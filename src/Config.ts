@@ -1,12 +1,16 @@
-import { Config } from "effect"
+import { Config, Schema } from "effect"
+import * as Provider from "./Provider.ts"
 
 export const port = Config.integer("YAPD_PORT").pipe(Config.withDefault(4747))
 
-/** Model used to condense agent messages, passed to `codex exec --model`. */
-export const model = Config.string("YAPD_MODEL").pipe(Config.withDefault("gpt-6-luna"))
+/** Coding agent CLI used to condense agent messages. */
+export const provider = Schema.Config("YAPD_PROVIDER", Provider.Name).pipe(Config.withDefault("codex" as const))
 
-/** Reasoning effort for that model. Luna needs some to stay coherent. */
-export const effort = Config.literal("low", "medium", "high", "xhigh")("YAPD_EFFORT").pipe(Config.withDefault("high"))
+/** Model for that CLI, in whatever form it takes. Defaults to the provider's own. */
+export const model = Config.option(Config.string("YAPD_MODEL"))
+
+/** Reasoning effort, passed through as is. Defaults to the provider's own. */
+export const effort = Config.option(Config.string("YAPD_EFFORT"))
 
 /** Kokoro voice, see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md */
 export const voice = Config.string("YAPD_VOICE").pipe(Config.withDefault("bm_fable"))

@@ -8,7 +8,7 @@ import type { Agent } from "./Payload.ts"
  */
 export const hook = (agent: Agent) =>
   Effect.gen(function* () {
-    // yapd's own `claude -p` calls must not report back to it.
+    // yapd's own condensing calls must not report back to it.
     if (process.env.YAPD_INTERNAL) return
     const port = yield* Config.port
     const body = yield* Effect.promise(() => Bun.stdin.text())
