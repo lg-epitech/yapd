@@ -1,4 +1,4 @@
-import { Config, Schema } from "effect"
+import { Config, Option, Schema } from "effect"
 import * as Provider from "./Provider.ts"
 
 export const port = Config.integer("YAPD_PORT").pipe(Config.withDefault(4747))
@@ -6,11 +6,14 @@ export const port = Config.integer("YAPD_PORT").pipe(Config.withDefault(4747))
 /** Coding agent CLI used to condense agent messages. */
 export const provider = Schema.Config("YAPD_PROVIDER", Provider.Name).pipe(Config.withDefault("codex" as const))
 
+/** An empty value, like `YAPD_MODEL=`, counts as unset. */
+const optional = (name: string) => Config.option(Config.string(name)).pipe(Config.map(Option.filter((value) => value !== "")))
+
 /** Model for that CLI, in whatever form it takes. Defaults to the provider's own. */
-export const model = Config.option(Config.string("YAPD_MODEL"))
+export const model = optional("YAPD_MODEL")
 
 /** Reasoning effort, passed through as is. Defaults to the provider's own. */
-export const effort = Config.option(Config.string("YAPD_EFFORT"))
+export const effort = optional("YAPD_EFFORT")
 
 /** Kokoro voice, see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md */
 export const voice = Config.string("YAPD_VOICE").pipe(Config.withDefault("bm_fable"))

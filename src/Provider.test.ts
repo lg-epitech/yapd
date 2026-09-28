@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { providers } from "./Provider.ts"
+import { json, providers } from "./Provider.ts"
 
 const call = { prompt: "hi", model: undefined, effort: undefined, schema: { json: "{}", path: "/tmp/schema.json" } }
 const summary = { priority: "done", spoken: "All good." }
@@ -16,12 +16,22 @@ describe("Provider", () => {
     expect(argv.slice(argv.indexOf("--variant"), argv.indexOf("--variant") + 2)).toEqual(["--variant", "high"])
   })
 
-  test("finds the reply in prose or a code fence", () => {
-    expect(providers.grok.reply(`Here you go:\n\`\`\`json\n${JSON.stringify(summary)}\n\`\`\``)).toEqual(summary)
+  test("finds the reply in a code fence", () => {
+    expect(json(`Here you go:\n\`\`\`json\n${JSON.stringify(summary)}\n\`\`\``)).toEqual(summary)
+  })
+
+  test("finds the reply after prose with braces in it", () => {
+    expect(json(`The {config} loader is fixed. ${JSON.stringify(summary)} Done.`)).toEqual(summary)
+  })
+
+  test("puts Codex's effort in its config", () => {
+    const { argv } = providers.codex.command({ ...call, effort: "high" })
+    expect(argv).toContain("model_reasoning_effort=high")
+    expect(providers.codex.command(call).argv).not.toContain("model_reasoning_effort=undefined")
   })
 
   test("reads replies wrapped in a JSON envelope", () => {
-    expect(providers.claude.reply(JSON.stringify({ result: "", structured_output: summary }))).toEqual(summary)
-    expect(providers.gemini.reply(JSON.stringify({ response: JSON.stringify(summary) }))).toEqual(summary)
+    expect(providers.claude.reply?.(JSON.stringify({ result: "", structured_output: summary }))).toEqual(summary)
+    expect(providers.gemini.reply?.(JSON.stringify({ response: JSON.stringify(summary) }))).toEqual(summary)
   })
 })

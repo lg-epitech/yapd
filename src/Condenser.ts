@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Config from "./Config.ts"
 import { run } from "./Process.ts"
-import { providers } from "./Provider.ts"
+import { json, providers } from "./Provider.ts"
 
 export const Priority = Schema.Literal("needs-you", "done", "trivial")
 export type Priority = typeof Priority.Type
@@ -49,9 +49,16 @@ export const ProviderCondenser = Layer.scoped(
   Effect.gen(function* () {
     const name = yield* Config.provider
     const provider = providers[name]
-    const model = Option.getOrUndefined(yield* Config.model) ?? provider.defaults?.model
-    const effort = Option.getOrUndefined(yield* Config.effort) ?? provider.defaults?.effort
-    if (effort !== undefined && !provider.effort) {
+    const configured = { model: yield* Config.model, effort: yield* Config.effort }
+    // The provider's default effort is tuned for its default model, so it only comes with it.
+    const { model, effort } = Option.match(configured.model, {
+      onNone: () => ({
+        model: provider.defaults?.model,
+        effort: Option.getOrElse(configured.effort, () => provider.defaults?.effort),
+      }),
+      onSome: (model) => ({ model, effort: Option.getOrUndefined(configured.effort) }),
+    })
+    if (effort !== undefined && !provider.takesEffort) {
       return yield* Effect.fail(
         ConfigError.InvalidData(
           ["YAPD_EFFORT"],
@@ -60,11 +67,11 @@ export const ProviderCondenser = Layer.scoped(
       )
     }
 
-    const json = JSON.stringify(JSONSchema.make(Summary))
+    const inline = JSON.stringify(JSONSchema.make(Summary))
     const path = yield* Effect.acquireRelease(
       Effect.promise(async () => {
         const path = join(tmpdir(), `yapd-schema-${crypto.randomUUID()}.json`)
-        await Bun.write(path, json)
+        await Bun.write(path, inline)
         return path
       }),
       (path) => Effect.promise(() => rm(path, { force: true })),
@@ -78,10 +85,10 @@ export const ProviderCondenser = Layer.scoped(
           onNone: () => `${instructions}\n\nAgent's message:\n${turn.message}`,
           onSome: (prompt) => `${instructions}\n\nUser's prompt:\n${prompt}\n\nAgent's message:\n${turn.message}`,
         })
-        const { argv, stdin } = provider.command({ prompt, model, effort, schema: { json, path } })
+        const { argv, stdin } = provider.command({ prompt, model, effort, schema: { json: inline, path } })
         // YAPD_INTERNAL keeps the call from triggering yapd's own hooks.
         return run(argv, { ...(stdin === undefined ? {} : { stdin }), env: { YAPD_INTERNAL: "1" } }).pipe(
-          Effect.flatMap((stdout) => Effect.try(() => provider.reply(stdout))),
+          Effect.flatMap((stdout) => Effect.try(() => (provider.reply ?? json)(stdout))),
           Effect.flatMap(decode),
           Effect.timeout("60 seconds"),
           Effect.mapError((cause) => new CondenseError({ cause })),
