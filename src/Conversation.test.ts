@@ -78,18 +78,21 @@ describe("Responder", () => {
 })
 
 describe("Condenser", () => {
-  test("gives the model the prompt, the message and the style", () => {
+  test("gives the model the project, the prompt, the message and the style", () => {
     const prompt = Condenser.prompt(
+      "yapd",
       { prompt: Option.some("Why do retries fail?"), message: "The secret was rotated." },
       Option.some("Call me sir."),
     )
     expect(prompt).toContain("Call me sir.")
+    expect(prompt).toContain("Project: yapd")
     expect(prompt).toContain("User's prompt:\nWhy do retries fail?")
     expect(prompt.endsWith("Agent's message:\nThe secret was rotated.")).toBe(true)
   })
 
   test("counts a reply that only repeats what the user said as trivial", () => {
     const prompt = Condenser.prompt(
+      "yapd",
       { prompt: Option.some("Sounds good."), message: "Understood. The checks are still running." },
       Option.none(),
     )
@@ -97,9 +100,21 @@ describe("Condenser", () => {
   })
 
   test("talks plainly without a style", () => {
-    const prompt = Condenser.prompt({ prompt: Option.none(), message: "Done." }, Option.none())
+    const prompt = Condenser.prompt("yapd", { prompt: Option.none(), message: "Done." }, Option.none())
     expect(prompt).not.toContain("How the user wants you to talk")
     expect(prompt).not.toContain("User's prompt")
+  })
+
+  test("keeps a summary that already names the project", () => {
+    expect(Condenser.introduce("yapd", "yapd's tests pass now.")).toBe("yapd's tests pass now.")
+    expect(Condenser.introduce("cryptio-sources", "Over in Cryptio Sources, it's merged.")).toBe(
+      "Over in Cryptio Sources, it's merged.",
+    )
+  })
+
+  test("names the project up front when the summary leaves it out", () => {
+    expect(Condenser.introduce("yapd", "The tests pass now.")).toBe("yapd. The tests pass now.")
+    expect(Condenser.introduce("api", "It's rapid now.")).toBe("api. It's rapid now.")
   })
 })
 

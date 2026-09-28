@@ -203,8 +203,7 @@ export const make = (options: {
         const rendered: Array<string> = []
         return Effect.gen(function* () {
           const lines: Array<Line> = []
-          // The project is spoken first, so it's part of what was heard.
-          let text = `${update.project}. ${update.spoken}`
+          let text = update.spoken
           let path = update.audio
           let from = 0
           let missed = 0

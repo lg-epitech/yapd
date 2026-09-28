@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Audio } from "./Audio.ts"
 import { type Ticket, Waiting } from "./ClaudeCode.ts"
-import { Condenser, type Summary, type Turn } from "./Condenser.ts"
+import { Condenser, introduce, type Summary, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Inbox from "./Inbox.ts"
@@ -52,7 +52,10 @@ export const make = Effect.gen(function* () {
       }),
   })
 
-  const fallback: Summary = { priority: "done", spoken: "Finished a turn, but I couldn't summarize it." }
+  const fallback = (project: string): Summary => ({
+    priority: "done",
+    spoken: `${project} finished a turn, but I couldn't summarize it.`,
+  })
 
   const prepare = (
     session: string,
@@ -63,19 +66,20 @@ export const make = Effect.gen(function* () {
     hook: Ticket | undefined,
   ) =>
     Effect.gen(function* () {
-      const summary = yield* condenser.condense(turn).pipe(
+      const summary = yield* condenser.condense(project, turn).pipe(
         Effect.retry({ times: 1 }),
-        Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback))),
+        Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),
       )
-      const { priority, spoken } = summary
+      const priority = summary.priority
       // Even a reply to a follow-up, since yapd already said it passed that on.
       if (priority === "trivial") {
         yield* release(hook)
         return yield* Effect.logInfo("Skipped trivial update")
       }
 
+      const spoken = introduce(project, summary.spoken)
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
-      yield* voice.render(`${project}. ${spoken}`, audio).pipe(Effect.onError(() => removeFile(audio)))
+      yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       yield* STM.commit(
         TRef.update(inbox, (current) =>
