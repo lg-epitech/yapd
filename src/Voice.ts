@@ -1,6 +1,8 @@
+import { env } from "@huggingface/transformers"
 import { Context, Data, Effect, Layer, Schedule } from "effect"
 import { KokoroTTS, type GenerateOptions } from "kokoro-js"
 import { rename, rm } from "node:fs/promises"
+import { join } from "node:path"
 import * as Config from "./Config.ts"
 import { type ProcessError, run } from "./Process.ts"
 
@@ -14,6 +16,28 @@ export class Voice extends Context.Tag("yapd/Voice")<
 export const extension = ".wav"
 
 export class KokoroError extends Data.TaggedError("KokoroError")<{ readonly cause: unknown }> {}
+
+const repo = "onnx-community/Kokoro-82M-v1.0-ONNX"
+const cache = join(env.cacheDir, repo)
+const loaded = join(cache, ".yapd-loaded")
+
+/**
+ * transformers.js downloads straight into its cache, so a restart mid-download
+ * leaves a partial model that every later start fails to load. Only a model
+ * that loaded before is trusted; anything else downloads again.
+ */
+const load = Effect.gen(function* () {
+  if (!(yield* Effect.promise(() => Bun.file(loaded).exists()))) {
+    yield* Effect.promise(() => rm(cache, { recursive: true, force: true }))
+  }
+  const tts = yield* Effect.tryPromise({
+    // fp32 is both the best quality and, on Apple silicon, faster than the quantized models.
+    try: () => KokoroTTS.from_pretrained(repo, { dtype: "fp32", device: "cpu" }),
+    catch: (cause) => new KokoroError({ cause }),
+  })
+  yield* Effect.promise(() => Bun.write(loaded, ""))
+  return tts
+})
 
 const say = (text: string, path: string) => run(["say", "--data-format=LEI16@24000", "-o", path], { stdin: text })
 
@@ -29,11 +53,7 @@ export const KokoroVoice = Layer.scoped(
     const effect = yield* Config.effect
 
     const model = yield* Effect.cached(
-      Effect.tryPromise({
-        // fp32 is both the best quality and, on Apple silicon, faster than the quantized models.
-        try: () => KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", { dtype: "fp32", device: "cpu" }),
-        catch: (cause) => new KokoroError({ cause }),
-      }).pipe(
+      load.pipe(
         Effect.filterOrFail(
           (tts) => voice in tts.voices,
           () => new KokoroError({ cause: `Unknown voice "${voice}"` }),
