@@ -1,0 +1,46 @@
+{
+  "name": "yapd",
+  "version": "0.1.0",
+  "description": "Your coding agents, out loud.",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "text-to-speech",
+    "agents",
+    "hooks"
+  ],
+  "homepage": "https://github.com/lg-epitech/yapd#readme",
+  "bugs": "https://github.com/lg-epitech/yapd/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lg-epitech/yapd.git"
+  },
+  "license": "MIT",
+  "author": "Laurent Gonzalez",
+  "type": "module",
+  "bin": {
+    "yapd": "src/main.ts"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "scripts": {
+    "start": "bun src/main.ts serve",
+    "check": "tsc",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "effect": "^3.22.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
