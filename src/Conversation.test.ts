@@ -75,6 +75,20 @@ describe("Responder", () => {
     expect(prompt).toContain(`That includes acknowledging, like "sounds good"`)
     expect(prompt).toContain(`Agreeing with what the agent already said it would do changes nothing, so that's "dismiss".`)
   })
+
+  test("doesn't send a reply that tells the agent to do nothing", () => {
+    const prompt = Responder.prompt(
+      {
+        project: "yapd",
+        turn: { prompt: Option.none(), message: "Want me to update the ticket?" },
+        needsYou: true,
+        lines: [],
+        heard: "Keep the ticket as it is, and don't do anything else.",
+      },
+      Option.none(),
+    )
+    expect(prompt).toContain(`So is telling it to do nothing, leave something as it is, or not go ahead`)
+  })
 })
 
 describe("Condenser", () => {
