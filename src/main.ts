@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Cause, Effect, Exit, Fiber, Layer, Logger } from "effect"
-import { CodexCondenser } from "./Condenser.ts"
+import { ProviderCondenser } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Daemon from "./Daemon.ts"
 import { hook } from "./Hook.ts"
@@ -13,7 +13,7 @@ const serve = Effect.gen(function* () {
   return yield* daemon.speak
 }).pipe(
   Effect.scoped,
-  Effect.provide(Layer.mergeAll(CodexCondenser, KokoroVoice)),
+  Effect.provide(Layer.mergeAll(ProviderCondenser, KokoroVoice)),
   // Outermost, so layers log through it too.
   Effect.provide(Logger.pretty),
 )

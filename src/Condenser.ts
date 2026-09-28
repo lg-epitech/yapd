@@ -1,9 +1,10 @@
-import { Context, Data, Effect, JSONSchema, Layer, Option, Schema } from "effect"
+import { ConfigError, Context, Data, Effect, JSONSchema, Layer, Option, Schema } from "effect"
 import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Config from "./Config.ts"
 import { run } from "./Process.ts"
+import { json, providers } from "./Provider.ts"
 
 export const Priority = Schema.Literal("needs-you", "done", "trivial")
 export type Priority = typeof Priority.Type
@@ -28,6 +29,8 @@ export class Condenser extends Context.Tag("yapd/Condenser")<
 
 const instructions = `You turn a coding agent's final message into a short spoken update. The user is listening, not reading.
 
+Reply with only a JSON object with the keys "spoken" and "priority".
+
 "spoken":
 - At most 50 words, one to three sentences. Lead with the outcome, then anything the user must decide or do.
 - If the user's prompt is given, answer what they asked rather than recounting everything the agent did.
@@ -40,45 +43,53 @@ const instructions = `You turn a coding agent's final message into a short spoke
 - "trivial" if nothing worth saying aloud happened, like a bare acknowledgement.
 - "done" otherwise.`
 
-/** Condenses with a headless `codex exec` call, so it runs on the user's existing Codex login. */
-export const CodexCondenser = Layer.scoped(
+/** Condenses with the configured coding agent CLI, so it runs on the user's existing login. */
+export const ProviderCondenser = Layer.scoped(
   Condenser,
   Effect.gen(function* () {
-    const model = yield* Config.model
-    const effort = yield* Config.effort
-    const schema = yield* Effect.acquireRelease(
+    const name = yield* Config.provider
+    const provider = providers[name]
+    const configured = { model: yield* Config.model, effort: yield* Config.effort }
+    // The provider's default effort is tuned for its default model, so it only comes with it.
+    const { model, effort } = Option.match(configured.model, {
+      onNone: () => ({
+        model: provider.defaults?.model,
+        effort: Option.getOrElse(configured.effort, () => provider.defaults?.effort),
+      }),
+      onSome: (model) => ({ model, effort: Option.getOrUndefined(configured.effort) }),
+    })
+    if (effort !== undefined && !provider.takesEffort) {
+      return yield* Effect.fail(
+        ConfigError.InvalidData(
+          ["YAPD_EFFORT"],
+          `${name} has no reasoning effort setting, pick a model that includes one instead`,
+        ),
+      )
+    }
+
+    const inline = JSON.stringify(JSONSchema.make(Summary))
+    const path = yield* Effect.acquireRelease(
       Effect.promise(async () => {
         const path = join(tmpdir(), `yapd-schema-${crypto.randomUUID()}.json`)
-        await Bun.write(path, JSON.stringify(JSONSchema.make(Summary)))
+        await Bun.write(path, inline)
         return path
       }),
       (path) => Effect.promise(() => rm(path, { force: true })),
     )
-    const command = [
-      "codex", "exec",
-      "--model", model,
-      "--config", `model_reasoning_effort=${effort}`,
-      "--config", "project_doc_max_bytes=0",
-      "--output-schema", schema,
-      "--sandbox", "read-only",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--ephemeral",
-      "--skip-git-repo-check",
-      // The call must not trigger yapd's own Stop hook.
-      "--disable", "hooks",
-      "-",
-    ]
-    const decode = Schema.decode(Schema.parseJson(Summary))
+    const decode = Schema.decodeUnknown(Summary)
+    yield* Effect.logInfo(`Condensing with ${[name, model, effort].filter(Boolean).join(" ")}`)
 
     return {
       condense: (turn) => {
-        const input = Option.match(turn.prompt, {
+        const prompt = Option.match(turn.prompt, {
           onNone: () => `${instructions}\n\nAgent's message:\n${turn.message}`,
           onSome: (prompt) => `${instructions}\n\nUser's prompt:\n${prompt}\n\nAgent's message:\n${turn.message}`,
         })
-        return run(command, { stdin: input, env: { YAPD_INTERNAL: "1" } }).pipe(
-          Effect.flatMap((stdout) => decode(stdout.trim())),
+        const { argv, stdin } = provider.command({ prompt, model, effort, schema: { json: inline, path } })
+        // YAPD_INTERNAL keeps the call from triggering yapd's own hooks.
+        return run(argv, { ...(stdin === undefined ? {} : { stdin }), env: { YAPD_INTERNAL: "1" } }).pipe(
+          Effect.flatMap((stdout) => Effect.try(() => (provider.reply ?? json)(stdout))),
+          Effect.flatMap(decode),
           Effect.timeout("60 seconds"),
           Effect.mapError((cause) => new CondenseError({ cause })),
         )
