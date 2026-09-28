@@ -56,7 +56,7 @@ Say anything while yapd is talking and it goes quiet at once. What happens next 
 - Tell the agent something, like "merge it" or "I'm not sure about that, look again", and it sends that to the session as your message. You hear the reply like any other update, however quick it is.
 - Talk to someone else and it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
 
-You can also answer just after it finishes, so "yes, merge it" works when an update ends on a question. A reply takes as long as a summary, around seven seconds with Codex.
+You can also answer just after it finishes, so "yes, merge it" works when an update ends on a question. A reply takes as long as a summary, around five seconds with Codex.
 
 The microphone is on only while yapd has something to say and for a few seconds after. It uses the same echo cancellation as FaceTime, so speakers are fine. What you say is transcribed on your Mac with [Whisper](https://huggingface.co/onnx-community/whisper-base), which downloads on first start, and only the words go to the provider.
 
@@ -82,7 +82,7 @@ A session another app drives, like T3 Code, only gets follow-ups through that ap
 
 ## Providers
 
-The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high. To use a different one, put this in a `.env` file in the yapd folder and run `bun src/main.ts install` again:
+The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high, on its fast tier, which for Luna costs no extra usage. yapd keeps Codex running between calls, which saves a few seconds each time. To use a different one, put this in a `.env` file in the yapd folder and run `bun src/main.ts install` again:
 
 ```sh
 YAPD_PROVIDER=claude
@@ -90,7 +90,7 @@ YAPD_MODEL=sonnet
 YAPD_EFFORT=low
 ```
 
-Leave out the model or the effort to get that CLI's default. Both are passed through as is, so use the names that CLI expects. Codex only defaults to Luna on high when no model is set.
+Leave out the model or the effort to get that CLI's default. Both are passed through as is, so use the names that CLI expects. Codex only defaults to Luna on high and the fast tier when no model is set.
 
 | `YAPD_PROVIDER` | CLI | Effort |
 | --- | --- | --- |

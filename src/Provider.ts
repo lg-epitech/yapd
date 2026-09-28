@@ -13,8 +13,8 @@ export interface Call {
 
 /** A coding agent CLI run headless, read-only and without the user's setup, as far as each CLI allows. */
 export interface Provider {
-  /** Used when no model is configured. */
-  readonly defaults?: { readonly model: string; readonly effort: string }
+  /** Used when no model is configured. The tier is a faster service tier, where the CLI has one. */
+  readonly defaults?: { readonly model: string; readonly effort: string; readonly tier?: string }
   /** False when the CLI has no reasoning effort setting, only models that bake one in. */
   readonly takesEffort: boolean
   readonly command: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
@@ -38,8 +38,8 @@ export const json = (text: string): unknown => {
 
 export const providers: Record<Name, Provider> = {
   codex: {
-    // Luna needs some reasoning to stay coherent.
-    defaults: { model: "gpt-6-luna", effort: "high" },
+    // Luna needs some reasoning to stay coherent. Its fast tier costs no extra usage, unlike bigger models'.
+    defaults: { model: "gpt-6-luna", effort: "high", tier: "priority" },
     takesEffort: true,
     command: ({ prompt, model, effort, schema }) => ({
       argv: [
