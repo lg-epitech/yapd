@@ -23,6 +23,8 @@ export interface Line {
 export interface Interruption {
   readonly project: string
   readonly turn: Turn
+  /** Whether the agent is waiting on the user. */
+  readonly needsYou: boolean
   /** What's been said about the update so far, oldest first, ending with yapd's line they spoke over. */
   readonly lines: ReadonlyArray<Line>
   readonly heard: string
@@ -40,9 +42,9 @@ const instructions = `You're the voice that reads a coding agent's updates aloud
 Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
 "intent":
-- "dismiss" if they've heard enough or want you to be quiet, however they put it.
+- "dismiss" if they've heard enough or want you to be quiet, however they put it. That includes acknowledging, like "sounds good", "okay" or "thanks", unless the agent is waiting on them and those words answer what it asked.
 - "answer" if they asked something the agent's message or the conversation answers, including asking you to repeat.
-- "send" if it's meant for the agent: an instruction, a correction, a decision it asked for, or a question its message doesn't answer.
+- "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss".
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
 
 "spoken": what you say back. They're listening, not reading: natural speech, no lists, markdown, code, file paths or URLs.
@@ -54,13 +56,16 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Reply in the language they spoke.`
 
-export const prompt = ({ project, turn, lines, heard }: Interruption, style: Option.Option<string>) =>
+export const prompt = ({ project, turn, needsYou, lines, heard }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
     `Project: ${project}`,
     ...Option.match(turn.prompt, { onNone: () => [], onSome: (prompt) => [`User's prompt to the agent:\n${prompt}`] }),
     `Agent's message:\n${turn.message}`,
+    needsYou
+      ? "The agent is waiting on the user: it asked something, needs a decision or permission, or failed."
+      : "The agent isn't waiting on the user.",
     `Conversation so far, where "…" marks where you were cut off:\n${lines
       .map(({ speaker, text }) => `${speaker === "yapd" ? "You" : "User"}: ${text}`)
       .join("\n")}`,

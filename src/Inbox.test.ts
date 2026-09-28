@@ -10,6 +10,7 @@ const ready = (session: string, priority: Inbox.Ready["priority"], arrivedAt: nu
     session,
     project: "yapd",
     turn: { prompt: Option.none(), message: "Done." },
+    needsYou: priority === "needs-you",
     spoken: "Done.",
     audio: `${session}.wav`,
     thread: { agent: "claude", session, cwd: "/tmp", message: "Done.", origin: {} },
