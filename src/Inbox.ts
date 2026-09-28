@@ -1,11 +1,15 @@
+import type { Ticket } from "./ClaudeCode.ts"
 import type { Priority } from "./Condenser.ts"
+import type { Update } from "./Conversation.ts"
 
 /** An update that is condensed, rendered, and waiting for its turn to be spoken. */
 export interface Ready {
   readonly session: string
   readonly priority: Exclude<Priority, "trivial">
   readonly arrivedAt: number
-  readonly audio: string
+  readonly update: Update
+  /** The session's Stop hook, waiting in case the user replies to this update. */
+  readonly hook?: Ticket
 }
 
 /** Ready updates, at most one per session. */

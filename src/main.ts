@@ -1,12 +1,32 @@
 #!/usr/bin/env bun
 import { Cause, Effect, Exit, Fiber, Layer, Logger } from "effect"
+import { DeviceAudio } from "./Audio.ts"
+import * as ClaudeCode from "./ClaudeCode.ts"
+import * as Codex from "./Codex.ts"
 import { ProviderCondenser } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Daemon from "./Daemon.ts"
 import { hook } from "./Hook.ts"
+import { ProviderModel } from "./Model.ts"
+import * as Relay from "./Relay.ts"
+import { ProviderResponder } from "./Responder.ts"
 import * as Server from "./Server.ts"
 import * as Service from "./Service.ts"
+import * as T3Code from "./T3Code.ts"
+import { WhisperTranscriber } from "./Transcriber.ts"
+import { SileroVad } from "./Vad.ts"
 import { KokoroVoice } from "./Voice.ts"
+
+/**
+ * T3 Code first, since it only claims threads it can find, and its sessions
+ * must go through it. Then each agent's own way in, whatever it runs in.
+ */
+const Relays = Layer.effect(
+  Relay.Relays,
+  Effect.gen(function* () {
+    return Relay.make([yield* T3Code.relay, yield* ClaudeCode.relay, Codex.relay])
+  }),
+)
 
 const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make
@@ -14,7 +34,16 @@ const serve = Effect.gen(function* () {
   return yield* daemon.speak
 }).pipe(
   Effect.scoped,
-  Effect.provide(Layer.mergeAll(ProviderCondenser, KokoroVoice)),
+  Effect.provide(
+    Layer.mergeAll(
+      Layer.mergeAll(ProviderCondenser, ProviderResponder).pipe(Layer.provide(ProviderModel)),
+      KokoroVoice,
+      DeviceAudio,
+      SileroVad,
+      WhisperTranscriber,
+      Relays,
+    ).pipe(Layer.provideMerge(ClaudeCode.WaitingLive)),
+  ),
   // Outermost, so layers log through it too.
   Effect.provide(Logger.pretty),
 )
@@ -29,7 +58,7 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
       console.error(Cause.pretty(exit.cause))
       process.exit(1)
     }
-    process.exit(0)
+    process.exit(typeof process.exitCode === "number" ? process.exitCode : 0)
   })
 }
 
@@ -42,9 +71,15 @@ if (command === "serve") {
 } else if (command === "uninstall") {
   runMain(Service.uninstall)
 } else if (command === "hook" && (argument === "claude" || argument === "codex")) {
-  runMain(hook(argument))
+  runMain(
+    hook(argument, process.argv.includes("--wait")).pipe(
+      Effect.map((code) => {
+        process.exitCode = code
+      }),
+    ),
+  )
 } else {
-  console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex>")
+  console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait]")
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)
 }

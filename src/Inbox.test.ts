@@ -1,11 +1,20 @@
 import { describe, expect, test } from "bun:test"
+import { Option } from "effect"
 import * as Inbox from "./Inbox.ts"
 
 const ready = (session: string, priority: Inbox.Ready["priority"], arrivedAt: number): Inbox.Ready => ({
   session,
   priority,
   arrivedAt,
-  audio: `${session}.wav`,
+  update: {
+    session,
+    project: "yapd",
+    turn: { prompt: Option.none(), message: "Done." },
+    spoken: "Done.",
+    audio: `${session}.wav`,
+    thread: { agent: "claude", session, cwd: "/tmp", message: "Done.", origin: {} },
+    at: arrivedAt,
+  },
 })
 
 describe("Inbox", () => {

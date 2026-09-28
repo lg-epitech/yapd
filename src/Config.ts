@@ -1,4 +1,4 @@
-import { Config, Option, Schema } from "effect"
+import { Config, Option, Redacted, Schema } from "effect"
 import * as Provider from "./Provider.ts"
 
 export const port = Config.integer("YAPD_PORT").pipe(Config.withDefault(4747))
@@ -26,4 +26,18 @@ export const effect = Config.string("YAPD_EFFECT").pipe(
   Config.withDefault(
     "highpass=f=120,equalizer=f=3000:t=q:w=1:g=3,chorus=0.7:0.9:25:0.25:0.3:2,aecho=0.8:0.5:40|70:0.25|0.15,volume=9dB",
   ),
+)
+
+/** Listen while speaking, so the user can interrupt. Off plays with afplay and never opens the microphone. */
+export const listen = Config.boolean("YAPD_LISTEN").pipe(Config.withDefault(true))
+
+/** Whisper model that hears the user when they interrupt. */
+export const whisper = Config.string("YAPD_WHISPER").pipe(Config.withDefault("onnx-community/whisper-base"))
+
+/** The language the user speaks, as Whisper names it, like "english" or "french". */
+export const language = Config.string("YAPD_LANGUAGE").pipe(Config.withDefault("english"))
+
+/** Lets yapd send follow-ups to T3 Code threads. Issued by T3 Code's `auth session issue`. */
+export const t3codeToken = Config.option(Config.redacted("YAPD_T3CODE_TOKEN")).pipe(
+  Config.map(Option.filter((token) => Redacted.value(token) !== "")),
 )
