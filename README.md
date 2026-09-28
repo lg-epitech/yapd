@@ -102,6 +102,16 @@ Leave out the model or the effort to get that CLI's default. Both are passed thr
 | `cursor` | [Cursor](https://cursor.com/cli) | in the model name |
 | `gemini` | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | a model alias from its settings |
 
+## Style
+
+yapd talks plainly unless you tell it otherwise. Describe how it should talk in `.env` and run `bun src/main.ts install` again:
+
+```sh
+YAPD_STYLE="Talk like Jarvis from Iron Man: calm, precise, with a dry British wit. Call me sir."
+```
+
+The style applies to the summaries and to its answers when you interrupt. It doesn't change what it passes on to the agent, and summaries stay a sentence or two.
+
 ## Quick turns
 
 Turns that finish in under 20 seconds aren't read out, since you've probably seen them already. Change that with `YAPD_MIN_SECONDS` in the same `.env`, or set it to `0` to hear everything.

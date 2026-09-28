@@ -1,4 +1,5 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
+import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 
 export const Priority = Schema.Literal("needs-you", "done", "trivial")
@@ -38,18 +39,26 @@ Reply with only a JSON object with the keys "spoken" and "priority".
 - "trivial" if nothing worth saying aloud happened, like a bare acknowledgement.
 - "done" otherwise.`
 
+/** The user's YAPD_STYLE, which summaries and replies both follow. */
+export const styled = (style: string) =>
+  `How the user wants you to talk, for "spoken" only. Follow it for tone, wording and how you address them, but keep to the rules above:\n${style}`
+
+export const prompt = (turn: Turn, style: Option.Option<string>) =>
+  [
+    instructions,
+    ...Option.toArray(Option.map(style, styled)),
+    ...Option.match(turn.prompt, { onNone: () => [], onSome: (prompt) => [`User's prompt:\n${prompt}`] }),
+    `Agent's message:\n${turn.message}`,
+  ].join("\n\n")
+
 export const ProviderCondenser = Layer.effect(
   Condenser,
   Effect.gen(function* () {
     const model = yield* Model
+    const style = yield* Config.style
     return {
-      condense: (turn) => {
-        const prompt = Option.match(turn.prompt, {
-          onNone: () => `${instructions}\n\nAgent's message:\n${turn.message}`,
-          onSome: (prompt) => `${instructions}\n\nUser's prompt:\n${prompt}\n\nAgent's message:\n${turn.message}`,
-        })
-        return model.ask(Summary, prompt).pipe(Effect.mapError((cause) => new CondenseError({ cause })))
-      },
+      condense: (turn) =>
+        model.ask(Summary, prompt(turn, style)).pipe(Effect.mapError((cause) => new CondenseError({ cause }))),
     }
   }),
 )

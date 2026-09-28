@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Option } from "effect"
+import * as Condenser from "./Condenser.ts"
 import { cut } from "./Conversation.ts"
 import * as Helper from "./Helper.ts"
 import * as Responder from "./Responder.ts"
@@ -15,12 +16,15 @@ describe("Conversation", () => {
 
 describe("Responder", () => {
   test("gives the model the update and the conversation so far", () => {
-    const prompt = Responder.prompt({
-      project: "yapd",
-      turn: { prompt: Option.some("Why do retries fail?"), message: "The secret was rotated." },
-      lines: [{ speaker: "yapd", text: "The secret…" }],
-      heard: "When was it rotated?",
-    })
+    const prompt = Responder.prompt(
+      {
+        project: "yapd",
+        turn: { prompt: Option.some("Why do retries fail?"), message: "The secret was rotated." },
+        lines: [{ speaker: "yapd", text: "The secret…" }],
+        heard: "When was it rotated?",
+      },
+      Option.none(),
+    )
     expect(prompt).toContain("Project: yapd")
     expect(prompt).toContain("User's prompt to the agent:\nWhy do retries fail?")
     expect(prompt).toContain("Agent's message:\nThe secret was rotated.")
@@ -29,12 +33,38 @@ describe("Responder", () => {
   })
 
   test("leaves out the prompt when there was none", () => {
-    const prompt = Responder.prompt({
-      project: "yapd",
-      turn: { prompt: Option.none(), message: "Done." },
-      lines: [],
-      heard: "Got it.",
-    })
+    const prompt = Responder.prompt(
+      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, lines: [], heard: "Got it." },
+      Option.none(),
+    )
+    expect(prompt).not.toContain("User's prompt")
+    expect(prompt).not.toContain("How the user wants you to talk")
+  })
+
+  test("talks the way the user asked", () => {
+    const prompt = Responder.prompt(
+      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, lines: [], heard: "Which PR?" },
+      Option.some("Call me sir."),
+    )
+    expect(prompt).toContain("How the user wants you to talk")
+    expect(prompt).toContain("Call me sir.")
+  })
+})
+
+describe("Condenser", () => {
+  test("gives the model the prompt, the message and the style", () => {
+    const prompt = Condenser.prompt(
+      { prompt: Option.some("Why do retries fail?"), message: "The secret was rotated." },
+      Option.some("Call me sir."),
+    )
+    expect(prompt).toContain("Call me sir.")
+    expect(prompt).toContain("User's prompt:\nWhy do retries fail?")
+    expect(prompt.endsWith("Agent's message:\nThe secret was rotated.")).toBe(true)
+  })
+
+  test("talks plainly without a style", () => {
+    const prompt = Condenser.prompt({ prompt: Option.none(), message: "Done." }, Option.none())
+    expect(prompt).not.toContain("How the user wants you to talk")
     expect(prompt).not.toContain("User's prompt")
   })
 })
