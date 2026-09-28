@@ -114,4 +114,4 @@ The style applies to the summaries and to its answers when you interrupt. It doe
 
 ## Quick turns
 
-Turns that finish in under 20 seconds aren't read out, since you've probably seen them already. Change that with `YAPD_MIN_SECONDS` in the same `.env`, or set it to `0` to hear everything.
+yapd skips turns that finish in under 20 seconds, since you were probably watching. Set `YAPD_MIN_SECONDS` in `.env` to change the cutoff, or to `0` to hear every turn.
