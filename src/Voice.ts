@@ -83,5 +83,3 @@ export const KokoroVoice = Layer.scoped(
 )
 
 export const play = (path: string) => run(["afplay", path])
-
-export const chime = play("/System/Library/Sounds/Tink.aiff")
