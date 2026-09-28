@@ -20,6 +20,7 @@ describe("Responder", () => {
       {
         project: "yapd",
         turn: { prompt: Option.some("Why do retries fail?"), message: "The secret was rotated." },
+        needsYou: false,
         lines: [{ speaker: "yapd", text: "The secret…" }],
         heard: "When was it rotated?",
       },
@@ -34,7 +35,7 @@ describe("Responder", () => {
 
   test("leaves out the prompt when there was none", () => {
     const prompt = Responder.prompt(
-      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, lines: [], heard: "Got it." },
+      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, needsYou: false, lines: [], heard: "Got it." },
       Option.none(),
     )
     expect(prompt).not.toContain("User's prompt")
@@ -43,11 +44,36 @@ describe("Responder", () => {
 
   test("talks the way the user asked", () => {
     const prompt = Responder.prompt(
-      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, lines: [], heard: "Which PR?" },
+      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, needsYou: false, lines: [], heard: "Which PR?" },
       Option.some("Call me sir."),
     )
     expect(prompt).toContain("How the user wants you to talk")
     expect(prompt).toContain("Call me sir.")
+  })
+
+  test("says whether the agent is waiting on the user", () => {
+    const interruption = (needsYou: boolean) =>
+      Responder.prompt(
+        {
+          project: "yapd",
+          turn: { prompt: Option.none(), message: "Checks are running, I'll report back." },
+          needsYou,
+          lines: [],
+          heard: "Sounds good.",
+        },
+        Option.none(),
+      )
+    expect(interruption(true)).toContain("The agent is waiting on the user")
+    expect(interruption(false)).toContain("The agent isn't waiting on the user.")
+  })
+
+  test("only sends an acknowledgement that answers the agent", () => {
+    const prompt = Responder.prompt(
+      { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, needsYou: false, lines: [], heard: "Okay." },
+      Option.none(),
+    )
+    expect(prompt).toContain(`That includes acknowledging, like "sounds good"`)
+    expect(prompt).toContain(`Agreeing with what the agent already said it would do changes nothing, so that's "dismiss".`)
   })
 })
 
@@ -60,6 +86,14 @@ describe("Condenser", () => {
     expect(prompt).toContain("Call me sir.")
     expect(prompt).toContain("User's prompt:\nWhy do retries fail?")
     expect(prompt.endsWith("Agent's message:\nThe secret was rotated.")).toBe(true)
+  })
+
+  test("counts a reply that only repeats what the user said as trivial", () => {
+    const prompt = Condenser.prompt(
+      { prompt: Option.some("Sounds good."), message: "Understood. The checks are still running." },
+      Option.none(),
+    )
+    expect(prompt).toContain(`a reply that only confirms what the user just said or restates work they already know about`)
   })
 
   test("talks plainly without a style", () => {

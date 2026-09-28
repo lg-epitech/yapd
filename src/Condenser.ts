@@ -36,7 +36,7 @@ Reply with only a JSON object with the keys "spoken" and "priority".
 
 "priority":
 - "needs-you" if the agent asks a question, needs a decision or permission, or failed.
-- "trivial" if nothing worth saying aloud happened, like a bare acknowledgement.
+- "trivial" if there's nothing new to hear: a bare acknowledgement, or a reply that only confirms what the user just said or restates work they already know about, like "Understood, the checks are still running". Something the agent did or found since isn't trivial.
 - "done" otherwise.`
 
 /** The user's YAPD_STYLE, which summaries and replies both follow. */

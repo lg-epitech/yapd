@@ -60,7 +60,6 @@ export const make = Effect.gen(function* () {
     turn: Turn,
     thread: Thread,
     arrivedAt: number,
-    followedUp: boolean,
     hook: Ticket | undefined,
   ) =>
     Effect.gen(function* () {
@@ -68,16 +67,16 @@ export const make = Effect.gen(function* () {
         Effect.retry({ times: 1 }),
         Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback))),
       )
-      const { spoken } = summary
-      if (summary.priority === "trivial" && !followedUp) {
+      const { priority, spoken } = summary
+      // Even a reply to a follow-up, since yapd already said it passed that on.
+      if (priority === "trivial") {
         yield* release(hook)
         return yield* Effect.logInfo("Skipped trivial update")
       }
-      const priority = summary.priority === "trivial" ? "done" : summary.priority
 
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(`${project}. ${spoken}`, audio).pipe(Effect.onError(() => removeFile(audio)))
-      const update = { session, project, turn, spoken, audio, thread, at: arrivedAt }
+      const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       yield* STM.commit(
         TRef.update(inbox, (current) =>
           Inbox.add(current, { session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
@@ -145,7 +144,7 @@ export const make = Effect.gen(function* () {
           }
           const turn = { prompt: Option.fromNullable(prompt?.text), message }
           const thread = { agent, session: payload.session_id, cwd: payload.cwd, message, origin }
-          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, followedUp, hook))
+          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, hook))
           return hook
         }
       }

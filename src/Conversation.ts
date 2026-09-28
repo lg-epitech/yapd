@@ -15,6 +15,8 @@ export interface Update {
   readonly session: string
   readonly project: string
   readonly turn: Turn
+  /** Whether the agent asked something, needs a decision or permission, or failed. */
+  readonly needsYou: boolean
   readonly spoken: string
   readonly audio: string
   readonly thread: Thread
@@ -234,6 +236,7 @@ export const make = (options: {
               .respond({
                 project: update.project,
                 turn: update.turn,
+                needsYou: update.needsYou,
                 lines: [...lines, { speaker: "yapd", text: said }],
                 heard,
               })
