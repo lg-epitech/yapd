@@ -31,7 +31,7 @@ const instructions = `You turn a coding agent's final message into a short spoke
 "spoken":
 - At most 50 words, one to three sentences. Lead with the outcome, then anything the user must decide or do.
 - If the user's prompt is given, answer what they asked rather than recounting everything the agent did.
-- Natural speech: contractions, connected sentences. No lists, markdown, code, file paths or URLs. Say "the config loader", not "src/config/loader.ts". Round numbers.
+- Natural speech: contractions, connected sentences. No lists, markdown, code, file paths or URLs. Say "the config loader", not "src/config/loader.ts". Round numbers that are hard to say, like 1,847 or 0.3127, but keep simple ones like 81.
 - No filler like "I have successfully". Don't name the agent or the project; they're announced separately.
 - Use the language the agent's message is written in.
 
