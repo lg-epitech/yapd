@@ -6,7 +6,7 @@ import { Condenser, type Summary, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Inbox from "./Inbox.ts"
 import type { Agent, Payload } from "./Payload.ts"
-import { chime, extension, play, Voice } from "./Voice.ts"
+import { extension, play, Voice } from "./Voice.ts"
 
 /** Updates are condensed and rendered in parallel, then spoken one at a time. */
 export const make = Effect.gen(function* () {
@@ -97,7 +97,6 @@ export const make = Effect.gen(function* () {
 
   const speakNext = Effect.gen(function* () {
     const ready = yield* STM.commit(takeNext)
-    yield* chime.pipe(Effect.ignore)
     yield* play(ready.audio).pipe(
       Effect.catchAll((error) => Effect.logError("Could not play update", error)),
       Effect.ensuring(removeFile(ready.audio)),
