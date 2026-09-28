@@ -64,7 +64,8 @@ const healthy = Effect.gen(function* () {
 export const install = Effect.gen(function* () {
   const main = join(import.meta.dir, "main.ts")
   const options: Options = {
-    bun: process.execPath,
+    // execPath resolves symlinks, which would pin a versioned install that an upgrade removes.
+    bun: Bun.which("bun") ?? process.execPath,
     main,
     // The daemon reads .env from here.
     workingDirectory: dirname(dirname(main)),
