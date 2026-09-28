@@ -3,6 +3,9 @@ import * as Provider from "./Provider.ts"
 
 export const port = Config.integer("YAPD_PORT").pipe(Config.withDefault(4747))
 
+/** Turns that finish faster than this aren't spoken, since the user is likely still watching. 0 speaks everything. */
+export const minSeconds = Config.integer("YAPD_MIN_SECONDS").pipe(Config.withDefault(20))
+
 /** Coding agent CLI used to condense agent messages. */
 export const provider = Schema.Config("YAPD_PROVIDER", Provider.Name).pipe(Config.withDefault("codex" as const))
 

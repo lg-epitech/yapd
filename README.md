@@ -51,3 +51,7 @@ Leave out the model or the effort to get that CLI's default. Both are passed thr
 | `opencode` | [OpenCode](https://opencode.ai), models as `provider/model` | `--variant` |
 | `cursor` | [Cursor](https://cursor.com/cli) | in the model name |
 | `gemini` | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | a model alias from its settings |
+
+## Quick turns
+
+Turns that finish in under 20 seconds aren't read out, since you've probably seen them already. Change that with `YAPD_MIN_SECONDS` in the same `.env`, or set it to `0` to hear everything.
