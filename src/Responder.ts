@@ -1,5 +1,6 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
-import type { Turn } from "./Condenser.ts"
+import { styled, type Turn } from "./Condenser.ts"
+import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 
 export const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
@@ -53,9 +54,10 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Reply in the language they spoke.`
 
-export const prompt = ({ project, turn, lines, heard }: Interruption) =>
+export const prompt = ({ project, turn, lines, heard }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
+    ...Option.toArray(Option.map(style, styled)),
     `Project: ${project}`,
     ...Option.match(turn.prompt, { onNone: () => [], onSome: (prompt) => [`User's prompt to the agent:\n${prompt}`] }),
     `Agent's message:\n${turn.message}`,
@@ -69,9 +71,10 @@ export const ProviderResponder = Layer.effect(
   Responder,
   Effect.gen(function* () {
     const model = yield* Model
+    const style = yield* Config.style
     return {
       respond: (interruption) =>
-        model.ask(Reply, prompt(interruption)).pipe(Effect.mapError((cause) => new RespondError({ cause }))),
+        model.ask(Reply, prompt(interruption, style)).pipe(Effect.mapError((cause) => new RespondError({ cause }))),
     }
   }),
 )

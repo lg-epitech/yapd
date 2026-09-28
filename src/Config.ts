@@ -18,6 +18,9 @@ export const model = optional("YAPD_MODEL")
 /** Reasoning effort, passed through as is. Defaults to the provider's own. */
 export const effort = optional("YAPD_EFFORT")
 
+/** How yapd talks, in the user's words, like "Talk like Jarvis and call me sir". Unset, it talks plainly. */
+export const style = optional("YAPD_STYLE")
+
 /** Kokoro voice, see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md */
 export const voice = Config.string("YAPD_VOICE").pipe(Config.withDefault("bm_fable"))
 
