@@ -58,6 +58,8 @@ Say anything while yapd is talking and it stops. The model that writes the summa
 
 You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. yapd takes about as long to respond as it does to write a summary, around five seconds with Codex.
 
+Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it says back each step it sent, so you'd hear if one went missing.
+
 The microphone is only on while yapd has something to say and for a few seconds after. It uses FaceTime's echo cancellation, so speakers are fine. [Whisper](https://huggingface.co/onnx-community/whisper-base) transcribes you on your Mac and only the words go to the provider. It downloads on first start.
 
 Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. `YAPD_WHISPER` picks another model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` never opens the microphone.
