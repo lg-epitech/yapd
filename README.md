@@ -49,18 +49,18 @@ On first start yapd asks for the microphone, so you can interrupt it.
 
 ## Interrupting
 
-Say anything while yapd is talking and it goes quiet at once. What happens next depends on what you said, which the same model that writes the summaries works out:
+Say anything while yapd is talking and it stops. The model that writes the summaries then works out what you meant:
 
-- Brush it off, like "got it" or "mute it", and it stops there.
+- "Got it" or "mute it" and it stays quiet.
 - Ask something the update answers, like "which PR was that?", and it answers.
-- Tell the agent something, like "merge it" or "I'm not sure about that, look again", and it sends that to the session as your message. You hear the reply like any other update, however quick it is.
-- Talk to someone else and it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
+- Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one.
+- If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
 
-You can also answer just after it finishes, so "yes, merge it" works when an update ends on a question. A reply takes as long as a summary, around five seconds with Codex.
+You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. yapd takes about as long to respond as it does to write a summary, around five seconds with Codex.
 
-The microphone is on only while yapd has something to say and for a few seconds after. It uses the same echo cancellation as FaceTime, so speakers are fine. What you say is transcribed on your Mac with [Whisper](https://huggingface.co/onnx-community/whisper-base), which downloads on first start, and only the words go to the provider.
+The microphone is only on while yapd has something to say and for a few seconds after. It uses FaceTime's echo cancellation, so speakers are fine. [Whisper](https://huggingface.co/onnx-community/whisper-base) transcribes you on your Mac and only the words go to the provider. It downloads on first start.
 
-Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. `YAPD_WHISPER` picks a different model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` turns listening off and never opens the microphone.
+Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. `YAPD_WHISPER` picks another model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` never opens the microphone.
 
 ### Where follow-ups go
 
