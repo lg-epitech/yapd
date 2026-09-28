@@ -21,3 +21,6 @@ export const PromptSubmit = Schema.Struct({
 
 export const Payload = Schema.Union(Stop, PromptSubmit)
 export type Payload = typeof Payload.Type
+
+/** How yapd tells sessions apart: their ids are only unique per agent. */
+export const key = (agent: Agent, session: string) => `${agent}:${session}`

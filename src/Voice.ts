@@ -1,9 +1,8 @@
-import { env } from "@huggingface/transformers"
-import { Context, Data, Effect, Layer, Schedule } from "effect"
+import { Context, Data, Effect, Layer } from "effect"
 import { KokoroTTS, type GenerateOptions } from "kokoro-js"
 import { rename, rm } from "node:fs/promises"
-import { join } from "node:path"
 import * as Config from "./Config.ts"
+import * as Hub from "./Hub.ts"
 import { type ProcessError, run } from "./Process.ts"
 
 /** Renders speech to an audio file ahead of time, so playback never waits on synthesis. */
@@ -18,26 +17,9 @@ export const extension = ".wav"
 export class KokoroError extends Data.TaggedError("KokoroError")<{ readonly cause: unknown }> {}
 
 const repo = "onnx-community/Kokoro-82M-v1.0-ONNX"
-const cache = join(env.cacheDir, repo)
-const loaded = join(cache, ".yapd-loaded")
 
-/**
- * transformers.js downloads straight into its cache, so a restart mid-download
- * leaves a partial model that every later start fails to load. Only a model
- * that loaded before is trusted; anything else downloads again.
- */
-const load = Effect.gen(function* () {
-  if (!(yield* Effect.promise(() => Bun.file(loaded).exists()))) {
-    yield* Effect.promise(() => rm(cache, { recursive: true, force: true }))
-  }
-  const tts = yield* Effect.tryPromise({
-    // fp32 is both the best quality and, on Apple silicon, faster than the quantized models.
-    try: () => KokoroTTS.from_pretrained(repo, { dtype: "fp32", device: "cpu" }),
-    catch: (cause) => new KokoroError({ cause }),
-  }).pipe(Effect.retry({ times: 2, schedule: Schedule.exponential("1 second") }))
-  yield* Effect.promise(() => Bun.write(loaded, ""))
-  return tts
-})
+// fp32 is both the best quality and, on Apple silicon, faster than the quantized models.
+const load = Hub.load(repo, () => KokoroTTS.from_pretrained(repo, { dtype: "fp32", device: "cpu" }))
 
 const say = (text: string, path: string) => run(["say", "--data-format=LEI16@24000", "-o", path], { stdin: text })
 
@@ -100,5 +82,3 @@ export const KokoroVoice = Layer.scoped(
     }
   }),
 )
-
-export const play = (path: string) => run(["afplay", path])
