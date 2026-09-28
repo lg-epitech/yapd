@@ -51,7 +51,7 @@ On first start yapd asks for the microphone, so you can interrupt it.
 
 Say anything while yapd is talking and it stops. The model that writes the summaries then works out what you meant:
 
-- "Got it", "sounds good" or "mute it" and it stays quiet. Agreeing only goes to the agent when it asked you something.
+- "Got it", "sounds good" or "mute it" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
 - Ask something the update answers, like "which PR was that?", and it answers.
 - Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one, unless the agent only says it understood.
 - If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
