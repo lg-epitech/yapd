@@ -4,7 +4,7 @@ Your coding agents, out loud.
 
 When a Claude Code or Codex session finishes, yapd sums up the reply in a sentence or two and says it. If several finish together you hear them one at a time, and whatever needs you goes first.
 
-Needs macOS, [Bun](https://bun.sh) and a signed-in [Codex CLI](https://github.com/openai/codex).
+Needs macOS, [Bun](https://bun.sh) and a signed-in [Codex CLI](https://github.com/openai/codex). The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally and downloads on first start. With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis.
 
 ## Setup
 

@@ -5,7 +5,7 @@ const ready = (session: string, priority: Inbox.Ready["priority"], arrivedAt: nu
   session,
   priority,
   arrivedAt,
-  audio: `${session}.aiff`,
+  audio: `${session}.wav`,
 })
 
 describe("Inbox", () => {

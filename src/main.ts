@@ -5,13 +5,18 @@ import * as Config from "./Config.ts"
 import * as Daemon from "./Daemon.ts"
 import { hook } from "./Hook.ts"
 import * as Server from "./Server.ts"
-import { SayVoice } from "./Voice.ts"
+import { KokoroVoice } from "./Voice.ts"
 
 const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make
   yield* Server.serve(yield* Config.port, daemon.handle)
   return yield* daemon.speak
-}).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(CodexCondenser, SayVoice, Logger.pretty)))
+}).pipe(
+  Effect.scoped,
+  Effect.provide(Layer.mergeAll(CodexCondenser, KokoroVoice)),
+  // Outermost, so layers log through it too.
+  Effect.provide(Logger.pretty),
+)
 
 const runMain = (effect: Effect.Effect<void, unknown>) => {
   const fiber = Effect.runFork(effect)
