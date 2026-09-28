@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import { Condenser, type Summary, type Turn } from "./Condenser.ts"
+import * as Config from "./Config.ts"
 import * as Inbox from "./Inbox.ts"
 import type { Agent, Payload } from "./Payload.ts"
 import { chime, extension, play, Voice } from "./Voice.ts"
@@ -11,6 +12,7 @@ import { chime, extension, play, Voice } from "./Voice.ts"
 export const make = Effect.gen(function* () {
   const condenser = yield* Condenser
   const voice = yield* Voice
+  const minMillis = (yield* Config.minSeconds) * 1000
 
   const dir = yield* Effect.acquireRelease(
     Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-"))),
@@ -20,7 +22,7 @@ export const make = Effect.gen(function* () {
 
   const inbox = yield* STM.commit(TRef.make(Inbox.empty))
   const preparing = yield* FiberMap.make<string>()
-  const prompts = new Map<string, string>()
+  const prompts = new Map<string, { readonly text: string | undefined; readonly at: number }>()
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
 
@@ -67,14 +69,20 @@ export const make = Effect.gen(function* () {
 
       switch (payload.hook_event_name) {
         case "UserPromptSubmit":
-          if (payload.prompt !== undefined) prompts.set(session, payload.prompt)
+          prompts.set(session, { text: payload.prompt, at: yield* Clock.currentTimeMillis })
           return
         case "Stop": {
           const message = payload.last_assistant_message?.trim()
           if (!message) return
-          const turn = { prompt: Option.fromNullable(prompts.get(session)), message }
+          const project = basename(payload.cwd)
+          const prompt = prompts.get(session)
           const arrivedAt = yield* Clock.currentTimeMillis
-          yield* FiberMap.run(preparing, session, prepare(session, basename(payload.cwd), turn, arrivedAt))
+          // The user is probably still looking at a turn this short. Without a prompt there's no telling, so it's spoken.
+          if (prompt !== undefined && arrivedAt - prompt.at < minMillis) {
+            return yield* Effect.logInfo("Skipped quick turn").pipe(Effect.annotateLogs({ project }))
+          }
+          const turn = { prompt: Option.fromNullable(prompt?.text), message }
+          yield* FiberMap.run(preparing, session, prepare(session, project, turn, arrivedAt))
         }
       }
     }).pipe(events.withPermits(1))
