@@ -1,7 +1,7 @@
 import { Cause, Clock, Effect, FiberMap, Option, STM, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, join } from "node:path"
+import { join } from "node:path"
 import { Audio } from "./Audio.ts"
 import { type Ticket, Waiting } from "./ClaudeCode.ts"
 import { Condenser, type Summary, type Turn } from "./Condenser.ts"
@@ -10,6 +10,7 @@ import * as Conversation from "./Conversation.ts"
 import * as Inbox from "./Inbox.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
+import * as Project from "./Project.ts"
 import type { Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
 import { extension, Voice } from "./Voice.ts"
@@ -130,7 +131,7 @@ export const make = Effect.gen(function* () {
           const hook = wait ? yield* waiting.open(session) : undefined
           const message = payload.last_assistant_message?.trim()
           const followedUp = followed.delete(session)
-          const project = basename(payload.cwd)
+          const project = yield* Project.name(payload.cwd)
           const prompt = prompts.get(session)
           if (!message) {
             yield* release(hook)
