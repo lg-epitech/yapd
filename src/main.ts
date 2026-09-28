@@ -5,6 +5,7 @@ import * as Config from "./Config.ts"
 import * as Daemon from "./Daemon.ts"
 import { hook } from "./Hook.ts"
 import * as Server from "./Server.ts"
+import * as Service from "./Service.ts"
 import { KokoroVoice } from "./Voice.ts"
 
 const serve = Effect.gen(function* () {
@@ -36,10 +37,14 @@ const [command, argument] = process.argv.slice(2)
 
 if (command === "serve") {
   runMain(serve)
+} else if (command === "install") {
+  runMain(Service.install)
+} else if (command === "uninstall") {
+  runMain(Service.uninstall)
 } else if (command === "hook" && (argument === "claude" || argument === "codex")) {
   runMain(hook(argument))
 } else {
-  console.error("usage: yapd serve | yapd hook <claude|codex>")
+  console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex>")
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)
 }

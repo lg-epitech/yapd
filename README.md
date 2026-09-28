@@ -14,8 +14,10 @@ With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis.
 
 ```sh
 bun install
-bun start
+bun src/main.ts install
 ```
+
+This runs yapd in the background with launchd, starts it at login and restarts it if it stops. Logs go to `~/Library/Logs/yapd.log`. It keeps the `PATH` of the shell you install from, so run it again after changing `.env` or moving a CLI. `bun src/main.ts uninstall` removes it. To run it in the foreground instead, uninstall it and use `bun start`.
 
 Then add the hook to `~/.claude/settings.json`:
 
@@ -32,7 +34,7 @@ For Codex, put the same thing in `~/.codex/hooks.json` with `hook codex`. You wi
 
 ## Providers
 
-The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high. To use a different one, put this in a `.env` file in the yapd folder, which `bun start` picks up:
+The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high. To use a different one, put this in a `.env` file in the yapd folder and run `bun src/main.ts install` again:
 
 ```sh
 YAPD_PROVIDER=claude
