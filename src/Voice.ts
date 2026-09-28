@@ -34,7 +34,7 @@ const load = Effect.gen(function* () {
     // fp32 is both the best quality and, on Apple silicon, faster than the quantized models.
     try: () => KokoroTTS.from_pretrained(repo, { dtype: "fp32", device: "cpu" }),
     catch: (cause) => new KokoroError({ cause }),
-  })
+  }).pipe(Effect.retry({ times: 2, schedule: Schedule.exponential("1 second") }))
   yield* Effect.promise(() => Bun.write(loaded, ""))
   return tts
 })
@@ -58,7 +58,6 @@ export const KokoroVoice = Layer.scoped(
           (tts) => voice in tts.voices,
           () => new KokoroError({ cause: `Unknown voice "${voice}"` }),
         ),
-        Effect.retry({ times: 2, schedule: Schedule.exponential("1 second") }),
         Effect.tap(() => Effect.logInfo(`Kokoro ready with voice ${voice}`)),
       ),
     )
