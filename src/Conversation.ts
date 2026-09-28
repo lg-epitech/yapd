@@ -1,4 +1,4 @@
-import { Effect, Fiber, Option, Queue, Stream } from "effect"
+import { Clock, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, type Playback } from "./Audio.ts"
@@ -24,6 +24,24 @@ export interface Update {
   readonly at: number
 }
 
+type Signal =
+  | Endpointer.Event
+  /** The microphone stopped, like when the helper quits. */
+  | { readonly _tag: "Deaf" }
+  /** The rest carry the id of what sent them, so one that's no longer waited on is let go. */
+  | { readonly _tag: "Finished"; readonly id: number }
+  | { readonly _tag: "Lingered"; readonly id: number }
+  | { readonly _tag: "Replied"; readonly id: number; readonly reply: Reply }
+
+/**
+ * The microphone for a whole update, so nothing the user says is missed
+ * between lines, like while yapd works out what to say back.
+ */
+interface Ear {
+  readonly signals: Queue.Queue<Signal>
+  deaf: boolean
+}
+
 /** How a line went: played out, or talked over, with what the user said. */
 type Outcome =
   | { readonly _tag: "Finished" }
@@ -33,14 +51,8 @@ type Outcome =
       readonly at: number
       readonly duration: number
       readonly audio: Float32Array
+      readonly ear: Ear
     }
-
-type Signal =
-  | Endpointer.Event
-  | { readonly _tag: "Finished" }
-  | { readonly _tag: "Lingered" }
-  /** The microphone stopped, like when the helper quits. */
-  | { readonly _tag: "Deaf" }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
 const linger = "3 seconds"
@@ -52,6 +64,20 @@ const ducked = 0.25
 const rewind = 1.5
 /** Talk that wasn't meant for yapd, after which the rest of an update plays without listening, say for a TV. */
 const misses = 3
+/** How long to wait for the rest when the user trails off, before working out a reply. */
+const hesitation = "3 seconds"
+/** How long the user can keep adding to what they said, since talk that goes on longer is more likely a TV. */
+const rambling = 60_000
+
+/** Words a sentence hardly ever ends on. */
+const dangling = /\b(and|or|but|to|the|a|an|of|for|with|my|your|if|when|because)[.,]?$/i
+
+/** Whether the user seems to have stopped mid-thought: Whisper marks trailing off with an ellipsis. */
+export const unfinished = (heard: string) => /(\.\.\.|…|,)$/.test(heard) || dangling.test(heard)
+
+/** What the user said before and after a pause, as one. */
+export const together = (before: string, after: string) =>
+  after === "" ? before : `${before.replace(/\s*(\.\.\.|…)$/, "")} ${after}`
 
 /** The part of `text` heard in `fraction` of its audio, marked when it's cut short. */
 export const cut = (text: string, fraction: number) => {
@@ -81,38 +107,54 @@ export const make = (options: {
     const relays = yield* Relays
     const voice = yield* Voice
 
-    const speak = (path: string, from: number, listening: boolean) =>
+    let ids = 0
+    const fresh = () => ++ids
+
+    /** Starts listening, if there's a microphone. That's only known once something plays. */
+    const open = (scope: Scope.Scope) =>
+      Effect.gen(function* () {
+        const detect = yield* vad.make.pipe(Effect.option)
+        if (Option.isNone(detect)) return undefined
+        const microphone = yield* audio.microphone.pipe(Scope.extend(scope))
+        if (Option.isNone(microphone)) return undefined
+        const ear: Ear = { signals: yield* Queue.unbounded<Signal>(), deaf: false }
+        const endpointer = new Endpointer.Endpointer()
+        yield* Stream.fromQueue(microphone.value).pipe(
+          Stream.mapEffect((frame) =>
+            detect.value(frame).pipe(Effect.map((probability) => endpointer.push(frame, probability))),
+          ),
+          Stream.runForEach((event) => (event === undefined ? Effect.void : Queue.offer(ear.signals, event))),
+          Effect.ignore,
+          Effect.zipRight(
+            Effect.suspend(() => {
+              ear.deaf = true
+              return Queue.offer(ear.signals, { _tag: "Deaf" })
+            }),
+          ),
+          Effect.forkIn(scope),
+        )
+        return ear
+      })
+
+    const speak = (path: string, from: number, ear: Effect.Effect<Ear | undefined>) =>
       Effect.gen(function* () {
         const playback = yield* audio.play(path, from)
-        // Only known once playing: the helper opens the microphone as it starts.
-        const microphone = listening ? yield* audio.microphone : Option.none()
-        const detect = Option.isSome(microphone) ? yield* vad.make.pipe(Effect.option) : Option.none()
-        if (Option.isNone(microphone) || Option.isNone(detect)) {
+        const listening = yield* ear
+        if (listening === undefined || listening.deaf) {
           yield* playback.finished
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* listen(playback, microphone.value, detect.value)
+        return yield* listen(playback, listening)
       }).pipe(Effect.scoped)
 
-    const listen = (
-      playback: Playback,
-      microphone: Queue.Dequeue<Float32Array>,
-      detect: (frame: Float32Array) => Effect.Effect<number, unknown>,
-    ) =>
+    const listen = (playback: Playback, ear: Ear) =>
       Effect.gen(function* () {
-        const signals = yield* Queue.unbounded<Signal>()
-        const endpointer = new Endpointer.Endpointer()
-        yield* Stream.fromQueue(microphone).pipe(
-          Stream.mapEffect((frame) => detect(frame).pipe(Effect.map((probability) => endpointer.push(frame, probability)))),
-          Stream.runForEach((event) => (event === undefined ? Effect.void : Queue.offer(signals, event))),
-          Effect.ignore,
-          Effect.zipRight(Queue.offer(signals, { _tag: "Deaf" })),
-          Effect.forkScoped,
-        )
+        const { signals } = ear
+        const id = fresh()
         // Failing counts too, or this could wait for a signal that never comes.
         yield* playback.finished.pipe(
           Effect.ignore,
-          Effect.zipRight(Queue.offer(signals, { _tag: "Finished" })),
+          Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id })),
           Effect.forkScoped,
         )
 
@@ -121,15 +163,21 @@ export const make = (options: {
         let speaking = false
         let deaf = false
         let stoppedAt: number | undefined
-        let lingering: Fiber.RuntimeFiber<void> | undefined
-        const stopLingering = Effect.suspend(() => (lingering === undefined ? Effect.void : Fiber.interrupt(lingering)))
+        let lingering: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
+        const stopLingering = Effect.suspend(() => {
+          const fiber = lingering?.fiber
+          lingering = undefined
+          return fiber === undefined ? Effect.void : Fiber.interrupt(fiber)
+        })
         const startLingering = Effect.gen(function* () {
           yield* stopLingering
-          lingering = yield* Effect.sleep(linger).pipe(
-            Effect.zipRight(Queue.offer(signals, { _tag: "Lingered" })),
+          const id = fresh()
+          const fiber = yield* Effect.sleep(linger).pipe(
+            Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })),
             Effect.asVoid,
             Effect.forkScoped,
           )
+          lingering = { id, fiber }
         })
         const next = Effect.suspend(() =>
           speaking && !playing
@@ -166,22 +214,97 @@ export const make = (options: {
                 at: stoppedAt ?? playback.duration,
                 duration: playback.duration,
                 audio: signal.audio,
+                ear,
               } satisfies Outcome
             case "Finished":
               // Also arrives for a playback the user stopped, which is already dealt with.
-              if (!playing) break
+              if (signal.id !== id || !playing) break
               playing = false
               if (deaf) return { _tag: "Finished" } satisfies Outcome
               if (!speaking) yield* startLingering
               break
             case "Lingered":
+              if (signal.id !== lingering?.id) break
               return { _tag: "Finished" } satisfies Outcome
             case "Deaf":
               deaf = true
               if (!playing) return { _tag: "Finished" } satisfies Outcome
               yield* playback.volume(1)
               break
+            case "Replied":
+              break
           }
+        }
+      })
+
+    /**
+     * Works out a reply while still listening, so pausing mid-thought doesn't cut
+     * the user off: if they carry on before it's ready, it starts again with all
+     * they said. Nothing's done with a reply while they might still be talking.
+     */
+    const settle = (
+      ear: Ear,
+      first: string,
+      transcribe: (audio: Float32Array) => Effect.Effect<string>,
+      respond: (heard: string) => Effect.Effect<Reply>,
+    ) =>
+      Effect.gen(function* () {
+        const until = (yield* Clock.currentTimeMillis) + rambling
+        let heard = first
+        while (true) {
+          const replying = unfinished(heard) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard)) : respond(heard)
+          if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, reply: yield* replying }
+          const id = fresh()
+          const fiber = yield* replying.pipe(
+            Effect.flatMap((reply) => Queue.offer(ear.signals, { _tag: "Replied", id, reply })),
+            Effect.fork,
+          )
+
+          let speaking = false
+          let carryingOn = false
+          let held: Reply | undefined
+          let more: Float32Array | undefined
+          waiting: while (true) {
+            const signal = yield* carryingOn
+              ? Queue.take(ear.signals).pipe(
+                  Effect.timeout(patience),
+                  Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
+                )
+              : Queue.take(ear.signals)
+            switch (signal._tag) {
+              case "Replied":
+                // Once they carry on, even one that got in before it was stopped is out of date.
+                if (signal.id !== id || carryingOn) break
+                if (!speaking) return { heard, reply: signal.reply }
+                held = signal.reply
+                break
+              case "Onset":
+                speaking = true
+                break
+              case "Abandoned":
+                speaking = false
+                if (held !== undefined) return { heard, reply: held }
+                break
+              case "Speech":
+                carryingOn = true
+                held = undefined
+                yield* Fiber.interrupt(fiber)
+                break
+              case "Utterance":
+                more = signal.audio
+                break waiting
+              case "Deaf":
+                speaking = false
+                if (carryingOn) break waiting
+                if (held !== undefined) return { heard, reply: held }
+                break
+              case "Finished":
+              case "Lingered":
+                break
+            }
+          }
+          yield* Fiber.interrupt(fiber)
+          if (more !== undefined) heard = together(heard, yield* transcribe(more))
         }
       })
 
@@ -198,10 +321,27 @@ export const make = (options: {
         yield* Effect.logInfo(`Sent: ${text}`)
       })
 
+    const transcribe = (audio: Float32Array) =>
+      transcriber.transcribe(audio).pipe(
+        Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
+        Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))),
+      )
+
     const converse = (update: Update) =>
       Effect.suspend(() => {
         const rendered: Array<string> = []
         return Effect.gen(function* () {
+          const scope = yield* Effect.scope
+          let opened: Ear | undefined
+          const ear = Effect.suspend(() =>
+            opened === undefined
+              ? open(scope).pipe(
+                  Effect.tap((ear) => {
+                    opened = ear
+                  }),
+                )
+              : Effect.succeed(opened),
+          )
           const lines: Array<Line> = []
           let text = update.spoken
           let path = update.audio
@@ -210,7 +350,7 @@ export const make = (options: {
           let sent = false
 
           while (true) {
-            const outcome: Outcome = yield* speak(path, from, missed < misses)
+            const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined))
             if (outcome._tag === "Finished") return
             // Replying to something yapd had finished saying: there's nothing to go back to.
             const after = outcome.at >= outcome.duration
@@ -220,26 +360,25 @@ export const make = (options: {
               from = Math.max(from, outcome.at - rewind)
             }
 
-            const heard = yield* transcriber.transcribe(outcome.audio).pipe(
-              Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
-            )
-            if (heard === "") {
+            const first = yield* transcribe(outcome.audio)
+            if (first === "") {
               if (after) return
               carryOn()
               continue
             }
-            yield* Effect.logInfo(`Heard: ${heard}`)
 
             const said = cut(text, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
-            const reply = yield* responder
-              .respond({
-                project: update.project,
-                turn: update.turn,
-                needsYou: update.needsYou,
-                lines: [...lines, { speaker: "yapd", text: said }],
-                heard,
-              })
-              .pipe(Effect.catchAll((error) => Effect.logWarning("Could not reply", error).pipe(Effect.as(misheard))))
+            const { heard, reply } = yield* settle(outcome.ear, first, transcribe, (heard) =>
+              responder
+                .respond({
+                  project: update.project,
+                  turn: update.turn,
+                  needsYou: update.needsYou,
+                  lines: [...lines, { speaker: "yapd", text: said }],
+                  heard,
+                })
+                .pipe(Effect.catchAll((error) => Effect.logWarning("Could not reply", error).pipe(Effect.as(misheard)))),
+            )
             yield* Effect.logInfo(`Reply: ${reply.intent}`)
 
             if (reply.intent === "dismiss") return
@@ -270,6 +409,7 @@ export const make = (options: {
             missed = 0
           }
         }).pipe(
+          Effect.scoped,
           Effect.ensuring(Effect.promise(() => Promise.all(rendered.map((path) => rm(path, { force: true }))))),
           Effect.annotateLogs({ project: update.project }),
         )

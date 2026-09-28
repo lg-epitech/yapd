@@ -49,10 +49,10 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
 "spoken": what you say back. They're listening, not reading: natural speech, no lists, markdown, code, file paths or URLs.
 - For "answer", the answer in at most 50 words.
-- For "send", a few words on what you passed on, like "Okay, I've asked it to take another look."
+- For "send", one short sentence naming each thing you passed on, so they can tell nothing was left out, like "Okay, I've asked it to merge the pull request, then update your master worktree and the deployment."
 - Empty for "dismiss" and "resume".
 
-"message": for "send", the message for the agent, written as the user would type it: first person, keeping their intent and wording, with anything they referred to spelled out so it stands on its own. Empty otherwise.
+"message": for "send", the message for the agent, written as the user would type it: first person, keeping their intent and wording, with anything they referred to spelled out so it stands on its own. Keep every request they made, in their order, including what to do once something's done, like "when that's merged, update the deployment". Empty otherwise.
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Reply in the language they spoke.`
 
