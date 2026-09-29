@@ -22,6 +22,7 @@ import { join } from "node:path"
 import * as Config from "./Config.ts"
 import * as Helper from "./Helper.ts"
 import { run } from "./Process.ts"
+import * as Shortcut from "./Shortcut.ts"
 
 export class AudioError extends Data.TaggedError("AudioError")<{ readonly message: string; readonly cause?: unknown }> {}
 
@@ -83,6 +84,8 @@ const Event = Schema.Union(
   Schema.Struct({ type: Schema.Literal("stopped"), id: Schema.optional(Schema.String), at: Schema.optional(Schema.Number) }),
   Schema.Struct({ type: Schema.Literal("failed"), id: Schema.String, message: Schema.String }),
   Schema.Struct({ type: Schema.Literal("error"), message: Schema.String }),
+  Schema.Struct({ type: Schema.Literal("shortcut"), registered: Schema.Boolean, message: Schema.optional(Schema.String) }),
+  Schema.Struct({ type: Schema.Literal("pressed"), key: Schema.Literal("shortcut", "escape") }),
 )
 const decodeEvent = Schema.decodeUnknownOption(Schema.parseJson(Event))
 
@@ -116,12 +119,11 @@ const permissionLog = (permission: string) => {
 
 /**
  * Plays and listens through the native helper, whose voice processing cancels
- * yapd's own voice out of the microphone. Starting it asks for microphone access
- * the first time. If it quits, the next update starts it again, and plays with
- * afplay if it can't.
+ * yapd's own voice out of the microphone, and which takes the shortcut. Starting
+ * it asks for microphone access the first time. If it quits, the next update
+ * starts it again, or right away for the shortcut, and plays with afplay if it can't.
  */
-export const NativeAudio = Layer.scoped(
-  Audio,
+export const NativeAudio = Layer.scopedContext(
   Effect.gen(function* () {
     yield* Helper.build
     const dir = yield* Effect.acquireRelease(
@@ -159,6 +161,8 @@ export const NativeAudio = Layer.scoped(
       unsent.push(Helper.encode(message))
       if (unsent.length === 1) flush()
     }
+    const keys = yield* Config.shortcut
+    const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, send) : undefined
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
@@ -173,6 +177,7 @@ export const NativeAudio = Layer.scoped(
           if (greeted !== undefined) Deferred.unsafeDone(greeted, Exit.void)
           if (event.value.permission !== permission) runFork(permissionLog(event.value.permission))
           permission = event.value.permission
+          if (event.value.type === "hello" && shortcut !== undefined) runSync(shortcut.greeted)
           return
         case "active":
           listening = event.value.listening
@@ -195,8 +200,25 @@ export const NativeAudio = Layer.scoped(
           return
         case "error":
           runFork(Effect.logWarning(`Audio helper: ${event.value.message}`))
+          return
+        case "shortcut":
+          if (shortcut !== undefined) runFork(shortcut.registered(event.value.registered, event.value.message))
+          return
+        case "pressed":
+          if (shortcut !== undefined) runSync(shortcut.pressed(event.value.key))
       }
     }
+
+    let quitAt = Number.NEGATIVE_INFINITY
+    /** The shortcut needs a helper running, but one that keeps quitting waits for the next update. */
+    const restart = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const again = shortcut !== undefined && now - quitAt > 60_000
+      quitAt = now
+      if (!again) return yield* Effect.logWarning("The audio helper quit, it starts again with the next update")
+      yield* Effect.logWarning("The audio helper quit, starting it again for the shortcut")
+      yield* connect.pipe(Effect.catchAll((error) => Effect.logWarning("Could not start the audio helper", error)))
+    })
 
     const disconnected = () => {
       connection = undefined
@@ -204,7 +226,8 @@ export const NativeAudio = Layer.scoped(
       listening = false
       if (current !== undefined) settle(current, new AudioError({ message: "The audio helper quit" }), 0)
       current = undefined
-      if (!closing) runFork(Effect.logWarning("The audio helper quit, it starts again with the next update"))
+      if (shortcut !== undefined) runSync(shortcut.quit)
+      if (!closing) runFork(restart)
     }
 
     yield* Effect.acquireRelease(
@@ -327,7 +350,7 @@ export const NativeAudio = Layer.scoped(
         } satisfies Playback
       })
 
-    return {
+    const audio: Audio["Type"] = {
       play: (file, from = 0) =>
         native(file, from).pipe(
           Effect.catchAll((error) =>
@@ -342,16 +365,39 @@ export const NativeAudio = Layer.scoped(
         listening = false
       }),
     }
+    return Context.make(Audio, audio).pipe(Context.add(Shortcut.Shortcut, shortcut?.service ?? Shortcut.none))
   }),
 )
 
-/** The helper when listening is on and it builds, afplay otherwise. */
+/** Without the helper, nothing takes the shortcut. */
+const noShortcut = (keys: Option.Option<Shortcut.Keys>, log: (keys: string) => Effect.Effect<void>) =>
+  Layer.effect(
+    Shortcut.Shortcut,
+    Option.match(keys, { onNone: () => Effect.void, onSome: (set) => log(Shortcut.format(set)) }).pipe(
+      Effect.as(Shortcut.none),
+    ),
+  )
+
+/** The helper when listening is on and it builds, afplay and no shortcut otherwise. */
 export const DeviceAudio = Layer.unwrapEffect(
   Effect.gen(function* () {
-    if (!(yield* Config.listen)) return AfplayAudio
+    // Read here too, so a shortcut it can't read stops the daemon rather than falling back to afplay.
+    const keys = yield* Config.shortcut
+    if (!(yield* Config.listen)) {
+      return Layer.merge(
+        AfplayAudio,
+        noShortcut(keys, (text) =>
+          Effect.logInfo(`${text} is off: dictating needs the microphone, which YAPD_LISTEN=false keeps closed`),
+        ),
+      )
+    }
     return NativeAudio.pipe(
       Layer.catchAll((error) =>
-        Layer.merge(AfplayAudio, Layer.effectDiscard(Effect.logWarning("Can't listen for interruptions", error))),
+        Layer.mergeAll(
+          AfplayAudio,
+          noShortcut(keys, (text) => Effect.logWarning(`${text} is off without the audio helper`)),
+          Layer.effectDiscard(Effect.logWarning("Can't listen for interruptions", error)),
+        ),
       ),
     )
   }),

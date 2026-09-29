@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Either, Exit } from "effect"
+import { Effect, Either, Exit, Option, TestClock, TestContext } from "effect"
+import * as Launcher from "./Launcher.ts"
 import { ProcessError } from "./Process.ts"
 import * as Relay from "./Relay.ts"
 import * as Remote from "./Remote.ts"
@@ -97,5 +98,86 @@ describe("Remote", () => {
       JSON.stringify({ reason: "I can't reach that session from here." }),
     )
     expect(JSON.parse(await Effect.runPromise(Remote.serve(sending, "{}")))).toHaveProperty("reason")
+  })
+})
+
+describe("Remote launcher", () => {
+  const request: Launcher.Request = { project: "free-sound", prompt: "Fix the loader; rm -rf ~", worktree: true }
+  const started: Launcher.Started = {
+    thread: "thread-1",
+    project: "free-sound",
+    directory: "/home/me/.t3/worktrees/free-sound/t3code-0a1b2c3d",
+    branch: "t3code/0a1b2c3d",
+    model: "claude-fable-5-1",
+    worktree: true,
+  }
+  const own: Launcher.Launcher = {
+    start: () => Effect.succeed({ ...started, directory: "/code/free-sound" }),
+    catalog: Effect.succeed({ projects: [], models: [] }),
+  }
+  const why = <A>(effect: Effect.Effect<A, Launcher.LaunchError>) =>
+    Effect.runPromise(effect.pipe(Effect.flip, Effect.map(({ reason }) => reason)))
+  const answering = (stdout: string) => Remote.launcher("rig", "me@rig.example.com", () => Effect.succeed(stdout))
+  const failing = (code: number, stderr = "") =>
+    Remote.launcher("rig", "me@rig.example.com", (command) => Effect.fail(new ProcessError({ command: command.join(" "), code, stderr })))
+
+  test("runs yapd start on the machine, with the request on stdin", async () => {
+    const calls: Array<{ command: ReadonlyArray<string>; stdin: string }> = []
+    const launcher = Remote.launcher("rig", "me@rig.example.com", (command, stdin) =>
+      Effect.sync(() => {
+        calls.push({ command, stdin })
+        return `welcome to rig\n${JSON.stringify({ started, catalog: { projects: [], models: [] } })}\n`
+      }),
+    )
+    expect(await Effect.runPromise(launcher.start(request))).toEqual(started)
+    expect(calls[0]?.command).toEqual([
+      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd start",
+    ])
+    expect(JSON.parse(calls[0]?.stdin ?? "")).toEqual(request)
+    expect(await Effect.runPromise(launcher.catalog)).toEqual({ projects: [], models: [] })
+    expect(calls[1]?.command.at(-1)).toBe("cd / && yapd catalog")
+  })
+
+  test("says why the machine didn't start it, and doesn't claim to know when it stops answering", async () => {
+    expect(await why(answering('{"reason":"T3 Code isn\'t running."}').start(request))).toBe("T3 Code isn't running.")
+    expect(await why(failing(255).start(request))).toBe("I can't reach rig.")
+    expect(await why(failing(1, "usage: yapd serve | yapd install").start(request))).toBe("yapd on rig needs updating.")
+    expect(await why(answering("not json").start(request))).toBe("yapd on rig answered in a way I don't understand.")
+    const silent = Remote.launcher("rig", "rig", () => Effect.never)
+    /** How a start that never hears back stands after a while: still waiting, or given up and why. */
+    const after = (duration: `${number} minutes`) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const fiber = yield* Effect.fork(Effect.flip(silent.start(request)))
+          yield* TestClock.adjust(duration)
+          const exit = Option.getOrUndefined(yield* fiber.poll)
+          return exit === undefined ? "waiting" : Exit.isSuccess(exit) ? exit.value.reason : "failed"
+        }).pipe(Effect.provide(TestContext.TestContext)),
+      )
+    // A worktree can take minutes.
+    expect(await after("6 minutes")).toBe("waiting")
+    expect(await after("7 minutes")).toBe("rig isn't answering, so I don't know if it started.")
+  })
+
+  test("picks the launcher by the machine's name, which for this one can be what the user calls it", async () => {
+    const calls: Array<ReadonlyArray<string>> = []
+    const launchers = Remote.launchers(
+      remotes,
+      () => "Laurents-MacBook-Pro.local",
+      own,
+      (command) =>
+        Effect.sync(() => {
+          calls.push(command)
+          return JSON.stringify({ started })
+        }),
+      "Rosie",
+    )
+    for (const here of [undefined, "", " Rosie ", "laurents-macbook-pro"]) {
+      expect((await Effect.runPromise(launchers(here).start(request))).directory).toBe("/code/free-sound")
+    }
+    expect(calls).toEqual([])
+    expect(await Effect.runPromise(launchers("Rig").start(request))).toEqual(started)
+    expect(calls[0]?.at(-2)).toBe("me@rig.example.com")
+    expect(await why(launchers("box").start(request))).toBe("I don't know how to reach box. It needs adding to YAPD_REMOTES.")
   })
 })

@@ -322,16 +322,24 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
       )
     }).pipe(background)
 
-    /** The ready thread that has waited longest, letting go of any that waited too long. */
-    const take = Effect.gen(function* () {
+    /** Lets go of ready threads that waited too long. */
+    const prune = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
       const usable = (spare: Spare) => spare.server === current && now - spare.at < freshFor
       const stale = ready.filter((spare) => !usable(spare))
-      const [spare, ...rest] = ready.filter(usable)
-      ready = rest
+      ready = ready.filter(usable)
       yield* Effect.forEach(stale, (spare) => release(spare.server, spare.thread), { discard: true })
+    })
+
+    /** The ready thread that has waited longest. */
+    const take = Effect.map(prune, () => {
+      const [spare, ...rest] = ready
+      ready = rest
       return spare
     })
+
+    /** Has threads ready for a call that's known to be coming, like while the user dictates. */
+    const prepare = Effect.zipRight(prune, refill)
 
     /** A new thread for a call. One the call stops waiting for is kept for the next. */
     const threadFor = (server: Connection) =>
@@ -427,5 +435,5 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
         return yield* answer
       }).pipe(Effect.scoped)
 
-    return { run }
+    return { run, prepare }
   })

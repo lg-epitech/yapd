@@ -1,13 +1,22 @@
-import { Effect, Option, Schema } from "effect"
+import { Effect, Fiber, Option, Schema } from "effect"
 import { hostname } from "node:os"
 import { wake } from "./ClaudeCode.ts"
 import * as Config from "./Config.ts"
 import * as Origin from "./Origin.ts"
 import { type Agent, Stop } from "./Payload.ts"
 import * as Project from "./Project.ts"
+import * as Seen from "./Seen.ts"
 
 const Reply = Schema.Struct({ reply: Schema.optional(Schema.String) })
 const decodeStop = Schema.decodeUnknownOption(Schema.parseJson(Stop))
+
+/** Notes where the agent ran and what with, under a timeout, and without ever failing. */
+export const note = (agent: Agent, stop: typeof Stop.Type, path?: string) =>
+  Seen.note({ directory: stop.cwd, agent, model: stop.model }, path).pipe(
+    Effect.timeoutOption("1 second"),
+    Effect.catchAllCause(() => Effect.void),
+    Effect.asVoid,
+  )
 
 /**
  * Forwards a hook payload from stdin to the daemon and returns the exit code.
@@ -36,6 +45,9 @@ export const hook = (agent: Agent, wait: boolean) =>
           ),
         )
       : undefined
+    // So new work can start where agents have run. Alongside the rest, and given up on if the disk is slow.
+    const noting = yield* Effect.fork(Option.match(stop, { onNone: () => Effect.void, onSome: (stop) => note(agent, stop) }))
+    yield* Effect.addFinalizer(() => Fiber.await(noting))
     const origin = { ...Origin.fromEnv(process.env), host: hostname(), ...(project ? { project } : {}) }
     const query = new URLSearchParams({ agent, origin: JSON.stringify(origin) })
     if (waiting) query.set("wait", "1")
@@ -54,4 +66,7 @@ export const hook = (agent: Agent, wait: boolean) =>
     if (reply === undefined) return 0
     process.stderr.write(wake(reply))
     return 2
-  }).pipe(Effect.orElseSucceed(() => 0))
+  }).pipe(
+    Effect.scoped,
+    Effect.orElseSucceed(() => 0),
+  )

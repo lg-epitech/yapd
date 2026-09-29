@@ -1,0 +1,300 @@
+import { describe, expect, test } from "bun:test"
+import { Context, Deferred, Effect, Exit, Layer, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
+import { Audio } from "./Audio.ts"
+import { Waiting } from "./ClaudeCode.ts"
+import { Condenser } from "./Condenser.ts"
+import * as Daemon from "./Daemon.ts"
+import { defaults } from "./Endpointer.ts"
+import * as Floor from "./Floor.ts"
+import { Relays } from "./Relay.ts"
+import { Responder } from "./Responder.ts"
+import { Transcriber } from "./Transcriber.ts"
+import { Vad, VadError } from "./Vad.ts"
+import { Voice } from "./Voice.ts"
+
+/**
+ * Runs the daemon with updates that each take ten seconds to read, and no
+ * microphone unless the user `says` something, which is then meant for the agent
+ * and takes three seconds to send.
+ */
+const make = (says?: string) => Effect.gen(function* () {
+  /** What each rendered file says, and what was played, in order. */
+  const rendered = new Map<string, string>()
+  const played: Array<string> = []
+  const stopped: Array<string> = []
+  /** What happened to follow-ups and the hooks that wait for them, in order. */
+  const followUps: Array<string> = []
+  const microphone = yield* Queue.unbounded<Float32Array>()
+  let rests = 0
+  const layer = Layer.mergeAll(
+    Layer.succeed(Condenser, { condense: (_, turn) => Effect.succeed({ priority: "done", spoken: turn.message }) }),
+    Layer.succeed(Voice, { render: (text, path) => Effect.sync(() => void rendered.set(path, text)) }),
+    Layer.succeed(Audio, {
+      play: (path) =>
+        Effect.gen(function* () {
+          const text = rendered.get(path) ?? path
+          played.push(text)
+          let done = false
+          // Closing the scope stops it, as with the helper.
+          yield* Effect.addFinalizer(() => Effect.sync(() => void (done || stopped.push(text))))
+          return {
+            duration: 10,
+            finished: Effect.sleep("10 seconds").pipe(
+              Effect.tap(() => {
+                done = true
+              }),
+            ),
+            stop: Effect.succeed(2),
+            volume: () => Effect.void,
+          }
+        }),
+      microphone: Effect.succeed(says === undefined ? Option.none() : Option.some(microphone)),
+      rest: Effect.sync(() => void rests++),
+    }),
+    Layer.succeed(Waiting, {
+      open: (session) => Effect.map(Deferred.make<string | undefined>(), (answer) => ({ session, answer })),
+      close: ({ session }) => Effect.sync(() => void followUps.push(`${session} let go`)),
+      drop: () => Effect.void,
+      deliver: () => Effect.succeed(false),
+      reply: () => Effect.succeed(undefined),
+    }),
+    Layer.succeed(Vad, {
+      // Each frame holds the probability that it's speech.
+      make: says === undefined ? Effect.fail(new VadError({ cause: "no microphone" })) : Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)),
+    }),
+    Layer.succeed(Transcriber, { transcribe: () => Effect.succeed(says ?? "") }),
+    Layer.succeed(Responder, {
+      respond: ({ heard }) =>
+        says === undefined ? Effect.die("nothing to respond to") : Effect.succeed({ intent: "send" as const, spoken: "Okay, passed on.", message: heard }),
+    }),
+    Layer.succeed(Relays, {
+      send: (thread, text) =>
+        Effect.sleep("3 seconds").pipe(Effect.zipRight(Effect.sync(() => void followUps.push(`${thread.session} sent: ${text}`)))),
+    }),
+    Floor.layer,
+  )
+  const context = yield* Layer.build(layer)
+  const { handle, speak: read, tell } = yield* Daemon.make.pipe(Effect.provide(context))
+  yield* Effect.forkScoped(read)
+  const floor = Context.get(context, Floor.Floor)
+  // Lets the fibers catch up on what the test did, since the clock only moves when told to.
+  const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
+  const finish = (session: string, message: string, waits = false) =>
+    handle(
+      "claude",
+      { hook_event_name: "Stop", session_id: session, cwd: "/tmp", last_assistant_message: message },
+      { project: "yapd" },
+      waits,
+    ).pipe(Effect.zipRight(flush))
+  /** Says what the user `says`, over whatever is being read. */
+  const speak = Queue.offerAll(microphone, [
+    ...Array.from({ length: 10 }, () => new Float32Array([0.9])),
+    ...Array.from({ length: defaults.silence }, () => new Float32Array([0])),
+  ]).pipe(Effect.zipRight(flush))
+  const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
+  /** A turn that took `seconds`, as its hooks report it. */
+  const turn = (session: string, message: string, seconds: number, extra: { readonly needsYou?: boolean; readonly launched?: boolean } = {}) =>
+    Effect.gen(function* () {
+      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd: "/tmp", prompt: "Go on." }, { project: "yapd" }, false)
+      yield* wait(seconds)
+      yield* handle(
+        "claude",
+        { hook_event_name: "Stop", session_id: session, cwd: "/tmp", last_assistant_message: message, ...(extra.needsYou ? { needs_you: true } : {}) },
+        { project: "yapd", ...(extra.launched ? { launched: true } : {}) },
+        false,
+      )
+      yield* flush
+    })
+  /** Something yapd has to say for itself, which as a question records how it went. */
+  const notice = (id: string, spoken: string, options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean } = {}) =>
+    tell({
+      id,
+      priority: options.question !== undefined || options.needsYou === true ? "needs-you" : "done",
+      spoken,
+      at: 0,
+      stale: Effect.succeed(options.stale === true),
+      ...(options.question === undefined
+        ? {}
+        : {
+            question: {
+              answer: () => Effect.succeed(Option.none()),
+              unanswered: Effect.sync(() => void options.question?.push(`${id} unanswered`)),
+            },
+          }),
+    }).pipe(Effect.zipRight(flush))
+  /** Takes the floor as a dictation would, until the returned scope closes. */
+  const dictate = Effect.gen(function* () {
+    const scope = yield* Scope.make()
+    yield* Floor.take.pipe(Effect.provideService(Floor.Floor, floor), Scope.extend(scope))
+    yield* flush
+    return scope
+  })
+  /** Holds the speaker and microphone as a dictation records, until the returned effect lets go. */
+  const record = Effect.gen(function* () {
+    const done = yield* Deferred.make<void>()
+    yield* Effect.forkScoped(Floor.use(floor, Context.get(context, Audio))(Deferred.await(done)))
+    yield* flush
+    return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
+  })
+  const reading = STM.commit(TRef.get(floor.reading))
+  return { finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, rests: () => rests, flush }
+})
+
+const daemon = make()
+
+const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
+  Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
+
+describe("Daemon", () => {
+  test("stops an update for a dictation, and reads it again after, before newer ones", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, reading, played, stopped } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        const dictation = yield* dictate
+        const readingDuring = yield* reading
+        yield* finish("b", "The tests pass.")
+        yield* wait(30)
+        const playedDuring = [...played]
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        yield* wait(11)
+        // Copies, since closing the test stops whatever is still playing.
+        return { played: [...played], playedDuring, stopped: [...stopped], readingDuring }
+      }),
+    )
+    expect(result.stopped).toEqual(["yapd. The PR is ready."])
+    expect(result.readingDuring).toBe(false)
+    // Nothing was read while the user dictated.
+    expect(result.playedDuring).toEqual(["yapd. The PR is ready."])
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "yapd. The tests pass."])
+  })
+
+  test("turns the microphone off once a dictation lets go of it, never while it records", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, record, rests } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        const before = rests()
+        yield* dictate
+        const stop = yield* record
+        // The update it cut off has let go, and there's nothing else to read.
+        yield* wait(1)
+        const during = rests()
+        yield* stop
+        return { before, during, after: rests() }
+      }),
+    )
+    expect(result.during).toBe(result.before)
+    // Once as the dictation lets go, and once more by the daemon, which had nothing to read.
+    expect(result.after).toBe(result.before + 2)
+  })
+
+  test("drops an update whose session moved on during the dictation", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, played } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        const dictation = yield* dictate
+        yield* finish("a", "Merged it.")
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        yield* wait(11)
+        return { played }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. Merged it."])
+  })
+
+  test("passes on a reply even when a dictation starts as it's being sent, and says so after", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, followUps, wait, dictate, played } = yield* make("Merge it.")
+        yield* finish("a", "The PR is ready.", true)
+        yield* speak
+        // On its way to the agent, which takes three seconds.
+        yield* wait(1)
+        const dictation = yield* dictate
+        const during = [...followUps]
+        yield* wait(3)
+        const sent = [...followUps]
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        yield* wait(11)
+        return { during, sent, played: [...played] }
+      }),
+    )
+    expect(result.during).toEqual([])
+    // Its hook is only let go of once the reply has had its chance to reach it.
+    expect(result.sent).toEqual(["a sent: Merge it.", "claude:a let go"])
+    // The update isn't read again: it was answered.
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. Okay, passed on."])
+  })
+
+  test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, wait, played } = yield* daemon
+        yield* turn("a", "Quick and watched.", 5)
+        yield* turn("b", "Quick, with nobody watching.", 5, { launched: true })
+        yield* wait(11)
+        yield* turn("c", "It was refused when it tried to push.", 5, { needsYou: true })
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Quick, with nobody watching.", "yapd. It was refused when it tried to push."])
+  })
+
+  test("says what yapd has to say for itself in turn, questions first", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, notice, wait, played } = yield* daemon
+        const asked: Array<string> = []
+        yield* wait(1)
+        yield* finish("a", "The PR is ready.")
+        yield* finish("b", "The tests pass.")
+        yield* notice("started", "Started in yapd, on Fable, in a worktree.")
+        yield* notice("gone", "Looking through yapd first.", { stale: true, needsYou: true })
+        yield* notice("question", "Which project is the loader fix for?", { question: asked })
+        yield* wait(11)
+        yield* wait(11)
+        const meanwhile = [...asked]
+        // Nobody said anything in the time a question leaves for it.
+        yield* wait(11)
+        yield* wait(11)
+        return { played: [...played], meanwhile, asked }
+      }),
+    )
+    expect(result.played).toEqual([
+      "yapd. The PR is ready.",
+      "Which project is the loader fix for?",
+      // From when the dictation was sent, which was before the update came in.
+      "Started in yapd, on Fable, in a worktree.",
+      "yapd. The tests pass.",
+    ])
+    expect(result.meanwhile).toEqual(["question unanswered"])
+    expect(result.asked).toEqual(["question unanswered"])
+  })
+
+  test("asks a question again after the dictation that cut it off, without counting it unanswered", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, dictate, played } = yield* daemon
+        const asked: Array<string> = []
+        yield* notice("question", "Which project is the loader fix for?", { question: asked })
+        yield* wait(2)
+        const dictation = yield* dictate
+        yield* wait(30)
+        const during = { played: [...played], asked: [...asked] }
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        yield* wait(11)
+        return { during, played: [...played], asked }
+      }),
+    )
+    expect(result.during).toEqual({ played: ["Which project is the loader fix for?"], asked: [] })
+    expect(result.played).toEqual(["Which project is the loader fix for?", "Which project is the loader fix for?"])
+    expect(result.asked).toEqual(["question unanswered"])
+  })
+})

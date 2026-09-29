@@ -1,19 +1,14 @@
-import { Effect, Option, Redacted, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { realpath } from "node:fs/promises"
-import { homedir } from "node:os"
-import { join } from "node:path"
 import * as Config from "./Config.ts"
 import { type Relay, RelayError, type Thread, Unreachable } from "./Relay.ts"
+import * as Server from "./T3CodeServer.ts"
 
 // T3 Code's local API, the one its own CLI uses. Sending through it keeps the
 // thread in step: resuming the agent behind T3 Code's back would fork it.
 
 /** Sessions the desktop app starts inherit this; `t3 serve` passes nothing, so every session is looked up. */
 export const bundle = "com.t3tools.t3code"
-
-/** Where the running server says it listens. T3CODE_HOME moves it, as it does for T3 Code. */
-const runtimeState = join(process.env.T3CODE_HOME ?? join(homedir(), ".t3"), "userdata", "server-runtime.json")
-const Server = Schema.parseJson(Schema.Struct({ origin: Schema.String }))
 
 const ShellThread = Schema.Struct({
   id: Schema.String,
@@ -91,37 +86,11 @@ export const relay = Effect.gen(function* () {
       const miss = (reason: string, cause?: unknown) =>
         thread.agent === "claude" && thread.origin.app === bundle ? new RelayError({ reason, cause }) : new Unreachable()
       if (Option.isNone(token)) return yield* miss("I need a T3 Code token to send it messages.")
-      const authorization = `Bearer ${Redacted.value(token.value)}`
-
-      const server = yield* Effect.tryPromise(() => Bun.file(runtimeState).text()).pipe(
-        Effect.flatMap(Schema.decodeUnknown(Server)),
-        Effect.mapError((cause) => miss("T3 Code isn't running.", cause)),
-      )
+      const reach = ({ reason, cause }: Server.Trouble) => miss(reason, cause)
+      const server = yield* Effect.mapError(Server.locate, reach)
+      const request = Server.api(server, token.value)
       const api = <A, I>(path: string, schema: Schema.Schema<A, I>, init: RequestInit = {}) =>
-        Effect.tryPromise((signal) =>
-          fetch(`${server.origin}${path}`, {
-            ...init,
-            headers: { authorization, "content-type": "application/json" },
-            signal,
-          }),
-        ).pipe(
-          Effect.timeout("5 seconds"),
-          Effect.mapError((cause) => miss("T3 Code isn't answering.", cause)),
-          Effect.filterOrElse(
-            (response) => response.ok,
-            (response) =>
-              Effect.fail(
-                response.status === 401 || response.status === 403
-                  ? miss("T3 Code turned down my token. It may have expired.")
-                  : miss("T3 Code wouldn't take it.", `${response.status} from ${path}`),
-              ),
-          ),
-          Effect.flatMap((response) =>
-            Effect.tryPromise({ try: () => response.json(), catch: (cause) => miss("T3 Code answered in a way I don't understand.", cause) }),
-          ),
-          Effect.flatMap(Schema.decodeUnknown(schema)),
-          Effect.mapError((error) => (error._tag === "ParseError" ? miss("T3 Code answered in a way I don't understand.", error) : error)),
-        )
+        Effect.mapError(request(path, schema, init), reach)
 
       const shell = yield* api("/api/orchestration/shell", Shell)
       const directories = new Set(
