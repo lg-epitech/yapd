@@ -162,6 +162,7 @@ final class Audio {
   /// Whether the daemon wants the engine running, which a device change doesn't alter.
   private var active = false
   private var tapped = false
+  private var processing = false
 
   init(link: Link, wantsMicrophone: Bool) {
     self.link = link
@@ -219,6 +220,7 @@ final class Audio {
     let usable = { (format: AVAudioFormat) in format.channelCount > 0 && format.sampleRate > 0 }
     guard usable(input.inputFormat(forBus: 0)) else { throw POSIXError(.ENODEV) }
     if !input.isVoiceProcessingEnabled { try input.setVoiceProcessingEnabled(true) }
+    processing = true
     if #available(macOS 14.0, *) {
       // Voice processing ducks other apps' audio hard by default.
       input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: true, duckingLevel: .min)
@@ -244,6 +246,11 @@ final class Audio {
       tapped = false
     }
     engine.stop()
+    // Stopping leaves other apps ducked by however much it last ducked them, until voice processing is off.
+    if processing {
+      try? engine.inputNode.setVoiceProcessingEnabled(false)
+      processing = false
+    }
   }
 
   private func play(id: String, path: String, from: Double) {
