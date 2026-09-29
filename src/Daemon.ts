@@ -134,7 +134,8 @@ export const make = Effect.gen(function* () {
           const hook = wait ? yield* waiting.open(session) : undefined
           const message = payload.last_assistant_message?.trim()
           const followedUp = followed.delete(session)
-          const project = yield* Project.name(payload.cwd)
+          // Hooks older than project names leave it to the daemon, which only sees its own machine's directories.
+          const project = origin.project ?? (yield* Project.name(payload.cwd))
           const prompt = prompts.get(session)
           if (!message) {
             yield* release(hook)

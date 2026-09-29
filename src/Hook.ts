@@ -1,15 +1,17 @@
-import { Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { wake } from "./ClaudeCode.ts"
 import * as Config from "./Config.ts"
 import * as Origin from "./Origin.ts"
-import type { Agent } from "./Payload.ts"
+import { type Agent, Stop } from "./Payload.ts"
+import * as Project from "./Project.ts"
 
 const Reply = Schema.Struct({ reply: Schema.optional(Schema.String) })
+const decodeStop = Schema.decodeUnknownOption(Schema.parseJson(Stop))
 
 /**
  * Forwards a hook payload from stdin to the daemon and returns the exit code.
- * It never fails and gives up after two seconds, so a stopped daemon can't slow
- * down or break an agent.
+ * It never fails and gives up after a few seconds, so a stopped daemon or a stuck
+ * or missing git can't slow down or break an agent.
  *
  * With `wait`, meant for a Claude Code Stop hook run in the background with
  * asyncRewake, it then waits for the update to be read out. If the user replies
@@ -23,7 +25,18 @@ export const hook = (agent: Agent, wait: boolean) =>
     const body = yield* Effect.promise(() => Bun.stdin.text())
     // A session another app drives through the SDK, like T3 Code, is that app's to talk to.
     const waiting = wait && !process.env.CLAUDE_CODE_ENTRYPOINT?.startsWith("sdk")
-    const query = new URLSearchParams({ agent, origin: JSON.stringify(Origin.fromEnv(process.env)) })
+    // Only updates announce the project, so prompts don't wait on git. A stuck or missing git leaves it to the daemon.
+    const stop = decodeStop(body)
+    const project = Option.isSome(stop)
+      ? Option.getOrUndefined(
+          yield* Project.name(stop.value.cwd).pipe(
+            Effect.timeoutOption("1 second"),
+            Effect.catchAllCause(() => Effect.succeedNone),
+          ),
+        )
+      : undefined
+    const origin = { ...Origin.fromEnv(process.env), ...(project ? { project } : {}) }
+    const query = new URLSearchParams({ agent, origin: JSON.stringify(origin) })
     if (waiting) query.set("wait", "1")
     const response = yield* Effect.tryPromise((signal) =>
       fetch(`http://127.0.0.1:${port}/events?${query}`, {

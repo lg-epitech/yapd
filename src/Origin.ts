@@ -4,6 +4,8 @@ import { Schema } from "effect"
 export const Origin = Schema.Struct({
   /** Bundle id of the app it runs under, like com.t3tools.t3code. */
   app: Schema.optional(Schema.String),
+  /** The repository it works in, named where it runs, since the daemon may be on another machine. */
+  project: Schema.optional(Schema.String),
 })
 export type Origin = typeof Origin.Type
 
