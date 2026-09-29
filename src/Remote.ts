@@ -64,7 +64,8 @@ export const relay = (remotes: Remotes, exec: Exec = ssh): Relay => ({
       const remote = remoteOf(remotes, thread)
       if (Option.isNone(remote)) return yield* new Unreachable()
       const host = thread.origin.host
-      const command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", remote.value, "yapd", "relay"]
+      // From /, since Bun would load a .env in the home directory SSH starts in, ahead of the yapd folder's.
+      const command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", remote.value, "cd / && yapd relay"]
       const stdout = yield* exec(command, JSON.stringify(Request.make({ thread, text }))).pipe(
         Effect.timeoutFail({
           duration: "30 seconds",

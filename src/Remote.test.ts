@@ -40,7 +40,7 @@ describe("Remote", () => {
     await Effect.runPromise(relay.send(thread("Rig"), "Merge it; rm -rf ~"))
     expect(calls).toHaveLength(1)
     expect(calls[0]?.command).toEqual([
-      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "yapd", "relay",
+      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd relay",
     ])
     expect(JSON.parse(calls[0]?.stdin ?? "")).toEqual({ thread: thread("Rig"), text: "Merge it; rm -rf ~" })
   })
