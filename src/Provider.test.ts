@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { json, providers } from "./Provider.ts"
 
-const call = { prompt: "hi", model: undefined, effort: undefined, schema: { json: "{}", path: "/tmp/schema.json" } }
+const call = { prompt: "hi", model: undefined, effort: undefined, tier: undefined, schema: { json: "{}", path: "/tmp/schema.json" } }
 const summary = { priority: "done", spoken: "All good." }
 
 describe("Provider", () => {
@@ -28,6 +28,11 @@ describe("Provider", () => {
     const { argv } = providers.codex.command({ ...call, effort: "high" })
     expect(argv).toContain("model_reasoning_effort=high")
     expect(providers.codex.command(call).argv).not.toContain("model_reasoning_effort=undefined")
+  })
+
+  test("puts Codex's tier in its config", () => {
+    expect(providers.codex.command({ ...call, tier: "priority" }).argv).toContain("service_tier=priority")
+    expect(providers.codex.command(call).argv.join(" ")).not.toContain("service_tier")
   })
 
   test("reads replies wrapped in a JSON envelope", () => {

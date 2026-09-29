@@ -18,6 +18,9 @@ export const model = optional("YAPD_MODEL")
 /** Reasoning effort, passed through as is. Defaults to the provider's own. */
 export const effort = optional("YAPD_EFFORT")
 
+/** Codex's service tier, like "priority" for its fast tier. Defaults to the provider's own. */
+export const tier = optional("YAPD_TIER")
+
 /** How yapd talks, in the user's words, like "Talk like Jarvis and call me sir". Unset, it talks plainly. */
 export const style = optional("YAPD_STYLE")
 

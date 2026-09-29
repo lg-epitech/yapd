@@ -7,6 +7,8 @@ export interface Call {
   readonly prompt: string
   readonly model: string | undefined
   readonly effort: string | undefined
+  /** Like "priority", Codex's fast tier. */
+  readonly tier: string | undefined
   /** JSON Schema of the reply, inline and as a file. */
   readonly schema: { readonly json: string; readonly path: string }
 }
@@ -41,11 +43,12 @@ export const providers: Record<Name, Provider> = {
     // Luna needs some reasoning to stay coherent. Its fast tier costs no extra usage, unlike bigger models'.
     defaults: { model: "gpt-6-luna", effort: "high", tier: "priority" },
     takesEffort: true,
-    command: ({ prompt, model, effort, schema }) => ({
+    command: ({ prompt, model, effort, tier, schema }) => ({
       argv: [
         "codex", "exec",
         ...flag("--model", model),
         ...flag("--config", effort === undefined ? undefined : `model_reasoning_effort=${effort}`),
+        ...flag("--config", tier === undefined ? undefined : `service_tier=${tier}`),
         "--config", "project_doc_max_bytes=0",
         "--output-schema", schema.path,
         "--sandbox", "read-only",
