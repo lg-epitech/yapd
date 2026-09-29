@@ -92,7 +92,7 @@ YAPD_MODEL=sonnet
 YAPD_EFFORT=low
 ```
 
-Leave out the model or the effort to get that CLI's default. Both are passed through as is, so use the names that CLI expects. Codex only defaults to Luna on high and the fast tier when no model is set.
+Leave out the model or the effort to get that CLI's default. Both are passed through as is, so use the names that CLI expects. Codex only defaults to Luna on high and the fast tier when no model is set. For Codex, `YAPD_TIER=priority` picks the fast tier for another model, like `YAPD_MODEL=gpt-6-sol` with `YAPD_EFFORT=low`.
 
 | `YAPD_PROVIDER` | CLI | Effort |
 | --- | --- | --- |

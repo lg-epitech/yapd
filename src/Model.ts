@@ -21,15 +21,19 @@ export const ProviderModel = Layer.scoped(
   Effect.gen(function* () {
     const name = yield* Config.provider
     const provider = providers[name]
-    const configured = { model: yield* Config.model, effort: yield* Config.effort }
+    const configured = { model: yield* Config.model, effort: yield* Config.effort, tier: yield* Config.tier }
     // The provider's default effort and tier are tuned for its default model, so they only come with it.
     const { model, effort, tier } = Option.match(configured.model, {
       onNone: () => ({
         model: provider.defaults?.model,
         effort: Option.getOrElse(configured.effort, () => provider.defaults?.effort),
-        tier: provider.defaults?.tier,
+        tier: Option.getOrElse(configured.tier, () => provider.defaults?.tier),
       }),
-      onSome: (model) => ({ model, effort: Option.getOrUndefined(configured.effort), tier: undefined }),
+      onSome: (model) => ({
+        model,
+        effort: Option.getOrUndefined(configured.effort),
+        tier: Option.getOrUndefined(configured.tier),
+      }),
     })
     if (effort !== undefined && !provider.takesEffort) {
       return yield* Effect.fail(
@@ -38,6 +42,9 @@ export const ProviderModel = Layer.scoped(
           `${name} has no reasoning effort setting, pick a model that includes one instead`,
         ),
       )
+    }
+    if (tier !== undefined && name !== "codex") {
+      return yield* Effect.fail(ConfigError.InvalidData(["YAPD_TIER"], `${name} has no service tier setting, only codex does`))
     }
     yield* Effect.logInfo(`Writing with ${[name, model, effort, tier && `${tier} tier`].filter(Boolean).join(" ")}`)
 
@@ -51,7 +58,7 @@ export const ProviderModel = Layer.scoped(
           return path
         }),
         (path) => {
-          const { argv, stdin } = provider.command({ prompt, model, effort, schema: { json: inline, path } })
+          const { argv, stdin } = provider.command({ prompt, model, effort, tier, schema: { json: inline, path } })
           // YAPD_INTERNAL keeps the call from triggering yapd's own hooks.
           return run(argv, { ...(stdin === undefined ? {} : { stdin }), env: { YAPD_INTERNAL: "1" } }).pipe(
             Effect.flatMap((stdout) => Effect.try(() => (provider.reply ?? json)(stdout))),
