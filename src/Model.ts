@@ -68,13 +68,13 @@ export const ProviderModel = Layer.scoped(
       )
     }
 
-    // Codex can stay running between calls, which saves starting it each time.
-    const server = name === "codex" ? Option.some(yield* CodexServer.make) : Option.none()
+    // Codex can stay running between calls, with threads started ahead, which saves seconds each time.
+    const server = name === "codex" ? Option.some(yield* CodexServer.make({ model, effort, tier })) : Option.none()
     const reply = (schema: object, prompt: string) =>
       Option.match(server, {
         onNone: () => once(schema, prompt),
         onSome: (server) =>
-          server.run({ prompt, model, effort, tier, schema }).pipe(
+          server.run({ prompt, schema }).pipe(
             Effect.flatMap((text) => Effect.try(() => json(text))),
             Effect.catchTag("ServerError", (error) =>
               Effect.logWarning("Codex's app-server isn't working, starting Codex for this call", error).pipe(
