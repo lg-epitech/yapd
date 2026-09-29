@@ -16,6 +16,10 @@ describe("split", () => {
     expect(parts("yapd. The tests pass. Nothing needs you.", 250)).toEqual(["yapd. The tests pass. Nothing needs you."])
   })
 
+  test("has nothing to read in blank text", () => {
+    expect(parts("  \n ", 250)).toEqual([])
+  })
+
   test("reads a long text in one go when Kokoro can", () => {
     const text = "In std, the split concepts are merged, sir: twenty-one cards are now ten. ".repeat(5).trim()
     expect(parts(text, 1000)).toEqual([text])

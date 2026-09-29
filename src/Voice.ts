@@ -30,6 +30,8 @@ const boundaries = [/(?<=[,;:])\s+/, /\s+/]
  */
 export const split = <E>(text: string, fits: (text: string) => Effect.Effect<boolean, E>) =>
   Effect.gen(function* () {
+    // Nothing to say, which Kokoro would still render as a short sound.
+    if (text.trim() === "") return []
     if (yield* fits(text)) return [text]
     const splitter = new TextSplitterStream()
     splitter.push(text)

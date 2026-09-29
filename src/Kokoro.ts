@@ -71,7 +71,8 @@ const program = Effect.gen(function* () {
   }
   const tts = new KokoroTTS(model as never, tokenizer)
   // Kokoro's own pipeline without the model, to count the tokens it would read. It reads at most 510 and silently
-  // drops the rest; a little under, since a text's count only roughly adds up from its sentences'.
+  // drops the rest, and the count stops at 510 too, since it goes through the same tokenizer: only a count under
+  // 510 shows the whole text fits.
   let counted = 0
   const counter = new KokoroTTS(
     (async ({ input_ids }: Record<"input_ids", Tensor>) => {
@@ -81,7 +82,7 @@ const program = Effect.gen(function* () {
     tokenizer,
   )
   const fits = (text: string) =>
-    Effect.tryPromise(() => counter.generate(text, speaker)).pipe(Effect.map(() => counted <= 500))
+    Effect.tryPromise(() => counter.generate(text, speaker)).pipe(Effect.map(() => counted < 510))
   const speaker = { voice: voice as NonNullable<GenerateOptions["voice"]> }
   // The GPU prepares its programs on the first run, which shouldn't hold up an update.
   yield* Effect.promise(() => tts.generate("Ready.", speaker))
