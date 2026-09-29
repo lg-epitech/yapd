@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { Cause, Effect, Exit, Fiber, Layer, Logger } from "effect"
-import { dirname, join } from "node:path"
+import { realpathSync } from "node:fs"
+import { dirname } from "node:path"
 import { DeviceAudio } from "./Audio.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
 import * as Codex from "./Codex.ts"
@@ -36,12 +37,6 @@ const Relays = Layer.effect(
 
 /** What `yapd relay` sends through, on the machine the session runs on. */
 const relay = Effect.gen(function* () {
-  // SSH runs it from the home directory, where Bun won't find the yapd folder's .env.
-  const env = Bun.file(join(dirname(import.meta.dir), ".env"))
-  if (yield* Effect.promise(() => env.exists())) {
-    const variables = Remote.dotenv(yield* Effect.promise(() => env.text()))
-    for (const [name, value] of Object.entries(variables)) process.env[name] ??= value
-  }
   const relays = Relay.make([yield* T3Code.relay, Codex.relay])
   const input = yield* Effect.promise(() => Bun.stdin.text())
   console.log(yield* Remote.serve(relays, input))
@@ -101,6 +96,12 @@ if ((command === "serve" || command === "install" || command === "uninstall") &&
     ),
   )
 } else if (command === "relay") {
+  // Bun reads .env from where it starts, which for the daemon is the yapd folder, but SSH starts in the home directory.
+  const folder = realpathSync(dirname(import.meta.dir))
+  if (realpathSync(process.cwd()) !== folder) {
+    const child = Bun.spawnSync([process.execPath, import.meta.path, "relay"], { cwd: folder, stdio: ["inherit", "inherit", "inherit"] })
+    process.exit(child.exitCode ?? 1)
+  }
   runMain(relay)
 } else {
   console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay")

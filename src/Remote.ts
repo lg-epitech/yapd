@@ -104,20 +104,3 @@ export const serve = (relays: Relays["Type"], input: string) =>
     Effect.catchTag("RelayError", ({ reason }) => Effect.succeed(Response.make({ reason }))),
     Effect.map((response) => JSON.stringify(response)),
   )
-
-/**
- * Reads the yapd folder's `.env`, like the daemon does, since SSH runs the relay
- * from the home directory. Variables already set win.
- */
-export const dotenv = (text: string) => {
-  const variables: Record<string, string> = {}
-  for (const line of text.split("\n")) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line)
-    if (match === null) continue
-    const [, name = "", raw = ""] = match
-    // A quoted value keeps its # and may be followed by a comment, like `KEY="a # b" # note`.
-    const quoted = /^(["'`])(.*?)\1\s*(?:#.*)?$/.exec(raw)
-    variables[name] = quoted === null ? raw.replace(/\s+#.*$/, "") : (quoted[2] ?? "")
-  }
-  return variables
-}

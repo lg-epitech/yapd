@@ -89,12 +89,4 @@ describe("Remote", () => {
     )
     expect(JSON.parse(await Effect.runPromise(Remote.serve(sending, "{}")))).toHaveProperty("reason")
   })
-
-  test("reads a .env file", () => {
-    expect(
-      Remote.dotenv(
-        ['# comment', 'YAPD_T3CODE_TOKEN=abc', 'export YAPD_STYLE="Call me sir. # not a comment"', "EMPTY=", "LANG=fr # note", "QUOTED='x' # note", "bad line"].join("\n"),
-      ),
-    ).toEqual({ YAPD_T3CODE_TOKEN: "abc", YAPD_STYLE: "Call me sir. # not a comment", EMPTY: "", LANG: "fr", QUOTED: "x" })
-  })
 })
