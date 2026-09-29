@@ -9,7 +9,8 @@ import { type Relay, RelayError, Unreachable } from "./Relay.ts"
 // user turn. The daemon doesn't know whether a session is still open, but it
 // knows who started it, which tells whether anything is reading its queue.
 
-const socket = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-control", "app-server-control.sock")
+// Read when used, since `yapd relay` loads CODEX_HOME from .env after startup.
+const socket = () => join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-control", "app-server-control.sock")
 
 class DaemonError extends Data.TaggedError("DaemonError")<{ readonly cause: unknown }> {}
 
@@ -27,7 +28,7 @@ export const reads = (originator: string) => originator === "codex-tui"
 /** Who started the thread, from the daemon's own API. */
 const originator = (thread: string) =>
   Effect.async<string, DaemonError>((resume) => {
-    const ws = new WebSocket(`ws+unix://${socket}`)
+    const ws = new WebSocket(`ws+unix://${socket()}`)
     const send = (message: object) => ws.send(JSON.stringify(message))
     const fail = (cause: unknown) => {
       ws.close()

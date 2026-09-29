@@ -11,8 +11,8 @@ import { type Relay, RelayError, type Thread, Unreachable } from "./Relay.ts"
 /** Sessions the desktop app starts inherit this; `t3 serve` passes nothing, so every session is looked up. */
 export const bundle = "com.t3tools.t3code"
 
-/** Where the running server says it listens. T3CODE_HOME moves it, as it does for T3 Code. */
-const runtimeState = join(process.env.T3CODE_HOME ?? join(homedir(), ".t3"), "userdata", "server-runtime.json")
+/** Where the running server says it listens. T3CODE_HOME moves it, as it does for T3 Code, and is read when used. */
+const runtimeState = () => join(process.env.T3CODE_HOME ?? join(homedir(), ".t3"), "userdata", "server-runtime.json")
 const Server = Schema.parseJson(Schema.Struct({ origin: Schema.String }))
 
 const ShellThread = Schema.Struct({
@@ -93,7 +93,7 @@ export const relay = Effect.gen(function* () {
       if (Option.isNone(token)) return yield* miss("I need a T3 Code token to send it messages.")
       const authorization = `Bearer ${Redacted.value(token.value)}`
 
-      const server = yield* Effect.tryPromise(() => Bun.file(runtimeState).text()).pipe(
+      const server = yield* Effect.tryPromise(() => Bun.file(runtimeState()).text()).pipe(
         Effect.flatMap(Schema.decodeUnknown(Server)),
         Effect.mapError((cause) => miss("T3 Code isn't running.", cause)),
       )

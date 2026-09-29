@@ -115,7 +115,8 @@ export const dotenv = (text: string) => {
     const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line)
     if (match === null) continue
     const [, name = "", raw = ""] = match
-    const quoted = /^(["'])(.*)\1$/.exec(raw)
+    // A quoted value keeps its # and may be followed by a comment, like `KEY="a # b" # note`.
+    const quoted = /^(["'`])(.*?)\1\s*(?:#.*)?$/.exec(raw)
     variables[name] = quoted === null ? raw.replace(/\s+#.*$/, "") : (quoted[2] ?? "")
   }
   return variables
