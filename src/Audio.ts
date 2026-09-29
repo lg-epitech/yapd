@@ -43,7 +43,9 @@ export class Audio extends Context.Tag("yapd/Audio")<
     readonly play: (path: string, from?: number) => Effect.Effect<Playback, AudioError, Scope.Scope>
     /**
      * 32 ms frames of 16 kHz mono from the microphone while playing, with yapd's
-     * own voice cancelled out. None when there's no microphone to listen to.
+     * own voice cancelled out, so none over its first seconds after the
+     * microphone comes on, until that's learnt. None when there's no microphone
+     * to listen to.
      */
     readonly microphone: Effect.Effect<Option.Option<Queue.Dequeue<Float32Array>>, never, Scope.Scope>
     /** Turns the microphone off until the next update. */
@@ -104,6 +106,13 @@ const settle = (current: Current, error: AudioError, at: number) => {
   if (current.stopped !== undefined) Deferred.unsafeDone(current.stopped, Exit.succeed(at))
 }
 
+/**
+ * How long yapd talks before the helper's echo cancellation has learnt its
+ * voice. It starts over each time the helper starts listening, and until then
+ * enough of yapd gets through to pass for the user talking over it.
+ */
+const learning = 3_000
+
 const permissionLog = (permission: string) => {
   switch (permission) {
     case "authorized":
@@ -140,6 +149,8 @@ export const NativeAudio = Layer.scopedContext(
     let greeted: Deferred.Deferred<void> | undefined
     let current: Current | undefined
     let listening = false
+    /** When the helper last started listening, which starts its echo cancellation over. */
+    let listenedAt = Number.NEGATIVE_INFINITY
     let permission: string | undefined
     let closing = false
     /** What the socket hasn't taken yet; it's written out once it drains. */
@@ -164,9 +175,15 @@ export const NativeAudio = Layer.scopedContext(
     const keys = yield* Config.shortcut
     const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, send) : undefined
 
+    /** Whether yapd is talking while the echo cancellation is still learning its voice. */
+    const echoing = () =>
+      current !== undefined &&
+      !runSync(Deferred.isDone(current.finished)) &&
+      runSync(Clock.currentTimeMillis) - listenedAt < learning
+
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
-        runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
+        if (!echoing()) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
         return
       }
       const event = decodeEvent(new TextDecoder().decode(message.payload))
@@ -181,6 +198,7 @@ export const NativeAudio = Layer.scopedContext(
           return
         case "active":
           listening = event.value.listening
+          listenedAt = runSync(Clock.currentTimeMillis)
           return
         case "playing":
           if (current?.id === event.value.id) Deferred.unsafeDone(current.started, Exit.succeed(event.value.duration))
