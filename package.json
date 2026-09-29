@@ -25,9 +25,6 @@
     "src",
     "!src/**/*.test.ts"
   ],
-  "os": [
-    "darwin"
-  ],
   "engines": {
     "bun": ">=1.3"
   },
