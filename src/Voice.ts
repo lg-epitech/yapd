@@ -1,9 +1,7 @@
-import { Context, Data, Effect, Layer } from "effect"
-import { RawAudio } from "@huggingface/transformers"
-import { KokoroTTS, TextSplitterStream, type GenerateOptions } from "kokoro-js"
-import { rename, rm } from "node:fs/promises"
+import type { Subprocess } from "bun"
+import { Clock, Context, Data, Deferred, Effect, Exit, Fiber, FiberId, Layer, Runtime } from "effect"
+import { KokoroTTS, TextSplitterStream } from "kokoro-js"
 import * as Config from "./Config.ts"
-import * as Hub from "./Hub.ts"
 import { type ProcessError, run } from "./Process.ts"
 
 /** Renders speech to an audio file ahead of time, so playback never waits on synthesis. */
@@ -17,10 +15,8 @@ export const extension = ".wav"
 
 export class KokoroError extends Data.TaggedError("KokoroError")<{ readonly cause: unknown }> {}
 
-const repo = "onnx-community/Kokoro-82M-v1.0-ONNX"
-
-// fp32 is both the best quality and, on Apple silicon, faster than the quantized models.
-const load = Hub.load(repo, () => KokoroTTS.from_pretrained(repo, { dtype: "fp32", device: "cpu" }))
+/** Kokoro's voices, with samples. */
+const voices = "https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md"
 
 const say = (text: string, path: string) => run(["say", "--data-format=LEI16@24000", "-o", path], { stdin: text })
 
@@ -97,62 +93,205 @@ export const join = (parts: ReadonlyArray<Float32Array>, rate: number) => {
   return joined
 }
 
+/** What the daemon asks of the Kokoro process. */
+export type Request =
+  | { readonly type: "render"; readonly id: number; readonly text: string; readonly path: string }
+  /** It no longer needs that render. */
+  | { readonly type: "cancel"; readonly id: number }
+
+/** What the Kokoro process tells the daemon. */
+export type Reply =
+  /** It has the model and is setting it up, which shouldn't take long. */
+  | { readonly type: "loading" }
+  | { readonly type: "ready"; readonly device: string }
+  /** It couldn't load, so there's no point asking it anything. */
+  | { readonly type: "unavailable"; readonly reason: string }
+  | { readonly type: "rendered"; readonly id: number }
+  | { readonly type: "failed"; readonly id: number; readonly reason: string }
+  | { readonly type: "warning"; readonly message: string }
+
+/** Where the Kokoro process runs the model. It takes the GPU when there is one. */
+export type Device = "GPU" | "CPU"
+
+interface Child {
+  readonly process: Subprocess
+  /** Settles once it has loaded Kokoro, or failed to. */
+  readonly ready: Deferred.Deferred<void, KokoroError>
+  readonly renders: Map<number, Deferred.Deferred<void, KokoroError>>
+  /** Stops it, for a reason that isn't its fault. */
+  readonly stop: () => void
+}
+
+/** How long an update waits for Kokoro to load, like on a first start while it downloads, before using say. */
+const patience = "20 seconds"
+
+/** How long setting the model up may take once it's downloaded. */
+const setup = "60 seconds"
+
 /**
- * Kokoro 82M, run locally. The model downloads on first start and loads in the
- * background. If it can't load or render, updates fall back to `say`. The
- * effect needs ffmpeg; without it, updates play unprocessed.
+ * Kokoro in its own process, src/Kokoro.ts, started with `command` right away,
+ * and again by the next render after it stops, so the daemon only waits on it.
+ * The process writes the file, effect included.
+ */
+export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: string) =>
+  Effect.gen(function* () {
+    const runtime = yield* Effect.runtime<never>()
+    const runFork = Runtime.runFork(runtime)
+    const now = () => Runtime.runSync(runtime)(Clock.currentTimeMillis)
+    let current: Child | undefined
+    let failedAt = Number.NEGATIVE_INFINITY
+    let next = 0
+    /** Until a process on the GPU crashes or hangs, which one on the CPU is less likely to. */
+    let device: Device = "GPU"
+    const leaveGpu = () => {
+      if (device === "CPU") return
+      device = "CPU"
+      runFork(Effect.logWarning("Kokoro's process stopped or hung on the GPU, so it runs on the CPU from now on"))
+    }
+
+    const start = Effect.gen(function* () {
+      const ready = Deferred.unsafeMake<void, KokoroError>(FiberId.none)
+      const renders = new Map<number, Deferred.Deferred<void, KokoroError>>()
+      let loaded = false
+      let stopped = false
+      let deadline: Fiber.RuntimeFiber<void> | undefined
+      const stop = () => {
+        stopped = true
+        child.kill()
+      }
+      const receive = (reply: Reply) => {
+        switch (reply.type) {
+          case "loading":
+            // One that hangs here, like on a wedged GPU, would never answer.
+            deadline = runFork(
+              Effect.sleep(setup).pipe(
+                Effect.zipRight(
+                  Effect.sync(() => {
+                    if (loaded) return
+                    failedAt = now()
+                    leaveGpu()
+                    stop()
+                  }),
+                ),
+              ),
+            )
+            return
+          case "ready":
+            loaded = true
+            Deferred.unsafeDone(ready, Exit.void)
+            runFork(Effect.logInfo(`Kokoro ready with voice ${voice}, on the ${reply.device}`))
+            return
+          case "unavailable":
+            failedAt = now()
+            Deferred.unsafeDone(ready, Exit.fail(new KokoroError({ cause: reply.reason })))
+            stop()
+            return
+          case "rendered": {
+            const render = renders.get(reply.id)
+            if (render !== undefined) Deferred.unsafeDone(render, Exit.void)
+            return
+          }
+          case "failed": {
+            const render = renders.get(reply.id)
+            if (render !== undefined) Deferred.unsafeDone(render, Exit.fail(new KokoroError({ cause: reply.reason })))
+            return
+          }
+          case "warning":
+            runFork(Effect.logWarning(reply.message))
+        }
+      }
+      const child = yield* Effect.try({
+        try: () =>
+          Bun.spawn([...command, voice, effect, device], {
+            stdin: "ignore",
+            stdout: "inherit",
+            stderr: "inherit",
+            ipc: (reply: Reply) => receive(reply),
+          }),
+        catch: (cause) => new KokoroError({ cause }),
+      })
+      const started: Child = { process: child, ready, renders, stop }
+      void child.exited.then(() => {
+        if (current === started) current = undefined
+        if (deadline !== undefined) runFork(Fiber.interrupt(deadline))
+        // It crashed while loading or rendering. Most likely the GPU, which the next one then leaves alone,
+        // and a crash while loading would only happen again, so the next minute goes straight to say.
+        if (!stopped && (!loaded || renders.size > 0)) {
+          leaveGpu()
+          if (!loaded) failedAt = now()
+        }
+        const gone = new KokoroError({ cause: "Kokoro's process stopped" })
+        Deferred.unsafeDone(ready, Exit.fail(gone))
+        for (const render of renders.values()) Deferred.unsafeDone(render, Exit.fail(gone))
+      })
+      current = started
+      return started
+    })
+
+    const connection = Effect.suspend(() => {
+      if (current !== undefined) return Effect.succeed(current)
+      // One that won't load would only hold each update up before it falls back anyway.
+      return now() - failedAt < 60_000 ? Effect.fail(new KokoroError({ cause: "Kokoro couldn't load a moment ago" })) : start
+    })
+    yield* Effect.addFinalizer(() => Effect.sync(() => current?.stop()))
+    // So the first update doesn't wait for it to load.
+    yield* connection.pipe(Effect.ignore)
+
+    const tell = (child: Child, request: Request) =>
+      Effect.sync(() => {
+        try {
+          child.process.send(request)
+        } catch {
+          // It stopped, which fails whatever waits on it.
+        }
+      })
+
+    const render = (text: string, path: string) =>
+      Effect.gen(function* () {
+        const child = yield* connection
+        // Still loading, it carries on for the next update, and this one uses say.
+        yield* Deferred.await(child.ready).pipe(
+          Effect.timeoutFail({ duration: patience, onTimeout: () => new KokoroError({ cause: "Kokoro is still loading" }) }),
+        )
+        const id = ++next
+        const rendered = yield* Deferred.make<void, KokoroError>()
+        child.renders.set(id, rendered)
+        yield* tell(child, { type: "render", id, text, path })
+        yield* Deferred.await(rendered).pipe(
+          Effect.timeout("60 seconds"),
+          Effect.catchTag("TimeoutException", () =>
+            // It may be stuck, like on a wedged GPU, so the next render gets a new one.
+            Effect.sync(() => {
+              leaveGpu()
+              child.stop()
+            }).pipe(Effect.zipRight(Effect.fail(new KokoroError({ cause: "Kokoro's process didn't answer" })))),
+          ),
+          Effect.onInterrupt(() => tell(child, { type: "cancel", id })),
+          Effect.ensuring(Effect.sync(() => child.renders.delete(id))),
+        )
+      })
+
+    return { render }
+  })
+
+/**
+ * Kokoro 82M, run locally, on the GPU when it can. The model downloads on first
+ * start and loads in the background. If it can't load or render, updates fall
+ * back to `say`. The effect needs ffmpeg; without it, updates play unprocessed.
  */
 export const KokoroVoice = Layer.scoped(
   Voice,
   Effect.gen(function* () {
-    const voice = yield* Config.voice
-    const effect = yield* Config.effect
-
-    const model = yield* Effect.cached(
-      load.pipe(
-        Effect.filterOrFail(
-          (tts) => voice in tts.voices,
-          () => new KokoroError({ cause: `Unknown voice "${voice}"` }),
-        ),
-        Effect.tap(() => Effect.logInfo(`Kokoro ready with voice ${voice}`)),
-      ),
-    )
-    yield* Effect.forkScoped(model.pipe(Effect.ignore))
-
-    // One render at a time: parallel runs just compete for the same cores.
-    const lock = yield* Effect.makeSemaphore(1)
-
-    const kokoro = (text: string, path: string) =>
-      Effect.gen(function* () {
-        const tts = yield* model
-        const raw = effect === "none" ? path : `${path}.raw.wav`
-        const parts = yield* Effect.forEach(split(text), (part) =>
-          Effect.tryPromise({
-            try: () => tts.generate(part, { voice: voice as NonNullable<GenerateOptions["voice"]> }),
-            catch: (cause) => new KokoroError({ cause }),
-          }).pipe(Effect.timeout("30 seconds")),
-        ).pipe(lock.withPermits(1))
-        const rate = parts[0]?.sampling_rate ?? 24000
-        yield* Effect.tryPromise({
-          try: () => new RawAudio(join(parts.map((part) => part.audio), rate), rate).save(raw),
-          catch: (cause) => new KokoroError({ cause }),
-        })
-        if (raw !== path) yield* applyEffect(raw, path)
-      })
-
-    const applyEffect = (raw: string, path: string) =>
-      run(["ffmpeg", "-loglevel", "error", "-y", "-i", raw, "-af", effect, path]).pipe(
-        Effect.catchAll((error) =>
-          Effect.logWarning("Could not apply the effect, playing it unprocessed", error).pipe(
-            Effect.zipRight(Effect.promise(() => rename(raw, path))),
-          ),
-        ),
-        Effect.ensuring(Effect.promise(() => rm(raw, { force: true }))),
-      )
-
+    const name = yield* Config.voice
+    // Kokoro's voices don't need the model, and a name it doesn't have won't start working later.
+    if (!(name in KokoroTTS.prototype.voices)) {
+      yield* Effect.logWarning(`Kokoro has no voice "${name}", so yapd uses say. Pick one from ${voices}`)
+      return { render: say }
+    }
+    const voice = yield* kokoro([process.execPath, `${import.meta.dir}/Kokoro.ts`], name, yield* Config.effect)
     return {
       render: (text, path) =>
-        kokoro(text, path).pipe(
+        voice.render(text, path).pipe(
           Effect.catchAll((error) =>
             Effect.logWarning("Kokoro failed, using say", error).pipe(Effect.zipRight(say(text, path))),
           ),
