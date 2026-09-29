@@ -91,8 +91,10 @@ const fakeKokoro = () => {
     setInterval(() => {}, 1000)
     return
   }
+  const cancelled = new Set<number>()
   process.on("message", (request: { type: string; id: number; path: string }) => {
     record({ request })
+    if (request.type === "cancel") cancelled.add(request.id)
     if (request.type !== "render") return
     if (mode === "crash") process.exit(1)
     if (mode === "failing") send({ type: "failed", id: request.id, reason: "No voice" })
@@ -101,7 +103,15 @@ const fakeKokoro = () => {
       record({ rendered: request.id })
       send({ type: "rendered", id: request.id })
     }
-    if (mode === "slow") setTimeout(rendered, 200)
+    // Busy rendering, it only hears it was given up on once it's done.
+    if (mode === "deaf") setTimeout(rendered, 200)
+    if (mode === "slow") {
+      setTimeout(() => {
+        if (!cancelled.has(request.id)) return rendered()
+        record({ cancelled: request.id })
+        send({ type: "cancelled", id: request.id })
+      }, 200)
+    }
     if (mode === "") rendered()
   })
   setTimeout(() => send({ type: "ready", device: "GPU" }), 20)
@@ -112,7 +122,13 @@ const script = Path.join(dir, "kokoro.js")
 await Bun.write(script, `(${fakeKokoro.toString()})()`)
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
 
-type Entry = { readonly launched?: ReadonlyArray<string>; readonly pid?: number; readonly request?: any; readonly rendered?: number }
+type Entry = {
+  readonly launched?: ReadonlyArray<string>
+  readonly pid?: number
+  readonly request?: any
+  readonly rendered?: number
+  readonly cancelled?: number
+}
 
 const entries = (log: string) =>
   Effect.promise(async () =>
@@ -187,6 +203,38 @@ describe("kokoro", () => {
           entry.request?.type === "render" ? [`asked ${entry.request.id}`] : entry.rendered !== undefined ? [`rendered ${entry.rendered}`] : [],
         )
         expect(order).toEqual(["asked 1", "rendered 1", "asked 2", "rendered 2"])
+      }),
+    ))
+
+  test("holds the next render back until the process is done with one given up on", () =>
+    withKokoro("slow", (voice, log, file) =>
+      Effect.gen(function* () {
+        const first = yield* Effect.fork(voice.render("One.", `${file}.1`))
+        yield* until(log, (recorded) => requests("render")(recorded).length === 1)
+        yield* Fiber.interrupt(first)
+        yield* voice.render("Two.", `${file}.2`)
+        const order = (yield* entries(log)).flatMap((entry) =>
+          entry.request?.type === "render"
+            ? [`asked ${entry.request.id}`]
+            : entry.rendered !== undefined
+              ? [`rendered ${entry.rendered}`]
+              : entry.cancelled !== undefined
+                ? [`cancelled ${entry.cancelled}`]
+                : [],
+        )
+        expect(order).toEqual(["asked 1", "cancelled 1", "asked 2", "rendered 2"])
+      }),
+    ))
+
+  test("removes the file of a render given up on that the process finished anyway", () =>
+    withKokoro("deaf", (voice, log, file) =>
+      Effect.gen(function* () {
+        const first = yield* Effect.fork(voice.render("One.", `${file}.1`))
+        yield* until(log, (recorded) => requests("render")(recorded).length === 1)
+        yield* Fiber.interrupt(first)
+        yield* voice.render("Two.", `${file}.2`)
+        expect(yield* Effect.promise(() => Bun.file(`${file}.1`).exists())).toBe(false)
+        expect(yield* Effect.promise(() => Bun.file(`${file}.2`).exists())).toBe(true)
       }),
     ))
 

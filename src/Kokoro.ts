@@ -89,9 +89,11 @@ const program = Effect.gen(function* () {
 
   const requests = yield* Queue.unbounded<Extract<Request, { type: "render" }>>()
   const cancelled = new Set<number>()
+  /** The last request it's done with: a cancel for one of those came too late to matter. */
+  let handled = 0
   process.on("message", (request: Request) => {
-    if (request.type === "cancel") cancelled.add(request.id)
-    else Queue.unsafeOffer(requests, request)
+    if (request.type !== "cancel") Queue.unsafeOffer(requests, request)
+    else if (request.id > handled) cancelled.add(request.id)
   })
   send({ type: "ready", device })
 
@@ -104,24 +106,31 @@ const program = Effect.gen(function* () {
       if (raw !== path) yield* applyEffect(raw, path)
     })
 
-  // One at a time: they'd only compete for the same GPU or cores.
-  return yield* Queue.take(requests).pipe(
-    Effect.flatMap(({ id, text, path }) =>
-      cancelled.delete(id)
-        ? Effect.void
-        : render(text, path).pipe(
-            Effect.matchCauseEffect({
-              onSuccess: () =>
-                // Given up on while it rendered, so nobody will remove it.
-                cancelled.delete(id)
-                  ? Effect.promise(() => rm(path, { force: true }))
-                  : Effect.sync(() => send({ type: "rendered", id })),
-              onFailure: (cause) => Effect.sync(() => send({ type: "failed", id, reason: Cause.pretty(cause) })),
+  /** Answers every request, even one given up on, since the daemon holds the next back until this one is done. */
+  const answer = ({ id, text, path }: Extract<Request, { type: "render" }>) =>
+    cancelled.delete(id)
+      ? Effect.sync(() => send({ type: "cancelled", id }))
+      : render(text, path).pipe(
+          Effect.matchCauseEffect({
+            onSuccess: () =>
+              // Given up on while it rendered, so nobody will remove it.
+              cancelled.delete(id)
+                ? Effect.promise(() => rm(path, { force: true })).pipe(
+                    Effect.zipRight(Effect.sync(() => send({ type: "cancelled", id }))),
+                  )
+                : Effect.sync(() => send({ type: "rendered", id })),
+            onFailure: (cause) => Effect.sync(() => send({ type: "failed", id, reason: Cause.pretty(cause) })),
+          }),
+          Effect.ensuring(
+            Effect.sync(() => {
+              handled = id
+              cancelled.delete(id)
             }),
           ),
-    ),
-    Effect.forever,
-  )
+        )
+
+  // One at a time: they'd only compete for the same GPU or cores.
+  return yield* Queue.take(requests).pipe(Effect.flatMap(answer), Effect.forever)
 })
 
 Effect.runFork(

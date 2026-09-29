@@ -1,6 +1,7 @@
 import type { Subprocess } from "bun"
 import { Clock, Context, Data, Deferred, Effect, Exit, Fiber, FiberId, Layer, Runtime } from "effect"
 import { KokoroTTS, TextSplitterStream } from "kokoro-js"
+import { rm } from "node:fs/promises"
 import * as Config from "./Config.ts"
 import { type ProcessError, run } from "./Process.ts"
 
@@ -111,6 +112,8 @@ export type Reply =
   | { readonly type: "unavailable"; readonly reason: string }
   | { readonly type: "rendered"; readonly id: number }
   | { readonly type: "failed"; readonly id: number; readonly reason: string }
+  /** It dropped a render the daemon gave up on, or finished it and removed the file. */
+  | { readonly type: "cancelled"; readonly id: number }
   | { readonly type: "warning"; readonly message: string }
 
 /** Where the Kokoro process runs the model. It takes the GPU when there is one. */
@@ -138,6 +141,7 @@ const setup = "60 seconds"
  */
 export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: string) =>
   Effect.gen(function* () {
+    const scope = yield* Effect.scope
     const runtime = yield* Effect.runtime<never>()
     const runFork = Runtime.runFork(runtime)
     const now = () => Runtime.runSync(runtime)(Clock.currentTimeMillis)
@@ -194,9 +198,11 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
             if (render !== undefined) Deferred.unsafeDone(render, Exit.void)
             return
           }
-          case "failed": {
+          case "failed":
+          case "cancelled": {
             const render = renders.get(reply.id)
-            if (render !== undefined) Deferred.unsafeDone(render, Exit.fail(new KokoroError({ cause: reply.reason })))
+            const cause = reply.type === "failed" ? reply.reason : "Cancelled"
+            if (render !== undefined) Deferred.unsafeDone(render, Exit.fail(new KokoroError({ cause })))
             return
           }
           case "warning":
@@ -258,16 +264,24 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
         yield* Deferred.await(child.ready).pipe(
           Effect.timeoutFail({ duration: patience, onTimeout: () => new KokoroError({ cause: "Kokoro is still loading" }) }),
         )
-        // One at a time, as the process renders them, so the time limit only counts its own render.
-        yield* lock.withPermits(1)(
+        // One at a time, as the process renders them, so the time limit only counts its own render. One given up on
+        // keeps its turn, and its time limit, until the process is done with it too, since it only stops between renders.
+        yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
+            yield* restore(lock.take(1))
             // It may have stopped while this waited its turn.
-            if (current !== child) return yield* new KokoroError({ cause: "Kokoro's process stopped" })
+            if (current !== child) {
+              yield* lock.release(1)
+              return yield* new KokoroError({ cause: "Kokoro's process stopped" })
+            }
             const id = ++next
-            const rendered = yield* Deferred.make<void, KokoroError>()
-            child.renders.set(id, rendered)
+            const finished = yield* Deferred.make<void, KokoroError>()
+            child.renders.set(id, finished)
             yield* tell(child, { type: "render", id, text, path })
-            yield* Deferred.await(rendered).pipe(
+            let abandoned = false
+            const turn = yield* Deferred.await(finished).pipe(
+              // The process may only hear it was given up on once it's done, busy as it is rendering, so its file is removed here.
+              Effect.tap(() => (abandoned ? Effect.promise(() => rm(path, { force: true })) : Effect.void)),
               Effect.timeout("60 seconds"),
               Effect.catchTag("TimeoutException", () =>
                 // It may be stuck, like on a wedged GPU, so the next render gets a new one.
@@ -276,8 +290,16 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
                   child.stop()
                 }).pipe(Effect.zipRight(Effect.fail(new KokoroError({ cause: "Kokoro's process didn't answer" })))),
               ),
-              Effect.onInterrupt(() => tell(child, { type: "cancel", id })),
-              Effect.ensuring(Effect.sync(() => child.renders.delete(id))),
+              Effect.ensuring(Effect.zipRight(Effect.sync(() => child.renders.delete(id)), lock.release(1))),
+              Effect.interruptible,
+              Effect.forkIn(scope),
+            )
+            return yield* restore(Fiber.join(turn)).pipe(
+              Effect.onInterrupt(() =>
+                Effect.sync(() => {
+                  abandoned = true
+                }).pipe(Effect.zipRight(tell(child, { type: "cancel", id }))),
+              ),
             )
           }),
         )
