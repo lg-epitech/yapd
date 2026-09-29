@@ -56,7 +56,7 @@ Say anything while yapd is talking and it stops. The model that writes the summa
 - Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one, unless the agent only says it understood.
 - If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
 
-You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. yapd takes about as long to respond as it does to write a summary, around five seconds with Codex.
+You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. yapd takes about as long to work out what you meant as it does to write a summary, around two seconds with Codex.
 
 Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it says back each step it sent, so you'd hear if one went missing.
 
@@ -109,7 +109,7 @@ Claude Code sessions in a terminal on the server get replies through their waiti
 
 ## Providers
 
-The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high, on its fast tier, which for Luna costs no extra usage. yapd keeps Codex running between calls, which saves a few seconds each time. To use a different one, put this in a `.env` file in the yapd folder and run `bun src/main.ts install` again:
+The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high, on its fast tier, which for Luna costs no extra usage. yapd keeps Codex running between calls, with a thread ready for the next one and without your MCP servers, apps or plugins, which saves a few seconds each time. To use a different one, put this in a `.env` file in the yapd folder and run `bun src/main.ts install` again:
 
 ```sh
 YAPD_PROVIDER=claude

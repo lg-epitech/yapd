@@ -9,17 +9,21 @@ export class ProcessError extends Data.TaggedError("ProcessError")<{
 /** Runs a command to completion and returns its stdout. Interrupting kills the process. */
 export const run = (
   command: ReadonlyArray<string>,
-  options: { readonly stdin?: string; readonly env?: Record<string, string> } = {},
+  options: { readonly stdin?: string; readonly env?: Record<string, string>; readonly cwd?: string } = {},
 ) =>
   Effect.acquireUseRelease(
-    Effect.sync(() =>
-      Bun.spawn([...command], {
-        stdin: options.stdin === undefined ? "ignore" : new Response(options.stdin),
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, ...options.env },
-      }),
-    ),
+    Effect.try({
+      try: () =>
+        Bun.spawn([...command], {
+          stdin: options.stdin === undefined ? "ignore" : new Response(options.stdin),
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, ...options.env },
+          ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        }),
+      // Bun throws when it can't start the command at all, like when it's missing.
+      catch: (cause) => new ProcessError({ command: command.join(" "), code: -1, stderr: String(cause) }),
+    }),
     (proc) =>
       Effect.gen(function* () {
         const [stdout, stderr, code] = yield* Effect.promise(() =>
