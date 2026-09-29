@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Layer, Option, Queue, TestClock, TestContext } from "effect"
+import { Effect, Fiber, Layer, Option, Queue, type Scope, TestClock, TestContext } from "effect"
 import { Audio } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
@@ -12,12 +12,27 @@ import { clean, Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { Voice } from "./Voice.ts"
 
-/** Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply. */
-const conversation = (said: ReadonlyArray<string>) =>
+const update: Conversation.Update = {
+  session: "s",
+  project: "yapd",
+  turn: { prompt: Option.none(), message: "The PR is ready." },
+  needsYou: false,
+  spoken: "The PR is ready.",
+  audio: "/tmp/update.wav",
+  thread: { agent: "claude", session: "s", cwd: "/tmp", message: "The PR is ready.", origin: {} },
+  at: 0,
+}
+
+/**
+ * Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply
+ * and the relay `sending` seconds to send.
+ */
+const conversation = (said: ReadonlyArray<string>, sending = 0) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
     const heard: Array<string> = []
     const sent: Array<string> = []
+    const late: Array<string> = []
     const transcripts = [...said]
     const layer = Layer.mergeAll(
       Layer.succeed(Audio, {
@@ -41,26 +56,18 @@ const conversation = (said: ReadonlyArray<string>) =>
             Effect.as({ intent: "send" as const, spoken: "Okay.", message: text }),
           ),
       }),
-      Layer.succeed(Relays, { send: (_, text) => Effect.sync(() => void sent.push(text)) }),
+      Layer.succeed(Relays, {
+        send: (_, text) => Effect.sleep(`${sending} seconds`).pipe(Effect.zipRight(Effect.sync(() => void sent.push(text)))),
+      }),
       Layer.succeed(Voice, { render: () => Effect.void }),
     )
-    const { converse } = yield* Conversation.make({
+    const made = yield* Conversation.make({
       dir: "/tmp",
       moved: () => Effect.succeed(false),
       sent: () => Effect.void,
+      late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
     }).pipe(Effect.provide(layer))
-    const fiber = yield* Effect.fork(
-      converse({
-        session: "s",
-        project: "yapd",
-        turn: { prompt: Option.none(), message: "The PR is ready." },
-        needsYou: false,
-        spoken: "The PR is ready.",
-        audio: "/tmp/update.wav",
-        thread: { agent: "claude", session: "s", cwd: "/tmp", message: "The PR is ready.", origin: {} },
-        at: 0,
-      }),
-    )
+    const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     const frames = (probability: number, count: number) =>
@@ -69,7 +76,19 @@ const conversation = (said: ReadonlyArray<string>) =>
       )
     const speak = frames(0.9, 10).pipe(Effect.zipRight(frames(0, defaults.silence)))
     const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
-    return { fiber, heard, sent, speak, wait }
+    /** Asks a question instead, once the update has been given up on, that takes what's said after "yes" for an answer. */
+    const ask = (answers: Array<string>) =>
+      Fiber.interrupt(fiber).pipe(
+        Effect.zipRight(
+          made.ask({
+            audio: "/tmp/question.wav",
+            answer: (heard) =>
+              Effect.succeed(heard.startsWith("Yes") ? Option.some(Effect.sync(() => void answers.push(heard))) : Option.none()),
+          }),
+        ),
+        Effect.fork,
+      )
+    return { ...made, fiber, heard, sent, late, speak, wait, ask }
   })
 
 /** Talks, then waits for the reply to be sent and read out. */
@@ -84,8 +103,11 @@ const run = (
       yield* wait(20)
       yield* Fiber.join(fiber)
       return { heard, sent }
-    }).pipe(Effect.provide(TestContext.TestContext)),
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
   )
+
+const scoped = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
+  Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
 
 describe("Conversation", () => {
   test("keeps the part of a line that was heard", () => {
@@ -136,6 +158,72 @@ describe("Conversation", () => {
     // Only asked once: it hadn't started on the first half when they carried on.
     expect(heard).toEqual(["Get that merged in and tell the agent to update the deployment."])
     expect(sent).toEqual(["Get that merged in and tell the agent to update the deployment."])
+  })
+})
+
+describe("Follow-ups", () => {
+  test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { fiber, sent, late, speak, wait, sending, settled } = yield* conversation(["Please merge it."], 3)
+        yield* speak
+        // The reply is worked out, and on its way to the agent.
+        yield* wait(6)
+        const during = { sent: [...sent], sending: yield* sending("s") }
+        // As a dictation does.
+        yield* Fiber.interrupt(fiber)
+        const waited = yield* Effect.fork(settled("s"))
+        yield* wait(3)
+        yield* Fiber.join(waited)
+        return { during, sent, late, sending: yield* sending("s") }
+      }),
+    )
+    expect(result.during).toEqual({ sent: [], sending: true })
+    expect(result.sent).toEqual(["Please merge it."])
+    expect(result.late).toEqual(["Okay."])
+    expect(result.sending).toBe(false)
+  })
+})
+
+describe("Questions", () => {
+  test("takes what the user says right after a question for its answer", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const { ask, speak, wait } = yield* conversation(["Yes, in yapd."])
+        const asking = yield* ask(answers)
+        yield* wait(10)
+        // Still listening, longer than after an update.
+        yield* wait(5)
+        yield* speak
+        return { answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    expect(result).toEqual({ answered: true, answers: ["Yes, in yapd."] })
+  })
+
+  test("leaves a question unanswered when nothing is said, or nothing meant for it", async () => {
+    const silent = await scoped(
+      Effect.gen(function* () {
+        const { ask, wait } = yield* conversation([])
+        const asking = yield* ask([])
+        yield* wait(10)
+        yield* wait(8)
+        return yield* Fiber.join(asking)
+      }),
+    )
+    expect(silent).toBe(false)
+    const unrelated = await scoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const { ask, speak, wait } = yield* conversation(["Dinner's ready!"])
+        const asking = yield* ask(answers)
+        yield* wait(10)
+        yield* speak
+        return { answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    expect(unrelated).toEqual({ answered: false, answers: [] })
   })
 })
 

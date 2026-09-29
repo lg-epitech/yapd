@@ -22,6 +22,12 @@ export interface Provider {
   readonly command: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
   /** Pulls the reply's JSON value out of stdout. Defaults to finding the object in plain text. */
   readonly reply?: (stdout: string) => unknown
+  /**
+   * The same call, run in a project's checkout to read through it. Only for CLIs
+   * that keep the model from changing anything themselves, and were seen to:
+   * OpenCode's plan agent, for one, still has its shell and only asks it not to.
+   */
+  readonly research?: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
 }
 
 const flag = (name: string, value: string | undefined) => (value === undefined ? [] : [name, value])
@@ -38,48 +44,58 @@ export const json = (text: string): unknown => {
   throw new SyntaxError(`No JSON object in ${JSON.stringify(text)}`)
 }
 
+/** Codex's sandbox leaves its shell nothing to write to, in the project or out of it, and no network. */
+const codex = ({ prompt, model, effort, tier, schema }: Call) => ({
+  argv: [
+    "codex", "exec",
+    ...flag("--model", model),
+    ...flag("--config", effort === undefined ? undefined : `model_reasoning_effort=${effort}`),
+    ...flag("--config", tier === undefined ? undefined : `service_tier=${tier}`),
+    "--config", "project_doc_max_bytes=0",
+    "--output-schema", schema.path,
+    "--sandbox", "read-only",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    // Belt and braces with YAPD_INTERNAL: the call must not trigger yapd's own Stop hook.
+    "--disable", "hooks",
+    "-",
+  ],
+  stdin: prompt,
+})
+
+const claude =
+  (tools: string) =>
+  ({ prompt, model, effort, schema }: Call) => ({
+    argv: [
+      "claude", "-p",
+      ...flag("--model", model),
+      ...flag("--effort", effort),
+      "--output-format", "json",
+      "--json-schema", schema.json,
+      "--tools", tools,
+      "--setting-sources", "",
+      "--strict-mcp-config",
+      "--disable-slash-commands",
+      "--no-session-persistence",
+    ],
+    stdin: prompt,
+  })
+
 export const providers: Record<Name, Provider> = {
   codex: {
     // Luna needs some reasoning to stay coherent. Its fast tier costs no extra usage, unlike bigger models'.
     defaults: { model: "gpt-6-luna", effort: "high", tier: "priority" },
     takesEffort: true,
-    command: ({ prompt, model, effort, tier, schema }) => ({
-      argv: [
-        "codex", "exec",
-        ...flag("--model", model),
-        ...flag("--config", effort === undefined ? undefined : `model_reasoning_effort=${effort}`),
-        ...flag("--config", tier === undefined ? undefined : `service_tier=${tier}`),
-        "--config", "project_doc_max_bytes=0",
-        "--output-schema", schema.path,
-        "--sandbox", "read-only",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        // Belt and braces with YAPD_INTERNAL: the call must not trigger yapd's own Stop hook.
-        "--disable", "hooks",
-        "-",
-      ],
-      stdin: prompt,
-    }),
+    command: codex,
+    research: codex,
   },
   claude: {
     takesEffort: true,
-    command: ({ prompt, model, effort, schema }) => ({
-      argv: [
-        "claude", "-p",
-        ...flag("--model", model),
-        ...flag("--effort", effort),
-        "--output-format", "json",
-        "--json-schema", schema.json,
-        "--tools", "",
-        "--setting-sources", "",
-        "--strict-mcp-config",
-        "--disable-slash-commands",
-        "--no-session-persistence",
-      ],
-      stdin: prompt,
-    }),
+    command: claude(""),
+    // The only tools it's given, so there's no shell and nothing that writes.
+    research: claude("Read,Glob,Grep"),
     reply: (stdout) => (JSON.parse(stdout) as { structured_output: unknown }).structured_output,
   },
   grok: {

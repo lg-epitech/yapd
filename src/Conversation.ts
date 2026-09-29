@@ -1,4 +1,4 @@
-import { Clock, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
+import { Clock, Deferred, type Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, type Playback } from "./Audio.ts"
@@ -31,7 +31,8 @@ type Signal =
   /** The rest carry the id of what sent them, so one that's no longer waited on is let go. */
   | { readonly _tag: "Finished"; readonly id: number }
   | { readonly _tag: "Lingered"; readonly id: number }
-  | { readonly _tag: "Replied"; readonly id: number; readonly reply: Reply }
+  /** The reply is whatever the one who asked for it works out: what to do about an update, or an answer to a question. */
+  | { readonly _tag: "Replied"; readonly id: number; readonly reply: unknown }
 
 /**
  * The microphone for a whole update, so nothing the user says is missed
@@ -55,7 +56,9 @@ type Outcome =
     }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
-const linger = "3 seconds"
+const linger: Duration.DurationInput = "3 seconds"
+/** Longer after a question, which takes a moment's thought to answer. */
+const pondering: Duration.DurationInput = "8 seconds"
 /** Longer than the longest utterance, so only a microphone that went quiet trips it. */
 const patience = "40 seconds"
 /** Volume while it's still unclear whether the user is talking. */
@@ -88,6 +91,17 @@ export const cut = (text: string, fraction: number) => {
 
 const misheard: Reply = { intent: "answer", spoken: "Sorry, I didn't catch that.", message: "" }
 
+/** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
+export interface Question {
+  readonly audio: string
+  /**
+   * Works out what the user meant by what they said, which may be called again
+   * if they carry on. What it returns is run once they've stopped, and none
+   * means it wasn't an answer.
+   */
+  readonly answer: (heard: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
+}
+
 /**
  * Reads updates out while listening. Talking over yapd ducks it at once and
  * stops it once it's clearly speech; what the user said then decides whether it
@@ -98,8 +112,11 @@ export const make = (options: {
   /** Whether the session has done anything since the update's turn stopped. */
   readonly moved: (update: Update) => Effect.Effect<boolean>
   readonly sent: (session: string, message: string) => Effect.Effect<void>
+  /** Says how a follow-up went when the update it answers was cut off before yapd could. */
+  readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
+    const lifetime = yield* Effect.scope
     const audio = yield* Audio
     const vad = yield* Vad
     const transcriber = yield* Transcriber
@@ -136,7 +153,21 @@ export const make = (options: {
         return ear
       })
 
-    const speak = (path: string, from: number, ear: Effect.Effect<Ear | undefined>) =>
+    /** The microphone for whatever is said in the scope, opened when it's first needed. */
+    const hearing = (scope: Scope.Scope) => {
+      let opened: Ear | undefined
+      return Effect.suspend(() =>
+        opened === undefined
+          ? open(scope).pipe(
+              Effect.tap((ear) => {
+                opened = ear
+              }),
+            )
+          : Effect.succeed(opened),
+      )
+    }
+
+    const speak = (path: string, from: number, ear: Effect.Effect<Ear | undefined>, wait = linger) =>
       Effect.gen(function* () {
         const playback = yield* audio.play(path, from)
         const listening = yield* ear
@@ -144,10 +175,10 @@ export const make = (options: {
           yield* playback.finished
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* listen(playback, listening)
+        return yield* listen(playback, listening, wait)
       }).pipe(Effect.scoped)
 
-    const listen = (playback: Playback, ear: Ear) =>
+    const listen = (playback: Playback, ear: Ear, wait: Duration.DurationInput) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
@@ -172,7 +203,7 @@ export const make = (options: {
         const startLingering = Effect.gen(function* () {
           yield* stopLingering
           const id = fresh()
-          const fiber = yield* Effect.sleep(linger).pipe(
+          const fiber = yield* Effect.sleep(wait).pipe(
             Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })),
             Effect.asVoid,
             Effect.forkScoped,
@@ -242,11 +273,11 @@ export const make = (options: {
      * the user off: if they carry on before it's ready, it starts again with all
      * they said. Nothing's done with a reply while they might still be talking.
      */
-    const settle = (
+    const settle = <R>(
       ear: Ear,
       first: string,
       transcribe: (audio: Float32Array) => Effect.Effect<string>,
-      respond: (heard: string) => Effect.Effect<Reply>,
+      respond: (heard: string) => Effect.Effect<R>,
     ) =>
       Effect.gen(function* () {
         const until = (yield* Clock.currentTimeMillis) + rambling
@@ -262,7 +293,7 @@ export const make = (options: {
 
           let speaking = false
           let carryingOn = false
-          let held: Reply | undefined
+          let held: R | undefined
           let more: Float32Array | undefined
           waiting: while (true) {
             const signal = yield* carryingOn
@@ -275,8 +306,9 @@ export const make = (options: {
               case "Replied":
                 // Once they carry on, even one that got in before it was stopped is out of date.
                 if (signal.id !== id || carryingOn) break
-                if (!speaking) return { heard, reply: signal.reply }
-                held = signal.reply
+                // Only this call's replies carry its id.
+                if (!speaking) return { heard, reply: signal.reply as R }
+                held = signal.reply as R
                 break
               case "Onset":
                 speaking = true
@@ -308,6 +340,49 @@ export const make = (options: {
         }
       })
 
+    /** Follow-ups on their way, by session. */
+    const sending = new Map<string, Deferred.Deferred<void>>()
+
+    /**
+     * Sends a follow-up and returns what to say about it. Once the user has said
+     * it, it's sent whatever happens to the conversation, like a dictation
+     * cutting it off: what's then left unsaid is said later.
+     */
+    const pass = (update: Update, reply: Reply, again: boolean, onSent: Effect.Effect<void>) =>
+      Effect.gen(function* () {
+        let failed = false
+        const done = yield* Deferred.make<void>()
+        sending.set(update.session, done)
+        const fiber = yield* follow(update, reply.message, again).pipe(
+          Effect.zipRight(onSent),
+          Effect.as(reply.spoken || "Sent."),
+          Effect.catchAll((error) =>
+            Effect.logWarning("Could not send the follow-up", error).pipe(
+              Effect.tap(() => {
+                failed = true
+              }),
+              Effect.as(error.reason),
+            ),
+          ),
+          Effect.ensuring(
+            Effect.suspend(() => {
+              if (sending.get(update.session) === done) sending.delete(update.session)
+              return Deferred.succeed(done, undefined)
+            }),
+          ),
+          Effect.annotateLogs({ project: update.project }),
+          Effect.forkIn(lifetime),
+        )
+        return yield* Fiber.join(fiber).pipe(
+          Effect.onInterrupt(() =>
+            Fiber.join(fiber).pipe(
+              Effect.flatMap((spoken) => options.late(update, spoken, failed)),
+              Effect.forkIn(lifetime),
+            ),
+          ),
+        )
+      })
+
     const follow = (update: Update, message: string, again: boolean) =>
       Effect.gen(function* () {
         if (again) return yield* new RelayError({ reason: "It's still on what I sent it, so I didn't send that." })
@@ -331,17 +406,7 @@ export const make = (options: {
       Effect.suspend(() => {
         const rendered: Array<string> = []
         return Effect.gen(function* () {
-          const scope = yield* Effect.scope
-          let opened: Ear | undefined
-          const ear = Effect.suspend(() =>
-            opened === undefined
-              ? open(scope).pipe(
-                  Effect.tap((ear) => {
-                    opened = ear
-                  }),
-                )
-              : Effect.succeed(opened),
-          )
+          const ear = hearing(yield* Effect.scope)
           const lines: Array<Line> = []
           let text = update.spoken
           let path = update.audio
@@ -391,14 +456,13 @@ export const make = (options: {
             lines.push({ speaker: "yapd", text: said }, { speaker: "user", text: heard })
             text =
               reply.intent === "send"
-                ? yield* follow(update, reply.message, sent).pipe(
-                    Effect.tap(() => {
+                ? yield* pass(
+                    update,
+                    reply,
+                    sent,
+                    Effect.sync(() => {
                       sent = true
                     }),
-                    Effect.as(reply.spoken || "Sent."),
-                    Effect.catchAll((error) =>
-                      Effect.logWarning("Could not send the follow-up", error).pipe(Effect.as(error.reason)),
-                    ),
                   )
                 : reply.spoken
             if (text === "") return
@@ -415,5 +479,43 @@ export const make = (options: {
         )
       })
 
-    return { converse }
+    /**
+     * Asks the user something and listens for what they say over it or right
+     * after, like with an update. Returns whether they answered.
+     */
+    const ask = (question: Question) =>
+      Effect.gen(function* () {
+        const ear = hearing(yield* Effect.scope)
+        let from = 0
+        let missed = 0
+        while (true) {
+          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), pondering)
+          if (outcome._tag === "Finished") return false
+          const first = yield* transcribe(outcome.audio)
+          const answer =
+            first === "" ? Option.none() : (yield* settle(outcome.ear, first, transcribe, question.answer)).reply
+          if (Option.isSome(answer)) {
+            // They've answered, so it's taken in even if a dictation starts right now.
+            yield* Effect.uninterruptible(answer.value)
+            return true
+          }
+          // Talk that wasn't an answer, after the question was asked in full, leaves it unanswered.
+          if (outcome.at >= outcome.duration) return false
+          missed++
+          from = Math.max(from, outcome.at - rewind)
+        }
+      }).pipe(Effect.scoped)
+
+    return {
+      converse,
+      ask,
+      /** Whether a follow-up to the session is on its way. */
+      sending: (session: string) => Effect.sync(() => sending.has(session)),
+      /** Waits for a follow-up to the session that's on its way, if any. */
+      settled: (session: string) =>
+        Effect.suspend(() => {
+          const done = sending.get(session)
+          return done === undefined ? Effect.void : Deferred.await(done)
+        }),
+    }
   })

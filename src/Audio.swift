@@ -1,10 +1,13 @@
 import AVFoundation
+import AppKit
+import Carbon.HIToolbox
 import Foundation
 
 // yapd's audio helper. It plays updates and listens to the microphone through
 // one voice-processing engine, so its own voice is cancelled out of what it
-// hears. The daemon launches it as an app, which gives it its own microphone
-// permission, and talks to it over a Unix socket.
+// hears, and takes the shortcut that starts new work. The daemon launches it as
+// an app, which gives it its own microphone permission, and talks to it over a
+// Unix socket.
 
 func log(_ message: String) {
   FileHandle.standardError.write(Data("yapd-audio: \(message)\n".utf8))
@@ -324,6 +327,131 @@ final class Audio {
   }
 }
 
+/// The shortcut, and Escape while the user dictates, registered as hotkeys, which
+/// need no permission, unlike watching the keyboard. A hotkey is kept from every
+/// other app, so the daemon says when to hold Escape. Only the main thread touches
+/// it, as Carbon and the keyboard layout need.
+final class Hotkeys {
+  private static let signature: FourCharCode = 0x7961_7064  // "yapd"
+  private static let shortcutID: UInt32 = 1
+  private static let escapeID: UInt32 = 2
+
+  /// Keys that type nothing, by the names the daemon uses.
+  private static let named: [String: Int] = [
+    "space": kVK_Space, "return": kVK_Return, "tab": kVK_Tab,
+    "f1": kVK_F1, "f2": kVK_F2, "f3": kVK_F3, "f4": kVK_F4, "f5": kVK_F5, "f6": kVK_F6, "f7": kVK_F7,
+    "f8": kVK_F8, "f9": kVK_F9, "f10": kVK_F10, "f11": kVK_F11, "f12": kVK_F12, "f13": kVK_F13,
+    "f14": kVK_F14, "f15": kVK_F15, "f16": kVK_F16, "f17": kVK_F17, "f18": kVK_F18, "f19": kVK_F19, "f20": kVK_F20,
+  ]
+  private static let modifiers = ["ctrl": controlKey, "option": optionKey, "cmd": cmdKey, "shift": shiftKey]
+
+  private let link: Link
+  private var shortcut: EventHotKeyRef?
+  private var escape: EventHotKeyRef?
+
+  init(link: Link) {
+    self.link = link
+    var pressed = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+    InstallEventHandler(
+      GetApplicationEventTarget(),
+      { _, event, context in
+        var id = EventHotKeyID()
+        GetEventParameter(
+          event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+          MemoryLayout<EventHotKeyID>.size, nil, &id)
+        let hotkeys = Unmanaged<Hotkeys>.fromOpaque(context!).takeUnretainedValue()
+        hotkeys.link.send(["type": "pressed", "key": id.id == Hotkeys.escapeID ? "escape" : "shortcut"])
+        return noErr
+      }, 1, &pressed, Unmanaged.passUnretained(self).toOpaque(), nil)
+  }
+
+  func handle(_ message: [String: Any]) {
+    switch message["type"] as? String {
+    case "shortcut":
+      if let shortcut { UnregisterEventHotKey(shortcut) }
+      shortcut = nil
+      guard let key = message["key"] as? String, let names = message["modifiers"] as? [String] else { return }
+      let modifiers = names.reduce(0) { $0 | (Hotkeys.modifiers[$1] ?? 0) }
+      guard let code = Hotkeys.named[key] ?? Hotkeys.code(typing: key) else {
+        return link.send(["type": "shortcut", "registered": false, "message": "no key types \"\(key)\" on this keyboard"])
+      }
+      if Hotkeys.system(code, modifiers) {
+        return link.send([
+          "type": "shortcut", "registered": false,
+          "message": "macOS uses it, in System Settings, Keyboard, Keyboard Shortcuts",
+        ])
+      }
+      let status = register(code, modifiers, Hotkeys.shortcutID, into: &shortcut)
+      link.send(
+        status == noErr
+          ? ["type": "shortcut", "registered": true]
+          : ["type": "shortcut", "registered": false, "message": Hotkeys.describe(status)])
+    case "escape":
+      let on = message["on"] as? Bool ?? false
+      if on, escape == nil {
+        let status = register(kVK_Escape, 0, Hotkeys.escapeID, into: &escape)
+        if status != noErr {
+          link.send(["type": "error", "message": "Could not take Escape to cancel: \(Hotkeys.describe(status))"])
+        }
+      } else if !on, let escape {
+        UnregisterEventHotKey(escape)
+        self.escape = nil
+      }
+    default: log("unknown message \(message)")
+    }
+  }
+
+  /// Exclusive, so it fails rather than share a key another app registered.
+  private func register(_ code: Int, _ modifiers: Int, _ id: UInt32, into ref: inout EventHotKeyRef?) -> OSStatus {
+    let status = RegisterEventHotKey(
+      UInt32(code), UInt32(modifiers), EventHotKeyID(signature: Hotkeys.signature, id: id), GetApplicationEventTarget(),
+      OptionBits(kEventHotKeyExclusive), &ref)
+    if status != noErr { ref = nil }
+    return status
+  }
+
+  private static func describe(_ status: OSStatus) -> String {
+    status == eventHotKeyExistsErr ? "another app has it" : "macOS turned it down (\(status))"
+  }
+
+  /// macOS's own shortcuts, like switching input source, don't count as registered, so they're looked up.
+  private static func system(_ code: Int, _ modifiers: Int) -> Bool {
+    var hotkeys: Unmanaged<CFArray>?
+    guard CopySymbolicHotKeys(&hotkeys) == noErr, let list = hotkeys?.takeRetainedValue() as? [[String: Any]] else {
+      return false
+    }
+    let mask = controlKey | optionKey | cmdKey | shiftKey
+    return list.contains { hotkey in
+      hotkey[kHISymbolicHotKeyEnabled] as? Bool == true && hotkey[kHISymbolicHotKeyCode] as? Int == code
+        && (hotkey[kHISymbolicHotKeyModifiers] as? Int ?? 0) & mask == modifiers
+    }
+  }
+
+  /// The key that types this character on the current layout, so `a` is A on an AZERTY keyboard too,
+  /// and with shift, for digits there.
+  private static func code(typing character: String) -> Int? {
+    guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+      let property = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
+    else { return nil }
+    let data = Unmanaged<CFData>.fromOpaque(property).takeUnretainedValue() as Data
+    return data.withUnsafeBytes { raw -> Int? in
+      guard let layout = raw.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return nil }
+      for state in [0, shiftKey >> 8] {
+        for code in 0..<128 {
+          var dead: UInt32 = 0
+          var length = 0
+          var typed = [UniChar](repeating: 0, count: 4)
+          let status = UCKeyTranslate(
+            layout, UInt16(code), UInt16(kUCKeyActionDisplay), UInt32(state), UInt32(LMGetKbdType()),
+            OptionBits(kUCKeyTranslateNoDeadKeysMask), &dead, typed.count, &length, &typed)
+          if status == noErr, String(utf16CodeUnits: typed, count: length).lowercased() == character { return code }
+        }
+      }
+      return nil
+    }
+  }
+}
+
 let arguments = CommandLine.arguments
 guard let flag = arguments.firstIndex(of: "--socket"), flag + 1 < arguments.count else {
   log("usage: yapd-audio --socket <path> [--no-microphone]")
@@ -344,5 +472,12 @@ link.send(["type": "hello", "permission": Audio.permission])
 if wantsMicrophone && AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
   AVCaptureDevice.requestAccess(for: .audio) { _ in link.send(["type": "permission", "permission": Audio.permission]) }
 }
-link.receive { message in audio.queue.async { audio.handle(message) } }
-dispatchMain()
+let hotkeys = Hotkeys(link: link)
+link.receive { message in
+  switch message["type"] as? String {
+  case "shortcut", "escape": DispatchQueue.main.async { hotkeys.handle(message) }
+  default: audio.queue.async { audio.handle(message) }
+  }
+}
+// Hotkeys come in through the app's event loop, which runs the main queue too.
+NSApplication.shared.run()

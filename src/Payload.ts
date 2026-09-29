@@ -10,6 +10,10 @@ export const Stop = Schema.Struct({
   session_id: Schema.String,
   cwd: Schema.String,
   last_assistant_message: Schema.optional(Schema.NullOr(Schema.String)),
+  /** Codex says which model ran the turn. */
+  model: Schema.optional(Schema.String),
+  /** Set by yapd's own minder, when a session nobody watches ended on something only the user can settle. */
+  needs_you: Schema.optional(Schema.Boolean),
 })
 
 export const PromptSubmit = Schema.Struct({

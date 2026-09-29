@@ -2,7 +2,7 @@
 
 I'm tired of reading my agent outputs. So I have another agent yap instead!
 
-When a Claude Code or Codex session finishes, yapd sums up the reply in a sentence or two and says it. If several finish together you hear them one at a time, and whatever needs you goes first. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting).
+When a Claude Code or Codex session finishes, yapd sums up the reply in a sentence or two and says it. If several finish together you hear them one at a time, and whatever needs you goes first. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting), or press a shortcut and [tell yapd what to start next](#starting-new-work).
 
 Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included.
 
@@ -60,7 +60,7 @@ You can also reply just after it finishes, so "yes, merge it" works when an upda
 
 Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it says back each step it sent, so you'd hear if one went missing.
 
-The microphone is only on while yapd has something to say and for a few seconds after. It uses FaceTime's echo cancellation, so speakers are fine. [Whisper](https://huggingface.co/onnx-community/whisper-base) transcribes you on your Mac and only the words go to the provider. It downloads on first start.
+The microphone is only on while yapd has something to say and for a few seconds after, and while you [dictate](#dictating). It uses FaceTime's echo cancellation, so speakers are fine. [Whisper](https://huggingface.co/onnx-community/whisper-base) transcribes you on your Mac and only the words go to the provider. It downloads on first start.
 
 Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. `YAPD_WHISPER` picks another model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` never opens the microphone.
 
@@ -81,6 +81,88 @@ yapd hands a follow-up to the session the update came from, through whatever tha
   Put it in `.env` as `YAPD_T3CODE_TOKEN=...` and run `bun src/main.ts install` again. If yapd says T3 Code turned down its token, issue a new one.
 
 A session another app drives, like T3 Code, only gets follow-ups through that app, so its own view stays in step. yapd won't send anything to a session that has moved on since the update, like when you've already typed something else, and says so when it can't reach one.
+
+## Dictating
+
+Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said becomes [new work](#starting-new-work).
+
+If yapd is reading an update when you press it, it stops, and reads it again from the start once you're done, along with anything that came in meanwhile. If you forget about it, it stops listening after five minutes and drops what it heard. It doesn't need any permission beyond the microphone.
+
+Whisper hears dictation with a larger model than interruptions, [whisper-small](https://huggingface.co/onnx-community/whisper-small), since a misheard prompt costs more than a misheard "merge it". It downloads the first time you dictate, about a gigabyte. `YAPD_DICTATION_WHISPER` picks another, like `onnx-community/whisper-large-v3-turbo`, which is more accurate but a few times slower. `YAPD_LANGUAGE` applies here too.
+
+Set `YAPD_SHORTCUT` to use other keys, like `YAPD_SHORTCUT=ctrl+option+cmd+d`, or `none` to turn it off. It needs ctrl, option or cmd, unless it's a function key. If another app or macOS already uses it, yapd says so in its log. Dictating needs the microphone, so there's no shortcut with `YAPD_LISTEN=false`.
+
+## Starting new work
+
+You talk to yapd, not to the agent. Say what you want the way you'd say it to a colleague, false starts and all, and yapd works out which project it's for, writes the prompt and starts the session. Then it tells you what it did, like "Started in yapd, on Fable, in a worktree." It doesn't ask you to confirm first.
+
+The prompt keeps what you meant and everything you asked for, tidied up, with what you left out because it was obvious filled in: "follow up on what the std agent just finished" becomes a prompt that says what that was. It adds nothing you didn't ask for. Whisper is told the names of your projects, models and machines before it listens, and what it still mangles, like "yap D", is matched against what exists. Short words are what it gets wrong most, so "no worktree" can come out as "on a work tree": yapd reads for what you'd have said, always tells you whether it made a worktree, and says so when it couldn't tell which you wanted and went by your rules.
+
+Where the work goes is settled by the first of these that says:
+
+1. What you said: "in yapd", "with Fable on low", "in a worktree", "on rig".
+2. Your [rules](#your-rules).
+3. What the project last used.
+
+The one thing yapd won't guess is the project. It goes by a project you named, earlier work you pointed at, like "the same in std", or a subject only one project has. That a request looks like your last one isn't enough. When it can't tell, it asks, and you answer by talking right after the question, as you would after an update. Say "never mind" to drop it. If you don't answer, it asks once more a minute later, then drops the request and says so. What you dictated is in the log either way, along with what yapd decided, why, and the prompt as it wrote it.
+
+Most prompts are written from what you said, in a few seconds. When a request leans on something in the project, like "do for the responder what we did for the condenser", yapd reads the project first, which takes longer, and says so before it starts: "Looking through yapd first." It reads with the provider's CLI kept from changing anything: Codex in its read-only sandbox, Claude Code with only its tools that read. With other providers it doesn't read projects, and writes from what you said.
+
+Nothing waits on this. Updates keep being read while a prompt is written, and you can dictate the next request before the last one has started. The shortcut only ever starts a new request, so answer questions by talking.
+
+### Your rules
+
+Put what yapd should go by in `preferences.md` in the yapd folder, in your own words. A model reads it with each request, so there's no format to follow, and changes apply to the next thing you dictate:
+
+```md
+Fable on high for design work and hard bugs. Opus 5.5 on high for everyday features and fixes.
+
+A worktree for features and fixes. None for questions and anything that only reads.
+
+When I say "the rig" I mean rig.
+```
+
+`YAPD_PREFERENCES` in `.env` points to a file somewhere else. Keep it short, since every prompt waits on it being read: past 6,000 characters, the rest is left out.
+
+### Where sessions start
+
+With a [T3 Code token](#where-follow-ups-go) in `.env`, new work starts as a T3 Code thread, in the projects T3 Code knows and with its defaults.
+
+Without one, yapd starts Claude Code or Codex from the command line, headless. It finds your projects in the folders you list, and in any repository an agent has run in since the hooks were set up:
+
+```sh
+YAPD_PROJECTS=~/projects,~/work
+YAPD_WORKTREE=true
+```
+
+`YAPD_WORKTREE` is whether work gets a worktree when nothing else says. Worktrees go in `~/.yapd/worktrees`, and what each session printed in `~/.yapd/sessions`.
+
+Approvals stay on for the sessions yapd starts. Nobody is there to answer them, so whatever would have asked is refused, and yapd tells you what the session tried to do and how to pick it up in a terminal. Those sessions are always read out, however short their turn, since you weren't watching. To let them do more, say so:
+
+```sh
+YAPD_CLAUDE_PERMISSIONS=acceptEdits
+YAPD_CODEX_SANDBOX=workspace-write
+```
+
+The first is Claude Code's `--permission-mode` and the second Codex's sandbox. Left unset, each runs as you've set it up yourself. For Codex that means it can read but not change anything, unless your own Codex config says otherwise, and yapd tells you so when it starts one that way.
+
+You reply to a headless session like to any other. It has no terminal to type into, so yapd picks the session up again for one more turn.
+
+### On other machines
+
+Work starts on the machine the project is on. yapd asks every machine in `YAPD_REMOTES` what it can start as you press the shortcut, so that it knows by the time you've finished talking, and starts the session there over SSH, as with follow-ups. Reading a project happens on its machine too, with the provider set in that machine's `.env`.
+
+Tell yapd what you call this Mac, since its hostname is rarely that:
+
+```sh
+YAPD_NAME=rosie
+```
+
+Then "on rosie" means here. Without it, this Mac answers to its hostname.
+
+### The writer's model
+
+Prompts are written by the model that writes summaries. To use another one, set any of `YAPD_WRITER_PROVIDER`, `YAPD_WRITER_MODEL`, `YAPD_WRITER_EFFORT` and `YAPD_WRITER_TIER`, which work like the [provider settings](#providers). With Codex and the same settings as for summaries, the two share the threads yapd keeps ready.
 
 ## Agents on another machine
 
@@ -105,7 +187,7 @@ YAPD_REMOTES=server=me@server.example.com
 
 A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config` works. Separate several with commas. yapd SSHes in with `BatchMode`, so it needs a key that works without a password prompt, and `yapd` has to be on the `PATH` that non-interactive SSH commands get: `ssh server yapd` should print yapd's usage, not "command not found". Adding `~/.bun/bin` to `PATH` in `~/.zshenv`, or at the top of `~/.bashrc`, is usually enough.
 
-Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in the `.env` of yapd's folder on the server.
+Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in the `.env` of yapd's folder on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings.
 
 ## Providers
 
@@ -137,7 +219,7 @@ yapd talks plainly unless you tell it otherwise. Describe how it should talk in 
 YAPD_STYLE="Talk like Jarvis from Iron Man: calm, precise, with a dry British wit. Call me sir."
 ```
 
-The style applies to the summaries and to its answers when you interrupt. It doesn't change what it passes on to the agent, and summaries stay a sentence or two.
+The style applies to the summaries, to its answers when you interrupt, and to what it says about new work. It doesn't change what it passes on to the agent or the prompts it writes, and summaries stay a sentence or two.
 
 ## Quick turns
 

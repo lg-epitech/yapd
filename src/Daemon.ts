@@ -7,22 +7,29 @@ import { type Ticket, Waiting } from "./ClaudeCode.ts"
 import { Condenser, introduce, type Summary, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Conversation from "./Conversation.ts"
+import * as Floor from "./Floor.ts"
 import * as Inbox from "./Inbox.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
 import * as Project from "./Project.ts"
+import * as Recent from "./Recent.ts"
 import type { Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
 import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
 
-/** Updates are condensed and rendered in parallel, then spoken one at a time. */
+/**
+ * Updates are condensed and rendered in parallel, then spoken one at a time,
+ * along with what yapd has to say for itself.
+ */
 export const make = Effect.gen(function* () {
+  const scope = yield* Effect.scope
   const condenser = yield* Condenser
   const voice = yield* Voice
   const audio = yield* Audio
   const waiting = yield* Waiting
+  const floor = yield* Floor.Floor
   const minMillis = (yield* Config.minSeconds) * 1000
 
   const dir = yield* Effect.acquireRelease(
@@ -38,8 +45,19 @@ export const make = Effect.gen(function* () {
   const activity = new Map<string, number>()
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   const followed = new Map<string, string>()
+  let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
+
+  /** Renders a notice and queues it. One that can't be rendered is only logged. */
+  const tell = (notice: Inbox.Notice) =>
+    Effect.gen(function* () {
+      const audio = join(dir, `${crypto.randomUUID()}${extension}`)
+      yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio }
+      yield* STM.commit(TRef.update(inbox, (current) => Inbox.add(current, said)))
+      yield* Effect.logInfo(`Ready: ${notice.spoken}`)
+    }).pipe(Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)))
 
   const conversation = yield* Conversation.make({
     dir,
@@ -49,7 +67,24 @@ export const make = Effect.gen(function* () {
         followed.set(session, message)
         // A session woken by its hook never reports this as a prompt, and the next summary should answer it.
         prompts.set(session, { text: message, at: yield* Clock.currentTimeMillis })
+        // Put back by a dictation that started just as this was sent, and answered now.
+        const answered = yield* STM.commit(
+          TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
+        )
+        if (answered === undefined) return
+        yield* removeFile(Inbox.audio(answered))
+        if ("update" in answered) yield* release(answered.hook)
       }),
+    late: (update, spoken, failed) =>
+      Effect.flatMap(Clock.currentTimeMillis, (at) =>
+        tell({
+          id: `late:${crypto.randomUUID()}`,
+          priority: failed ? "needs-you" : "done",
+          spoken: introduce(update.project, spoken),
+          at,
+          stale: Effect.succeed(false),
+        }),
+      ),
   })
 
   const fallback = (project: string): Summary => ({
@@ -64,13 +99,15 @@ export const make = Effect.gen(function* () {
     thread: Thread,
     arrivedAt: number,
     hook: Ticket | undefined,
+    needsYou: boolean,
   ) =>
     Effect.gen(function* () {
       const summary = yield* condenser.condense(project, turn).pipe(
         Effect.retry({ times: 1 }),
         Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),
       )
-      const priority = summary.priority
+      // Whoever sent it knows it needs the user, whatever the summary makes of it.
+      const priority = needsYou ? "needs-you" : summary.priority
       // Even a reply to a follow-up, since yapd already said it passed that on.
       if (priority === "trivial") {
         yield* release(hook)
@@ -86,6 +123,14 @@ export const make = Effect.gen(function* () {
           Inbox.add(current, { session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
         ),
       )
+      recent = Recent.add(recent, {
+        project,
+        ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
+        directory: thread.cwd,
+        spoken,
+        message: turn.message,
+        at: arrivedAt,
+      })
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
       workers.withPermits(1),
@@ -108,7 +153,7 @@ export const make = Effect.gen(function* () {
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
       )
-      if (dropped !== undefined) yield* removeFile(dropped.update.audio)
+      if (dropped !== undefined) yield* removeFile(Inbox.audio(dropped))
       // Its hook, if one waits, won't be getting a reply.
       yield* waiting.drop(session)
     })
@@ -141,15 +186,18 @@ export const make = Effect.gen(function* () {
             yield* release(hook)
             return hook
           }
+          const needsYou = payload.needs_you === true
+          // Nobody watches a session yapd started, so it's heard from however quick its turn, as is one that needs the user.
+          const watched = !needsYou && origin.launched !== true
           // The user is probably still looking at a turn this short. Without a prompt there's no telling, so it's spoken.
-          if (!followedUp && prompt !== undefined && arrivedAt - prompt.at < minMillis) {
+          if (watched && !followedUp && prompt !== undefined && arrivedAt - prompt.at < minMillis) {
             yield* release(hook)
             yield* Effect.logInfo("Skipped quick turn").pipe(Effect.annotateLogs({ project }))
             return hook
           }
           const turn = { prompt: Option.fromNullable(prompt?.text), message }
           const thread = { agent, session: payload.session_id, cwd: payload.cwd, message, origin }
-          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, hook))
+          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, hook, needsYou))
           return hook
         }
       }
@@ -161,13 +209,61 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((hook) => (hook === undefined ? Effect.succeed(undefined) : waiting.reply(hook))),
     )
 
+  /** Nothing is read while the user dictates. */
   const takeNext = STM.gen(function* () {
+    if (yield* Floor.dictating(floor)) return yield* STM.retry
     const current = yield* TRef.get(inbox)
     const ready = Inbox.next(current)
     if (ready === undefined) return yield* STM.retry
     yield* TRef.set(inbox, Inbox.remove(current, ready.session))
+    yield* TRef.set(floor.reading, true)
     return ready
   })
+
+  /**
+   * Puts back what a dictation cut off, to be said again from the start: an
+   * update unless the session has moved on or been answered since, even by a
+   * follow-up that's still on its way, and a notice unless it has been dealt with.
+   */
+  const keep = (ready: Inbox.Entry, dealtWith: boolean) =>
+    Effect.gen(function* () {
+      const over =
+        "update" in ready
+          ? (activity.get(ready.session) ?? 0) > ready.arrivedAt ||
+            followed.has(ready.session) ||
+            (yield* conversation.sending(ready.session))
+          : dealtWith
+      if (over) return false
+      return yield* STM.commit(
+        TRef.modify(inbox, (current) => (current.has(ready.session) ? [false, current] : [true, Inbox.add(current, ready)])),
+      )
+    })
+
+  /** A hook is let go of once the follow-up on its way has reached it, or it would get none. */
+  const letGo = (ready: Inbox.Entry) =>
+    "update" in ready && ready.hook !== undefined
+      ? conversation.settled(ready.session).pipe(Effect.zipRight(release(ready.hook)), Effect.forkIn(scope), Effect.asVoid)
+      : Effect.void
+
+  /** Says a notice. Only a question is listened to: whatever else they'd say to it has nowhere to go. */
+  const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>) =>
+    Effect.gen(function* () {
+      const { question } = said.notice
+      if (yield* said.notice.stale) return yield* dealtWith
+      if (question === undefined) {
+        const playback = yield* audio.play(said.audio)
+        yield* playback.finished
+        return yield* dealtWith
+      }
+      const answer = (heard: string) =>
+        question.answer(heard).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
+      const answered = yield* conversation.ask({ audio: said.audio, answer })
+      if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))
+    }).pipe(Effect.scoped)
+
+  const dictationStarted = STM.commit(
+    STM.flatMap(Floor.dictating(floor), (dictating) => (dictating ? STM.void : STM.retry)),
+  )
 
   const speakNext = Effect.gen(function* () {
     const queued = yield* STM.commit(
@@ -177,18 +273,53 @@ export const make = Effect.gen(function* () {
       ),
     )
     const ready = yield* Option.match(queued, {
-      // Nothing left to say, so the microphone goes off until there is.
-      onNone: () => audio.rest.pipe(Effect.zipRight(STM.commit(takeNext))),
+      // Nothing left to say, so the microphone goes off until there is, once no dictation is using it.
+      onNone: () => Floor.use(floor, audio)(Effect.void).pipe(Effect.zipRight(STM.commit(takeNext))),
       onSome: Effect.succeed,
     })
-    yield* conversation.converse(ready.update).pipe(
+    let kept = false
+    let dealtWith = false
+    const reading =
+      "update" in ready
+        ? conversation.converse(ready.update)
+        : say(
+            ready,
+            Effect.sync(() => {
+              dealtWith = true
+            }),
+          )
+    yield* reading.pipe(
       Effect.catchAllCause((cause) =>
         Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not speak update", cause),
       ),
-      Effect.ensuring(Effect.zipRight(removeFile(ready.update.audio), release(ready.hook))),
+      // Stopped at once, and let go of before the dictation starts.
+      Effect.raceFirst(
+        Effect.zipRight(
+          dictationStarted,
+          Effect.map(
+            Effect.suspend(() => keep(ready, dealtWith)),
+            (again) => {
+              kept = again
+            },
+          ),
+        ),
+      ),
+      Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : Effect.zipRight(removeFile(Inbox.audio(ready)), letGo(ready))))),
+      Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
     )
     yield* Effect.sleep("400 millis")
   })
 
-  return { handle, speak: Effect.forever(speakNext) }
+  return {
+    handle,
+    speak: Effect.forever(speakNext),
+    tell,
+    /** What the user was told lately, newest first. */
+    recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.since(recent, now)),
+    /** Notes something yapd did itself, for the user to build on like they do on updates. */
+    note: (heard: Recent.Heard) =>
+      Effect.sync(() => {
+        recent = Recent.add(recent, heard)
+      }),
+  }
 })
