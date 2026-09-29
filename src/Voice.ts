@@ -238,6 +238,8 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
     // So the first update doesn't wait for it to load.
     yield* connection.pipe(Effect.ignore)
 
+    const lock = yield* Effect.makeSemaphore(1)
+
     const tell = (child: Child, request: Request) =>
       Effect.sync(() => {
         try {
@@ -254,21 +256,28 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
         yield* Deferred.await(child.ready).pipe(
           Effect.timeoutFail({ duration: patience, onTimeout: () => new KokoroError({ cause: "Kokoro is still loading" }) }),
         )
-        const id = ++next
-        const rendered = yield* Deferred.make<void, KokoroError>()
-        child.renders.set(id, rendered)
-        yield* tell(child, { type: "render", id, text, path })
-        yield* Deferred.await(rendered).pipe(
-          Effect.timeout("60 seconds"),
-          Effect.catchTag("TimeoutException", () =>
-            // It may be stuck, like on a wedged GPU, so the next render gets a new one.
-            Effect.sync(() => {
-              leaveGpu()
-              child.stop()
-            }).pipe(Effect.zipRight(Effect.fail(new KokoroError({ cause: "Kokoro's process didn't answer" })))),
-          ),
-          Effect.onInterrupt(() => tell(child, { type: "cancel", id })),
-          Effect.ensuring(Effect.sync(() => child.renders.delete(id))),
+        // One at a time, as the process renders them, so the time limit only counts its own render.
+        yield* lock.withPermits(1)(
+          Effect.gen(function* () {
+            // It may have stopped while this waited its turn.
+            if (current !== child) return yield* new KokoroError({ cause: "Kokoro's process stopped" })
+            const id = ++next
+            const rendered = yield* Deferred.make<void, KokoroError>()
+            child.renders.set(id, rendered)
+            yield* tell(child, { type: "render", id, text, path })
+            yield* Deferred.await(rendered).pipe(
+              Effect.timeout("60 seconds"),
+              Effect.catchTag("TimeoutException", () =>
+                // It may be stuck, like on a wedged GPU, so the next render gets a new one.
+                Effect.sync(() => {
+                  leaveGpu()
+                  child.stop()
+                }).pipe(Effect.zipRight(Effect.fail(new KokoroError({ cause: "Kokoro's process didn't answer" })))),
+              ),
+              Effect.onInterrupt(() => tell(child, { type: "cancel", id })),
+              Effect.ensuring(Effect.sync(() => child.renders.delete(id))),
+            )
+          }),
         )
       })
 

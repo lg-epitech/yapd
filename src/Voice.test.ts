@@ -92,9 +92,13 @@ const fakeKokoro = () => {
     if (request.type !== "render") return
     if (mode === "crash") process.exit(1)
     if (mode === "failing") send({ type: "failed", id: request.id, reason: "No voice" })
-    if (mode !== "") return
-    writeFileSync(request.path, "audio")
-    send({ type: "rendered", id: request.id })
+    const rendered = () => {
+      writeFileSync(request.path, "audio")
+      record({ rendered: request.id })
+      send({ type: "rendered", id: request.id })
+    }
+    if (mode === "slow") setTimeout(rendered, 200)
+    if (mode === "") rendered()
   })
   setTimeout(() => send({ type: "ready", device: "GPU" }), 20)
 }
@@ -104,7 +108,7 @@ const script = Path.join(dir, "kokoro.js")
 await Bun.write(script, `(${fakeKokoro.toString()})()`)
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
 
-type Entry = { readonly launched?: ReadonlyArray<string>; readonly pid?: number; readonly request?: any }
+type Entry = { readonly launched?: ReadonlyArray<string>; readonly pid?: number; readonly request?: any; readonly rendered?: number }
 
 const entries = (log: string) =>
   Effect.promise(async () =>
@@ -168,6 +172,17 @@ describe("kokoro", () => {
         expect(requests("render")(recorded).map((entry) => entry.request)).toEqual([
           { type: "render", id: 1, text: "The tests pass.", path: file },
         ])
+      }),
+    ))
+
+  test("hands the process one render at a time, so waiting its turn doesn't count against a render", () =>
+    withKokoro("slow", (voice, log, file) =>
+      Effect.gen(function* () {
+        yield* Effect.all([voice.render("One.", `${file}.1`), voice.render("Two.", `${file}.2`)], { concurrency: "unbounded" })
+        const order = (yield* entries(log)).flatMap((entry) =>
+          entry.request?.type === "render" ? [`asked ${entry.request.id}`] : entry.rendered !== undefined ? [`rendered ${entry.rendered}`] : [],
+        )
+        expect(order).toEqual(["asked 1", "rendered 1", "asked 2", "rendered 2"])
       }),
     ))
 

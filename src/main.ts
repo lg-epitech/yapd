@@ -32,8 +32,14 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
 
 const [command, argument] = process.argv.slice(2)
 
-if ((command === "serve" || command === "install" || command === "uninstall") && !(process.platform === "darwin" && process.arch === "arm64")) {
-  console.error("yapd only speaks on Macs with Apple silicon. Here it runs hooks and relays follow-ups, which need no service.")
+const mac = process.platform === "darwin"
+// Intel Macs could run it before, so they can still remove the service.
+if ((command === "serve" || command === "install" || (command === "uninstall" && !mac)) && !(mac && process.arch === "arm64")) {
+  console.error(
+    `yapd only speaks on Macs with Apple silicon. Here it runs hooks and relays follow-ups, which need no service.${
+      mac ? " To remove one installed before, run `bun src/main.ts uninstall`." : ""
+    }`,
+  )
   process.exit(1)
 } else if (command === "serve") {
   runMain(Effect.flatMap(Effect.promise(() => import("./Serve.ts")), ({ serve }) => serve))
