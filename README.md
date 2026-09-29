@@ -88,7 +88,7 @@ Press ctrl+option+cmd+space from any app and talk to yapd, then press it again t
 
 If yapd is reading an update when you press it, it stops, and reads it again from the start once you're done, along with anything that came in meanwhile. If you forget about it, it stops listening after five minutes and drops what it heard. It doesn't need any permission beyond the microphone.
 
-Whisper hears dictation with a larger model than interruptions, [whisper-small](https://huggingface.co/onnx-community/whisper-small), since a misheard prompt costs more than a misheard "merge it". It downloads the first time you dictate, about a gigabyte. `YAPD_DICTATION_WHISPER` picks another, like `onnx-community/whisper-large-v3-turbo`, which is more accurate but a few times slower. `YAPD_LANGUAGE` applies here too.
+Whisper hears dictation with a larger model than interruptions, [whisper-small](https://huggingface.co/onnx-community/whisper-small), since a misheard prompt costs more than a misheard "merge it". It downloads when yapd first starts, about a gigabyte, and loads the first time you dictate. `YAPD_DICTATION_WHISPER` picks another, like `onnx-community/whisper-large-v3-turbo`, which is more accurate but a few times slower. `YAPD_LANGUAGE` applies here too.
 
 Set `YAPD_SHORTCUT` to use other keys, like `YAPD_SHORTCUT=ctrl+option+cmd+d`, or `none` to turn it off. It needs ctrl, option or cmd, unless it's a function key. If another app or macOS already uses it, yapd says so in its log. Dictating needs the microphone, so there's no shortcut with `YAPD_LISTEN=false`.
 

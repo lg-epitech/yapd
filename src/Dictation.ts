@@ -1,4 +1,4 @@
-import { Cause, Context, Deferred, Effect, Fiber, Layer, Option, PubSub, Stream } from "effect"
+import { Cause, Context, Deferred, Effect, Either, Fiber, Layer, Option, PubSub, Stream } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -267,12 +267,22 @@ export const WhisperDictation = Layer.scoped(
         }
         if (end === "Cancelled") return yield* Effect.logInfo("Dictation cancelled")
         const heard = yield* transcribe(frames, voiced).pipe(
-          Effect.catchAll((error) => Effect.logWarning("Could not transcribe the dictation", error).pipe(Effect.as(undefined))),
+          Effect.tapError((error) => Effect.logWarning("Could not transcribe the dictation", error)),
+          Effect.either,
         )
-        if (heard === undefined) return yield* say("Sorry, I couldn't make that out.")
-        if (heard === "") return yield* say("I didn't catch anything.")
+        if (Either.isLeft(heard)) {
+          const error = heard.left
+          if (error._tag === "TranscribeError") return yield* say("Sorry, I couldn't make that out.")
+          // Without a model to hear it, saying it again at once wouldn't help, so they're told what would.
+          return yield* say(
+            error.loading
+              ? "The model for dictation is still downloading. Try again in a minute."
+              : "I couldn't load the model for dictation, so I didn't hear that. I'll try again the next time you dictate.",
+          )
+        }
+        if (heard.right === "") return yield* say("I didn't catch anything.")
         if (before !== undefined) yield* Deferred.await(before)
-        yield* PubSub.publish(transcripts, heard)
+        yield* PubSub.publish(transcripts, heard.right)
       }).pipe(
         Effect.ensuring(Deferred.succeed(done, undefined)),
         Effect.scoped,
