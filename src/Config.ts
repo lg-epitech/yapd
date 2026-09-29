@@ -1,5 +1,6 @@
-import { Config, Option, Redacted, Schema } from "effect"
+import { Config, ConfigError, Either, Option, Redacted, Schema } from "effect"
 import * as Provider from "./Provider.ts"
+import * as Remote from "./Remote.ts"
 
 export const port = Config.integer("YAPD_PORT").pipe(Config.withDefault(4747))
 
@@ -43,4 +44,10 @@ export const language = Config.string("YAPD_LANGUAGE").pipe(Config.withDefault("
 /** Lets yapd send follow-ups to T3 Code threads. Issued by T3 Code's `auth session issue`. */
 export const t3codeToken = Config.option(Config.redacted("YAPD_T3CODE_TOKEN")).pipe(
   Config.map(Option.filter((token) => Redacted.value(token) !== "")),
+)
+
+/** Machines whose hooks reach this daemon, like `rig` or `rig=me@rig.example.com`, so follow-ups can go back over SSH. */
+export const remotes = Config.string("YAPD_REMOTES").pipe(
+  Config.withDefault(""),
+  Config.mapOrFail((value) => Either.mapLeft(Remote.parse(value), (message) => ConfigError.InvalidData([], message))),
 )

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Cause, Effect, Exit, Fiber, Layer, Logger } from "effect"
+import { dirname, join } from "node:path"
 import { DeviceAudio } from "./Audio.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
 import * as Codex from "./Codex.ts"
@@ -9,6 +10,7 @@ import * as Daemon from "./Daemon.ts"
 import { hook } from "./Hook.ts"
 import { ProviderModel } from "./Model.ts"
 import * as Relay from "./Relay.ts"
+import * as Remote from "./Remote.ts"
 import { ProviderResponder } from "./Responder.ts"
 import * as Server from "./Server.ts"
 import * as Service from "./Service.ts"
@@ -19,14 +21,31 @@ import { KokoroVoice } from "./Voice.ts"
 
 /**
  * T3 Code first, since it only claims threads it can find, and its sessions
- * must go through it. Then each agent's own way in, whatever it runs in.
+ * must go through it. Then each agent's own way in, whatever it runs in. A
+ * waiting Claude Code hook holds its connection wherever it runs, but other
+ * machines' T3 Code and Codex are only reachable from there.
  */
 const Relays = Layer.effect(
   Relay.Relays,
   Effect.gen(function* () {
-    return Relay.make([yield* T3Code.relay, yield* ClaudeCode.relay, Codex.relay])
+    const remotes = yield* Config.remotes
+    const here = Remote.here(remotes)
+    return Relay.make([here(yield* T3Code.relay), yield* ClaudeCode.relay, Remote.relay(remotes), here(Codex.relay)])
   }),
 )
+
+/** What `yapd relay` sends through, on the machine the session runs on. */
+const relay = Effect.gen(function* () {
+  // SSH runs it from the home directory, where Bun won't find the yapd folder's .env.
+  const env = Bun.file(join(dirname(import.meta.dir), ".env"))
+  if (yield* Effect.promise(() => env.exists())) {
+    const variables = Remote.dotenv(yield* Effect.promise(() => env.text()))
+    for (const [name, value] of Object.entries(variables)) process.env[name] ??= value
+  }
+  const relays = Relay.make([yield* T3Code.relay, Codex.relay])
+  const input = yield* Effect.promise(() => Bun.stdin.text())
+  console.log(yield* Remote.serve(relays, input))
+})
 
 const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make
@@ -64,7 +83,10 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
 
 const [command, argument] = process.argv.slice(2)
 
-if (command === "serve") {
+if ((command === "serve" || command === "install" || command === "uninstall") && process.platform !== "darwin") {
+  console.error("yapd only speaks on macOS. Here it runs hooks and relays follow-ups, which need no service.")
+  process.exit(1)
+} else if (command === "serve") {
   runMain(serve)
 } else if (command === "install") {
   runMain(Service.install)
@@ -78,8 +100,10 @@ if (command === "serve") {
       }),
     ),
   )
+} else if (command === "relay") {
+  runMain(relay)
 } else {
-  console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait]")
+  console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay")
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)
 }

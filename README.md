@@ -4,7 +4,7 @@ I'm tired of reading my agent outputs. So I have another agent yap instead!
 
 When a Claude Code or Codex session finishes, yapd sums up the reply in a sentence or two and says it. If several finish together you hear them one at a time, and whatever needs you goes first. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting).
 
-Needs macOS, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers).
+Needs macOS, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included.
 
 The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally and downloads on first start.
 
@@ -81,6 +81,31 @@ yapd hands a follow-up to the session the update came from, through whatever tha
   Put it in `.env` as `YAPD_T3CODE_TOKEN=...` and run `bun src/main.ts install` again. If yapd says T3 Code turned down its token, issue a new one.
 
 A session another app drives, like T3 Code, only gets follow-ups through that app, so its own view stays in step. yapd won't send anything to a session that has moved on since the update, like when you've already typed something else, and says so when it can't reach one.
+
+## Agents on another machine
+
+yapd speaks on one Mac, but the agents can run anywhere, like on a Linux server you SSH into. Install yapd there too, without `install`, since that machine only runs the hooks:
+
+```sh
+bun install
+bun link
+```
+
+Add the hooks there as above. They send to `127.0.0.1:4747`, so forward that port to the Mac, however you like. From the Mac, a reverse tunnel does it:
+
+```sh
+ssh -N -R 127.0.0.1:4747:127.0.0.1:4747 me@server
+```
+
+Updates then come through, named after each session's repository. For follow-ups, the Mac reaches back over SSH and runs `yapd relay` on the server, which sends them there. List the server in the Mac's `.env`, by the hostname it reports and how to SSH into it, then run `bun src/main.ts install` again:
+
+```sh
+YAPD_REMOTES=server=me@server.example.com
+```
+
+A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config` works. Separate several with commas. yapd SSHes in with `BatchMode`, so it needs a key that works without a password prompt, and `yapd` has to be on the `PATH` that non-interactive SSH commands get: `ssh server yapd` should print yapd's usage, not "command not found". Adding `~/.bun/bin` to `PATH` in `~/.zshenv`, or at the top of `~/.bashrc`, is usually enough.
+
+Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in the `.env` of yapd's folder on the server.
 
 ## Providers
 
