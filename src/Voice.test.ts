@@ -8,25 +8,33 @@ import { join, KokoroError, kokoro, split } from "./Voice.ts"
 /** Samples at `level`, with `rate` samples a second. */
 const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.round(seconds * rate)).fill(level)
 
+/** Parts as `split` makes them, with Kokoro's token count standing in as a number of characters. */
+const parts = (text: string, limit: number) => Effect.runSync(split(text, (part) => Effect.succeed(part.length <= limit)))
+
 describe("split", () => {
   test("keeps text that fits in one part", () => {
-    expect(split("yapd. The tests pass. Nothing needs you.")).toEqual(["yapd. The tests pass. Nothing needs you."])
+    expect(parts("yapd. The tests pass. Nothing needs you.", 250)).toEqual(["yapd. The tests pass. Nothing needs you."])
+  })
+
+  test("reads a long text in one go when Kokoro can", () => {
+    const text = "In std, the split concepts are merged, sir: twenty-one cards are now ten. ".repeat(5).trim()
+    expect(parts(text, 1000)).toEqual([text])
   })
 
   test("breaks long text between sentences, packing as many as fit", () => {
-    expect(split("One two. Three four. Five six.", 20)).toEqual(["One two. Three four.", "Five six."])
+    expect(parts("One two. Three four. Five six.", 20)).toEqual(["One two. Three four.", "Five six."])
   })
 
   test("breaks a sentence that's too long at clauses, then words", () => {
-    expect(split("Alpha beta, gamma delta epsilon zeta eta.", 20)).toEqual(["Alpha beta,", "gamma delta epsilon", "zeta eta."])
+    expect(parts("Alpha beta, gamma delta epsilon zeta eta.", 20)).toEqual(["Alpha beta,", "gamma delta epsilon", "zeta eta."])
   })
 
   test("never loses a word", () => {
     const text = "Here's the reply, sir: we found two issues. A contract brought in 536,000 transactions. Fixes are in review."
     for (const limit of [10, 30, 60, 250]) {
-      const parts = split(text, limit)
-      expect(parts.join(" ")).toBe(text)
-      for (const part of parts) expect(part.length <= limit || !part.includes(" ")).toBe(true)
+      const split = parts(text, limit)
+      expect(split.join(" ")).toBe(text)
+      for (const part of split) expect(part.length <= limit || !part.includes(" ")).toBe(true)
     }
   })
 })

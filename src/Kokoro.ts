@@ -70,6 +70,18 @@ const program = Effect.gen(function* () {
     }
   }
   const tts = new KokoroTTS(model as never, tokenizer)
+  // Kokoro's own pipeline without the model, to count the tokens it would read. It reads at most 510 and silently
+  // drops the rest; a little under, since a text's count only roughly adds up from its sentences'.
+  let counted = 0
+  const counter = new KokoroTTS(
+    (async ({ input_ids }: Record<"input_ids", Tensor>) => {
+      counted = input_ids.dims.at(-1)! - 2
+      return { waveform: new ort.Tensor("float32", new Float32Array(0), [0]) }
+    }) as never,
+    tokenizer,
+  )
+  const fits = (text: string) =>
+    Effect.tryPromise(() => counter.generate(text, speaker)).pipe(Effect.map(() => counted <= 500))
   const speaker = { voice: voice as NonNullable<GenerateOptions["voice"]> }
   // The GPU prepares its programs on the first run, which shouldn't hold up an update.
   yield* Effect.promise(() => tts.generate("Ready.", speaker))
@@ -85,7 +97,7 @@ const program = Effect.gen(function* () {
   const render = (text: string, path: string) =>
     Effect.gen(function* () {
       const raw = effect === "none" ? path : `${path}.raw.wav`
-      const parts = yield* Effect.forEach(split(text), (part) => Effect.tryPromise(() => tts.generate(part, speaker)))
+      const parts = yield* Effect.forEach(yield* split(text, fits), (part) => Effect.tryPromise(() => tts.generate(part, speaker)))
       const rate = parts[0]?.sampling_rate ?? 24000
       yield* Effect.tryPromise(() => new RawAudio(join(parts.map((part) => part.audio), rate), rate).save(raw))
       if (raw !== path) yield* applyEffect(raw, path)

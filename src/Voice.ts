@@ -20,38 +20,39 @@ const voices = "https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md"
 
 const say = (text: string, path: string) => run(["say", "--data-format=LEI16@24000", "-o", path], { stdin: text })
 
+/** Clauses, then words: where a sentence too long for Kokoro to read in one go breaks. */
+const boundaries = [/(?<=[,;:])\s+/, /\s+/]
+
 /**
- * Longest text Kokoro renders at once, in characters. It reads at most 510
- * phoneme tokens and silently drops the rest; English takes up to about 1.6 a
- * character once numbers are spelled out.
+ * The parts Kokoro reads, each in one go: the whole text when it fits, else
+ * whole sentences, as many as fit together. Only a sentence too long on its own
+ * breaks, at clauses, then words, since a cut sentence loses its intonation.
  */
-const longest = 250
+export const split = <E>(text: string, fits: (text: string) => Effect.Effect<boolean, E>) =>
+  Effect.gen(function* () {
+    if (yield* fits(text)) return [text]
+    const splitter = new TextSplitterStream()
+    splitter.push(text)
+    splitter.close()
+    return yield* pack([...splitter], boundaries, fits)
+  })
 
-const pack = (pieces: ReadonlyArray<string>, limit: number) =>
-  pieces.reduce<Array<string>>((parts, piece) => {
-    const last = parts.at(-1)
-    if (last !== undefined && last.length + 1 + piece.length <= limit) parts[parts.length - 1] = `${last} ${piece}`
-    else parts.push(piece)
+/** Packs pieces into as few parts as fit, breaking any that don't at the next, finer boundary. */
+const pack = <E>(
+  pieces: ReadonlyArray<string>,
+  [boundary, ...finer]: ReadonlyArray<RegExp>,
+  fits: (text: string) => Effect.Effect<boolean, E>,
+): Effect.Effect<Array<string>, E> =>
+  Effect.gen(function* () {
+    const parts: Array<string> = []
+    for (const piece of pieces) {
+      const last = parts.at(-1)
+      if (last !== undefined && (yield* fits(`${last} ${piece}`))) parts[parts.length - 1] = `${last} ${piece}`
+      else if (boundary === undefined || (yield* fits(piece))) parts.push(piece)
+      else parts.push(...(yield* pack(piece.split(boundary), finer, fits)))
+    }
     return parts
-  }, [])
-
-/** Packs pieces into as few parts as fit, splitting any that are too long at the next, finer boundary. */
-const fit = (pieces: ReadonlyArray<string>, limit: number, boundaries: ReadonlyArray<RegExp>): Array<string> => {
-  const [boundary, ...finer] = boundaries
-  return pack(
-    pieces.flatMap((piece) =>
-      piece.length <= limit || boundary === undefined ? [piece] : fit(piece.split(boundary), limit, finer),
-    ),
-    limit,
-  )
-}
-
-/** Whole sentences where possible, then clauses, then words, each part short enough for Kokoro to read all of it. */
-export const split = (text: string, limit = longest) => {
-  const splitter = new TextSplitterStream()
-  splitter.push(text)
-  return fit([...splitter], limit, [/(?<=[,;:])\s+/, /\s+/])
-}
+  })
 
 /** Louder than this is speech rather than the quiet Kokoro trails off into. */
 const loud = 0.02
