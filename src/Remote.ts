@@ -1,4 +1,4 @@
-import { Effect, Either, Option, Schema } from "effect"
+import { Effect, Either, Schema } from "effect"
 import { Origin } from "./Origin.ts"
 import { Agent } from "./Payload.ts"
 import { ProcessError, run } from "./Process.ts"
@@ -29,14 +29,24 @@ export const parse = (value: string): Either.Either<Remotes, string> => {
   return Either.right(remotes)
 }
 
-const remoteOf = (remotes: Remotes, thread: Thread) =>
-  thread.origin.host === undefined ? Option.none() : Option.fromNullable(remotes.get(thread.origin.host.toLowerCase()))
+/**
+ * This machine's hostname, read each time: a Mac's changes with the network.
+ * Its hooks read theirs as the turn ends, so they agree.
+ */
+export type Self = () => string
 
-/** Keeps a relay to this machine's threads: another machine's T3 Code or Codex isn't this one's. */
+/** Whether a thread runs on another machine. Hooks older than hostnames don't say, and were all local. */
+const elsewhere = (self: Self, thread: Thread) =>
+  thread.origin.host !== undefined && thread.origin.host.toLowerCase() !== self().toLowerCase()
+
+/**
+ * Keeps a relay to threads on this machine: another machine's T3 Code or Codex
+ * isn't this one's, even when a thread here has the same path.
+ */
 export const here =
-  (remotes: Remotes) =>
+  (self: Self) =>
   (relay: Relay): Relay => ({
-    send: (thread, text) => (Option.isSome(remoteOf(remotes, thread)) ? Effect.fail(new Unreachable()) : relay.send(thread, text)),
+    send: (thread, text) => (elsewhere(self, thread) ? Effect.fail(new Unreachable()) : relay.send(thread, text)),
   })
 
 export const Request = Schema.Struct({
@@ -58,14 +68,17 @@ const ssh: Exec = (command, stdin) => run(command, { stdin })
  * fixed and the message goes over stdin: SSH joins its arguments into a shell
  * command, and the event that named the machine came in over the network.
  */
-export const relay = (remotes: Remotes, exec: Exec = ssh): Relay => ({
+export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh): Relay => ({
   send: (thread, text) =>
     Effect.gen(function* () {
-      const remote = remoteOf(remotes, thread)
-      if (Option.isNone(remote)) return yield* new Unreachable()
-      const host = thread.origin.host
+      if (!elsewhere(self, thread)) return yield* new Unreachable()
+      const host = thread.origin.host ?? ""
+      const destination = remotes.get(host.toLowerCase())
+      if (destination === undefined) {
+        return yield* new RelayError({ reason: `I don't know how to reach ${host}. It needs adding to YAPD_REMOTES.` })
+      }
       // From /, since Bun would load a .env in the home directory SSH starts in, ahead of the yapd folder's.
-      const command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", remote.value, "cd / && yapd relay"]
+      const command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, "cd / && yapd relay"]
       const stdout = yield* exec(command, JSON.stringify(Request.make({ thread, text }))).pipe(
         Effect.timeoutFail({
           duration: "30 seconds",

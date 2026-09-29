@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { Cause, Effect, Exit, Fiber, Layer, Logger } from "effect"
 import { realpathSync } from "node:fs"
+import { hostname } from "node:os"
 import { dirname } from "node:path"
 import { DeviceAudio } from "./Audio.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
@@ -30,8 +31,8 @@ const Relays = Layer.effect(
   Relay.Relays,
   Effect.gen(function* () {
     const remotes = yield* Config.remotes
-    const here = Remote.here(remotes)
-    return Relay.make([here(yield* T3Code.relay), yield* ClaudeCode.relay, Remote.relay(remotes), here(Codex.relay)])
+    const here = Remote.here(hostname)
+    return Relay.make([here(yield* T3Code.relay), yield* ClaudeCode.relay, Remote.relay(remotes, hostname), here(Codex.relay)])
   }),
 )
 
