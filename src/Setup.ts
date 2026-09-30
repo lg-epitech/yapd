@@ -1,8 +1,8 @@
 import { Console, Data, Effect, Option } from "effect"
 import { existsSync } from "node:fs"
-import { copyFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import * as Home from "./Home.ts"
 
 // `yapd setup`: the hooks that tell yapd when an agent's turn ends, written
@@ -137,6 +137,8 @@ export const install = (agent: Agent, run: ReturnType<typeof command>) =>
         if (mode !== undefined && !(await Bun.file(backup).exists())) await copyFile(file, backup)
         // Whole or not at all, since the agent may read it at any time, and as private from the start.
         const staging = `${file}.${crypto.randomUUID()}`
+        // An agent that has never run may not have made its folder yet.
+        await mkdir(dirname(file), { recursive: true })
         try {
           await writeFile(staging, `${JSON.stringify({ ...settings, hooks }, null, 2)}\n`, { flag: "wx", mode: mode ?? 0o644 })
           await rename(staging, file)

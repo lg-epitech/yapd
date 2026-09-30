@@ -75,13 +75,24 @@ const [command, argument] = process.argv.slice(2)
 /** Commands that read the user's settings. Hooks don't, and start wherever the agent runs. */
 const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "research", "mind"]
 
-/** What Bun loaded from .env files in the folder this started in, as a bun with nothing else to go on sees it. */
+/** The environment a bun started with `env` in this folder ends up with, .env files and all. */
+const probe = (env: Record<string, string | undefined>): Record<string, string | undefined> =>
+  JSON.parse(Bun.spawnSync([process.execPath, "--print", "JSON.stringify(process.env)"], { env }).stdout.toString())
+
+/**
+ * What Bun set from .env files in the folder this started in. First which
+ * names they set, with NODE_ENV as it was, since it picks the files. Then what
+ * they set them to with everything else as it was, since a value can be built
+ * from other variables.
+ */
 const dotenv = (): Record<string, string | undefined> => {
   if (![".env", ".env.local", ".env.development", ".env.production", ".env.test"].some((name) => existsSync(name))) return {}
   try {
-    // With NODE_ENV as it was, which picks between .env.production and the others.
-    const env = process.env.NODE_ENV === undefined ? {} : { NODE_ENV: process.env.NODE_ENV }
-    return JSON.parse(Bun.spawnSync([process.execPath, "--print", "JSON.stringify(process.env)"], { env }).stdout.toString())
+    const names = Object.keys(probe(process.env.NODE_ENV === undefined ? {} : { NODE_ENV: process.env.NODE_ENV })).filter(
+      (name) => name !== "NODE_ENV",
+    )
+    const set = probe(Object.fromEntries(Object.entries(process.env).filter(([name]) => !names.includes(name))))
+    return Object.fromEntries(names.map((name) => [name, set[name]]))
   } catch {
     return {}
   }
@@ -89,21 +100,16 @@ const dotenv = (): Record<string, string | undefined> => {
 
 // Bun reads .env from the folder it starts in, so these run in yapd's home, wherever they were started from: the
 // yapd folder, the home directory an SSH command starts in, or anywhere else. As `yapd`, Bun reads none there. Run
-// as `bun main.ts`, what it read is left behind, since the restart would keep it ahead of yapd's settings: yapd's
-// own by name, since one the file built from other variables comes out differently in the probe, and the rest only
-// when unchanged, since the shell may have set them too. NODE_ENV is the caller's, since the probe was given it.
-// YAPD_HOME is passed on as it was resolved, even from there, so it doesn't resolve again from inside itself.
+// as `bun main.ts`, what it read is left behind, since the restart would keep it ahead of yapd's settings. A value
+// the caller set to something else is theirs, and kept. YAPD_HOME is passed on as it was resolved, even from
+// there, so it doesn't resolve again from inside itself.
 if (command !== undefined && settled.includes(command)) {
   Home.adopt(dirname(import.meta.dir))
   // As `yapd`, even from its home, since Bun was told to read no .env at all, and then there's nothing to leave behind.
   const unread = process.execArgv.includes("--no-env-file")
   if (unread || realpathSync(process.cwd()) !== realpathSync(Home.home)) {
     const loaded = unread ? {} : dotenv()
-    const env = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([name, value]) => name === "NODE_ENV" || !(name in loaded) || (!name.startsWith("YAPD_") && loaded[name] !== value),
-      ),
-    )
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name, value]) => !(name in loaded) || loaded[name] !== value))
     if (process.env.YAPD_HOME !== undefined) env.YAPD_HOME = Home.home
     const child = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2)], {
       cwd: Home.home,

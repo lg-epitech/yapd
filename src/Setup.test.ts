@@ -82,6 +82,20 @@ describe("install", () => {
     }
   })
 
+  test("makes the folder of an agent that has never run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yapd-setup-"))
+    const previous = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(dir, "codex")
+    try {
+      expect((await Effect.runPromise(Setup.install("codex", run))).changed).toBe(true)
+      expect(JSON.parse(readFileSync(join(dir, "codex", "hooks.json"), "utf8")).hooks.Stop).toEqual([{ hooks: [Setup.codex(run).Stop] }])
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previous
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test("leaves a file it can't read alone", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yapd-setup-"))
     const previous = process.env.CODEX_HOME
