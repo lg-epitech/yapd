@@ -28,8 +28,14 @@ describe("command", () => {
     expect(Setup.ours({ command: run("claude", true) })).toBe(true)
     expect(Setup.ours({ command: "bun /path/to/yapd/src/main.ts hook codex" })).toBe(true)
     expect(Setup.ours({ command: "yapd hook claude --wait" })).toBe(true)
+    expect(Setup.ours({ command: "/Users/me/.bun/bin/yapd hook codex" })).toBe(true)
+    expect(Setup.ours({ command: "bun /Users/me/.t3/worktrees/yapd/t3code-1234/src/main.ts hook claude" })).toBe(true)
+    expect(Setup.ours({ command: `/opt/bun '/Users/me/My Projects/yapd/src/main.ts' hook claude` })).toBe(true)
     expect(Setup.ours(format)).toBe(false)
     expect(Setup.ours({ command: "my-hook claude" })).toBe(false)
+    // Another tool's, called the same way.
+    expect(Setup.ours({ command: "bun /Users/me/hook-tools/main.ts hook claude" })).toBe(false)
+    expect(Setup.ours({ command: "bun /Users/me/yapd-notes/src/main.ts hook claude" })).toBe(false)
   })
 })
 

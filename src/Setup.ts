@@ -20,9 +20,19 @@ export type Group = { readonly hooks?: ReadonlyArray<Hook>; readonly [key: strin
 
 export type Hooks = { readonly [event: string]: ReadonlyArray<Group> }
 
-/** Whether a hook runs yapd's, however it was set up: `yapd hook claude`, or `bun …/src/main.ts hook codex`. */
+/**
+ * Whether a hook runs yapd's, however it was set up: `yapd hook claude`, or
+ * `bun …/yapd/src/main.ts hook codex` from a clone, a worktree of one, or the
+ * package. Only a main.ts inside a folder named yapd, so another tool's hook
+ * that happens to be called the same way is never taken for yapd's.
+ */
 export const ours = (hook: Hook) =>
-  typeof hook.command === "string" && /(?:^|[\s/'"])(?:yapd|main\.ts)['"]?\s+hook\s+(?:claude|codex)\b/.test(hook.command)
+  typeof hook.command === "string" &&
+  [
+    /(?:^|[\s/'"])yapd['"]?\s+hook\s+(?:claude|codex)\b/,
+    /\/yapd(?:\/[^\s'"]*)?\/src\/main\.ts\s+hook\s+(?:claude|codex)\b/,
+    /'[^']*\/yapd(?:\/[^']*)?\/src\/main\.ts'\s+hook\s+(?:claude|codex)\b/,
+  ].some((pattern) => pattern.test(hook.command as string))
 
 /** Quoted for the shell the agent runs hooks with, when it has to be. */
 const quote = (word: string) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`)
