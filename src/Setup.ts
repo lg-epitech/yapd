@@ -1,6 +1,6 @@
 import { Console, Data, Effect, Option } from "effect"
 import { existsSync } from "node:fs"
-import { chmod, copyFile, rename, stat } from "node:fs/promises"
+import { copyFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import * as Home from "./Home.ts"
@@ -31,14 +31,15 @@ const quote = (word: string) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word
  * What an agent runs to reach yapd. By full paths, since agents don't run
  * hooks with the PATH of the shell yapd was installed from, and with the
  * settings they need when yapd is set up differently, since hooks run where
- * the agent does and don't read yapd's.
+ * the agent does and don't read yapd's. Nor the project's .env, whose
+ * settings are for the project.
  */
 export const command =
   (bun: string, main: string, env: Readonly<Record<string, string>> = {}) =>
   (agent: Agent, wait: boolean) =>
     [
       ...Object.entries(env).map(([name, value]) => `${name}=${quote(value)}`),
-      ...[bun, main, "hook", agent, ...(wait ? ["--wait"] : [])].map(quote),
+      ...[bun, "--no-env-file", main, "hook", agent, ...(wait ? ["--wait"] : [])].map(quote),
     ].join(" ")
 
 /** The settings hooks need, when they're set: the port yapd listens on, and where its home is. */
@@ -134,11 +135,14 @@ export const install = (agent: Agent, run: ReturnType<typeof command>) =>
         const mode = await stat(file).then(({ mode }) => mode & 0o777, () => undefined)
         const backup = `${file}.before-yapd`
         if (mode !== undefined && !(await Bun.file(backup).exists())) await copyFile(file, backup)
-        // Whole or not at all, since the agent may read it at any time.
+        // Whole or not at all, since the agent may read it at any time, and as private from the start.
         const staging = `${file}.${crypto.randomUUID()}`
-        await Bun.write(staging, `${JSON.stringify({ ...settings, hooks }, null, 2)}\n`)
-        if (mode !== undefined) await chmod(staging, mode)
-        await rename(staging, file)
+        try {
+          await writeFile(staging, `${JSON.stringify({ ...settings, hooks }, null, 2)}\n`, { flag: "wx", mode: mode ?? 0o644 })
+          await rename(staging, file)
+        } finally {
+          await rm(staging, { force: true })
+        }
       },
       catch: (cause) => new SetupError({ message: `I couldn't write ${file}`, cause }),
     })

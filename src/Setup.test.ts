@@ -12,15 +12,15 @@ const format = { type: "command", command: "prettier --write ." }
 
 describe("command", () => {
   test("runs yapd by full paths, quoted only when they need it", () => {
-    expect(run("claude", true)).toBe("/Users/me/.bun/bin/bun /Users/me/.bun/install/global/node_modules/@lg-epitech/yapd/src/main.ts hook claude --wait")
+    expect(run("claude", true)).toBe("/Users/me/.bun/bin/bun --no-env-file /Users/me/.bun/install/global/node_modules/@lg-epitech/yapd/src/main.ts hook claude --wait")
     expect(Setup.command("/opt/bun", "/Users/me/My Projects/yapd's/src/main.ts")("codex", false)).toBe(
-      `/opt/bun '/Users/me/My Projects/yapd'\\''s/src/main.ts' hook codex`,
+      `/opt/bun --no-env-file '/Users/me/My Projects/yapd'\\''s/src/main.ts' hook codex`,
     )
   })
 
   test("carries the settings hooks need, ahead of the command", () => {
     const moved = Setup.command("/opt/bun", "/opt/yapd/src/main.ts", { YAPD_PORT: "4848", YAPD_HOME: "/Volumes/Data/my yapd" })
-    expect(moved("codex", false)).toBe("YAPD_PORT=4848 YAPD_HOME='/Volumes/Data/my yapd' /opt/bun /opt/yapd/src/main.ts hook codex")
+    expect(moved("codex", false)).toBe("YAPD_PORT=4848 YAPD_HOME='/Volumes/Data/my yapd' /opt/bun --no-env-file /opt/yapd/src/main.ts hook codex")
     expect(Setup.ours({ command: moved("codex", false) })).toBe(true)
   })
 

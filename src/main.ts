@@ -95,9 +95,10 @@ const dotenv = (): Record<string, string | undefined> => {
 // YAPD_HOME is passed on as it was resolved, even from there, so it doesn't resolve again from inside itself.
 if (command !== undefined && settled.includes(command)) {
   Home.adopt(dirname(import.meta.dir))
-  // As `yapd`, even from its home, since Bun was told to read no .env at all.
-  if (process.execArgv.includes("--no-env-file") || realpathSync(process.cwd()) !== realpathSync(Home.home)) {
-    const loaded = dotenv()
+  // As `yapd`, even from its home, since Bun was told to read no .env at all, and then there's nothing to leave behind.
+  const unread = process.execArgv.includes("--no-env-file")
+  if (unread || realpathSync(process.cwd()) !== realpathSync(Home.home)) {
+    const loaded = unread ? {} : dotenv()
     const env = Object.fromEntries(
       Object.entries(process.env).filter(
         ([name, value]) => name === "NODE_ENV" || !(name in loaded) || (!name.startsWith("YAPD_") && loaded[name] !== value),
