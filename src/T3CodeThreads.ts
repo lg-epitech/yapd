@@ -51,7 +51,8 @@ export const Shell = Schema.Struct({
 })
 export type Shell = typeof Shell.Type
 
-const Said = Schema.Struct({ role: text, text, createdAt: nullable(Schema.String), updatedAt: nullable(Schema.String) })
+/** A message as the thread carries it. A user message's id is the messageId it was dispatched with. */
+const Said = Schema.Struct({ id: text, role: text, text, createdAt: nullable(Schema.String), updatedAt: nullable(Schema.String) })
 
 const Snapshot = Schema.Struct({
   thread: Schema.Struct({ ...Thread.fields, messages: Schema.optionalWith(Schema.Array(Said), { default: () => [] }) }),
@@ -63,6 +64,17 @@ export const needs = (thread: Thread): ReadonlyArray<Need> => [
   ...(thread.hasPendingUserInput ? (["input"] as const) : []),
   ...(thread.hasActionableProposedPlan ? (["plan"] as const) : []),
 ]
+
+/**
+ * What keeps a message from going: an approval or an answer that T3 Code waits
+ * for, which the user gives there, and nothing sent gets through until they
+ * do. A plan waiting to be accepted doesn't: answering it by message is how a
+ * plan is answered.
+ */
+const stuck = (thread: Thread) => thread.hasPendingApprovals || thread.hasPendingUserInput
+
+/** How many of the thread's latest turns are read to see whether a message already reached it. */
+const lookback = 3
 
 /**
  * Where the thread stands. T3 Code raises an approval or a question while the
@@ -203,8 +215,14 @@ export const threads = (
         }
         if (gone(thread)) return yield* archived("didn't send it")
         // Sending now would steer the turn that's running instead of following it. Stopped on an approval or a
-        // question, the turn won't end until the user answers in T3 Code, which yapd can't do for them.
-        if (T3Code.busy(thread)) return needs(thread).length > 0 ? "waiting" : "busy"
+        // question, the thread won't move until the user answers in T3 Code, which yapd can't do for them.
+        if (T3Code.busy(thread) || stuck(thread)) {
+          // Unless the turn is this very message's: a try whose answer was lost finds it accepted and under way.
+          // Then it went, and saying otherwise would have the user say it again.
+          const { thread: read } = yield* snapshot(api, id, `?turnLimit=${lookback}`)
+          if (read.messages.some((message) => message.id === outgoing.messageId)) return "sent"
+          return stuck(thread) ? "waiting" : "busy"
+        }
         yield* api("/api/orchestration/dispatch", Schema.Unknown, {
           method: "POST",
           body: JSON.stringify(turnStart(thread, { ...outgoing, text })),

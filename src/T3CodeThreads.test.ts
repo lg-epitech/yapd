@@ -58,6 +58,7 @@ const shell = {
       hasPendingUserInput: true,
       hasActionableProposedPlan: true,
     },
+    { id: "planned", projectId: "project-1", title: "Plan the migration", updatedAt: "2026-09-29T07:30:00.000Z", latestTurn: { state: "completed" }, session: { status: "ready" }, hasActionableProposedPlan: true },
     {
       id: "failed",
       projectId: "project-2",
@@ -101,6 +102,7 @@ describe("T3CodeThreads", () => {
       ["new", "new"],
       ["done", "done"],
       ["waiting", "waiting"],
+      ["planned", "waiting"],
       ["failed", "failed"],
       ["stopped", "stopped"],
     ])
@@ -120,7 +122,7 @@ describe("T3CodeThreads", () => {
     expect(listed[0]).toMatchObject({ directory: "/code/yapd", needs: [] })
     expect(listed[1]?.needs).toEqual(["approval"])
     expect(listed[4]?.needs).toEqual(["input", "plan"])
-    expect(listed[5]).toMatchObject({ project: "", directory: "", error: "Provider went away." })
+    expect(listed[6]).toMatchObject({ project: "", directory: "", error: "Provider went away." })
   })
 
   test("has no threads without a token, whatever else is there", async () => {
@@ -158,12 +160,23 @@ describe("T3CodeThreads", () => {
 
   test("sends with the ids it was given, unless the thread is mid-turn, waiting on the user, or gone", async () => {
     const dispatched: Array<unknown> = []
-    const threads = reached(dispatched)
+    /** The thread's latest turns, as they're read before a busy or waiting thread is turned down. */
+    const turns = (id: string, messages: Array<{ id: string; role: string; text: string }>) => ({
+      [`/api/orchestration/threads/${id}?turnLimit=3`]: { thread: { ...shell.threads.find((thread) => thread.id === id), messages } },
+    })
+    const threads = reached(dispatched, {
+      ...turns("running", [{ id: "someone-else", role: "user", text: "Go on." }]),
+      ...turns("approving", [{ id: "someone-else", role: "user", text: "Go on." }]),
+      ...turns("waiting", []),
+    })
     expect(await Effect.runPromise(threads.send("running", outgoing))).toBe("busy")
     expect(await Effect.runPromise(threads.send("approving", outgoing))).toBe("waiting")
+    // Not mid-turn, but stopped on a question only the user can answer in T3 Code. A plan alone doesn't stop a message: that's how it's answered.
+    expect(await Effect.runPromise(threads.send("waiting", outgoing))).toBe("waiting")
     expect(dispatched).toEqual([])
+    expect(await Effect.runPromise(threads.send("planned", outgoing))).toBe("sent")
     expect(await Effect.runPromise(threads.send("done", outgoing))).toBe("sent")
-    expect(dispatched[0]).toMatchObject({
+    expect(dispatched[1]).toMatchObject({
       type: "thread.turn.start",
       commandId: "yapd:command-1",
       threadId: "done",
@@ -174,6 +187,19 @@ describe("T3CodeThreads", () => {
     expect(await failure(threads.send("archived", outgoing))).toMatchObject({ gone: true })
     expect(await failure(threads.send("missing", outgoing))).toMatchObject({ gone: true })
     expect((await failure(threads.send("done", { ...outgoing, text: " / " }))).reason).toBe("I didn't catch what to send.")
-    expect(dispatched).toHaveLength(1)
+    expect(dispatched).toHaveLength(2)
+  })
+
+  test("takes a message as sent when the thread already has it, however the thread stands, rather than send it twice", async () => {
+    const dispatched: Array<unknown> = []
+    // The first try's answer was lost, and the turn it started has since stopped on an approval.
+    const threads = reached(dispatched, {
+      "/api/orchestration/threads/approving?turnLimit=3": {
+        thread: { ...shell.threads[2], messages: [{ id: "message-1", role: "user", text: "compact keep the public API unchanged" }] },
+      },
+    })
+    expect(await Effect.runPromise(threads.send("approving", outgoing))).toBe("sent")
+    expect(await Effect.runPromise(threads.send("approving", { ...outgoing, messageId: "message-2" }))).toBe("waiting")
+    expect(dispatched).toEqual([])
   })
 })

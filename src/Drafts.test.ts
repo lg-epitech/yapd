@@ -641,12 +641,14 @@ describe("Drafts", () => {
       Effect.gen(function* () {
         const { dictate, sent, said, noted } = yield* drafts(() => addressed("message", "rosie/a1", "latency", "Keep the public API unchanged."))
         yield* dictate("Tell the latency one to keep the public API unchanged.")
-        return { sent, said: said.map(({ spoken, priority }) => ({ spoken, priority })), noted }
+        return { sent, said: said.map(({ id, spoken, priority }) => ({ id, spoken, priority })), noted }
       }),
     )
     expect(here.sent).toEqual([{ machine: "rosie", thread: rosieThreads[0]!, text: "Keep the public API unchanged." }])
-    expect(here.said).toEqual([{ spoken: "Sent to Reduce latency in yapd.", priority: "done" }])
+    expect(here.said.map(({ spoken, priority }) => ({ spoken, priority }))).toEqual([{ spoken: "Sent to Reduce latency in yapd.", priority: "done" }])
     expect(here.noted.map(({ thread, message }) => ({ thread, message }))).toEqual([{ thread: { machine: "rosie", id: "a1" }, message: "Keep the public API unchanged." }])
+    // Noted by the notice that reads it out, so it counts as heard when that plays.
+    expect(here.noted[0]?.id).toBe(here.said[0]!.id)
     const away = await run(
       Effect.gen(function* () {
         const { dictate, sent, spoken } = yield* drafts(() => addressed("message", "rig/c3", "eval loader", "Stop there."))

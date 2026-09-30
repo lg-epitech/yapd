@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option, type Scope, TestClock, TestContext } from "effect"
+import { Effect, Option, Redacted, Schema, type Scope, TestClock, TestContext } from "effect"
 import type { Notice } from "./Inbox.ts"
 import * as Outbox from "./Outbox.ts"
 import * as Store from "./Store.ts"
+import * as Server from "./T3CodeServer.ts"
+import * as T3CodeThreads from "./T3CodeThreads.ts"
 import { type Listed, type Outgoing, type Sent, type Threads, ThreadsError } from "./Threads.ts"
 
 const listed = (id: string, title: string, project = "yapd"): Listed => ({
@@ -34,6 +36,29 @@ const fake = () => {
       }),
   }
   return { threads, sent, answers: (next: Sent | ThreadsError) => void (answer = next) }
+}
+
+/**
+ * T3 Code as `T3CodeThreads` reaches it, with one idle thread that takes what's
+ * posted but whose answer never gets back, and then stops on an approval.
+ */
+const t3code = () => {
+  const thread = { id: "t1", projectId: "p1", title: "Fix retries", updatedAt: "2026-09-30T10:00:00.000Z", latestTurn: { state: "completed" }, session: { status: "ready" }, hasPendingApprovals: false }
+  const messages: Array<{ id: string; role: string; text: string }> = []
+  const transport: T3CodeThreads.Transport = {
+    api: (path, schema, init) => {
+      if (init?.method === "POST") {
+        const { message } = JSON.parse(String(init.body))
+        messages.push({ id: message.messageId, role: "user", text: message.text })
+        thread.latestTurn = { state: "running" }
+        thread.hasPendingApprovals = true
+        return Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering.", cause: "timeout" }))
+      }
+      const answer = path === "/api/orchestration/shell" ? { projects: [{ id: "p1", title: "yapd" }], threads: [thread] } : { thread: { ...thread, messages } }
+      return Effect.orDie(Schema.decodeUnknown(schema)(answer))
+    },
+  }
+  return { threads: T3CodeThreads.threads(Option.some(Redacted.make("token")), () => Effect.succeed(transport)), messages }
 }
 
 // Lets the watcher catch up on what the test did, since the clock only moves when told to.
@@ -116,6 +141,20 @@ describe("Outbox", () => {
         const commandId = rig.sent[0]?.outgoing.commandId ?? ""
         expect(rig.sent.map(({ outgoing }) => outgoing.commandId)).toEqual([commandId, commandId])
         expect(said(context.told)).toEqual([{ priority: "done", spoken: "Passed your message on to Fix retries on rig now that it finished." }])
+      }),
+    ))
+
+  test("finds a message T3 Code took without saying so in the thread, and marks it sent rather than failed once the thread waits on the user", () =>
+    run((context) =>
+      Effect.gen(function* () {
+        const rosie = t3code()
+        context.machines.set("rosie", rosie.threads)
+        const outbox = yield* Outbox.make(options(context))
+        expect(yield* outbox.send("rosie", listed("t1", "Fix retries"), "Keep the API.")).toEqual({ _tag: "Pending", reason: "T3 Code isn't answering." })
+        yield* wait(5)
+        expect(rosie.messages.map(({ text }) => text)).toEqual(["Keep the API."])
+        expect((yield* held(context.store)).map(({ state }) => state)).toEqual(["sent"])
+        expect(said(context.told)).toEqual([{ priority: "done", spoken: "Passed your message on to Fix retries in yapd now that it finished." }])
       }),
     ))
 

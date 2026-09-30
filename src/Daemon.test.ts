@@ -397,7 +397,7 @@ describe("Daemon", () => {
     expect(result).toBe("That session has moved on since, so I didn't send it.")
   })
 
-  test("links an update to the T3 Code thread it came from, when there's one to link, and goes on without when the lookup is slow", async () => {
+  test("counts an update as heard once it's read out, linked to its T3 Code thread when there's one, and goes on without when the lookup is slow", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { finish, recent, played, wait } = yield* make(undefined, {
@@ -411,12 +411,15 @@ describe("Daemon", () => {
         yield* finish("a", "The PR is ready.")
         yield* finish("b", "The tests pass.")
         yield* finish("c", "A slow one.")
+        // Only the one being read out counts as heard: the rest are queued, and "that one" can't mean them yet.
+        const meanwhile = (yield* recent).map(({ message }) => message)
         yield* wait(11)
         yield* wait(11)
         yield* wait(11)
-        return { heard: (yield* recent).map(({ message, thread }) => ({ message, thread })), played: [...played] }
+        return { meanwhile, heard: (yield* recent).map(({ message, thread }) => ({ message, thread })), played: [...played] }
       }),
     )
+    expect(result.meanwhile).toEqual(["The PR is ready."])
     expect(result.heard).toEqual([
       { message: "A slow one.", thread: undefined },
       { message: "The tests pass.", thread: undefined },

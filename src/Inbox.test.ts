@@ -3,6 +3,7 @@ import { Option } from "effect"
 import * as Inbox from "./Inbox.ts"
 
 const ready = (session: string, priority: Inbox.Ready["priority"], arrivedAt: number): Inbox.Ready => ({
+  id: `${session}:${arrivedAt}`,
   session,
   priority,
   arrivedAt,

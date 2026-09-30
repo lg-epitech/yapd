@@ -2,7 +2,7 @@ import { Cause, Clock, type Duration, Effect, Either, Fiber, Option, type Scope 
 import type { Notice } from "./Inbox.ts"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type { Delivery, Outbox } from "./Outbox.ts"
-import type { Heard } from "./Recent.ts"
+import type { Heard, Played } from "./Recent.ts"
 import type { Records } from "./Records.ts"
 import { Reporter } from "./Reporter.ts"
 import type { Researcher } from "./Research.ts"
@@ -218,8 +218,9 @@ export const make = (options: {
   readonly machines: ReadonlyArray<Machine>
   /** The user's rules, read as they are now. */
   readonly rules: Effect.Effect<Option.Option<string>>
-  /** What the user was told lately, newest first. */
-  readonly recent: Effect.Effect<ReadonlyArray<Heard>>
+  /** What the user has heard lately, the latest first. */
+  readonly recent: Effect.Effect<ReadonlyArray<Played>>
+  /** Notes what's about to be told, by the id of the notice that will tell it. */
   readonly note: (heard: Heard) => Effect.Effect<void>
   /** Queues something to say. */
   readonly tell: (notice: Notice) => Effect.Effect<void>
@@ -355,9 +356,12 @@ export const make = (options: {
         drafts.delete(draft.id)
       })
 
+    /** A notice's id, chosen ahead when what it says is noted for the user to build on. */
+    const noticeId = (draft: Draft) => `draft:${draft.id}:${crypto.randomUUID()}`
+
     const say = (draft: Draft, spoken: string, priority: Notice["priority"], extra: Partial<Notice> = {}) =>
       options.tell({
-        id: `draft:${draft.id}:${crypto.randomUUID()}`,
+        id: noticeId(draft),
         priority,
         spoken,
         at: draft.at,
@@ -416,7 +420,9 @@ export const make = (options: {
           })
           .pipe(Effect.catchAll((error) => Effect.logWarning(`Couldn't keep what ${started.thread} is about`, error)))
         const said = [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" ")
+        const id = noticeId(draft)
         yield* options.note({
+          id,
           project: project.name,
           ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
           directory: started.directory,
@@ -426,7 +432,7 @@ export const make = (options: {
           thread: { machine: machine.name, id: started.thread },
           at: now,
         })
-        yield* say(draft, said, "done")
+        yield* say(draft, said, "done", { id })
       })
 
     const offer = (draft: Draft, material: Material, question: string): Effect.Effect<void> =>
@@ -563,8 +569,10 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         yield* close(draft)
         const said = delivered(to, outcome.right)
+        const id = noticeId(draft)
         // Noted whether it went or is still on its way: either way the user can build on it.
         yield* options.note({
+          id,
           project: listed.project,
           ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
           directory: listed.directory,
@@ -573,7 +581,7 @@ export const make = (options: {
           thread: { machine: machine.name, id: listed.id },
           at: now,
         })
-        yield* say(draft, said.spoken, said.priority)
+        yield* say(draft, said.spoken, said.priority, { id })
       })
 
     const summary = (draft: Draft, material: Material, decision: Decision) =>
@@ -596,8 +604,10 @@ export const make = (options: {
         }
         yield* close(draft)
         const { thread, messages } = detail.right
-        // What was read out carries the thread, so "tell it to" can follow.
+        const id = noticeId(draft)
+        // What's read out carries the thread, so "tell it to" can follow.
         yield* options.note({
+          id,
           project: thread.project,
           ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
           directory: thread.directory,
@@ -606,7 +616,7 @@ export const make = (options: {
           thread: { machine: machine.name, id: thread.id },
           at: now,
         })
-        yield* say(draft, report.right.spoken, thread.state === "waiting" || thread.state === "failed" ? "needs-you" : "done")
+        yield* say(draft, report.right.spoken, thread.state === "waiting" || thread.state === "failed" ? "needs-you" : "done", { id })
       })
 
     const status = (draft: Draft, material: Material, decision: Decision) =>

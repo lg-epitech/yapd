@@ -3,7 +3,7 @@ import { styled } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import type { Catalog } from "./Launcher.ts"
 import { WriterModel } from "./Model.ts"
-import type { Heard } from "./Recent.ts"
+import type { Played } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
 import type { Known, Listed } from "./Threads.ts"
@@ -115,16 +115,17 @@ const wordsShown = ({ listed, known }: ThreadListing["threads"][number]) =>
  * words given for it are theirs. When they named it, one of those words, past
  * the bare ones like "the agent", has to be one the listing shows for that
  * thread, or the model went by something it wasn't given. When they only
- * pointed at something yapd read out, what was read out lately has to carry
- * that thread, and a bare pointer like "that one" can only mean the latest
- * thing read out that did. Bare words are the user's, but settle nothing on
+ * pointed at something yapd read out, what they've heard has to carry that
+ * thread, and a bare pointer like "that one" can only mean the last thing they
+ * heard: when that carried no thread, or another, they meant something yapd
+ * can't tell, and it asks. Bare words are the user's, but settle nothing on
  * their own.
  */
 export const groundedThread = (
   decision: Pick<Decision, "thread" | "threadFrom" | "threadEvidence">,
   lines: ReadonlyArray<Line>,
   threads: ReadonlyArray<ThreadListing>,
-  recent: ReadonlyArray<Heard>,
+  recent: ReadonlyArray<Played>,
 ) => {
   if (decision.threadFrom === "unclear") return false
   const chosen = decision.thread.trim()
@@ -135,12 +136,11 @@ export const groundedThread = (
     const listed = wordsShown(found)
     return telling.some((word) => listed.has(word))
   }
-  const carrying = recent.filter(({ thread }) => thread !== undefined)
   if (telling.length === 0) {
-    const latest = carrying.reduce<Heard | undefined>((newest, heard) => (newest === undefined || heard.at > newest.at ? heard : newest), undefined)
+    const latest = recent.reduce<Played | undefined>((last, heard) => (last === undefined || heard.heardAt > last.heardAt ? heard : last), undefined)
     return latest?.thread !== undefined && key(latest.thread.machine, latest.thread.id) === chosen
   }
-  return carrying.some(({ thread }) => thread !== undefined && key(thread.machine, thread.id) === chosen)
+  return recent.some(({ thread }) => thread !== undefined && key(thread.machine, thread.id) === chosen)
 }
 
 /** What comes back from reading the project: the prompt, or a question it raised. */
@@ -179,7 +179,8 @@ export interface Material {
   readonly threads: ReadonlyArray<ThreadListing>
   /** The user's preferences file, as they wrote it. */
   readonly rules: Option.Option<string>
-  readonly recent: ReadonlyArray<Heard>
+  /** What the user has heard lately, the latest first: only what was read out, since they can't point at what they haven't heard. */
+  readonly recent: ReadonlyArray<Played>
   /** What they dictated just before, that's still being written, oldest first: they may build on it. */
   readonly earlier: ReadonlyArray<string>
   /** What the user dictated, then any questions yapd asked about it and their answers. */
@@ -274,7 +275,7 @@ const deciding = (research: boolean, answering: boolean) =>
       `"thread": the thread's key exactly as listed, like "rosie/6f1a2b". Empty for anything else, and when unclear.`,
       `"threadFrom": what settles the thread, which is only ever one of two things.`,
       `- "named": they described it in their own words, and one listed thread fits: its title, its project, its branch, what the work is, or where it stands when that singles it out, like "the retry fix", "the latency investigation", "the yapd agent" when yapd has one thread, or "the one that's waiting for me" when one is waiting. Heard loosely, since dictation mangles names, but at least one of their words has to be one the listing shows for that thread.`,
-      `- "referred": they pointed at something you read out lately, like "that one", "it" or "the one that just finished", and what you read out carries the thread's key. Bare pointers like "it" or "that one" mean the latest thing you read out that carried a thread. Only what you read out counts: what they dictated before points at no thread.`,
+      `- "referred": they pointed at something you read out lately, like "that one", "it" or "the one that just finished", and what you read out carries the thread's key. Bare pointers like "it" or "that one" mean the last thing you read out, and only when it carries a thread: when it doesn't, that's unclear. Only what you read out counts, and only what's listed below as read out: what they dictated before points at no thread.`,
       `- "unclear": anything else, and then you ask. Two threads fitting about as well is unclear, and so is one that's only likely: the newest, or the only one still running. A thread they name that isn't listed, because it's archived or on a machine whose threads couldn't be listed, can't be reached: "ask" when a listed one could be it, else "none", saying why.`,
       `"threadEvidence": their words that settle it, copied from what they said exactly as transcribed, mistakes included: what they called it, or the words that point at what you read out. Empty when unclear.`,
       `When you ask which thread, name the candidates by what tells them apart: the project, the title or what the work is, and the machine only when it differs.`,
@@ -533,9 +534,9 @@ const machineOf = (listings: ReadonlyArray<Listing>, host: string | undefined) =
     : listings.find(({ hosts }) => hosts.some((known) => known.toLowerCase() === host.toLowerCase()))
   )?.machine ?? host
 
-const heard = (listings: ReadonlyArray<Listing>, now: number) => (said: Heard) =>
+const heard = (listings: ReadonlyArray<Listing>, now: number) => (said: Played) =>
   [
-    `- ${ago(said.at, now)}, ${said.project}${Option.match(Option.fromNullable(machineOf(listings, said.host)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}, in ${said.directory}${
+    `- ${ago(said.heardAt, now)}, ${said.project}${Option.match(Option.fromNullable(machineOf(listings, said.host)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}, in ${said.directory}${
       said.thread === undefined ? "" : `, thread ${key(said.thread.machine, said.thread.id)}`
     }. You said: ${squash(said.spoken)}`,
     // With a thread and no start, the text could be the agent's or a message yapd sent it, so neither is claimed.
@@ -560,7 +561,7 @@ const context = ({ listings, threads, rules, recent, earlier, lines, now }: Mate
   ...(choosing ? [listed(listings, now), threadsListed(threads, now)] : []),
   recent.length === 0
     ? "You've read nothing out lately."
-    : `What you read out lately, newest first:\n${recent.map(heard(listings, now)).join("\n")}`,
+    : `What you read out lately, the last thing first:\n${recent.map(heard(listings, now)).join("\n")}`,
   ...(earlier.length === 0
     ? []
     : [

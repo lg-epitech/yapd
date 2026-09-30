@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Option } from "effect"
 import type { Catalog } from "./Launcher.ts"
+import type { Played } from "./Recent.ts"
 import type { Listed } from "./Threads.ts"
 import * as Writer from "./Writer.ts"
 
@@ -70,6 +71,15 @@ const catalog: Catalog = {
   ],
 }
 
+/** Something read out `minutesAgo`, as soon as it came in. */
+const heard = (minutesAgo: number, overrides: Partial<Played> & Pick<Played, "project" | "spoken" | "message">): Played => ({
+  id: `heard:${minutesAgo}`,
+  directory: `/code/${overrides.project}`,
+  at: now - minutesAgo * 60_000,
+  heardAt: now - minutesAgo * 60_000,
+  ...overrides,
+})
+
 const material = (overrides: Partial<Writer.Material> = {}): Writer.Material => ({
   listings: [
     { machine: "rosie", here: true, hosts: ["Rosie.local"], catalog: Option.some(catalog) },
@@ -104,8 +114,8 @@ describe("Writer", () => {
     const prompt = Writer.prompt(
       material({
         recent: [
-          { project: "std", host: "rosie.LOCAL", directory: "/code/std", spoken: "Over in std, the Redis investigation is done.", message: `Two options.\n\n${"x".repeat(900)}`, at: now - 4 * 60_000 },
-          { project: "trainer", host: "rig", directory: "/home/me/trainer", spoken: "Started in trainer.", message: "Rerun the eval.", started: true, at: now - 90 * 60_000 },
+          heard(4, { project: "std", host: "rosie.LOCAL", spoken: "Over in std, the Redis investigation is done.", message: `Two options.\n\n${"x".repeat(900)}` }),
+          heard(90, { project: "trainer", host: "rig", directory: "/home/me/trainer", spoken: "Started in trainer.", message: "Rerun the eval.", started: true }),
         ],
       }),
       Option.none(),
@@ -138,7 +148,7 @@ describe("Writer", () => {
 
   test("lists the threads by key, with what the work is, so a message or a question can be about one", () => {
     const prompt = Writer.prompt(
-      material({ recent: [{ project: "std", host: "rosie.LOCAL", directory: "/code/std", spoken: "Done.", message: "Two options.", thread: { machine: "rosie", id: "b2" }, at: now - 60_000 }] }),
+      material({ recent: [heard(1, { project: "std", host: "rosie.LOCAL", spoken: "Done.", message: "Two options.", thread: { machine: "rosie", id: "b2" } })] }),
       Option.none(),
     )
     expect(prompt).toContain(`- "message" when it's for an agent that's already at work`)
@@ -196,7 +206,8 @@ describe("Writer", () => {
 
   test("only takes a thread that's listed, and settled by the user's own words", () => {
     const lines = [{ speaker: "user" as const, text: "Tell the latency one to keep the public API unchanged." }]
-    const recent = [{ project: "std", directory: "/code/std", spoken: "Done.", message: "Two options.", thread: { machine: "rosie", id: "b2" }, at: now }]
+    const redis = { project: "std", spoken: "Done.", message: "Two options.", thread: { machine: "rosie", id: "b2" } }
+    const recent = [heard(0, redis)]
     expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "named", threadEvidence: "the latency one" }, lines, threads, recent)).toBe(true)
     expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "unclear", threadEvidence: "the latency one" }, lines, threads, recent)).toBe(false)
     expect(Writer.groundedThread({ thread: "rosie/zz", threadFrom: "named", threadEvidence: "the latency one" }, lines, threads, recent)).toBe(false)
@@ -212,11 +223,15 @@ describe("Writer", () => {
     const pointing = [{ speaker: "user" as const, text: "Tell that one to stop." }]
     expect(Writer.groundedThread({ thread: "rosie/b2", threadFrom: "referred", threadEvidence: "that one" }, pointing, threads, recent)).toBe(true)
     expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "that one" }, pointing, threads, recent)).toBe(false)
-    const both = [{ ...recent[0]!, at: now - 60_000 }, { project: "yapd", directory: "/code/yapd", spoken: "Waiting on you.", message: "May I?", thread: { machine: "rosie", id: "a1" }, at: now }]
+    const both = [heard(1, redis), heard(0, { project: "yapd", spoken: "Waiting on you.", message: "May I?", thread: { machine: "rosie", id: "a1" } })]
     expect(Writer.groundedThread({ thread: "rosie/b2", threadFrom: "referred", threadEvidence: "that one" }, pointing, threads, both)).toBe(false)
     expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "that one" }, pointing, threads, both)).toBe(true)
     const finished = [{ speaker: "user" as const, text: "Tell the one that just finished to stop." }]
     expect(Writer.groundedThread({ thread: "rosie/b2", threadFrom: "referred", threadEvidence: "the one that just finished" }, finished, threads, both)).toBe(true)
+    // The last thing heard was an update with no thread to its name, like one from another machine: "it" can't be an older one.
+    const unlinked = [...both, heard(0, { project: "trainer", host: "rig", spoken: "Over on rig, the eval is done.", message: "Done.", heardAt: now + 1 })]
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "it" }, pointing, threads, unlinked)).toBe(false)
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "the one that's waiting" }, standing, threads, unlinked)).toBe(true)
     expect(Writer.parseKey("rosie/a1")).toEqual(Option.some({ machine: "rosie", id: "a1" }))
     expect(Writer.parseKey("a1")).toEqual(Option.none())
   })

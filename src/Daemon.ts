@@ -170,27 +170,30 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       }
 
       const spoken = introduce(project, summary.spoken)
-      const audio = join(dir, `${crypto.randomUUID()}${extension}`)
+      const id = crypto.randomUUID()
+      const audio = join(dir, `${id}${extension}`)
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       generations.set(update, generation)
-      yield* STM.commit(
-        TRef.update(inbox, (current) =>
-          Inbox.add(current, { session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
-        ),
-      )
-      // Only this machine's threads are ever found: another machine's T3 Code isn't asked, so its updates carry no thread.
-      const located = yield* Fiber.join(locating)
+      // Noted before it's queued, since it can be read out the moment it is.
       recent = Recent.add(recent, {
+        id,
         project,
         ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
         directory: thread.cwd,
         spoken,
         message: turn.message,
-        ...(Option.isNone(located) ? {} : { thread: located.value }),
         at: arrivedAt,
       })
+      yield* STM.commit(
+        TRef.update(inbox, (current) =>
+          Inbox.add(current, { id, session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
+        ),
+      )
       yield* Effect.logInfo(`Ready: ${spoken}`)
+      // Only this machine's threads are ever found: another machine's T3 Code isn't asked, so its updates carry no thread.
+      const located = yield* Fiber.join(locating)
+      if (Option.isSome(located)) recent = Recent.about(recent, id, located.value)
     }).pipe(
       workers.withPermits(1),
       Effect.catchAllCause((cause) =>
@@ -305,11 +308,18 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       ? conversation.settled(ready.session).pipe(Effect.zipRight(release(ready.hook)), Effect.forkIn(scope), Effect.asVoid)
       : Effect.void
 
+  /** Counts what's about to play as heard, from its first word: a dictation over it can already point at it. */
+  const heard = (id: string) =>
+    Effect.map(Clock.currentTimeMillis, (now) => {
+      recent = Recent.heard(recent, id, now)
+    })
+
   /** Says a notice. Only a question is listened to: whatever else they'd say to it has nowhere to go. */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>) =>
     Effect.gen(function* () {
       const { question } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
+      yield* heard(said.notice.id)
       if (question === undefined) {
         const playback = yield* audio.play(said.audio)
         yield* playback.finished
@@ -341,7 +351,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     let dealtWith = false
     const reading =
       "update" in ready
-        ? conversation.converse(ready.update)
+        ? Effect.zipRight(heard(ready.id), conversation.converse(ready.update))
         : say(
             ready,
             Effect.sync(() => {
@@ -374,9 +384,9 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     handle,
     speak: Effect.forever(speakNext),
     tell,
-    /** What the user was told lately, newest first. */
-    recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.since(recent, now)),
-    /** Notes something yapd did itself, for the user to build on like they do on updates. */
+    /** What the user has heard lately, the latest first. What's still waiting to be read out isn't theirs to point at yet. */
+    recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.played(recent, now)),
+    /** Notes something yapd is about to say for itself, for the user to build on like they do on updates. Noted before it's told, since it counts once it plays. */
     note: (heard: Recent.Heard) =>
       Effect.sync(() => {
         recent = Recent.add(recent, heard)

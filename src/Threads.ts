@@ -56,8 +56,8 @@ export type Outgoing = typeof Outgoing.Type
 
 /**
  * "busy" when the thread is in the middle of a turn, and "waiting" when it's
- * in the middle of one but stopped on an approval or an answer only the user
- * can give, in T3 Code. Nothing was sent in either case.
+ * stopped on an approval or an answer only the user can give, in T3 Code,
+ * whether or not a turn is still running. Nothing was sent in either case.
  */
 export const Sent = Schema.Literal("sent", "busy", "waiting")
 export type Sent = typeof Sent.Type
