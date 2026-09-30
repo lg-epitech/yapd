@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, FiberMap, Option, STM, TRef } from "effect"
+import { Cause, Clock, Effect, Fiber, FiberMap, Option, STM, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -19,11 +19,23 @@ import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
 
+/** How long an update waits, at most, on which thread it came from. */
+const linking = "2 seconds"
+
+export interface Options {
+  /**
+   * The T3 Code thread an update came from, when it can be told, so that "tell
+   * that one to" can follow it. Asked alongside the summary, never for long,
+   * and an update goes out without a link sooner than wait on one.
+   */
+  readonly locate?: (thread: Thread) => Effect.Effect<Option.Option<NonNullable<Recent.Heard["thread"]>>>
+}
+
 /**
  * Updates are condensed and rendered in parallel, then spoken one at a time,
  * along with what yapd has to say for itself.
  */
-export const make = Effect.gen(function* () {
+export const make = (options: Options = {}) => Effect.gen(function* () {
   const scope = yield* Effect.scope
   const condenser = yield* Condenser
   const voice = yield* Voice
@@ -137,6 +149,14 @@ export const make = Effect.gen(function* () {
     needsYou: boolean,
   ) =>
     Effect.gen(function* () {
+      // Looked up while the summary is written, which takes about as long. Whatever the lookup does, the
+      // update goes out: past its time, or failing, it just carries no thread. Interrupted with the rest if the session moves on.
+      const locating = yield* Effect.fork(
+        (options.locate?.(thread) ?? Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())).pipe(
+          Effect.timeout(linking),
+          Effect.catchAllCause(() => Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())),
+        ),
+      )
       const summary = yield* condenser.condense(project, turn).pipe(
         Effect.retry({ times: 1 }),
         Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),
@@ -159,12 +179,15 @@ export const make = Effect.gen(function* () {
           Inbox.add(current, { session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
         ),
       )
+      // Only this machine's threads are ever found: another machine's T3 Code isn't asked, so its updates carry no thread.
+      const located = yield* Fiber.join(locating)
       recent = Recent.add(recent, {
         project,
         ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
         directory: thread.cwd,
         spoken,
         message: turn.message,
+        ...(Option.isNone(located) ? {} : { thread: located.value }),
         at: arrivedAt,
       })
       yield* Effect.logInfo(`Ready: ${spoken}`)

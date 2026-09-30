@@ -7,9 +7,11 @@ import type { Launcher } from "./Launcher.ts"
 import { researcher } from "./Model.ts"
 import * as Remote from "./Remote.ts"
 import * as T3CodeLauncher from "./T3CodeLauncher.ts"
+import * as T3CodeThreads from "./T3CodeThreads.ts"
 
 // Where new work can start: this machine and the ones it reaches over SSH,
-// each with what starts agents there and what reads through its projects.
+// each with what starts agents there, what reads through its projects, and
+// the threads T3 Code already has there.
 
 /**
  * What starts agents on this machine: T3 Code when there's a token for it, and
@@ -43,6 +45,7 @@ export const machines = Effect.gen(function* () {
   const called = Option.getOrUndefined(yield* Config.name)
   const launchers = Remote.launchers(remotes, hostname, yield* own, undefined, called)
   const researchers = Remote.researchers(remotes, hostname, yield* researcher, undefined, called)
+  const threads = Remote.threadsOn(remotes, hostname, T3CodeThreads.threads(yield* Config.t3codeToken), undefined, called)
   const here: Machine = {
     get name() {
       return called ?? short(hostname())
@@ -53,11 +56,19 @@ export const machines = Effect.gen(function* () {
     },
     launcher: launchers(),
     researcher: researchers(),
+    threads: threads(),
   }
   return [
     here,
     ...[...remotes.keys()].map(
-      (remote): Machine => ({ name: remote, here: false, hosts: [remote], launcher: launchers(remote), researcher: researchers(remote) }),
+      (remote): Machine => ({
+        name: remote,
+        here: false,
+        hosts: [remote],
+        launcher: launchers(remote),
+        researcher: researchers(remote),
+        threads: threads(remote),
+      }),
     ),
   ]
 })

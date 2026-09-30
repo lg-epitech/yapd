@@ -20,6 +20,7 @@ import { Voice } from "./Voice.ts"
  */
 const make = (says?: string, options: {
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
+  readonly locate?: Daemon.Options["locate"]
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -100,9 +101,9 @@ const make = (says?: string, options: {
     })),
   )
   const context = yield* Layer.build(layer)
-  const made = yield* Daemon.make.pipe(Effect.provide(context))
+  const made = yield* Daemon.make(options.locate === undefined ? {} : { locate: options.locate }).pipe(Effect.provide(context))
   handle = made.handle
-  const { speak: read, tell } = made
+  const { speak: read, tell, recent } = made
   yield* Effect.forkScoped(read)
   const floor = Context.get(context, Floor.Floor)
   // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -165,7 +166,7 @@ const make = (says?: string, options: {
     return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
   })
   const reading = STM.commit(TRef.get(floor.reading))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
 })
 
 const daemon = make()
@@ -394,6 +395,35 @@ describe("Daemon", () => {
     )
     expect(deliveries).toBe(0)
     expect(result).toBe("That session has moved on since, so I didn't send it.")
+  })
+
+  test("links an update to the T3 Code thread it came from, when there's one to link, and goes on without when the lookup is slow", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, recent, played, wait } = yield* make(undefined, {
+          locate: (thread) =>
+            thread.message.includes("PR")
+              ? Effect.succeed(Option.some({ machine: "rosie", id: "t-1" }))
+              : thread.message.includes("slow")
+                ? Effect.never
+                : Effect.succeed(Option.none()),
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* finish("b", "The tests pass.")
+        yield* finish("c", "A slow one.")
+        yield* wait(11)
+        yield* wait(11)
+        yield* wait(11)
+        return { heard: (yield* recent).map(({ message, thread }) => ({ message, thread })), played: [...played] }
+      }),
+    )
+    expect(result.heard).toEqual([
+      { message: "A slow one.", thread: undefined },
+      { message: "The tests pass.", thread: undefined },
+      { message: "The PR is ready.", thread: { machine: "rosie", id: "t-1" } },
+    ])
+    // Read out all the same, once the lookup is given up on.
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The tests pass.", "yapd. A slow one."])
   })
 
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {

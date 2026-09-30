@@ -4,6 +4,7 @@ import * as Launcher from "./Launcher.ts"
 import { ProcessError } from "./Process.ts"
 import * as Relay from "./Relay.ts"
 import * as Remote from "./Remote.ts"
+import * as Threads from "./Threads.ts"
 
 const thread = (host?: string): Relay.Thread => ({
   agent: "claude",
@@ -179,5 +180,70 @@ describe("Remote launcher", () => {
     expect(await Effect.runPromise(launchers("Rig").start(request))).toEqual(started)
     expect(calls[0]?.at(-2)).toBe("me@rig.example.com")
     expect(await why(launchers("box").start(request))).toBe("I don't know how to reach box. It needs adding to YAPD_REMOTES.")
+  })
+})
+
+describe("Remote threads", () => {
+  const listed: Threads.Listed = {
+    id: "thread-1",
+    project: "free-sound",
+    directory: "/home/me/free-sound",
+    title: "Fix the loader",
+    branch: "main",
+    state: "done",
+    needs: [],
+    requestedAt: null,
+    completedAt: "2026-09-29T10:00:00.000Z",
+    updatedAt: "2026-09-29T10:00:00.000Z",
+    error: null,
+  }
+  const outgoing: Threads.Outgoing = { commandId: "yapd:command-1", messageId: "message-1", text: "Keep the API." }
+  const fail = <A>(effect: Effect.Effect<A, Threads.ThreadsError>) => Effect.runPromise(Effect.flip(effect))
+
+  test("runs each yapd command on the machine, with the request on stdin, and hears what it said", async () => {
+    const calls: Array<{ command: string; stdin: string }> = []
+    const answers: Record<string, unknown> = {
+      threads: { threads: [listed] },
+      thread: { detail: { thread: listed, messages: [{ role: "user", text: "Fix it.", at: "2026-09-29T09:00:00.000Z" }] } },
+      opening: { reason: "T3 Code doesn't have that thread any more.", gone: true },
+      send: { sent: "waiting" },
+    }
+    const threads = Remote.threads("rig", "me@rig.example.com", (command, stdin) =>
+      Effect.sync(() => {
+        const name = command.at(-1)?.replace("cd / && yapd ", "") ?? ""
+        calls.push({ command: name, stdin })
+        return `welcome to rig\n${JSON.stringify(answers[name])}\n`
+      }),
+    )
+    expect(await Effect.runPromise(threads.list)).toEqual([listed])
+    expect((await Effect.runPromise(threads.detail("thread-1", 3))).messages).toHaveLength(1)
+    expect(await fail(threads.opening("thread-2"))).toMatchObject({ reason: "T3 Code doesn't have that thread any more.", gone: true })
+    expect(await Effect.runPromise(threads.send("thread-1", outgoing))).toBe("waiting")
+    expect(calls.map(({ command }) => command)).toEqual(["threads", "thread", "opening", "send"])
+    expect(calls.map(({ stdin }) => (stdin === "" ? "" : JSON.parse(stdin)))).toEqual([
+      "",
+      { id: "thread-1", turns: 3 },
+      { id: "thread-2" },
+      { id: "thread-1", outgoing },
+    ])
+    const down = Remote.threads("rig", "rig", (command) => Effect.fail(new ProcessError({ command: command.join(" "), code: 255, stderr: "" })))
+    expect((await fail(down.list)).reason).toBe("I can't reach rig.")
+  })
+
+  test("serves each command from this machine's threads, keeping gone", async () => {
+    const own: Threads.Threads = {
+      list: Effect.succeed([listed]),
+      detail: () => Effect.fail(new Threads.ThreadsError({ reason: "That thread is archived, so I can't read it.", gone: true })),
+      opening: () => Effect.succeed("Fix it."),
+      send: (_, { text }) => Effect.succeed(text === "Keep the API." ? "sent" : "busy"),
+    }
+    expect(JSON.parse(await Effect.runPromise(Remote.serveThreads(own)))).toEqual({ threads: [listed] })
+    expect(JSON.parse(await Effect.runPromise(Remote.serveThread(own, JSON.stringify({ id: "thread-1", turns: 2 }))))).toEqual({
+      reason: "That thread is archived, so I can't read it.",
+      gone: true,
+    })
+    expect(JSON.parse(await Effect.runPromise(Remote.serveOpening(own, JSON.stringify({ id: "thread-1" }))))).toEqual({ text: "Fix it." })
+    expect(JSON.parse(await Effect.runPromise(Remote.serveSend(own, JSON.stringify({ id: "thread-1", outgoing }))))).toEqual({ sent: "sent" })
+    expect(JSON.parse(await Effect.runPromise(Remote.serveSend(own, "{}")))).toHaveProperty("reason")
   })
 })

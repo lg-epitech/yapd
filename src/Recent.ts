@@ -13,6 +13,8 @@ export interface Heard {
   /** What it summed up: the agent's message, or the prompt of work yapd started. */
   readonly message: string
   readonly started?: boolean
+  /** The T3 Code thread it was about, when yapd knows which. */
+  readonly thread?: { readonly machine: string; readonly id: string }
   readonly at: number
 }
 

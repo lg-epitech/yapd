@@ -10,9 +10,10 @@ import { DictationTranscriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
 
-// Dictating new work: the user presses the shortcut, talks for as long as they
-// like, pausing to think, and presses it again to send. Updates wait meanwhile.
-// It ends at what they said; what's done with it is up to whoever listens.
+// Dictating to yapd, whether new work, a message for an agent or a question:
+// the user presses the shortcut, talks for as long as they like, pausing to
+// think, and presses it again to send. Updates wait meanwhile. It ends at what
+// they said; what's done with it is up to whoever listens.
 
 export class Dictation extends Context.Tag("yapd/Dictation")<
   Dictation,

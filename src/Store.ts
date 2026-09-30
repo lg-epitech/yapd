@@ -20,7 +20,37 @@ export class StoreError extends Data.TaggedError("StoreError")<{ readonly messag
  * the tables it needs as a new step at the end, and a step that has shipped
  * never changes.
  */
-export const migrations: ReadonlyArray<string> = []
+export const migrations: ReadonlyArray<string> = [
+  // What yapd knows about threads themselves, and the messages it sends them.
+  // A message's ids are chosen before the first try and kept, so a try after
+  // a crash sends the same command. Its title and project are kept as of when
+  // it was held, so what became of it can be told after a restart. `machine`
+  // is what the user calls the machine, so renaming one orphans its rows.
+  `create table threads (
+    machine text not null,
+    id text not null,
+    prompt text,
+    dictated text,
+    description text,
+    started integer not null check (started in (0, 1)),
+    at text not null,
+    primary key (machine, id)
+  ) strict;
+  create table messages (
+    command_id text primary key,
+    message_id text not null,
+    machine text not null,
+    thread text not null,
+    title text not null,
+    project text not null,
+    text text not null,
+    state text not null check (state in ('held', 'sent', 'failed')),
+    reason text,
+    created_at text not null,
+    sent_at text
+  ) strict;
+  create index messages_held on messages (created_at) where state = 'held';`,
+]
 
 export class Store extends Context.Tag("yapd/Store")<
   Store,
