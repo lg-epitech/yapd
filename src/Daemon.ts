@@ -68,14 +68,20 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   const followed = new Map<string, { readonly message: string }>()
   /**
-   * Messages sent to threads through the outbox, which reach the daemon only
-   * as the prompt their hooks report, without saying which session. The one
-   * whose prompt carries the text is the one that got it, and its answer is
-   * wanted like a follow-up's, however quick the turn. Each is kept for a
-   * while, since a message held for a busy thread is sent much later, and
-   * taken once it turns up.
+   * Messages sent to threads through the outbox, by what the outbox calls
+   * them, which reach the daemon only as the prompt their hooks report,
+   * without saying which session. The one whose prompt carries the text is
+   * the one that got it, and its answer is wanted like a follow-up's, however
+   * quick the turn. Each is kept for a while, since a message held for a busy
+   * thread is sent much later, and taken once it turns up. Every try at one
+   * message is the same entry: a message tried three times before it went
+   * mustn't leave two more waiting to be taken by the user's own prompts.
    */
-  let expected: Array<{ readonly text: string; readonly at: number }> = []
+  const expected = new Map<string, { readonly text: string; readonly at: number }>()
+  /** Lets go of what has waited too long to turn up as a prompt: it never will. */
+  const prune = (now: number) => {
+    for (const [key, { at }] of expected) if (now - at >= expecting) expected.delete(key)
+  }
   let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
@@ -292,11 +298,12 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
           prompts.set(session, { text: payload.prompt, at: arrivedAt })
           const prompt = squash(payload.prompt ?? "")
           // A message the outbox sent, turning up as this session's prompt: it's followed like one sent by voice.
-          expected = expected.filter(({ at }) => arrivedAt - at < expecting)
-          const got = expected.findIndex(({ text }) => prompt.includes(text))
-          if (got !== -1) {
-            followed.set(session, { message: expected[got]!.text })
-            expected.splice(got, 1)
+          prune(arrivedAt)
+          for (const [key, { text }] of expected) {
+            if (!prompt.includes(text)) continue
+            followed.set(session, { message: text })
+            expected.delete(key)
+            break
           }
           // Anything but the follow-up itself means the user took over.
           const sent = followed.get(session)
@@ -460,12 +467,23 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     tell,
     /** What the user had heard by `at`, the latest first, as it stood then. What's still waiting to be read out isn't theirs to point at yet. */
     recent: (at: number) => Effect.sync(() => Recent.heardBy(recent, at)),
-    /** Expects `text`, about to be sent to a thread, to turn up as some session's prompt, whose answer is then wanted however quick. */
-    expect: (text: string) =>
+    /**
+     * Expects `text`, about to be sent to a thread as the message called `key`,
+     * to turn up as some session's prompt, whose answer is then wanted however
+     * quick. Said again before every try at the same message, which only
+     * renews the one expectation.
+     */
+    expect: (key: string, text: string) =>
       Effect.map(Clock.currentTimeMillis, (now) => {
         const squashed = squash(text)
         if (squashed === "") return
-        expected = [...expected.filter(({ at }) => now - at < expecting), { text: squashed, at: now }]
+        prune(now)
+        expected.set(key, { text: squashed, at: now })
+      }).pipe(events.withPermits(1)),
+    /** Stops expecting the message called `key`: it won't be sent, so a prompt with its words is the user's own. */
+    retract: (key: string) =>
+      Effect.sync(() => {
+        expected.delete(key)
       }).pipe(events.withPermits(1)),
     /** Notes something yapd is about to say for itself, for the user to build on like they do on updates. Noted before it's told, since it counts once it plays. */
     note: (heard: Recent.Heard) =>

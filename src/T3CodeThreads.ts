@@ -221,7 +221,19 @@ export const threads = (
         const { api } = yield* transport
         const shell = yield* api("/api/orchestration/shell", Shell)
         const thread = shell.threads.find((thread) => thread.id === id)
-        if (thread === undefined) return yield* unlisted("didn't send it")
+        /** Whether the thread, read whole, already has this very message. */
+        const has = ({ thread }: typeof Snapshot.Type) => thread.messages.some((message) => message.id === outgoing.messageId)
+        if (thread === undefined) {
+          // The shell leaves archived threads out, so one it doesn't list may have been archived since a try
+          // whose answer was lost, and still read. Then the message is looked for in it before it's given up on:
+          // a read that has it says it went, and only one that doesn't, or a 404, says it didn't. A read that
+          // fails any other way leaves that unknown, so the message is asked about again.
+          const found = yield* api(`/api/orchestration/threads/${encodeURIComponent(id)}`, Snapshot).pipe(
+            Effect.map(has),
+            Effect.catchTag("Trouble", (error) => Effect.fail(missing(error) ? unlisted("didn't send it", error) : error)),
+          )
+          return found ? "sent" : yield* unlisted("didn't send it")
+        }
         // Sending now would steer the turn that's running instead of following it. Stopped on an approval or a
         // question, the thread won't move until the user answers in T3 Code, which yapd can't do for them. And
         // one that's archived takes nothing more.
@@ -229,10 +241,10 @@ export const threads = (
           // Unless this very message is already there: a try whose answer was lost finds it accepted, and any
           // number of turns may have run since, or the thread was archived since. Then it went, and saying
           // otherwise would have the user say it again. The whole thread is read for it, which takes well under
-          // a second even for a long one, and an archived thread can still be read. One that can't be read right
-          // now, archived or not, is asked for again: until it reads, whether the message went is unknown, and
-          // only a read that doesn't have it says it didn't. One the shell doesn't have is gone all the same.
-          if (yield* Effect.map(snapshot(api, id), ({ thread }) => thread.messages.some((message) => message.id === outgoing.messageId))) return "sent"
+          // a second even for a long one. One that can't be read right now, archived or not, is asked for
+          // again: until it reads, whether the message went is unknown, and only a read that doesn't have it
+          // says it didn't.
+          if (yield* Effect.map(snapshot(api, id), has)) return "sent"
           if (gone(thread)) return yield* archived("didn't send it")
           return stuck(thread) ? "waiting" : "busy"
         }

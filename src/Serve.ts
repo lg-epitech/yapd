@@ -80,8 +80,9 @@ export const serve = Effect.gen(function* () {
       threads: (machine) => Option.fromNullable(reached.find(({ name }) => name === machine)?.threads),
       tell: daemon.tell,
       note: daemon.note,
-      // What's sent turns up as a thread's prompt, and its answer is wanted however quick.
+      // What's sent turns up as a thread's prompt, and its answer is wanted however quick. Not once it's given up on.
       expect: daemon.expect,
+      retract: daemon.retract,
     }),
     expect: (yield* Vocabulary).expect,
   })

@@ -171,7 +171,7 @@ const make = (says?: string, options: {
     return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
   })
   const reading = STM.commit(TRef.get(floor.reading))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, recentBy: made.recent, expected: made.expect, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, recentBy: made.recent, expected: made.expect, retracted: made.retract, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
 })
 
 const daemon = make()
@@ -545,13 +545,18 @@ describe("Daemon", () => {
   test("hears the answer to a message sent to a thread however quick the turn, and still skips a quick turn nobody sent", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { turn, expected, wait, played } = yield* daemon
-        yield* expected("Keep the API unchanged.")
+        const { turn, expected, retracted, wait, played } = yield* daemon
+        // Held for a busy thread and tried three times before it went: one message, however many tries.
+        for (let tries = 0; tries < 3; tries++) yield* expected("yapd:m1", "Keep the API unchanged.")
         yield* turn("a", "Kept it.", 5, { prompt: "Keep the API unchanged." })
         yield* wait(11)
-        // Taken once it turned up: the same words again are the user's own.
+        // Taken once it turned up: the same words again are the user's own, typed, and the turn is theirs to watch.
         yield* turn("a", "Still kept.", 5, { prompt: "Keep the API unchanged." })
         yield* turn("b", "Quick and watched.", 5)
+        // Given up on before it went: the user typing its words is their own doing too.
+        yield* expected("yapd:m2", "Drop the cache.")
+        yield* retracted("yapd:m2")
+        yield* turn("c", "Dropped.", 5, { prompt: "Drop the cache." })
         yield* wait(11)
         return [...played]
       }),

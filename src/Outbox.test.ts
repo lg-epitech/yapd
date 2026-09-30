@@ -75,8 +75,9 @@ interface Context {
   readonly store: Store.Store["Type"]
   readonly told: Array<Notice>
   readonly noted: Array<Heard>
-  /** What the daemon was told to expect, before each try. */
-  readonly expected: Array<string>
+  /** What the daemon was told to expect, before each try, and what it was told to stop expecting. */
+  readonly expected: Array<{ readonly key: string; readonly text: string }>
+  readonly retracted: Array<string>
   readonly machines: Map<string, Threads>
 }
 
@@ -86,9 +87,10 @@ const run = <A>(test: (context: Context) => Effect.Effect<A, unknown, Store.Stor
       const store = yield* Store.make(":memory:", Store.migrations)
       const told: Array<Notice> = []
       const noted: Array<Heard> = []
-      const expected: Array<string> = []
+      const expected: Array<{ readonly key: string; readonly text: string }> = []
+      const retracted: Array<string> = []
       const machines = new Map<string, Threads>()
-      return yield* test({ store, told, noted, expected, machines }).pipe(Effect.provideService(Store.Store, store))
+      return yield* test({ store, told, noted, expected, retracted, machines }).pipe(Effect.provideService(Store.Store, store))
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
   )
 
@@ -97,7 +99,8 @@ const options = (context: Omit<Context, "store">): Outbox.Options => ({
   threads: (machine) => Option.fromNullable(context.machines.get(machine)),
   tell: (notice) => Effect.sync(() => void context.told.push(notice)),
   note: (heard) => Effect.sync(() => void context.noted.push(heard)),
-  expect: (text) => Effect.sync(() => void context.expected.push(text)),
+  expect: (key, text) => Effect.sync(() => void context.expected.push({ key, text })),
+  retract: (key) => Effect.sync(() => void context.retracted.push(key)),
 })
 
 const said = (told: Array<Notice>) => told.map(({ priority, spoken }) => ({ priority, spoken }))
@@ -127,8 +130,9 @@ describe("Outbox", () => {
         const commandId = rosie.sent[0]?.outgoing.commandId ?? ""
         expect(commandId).toMatch(/^yapd:/)
         expect(rosie.sent.map(({ outgoing }) => outgoing.commandId)).toEqual([commandId, commandId, commandId])
-        // Expected before every try, so its answer is heard however quick the turn that gives it.
-        expect(context.expected).toEqual(["Keep the API.", "Keep the API.", "Keep the API."])
+        // Expected before every try, as the one message, so its answer is heard however quick the turn that gives it.
+        expect(context.expected).toEqual(Array.from({ length: 3 }, () => ({ key: commandId, text: "Keep the API." })))
+        expect(context.retracted).toEqual([])
         expect(said(context.told)).toEqual([{ priority: "done", spoken: "Passed your message on to Fix retries in yapd now that it finished." }])
         // Noted under the notice's id, for the thread, so once it plays "tell it to" means this thread.
         expect(context.noted.map(({ id, thread, directory, message }) => ({ id, thread, directory, message }))).toEqual([
@@ -152,7 +156,7 @@ describe("Outbox", () => {
         rosie.answers("sent")
         yield* wait(5)
         // The same text before every try, so the prompt the thread's hooks report is the one expected.
-        expect(context.expected).toEqual(["compact the notes", "compact the notes"])
+        expect(context.expected.map(({ text }) => text)).toEqual(["compact the notes", "compact the notes"])
         expect(rosie.sent.map(({ outgoing }) => outgoing.text)).toEqual(["compact the notes", "compact the notes"])
         expect(context.noted.map(({ message }) => message)).toEqual(["compact the notes"])
       }),
@@ -210,6 +214,8 @@ describe("Outbox", () => {
         yield* wait(5)
         expect((yield* held(context.store)).map(({ state }) => state)).toEqual(["failed", "failed"])
         expect(said(context.told)).toEqual([{ priority: "needs-you", spoken: `I couldn't pass your message on to Fix retries in yapd. ${Outbox.waiting}` }])
+        // Neither will turn up as a prompt now, so neither is waited for: the user saying the same in T3 Code is their own turn.
+        expect(context.retracted).toEqual([rosie.sent[0]?.outgoing.commandId ?? "", rosie.sent[1]?.outgoing.commandId ?? ""])
       }),
     ))
 
@@ -313,6 +319,7 @@ describe("Outbox", () => {
         expect(said(context.told)).toEqual([
           { priority: "needs-you", spoken: "I dropped your message for Fix retries in yapd on rig: it's been held for a day. I don't know how to reach rig." },
         ])
+        expect(context.retracted).toEqual([rig.sent[0]?.outgoing.commandId ?? ""])
       }),
     ))
 })

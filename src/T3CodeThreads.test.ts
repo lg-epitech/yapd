@@ -240,15 +240,30 @@ describe("T3CodeThreads", () => {
     expect(dispatched).toEqual([])
   })
 
-  test("doesn't give up on a message for an archived thread that can't be read right now", async () => {
-    // The shell still lists it, archived, but reading it fails for the moment. Whether the message went is unknown, so
-    // the outbox must hold it rather than tell the user it's lost: only a read without the message says that.
+  test("looks for the message in a thread the shell has stopped listing, since archiving one takes it out of the shell", async () => {
+    const dispatched: Array<unknown> = []
+    // Archived since a try whose answer was lost: the shell no longer has it, but the whole thread still reads, with the message.
+    const unlisted = { ...shell.threads[0], id: "unlisted", archivedAt: "2026-09-30T01:00:00.000Z" }
+    const threads = reached(dispatched, {
+      "/api/orchestration/threads/unlisted": { thread: { ...unlisted, messages: [{ id: "message-1", role: "user", text: "compact keep the public API unchanged" }] } },
+    })
+    expect(await Effect.runPromise(threads.send("unlisted", outgoing))).toBe("sent")
+    // Read without it, it never went, and there's nowhere left to send it.
+    expect(await failure(threads.send("unlisted", { ...outgoing, messageId: "message-2" }))).toMatchObject({ gone: true })
+    expect(dispatched).toEqual([])
+  })
+
+  test("doesn't give up on a message for a thread that can't be read right now", async () => {
+    // Reading the thread fails for the moment, whether the shell still lists it or has dropped it. Whether the message
+    // went is unknown, so the outbox must hold it rather than tell the user it's lost: only a read without the message says that.
     const transport: T3CodeThreads.Transport = {
       api: (path, schema) => (path === "/api/orchestration/shell" ? Effect.orDie(Schema.decodeUnknown(schema)(shell)) : Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." }))),
     }
     const threads = T3CodeThreads.threads(Option.some(Redacted.make("token")), () => Effect.succeed(transport))
-    const error = await failure(threads.send("archived", outgoing))
-    expect(error.reason).toBe("T3 Code isn't answering.")
-    expect(error.gone).toBeUndefined()
+    for (const id of ["archived", "unlisted"]) {
+      const error = await failure(threads.send(id, outgoing))
+      expect(error.reason).toBe("T3 Code isn't answering.")
+      expect(error.gone).toBeUndefined()
+    }
   })
 })
