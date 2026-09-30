@@ -4,6 +4,7 @@ import { homedir, userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import * as Config from "./Config.ts"
 import { home } from "./Home.ts"
+import { environment } from "./Setup.ts"
 import { run } from "./Process.ts"
 
 export const label = "dev.yapd"
@@ -18,8 +19,8 @@ export interface Options {
   readonly workingDirectory: string
   /** launchd starts agents with a bare PATH, so the provider CLIs and ffmpeg wouldn't be found. */
   readonly path: string
-  /** Where yapd's home is, when YAPD_HOME moved it, since the daemon can't read that from the .env inside it. */
-  readonly home?: string | undefined
+  /** The settings hooks carry too, like YAPD_HOME, which the daemon can't read from the .env inside it. */
+  readonly environment?: Readonly<Record<string, string>>
   readonly log: string
 }
 
@@ -43,8 +44,10 @@ export const plist = (options: Options) => `<?xml version="1.0" encoding="UTF-8"
   <key>WorkingDirectory</key>${string(options.workingDirectory)}
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>${string(options.path)}${options.home === undefined ? "" : `
-    <key>YAPD_HOME</key>${string(options.home)}`}
+    <key>PATH</key>${string(options.path)}${Object.entries(options.environment ?? {})
+      .map(([name, value]) => `
+    <key>${escape(name)}</key>${string(value)}`)
+      .join("")}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -78,7 +81,8 @@ export const install = Effect.gen(function* () {
     // The daemon reads .env from here.
     workingDirectory: home,
     path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
-    home: process.env.YAPD_HOME === undefined ? undefined : home,
+    // The same as the hooks get, so they reach the port it listens on, even one set only for this command.
+    environment: environment(),
     log: logPath,
   }
   yield* Effect.tryPromise(async () => {
