@@ -3,6 +3,7 @@ import { Cause, Effect, Exit, Fiber, Option } from "effect"
 import { realpathSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname } from "node:path"
+import * as Home from "./Home.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
 import * as Config from "./Config.ts"
@@ -70,6 +71,21 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
 
 const [command, argument] = process.argv.slice(2)
 
+/** Commands that read the user's settings. Hooks don't, and start wherever the agent runs. */
+const settled = ["serve", "install", "uninstall", "relay", "start", "catalog", "research", "mind"]
+
+// Bun reads .env from the folder it starts in, so these run in yapd's home, wherever they were started from: the
+// yapd folder, the home directory an SSH command starts in, or anywhere else.
+if (command !== undefined && settled.includes(command)) {
+  Home.adopt(dirname(import.meta.dir))
+  if (realpathSync(process.cwd()) !== realpathSync(Home.home)) {
+    const child = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2)], { cwd: Home.home, stdio: ["inherit", "inherit", "inherit"] })
+    // Passed on, so stopping this stops the daemon, rather than leave it holding the port.
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => child.kill(signal))
+    process.exit(await child.exited)
+  }
+}
+
 const mac = process.platform === "darwin"
 // Intel Macs could run it before, so they can still remove the service.
 if ((command === "serve" || command === "install" || (command === "uninstall" && !mac)) && !(mac && process.arch === "arm64")) {
@@ -97,12 +113,6 @@ if ((command === "serve" || command === "install" || (command === "uninstall" &&
   // Not for the user to run: it's how a session yapd started is kept an eye on.
   runMain(Minder.mind(argument))
 } else if (command === "relay" || command === "start" || command === "catalog" || command === "research") {
-  // Bun reads .env from where it starts, which for the daemon is the yapd folder, but SSH starts in the home directory.
-  const folder = realpathSync(dirname(import.meta.dir))
-  if (realpathSync(process.cwd()) !== folder) {
-    const child = Bun.spawnSync([process.execPath, import.meta.path, ...process.argv.slice(2)], { cwd: folder, stdio: ["inherit", "inherit", "inherit"] })
-    process.exit(child.exitCode ?? 1)
-  }
   runMain(command === "relay" ? relay : command === "start" ? start(argument) : command === "catalog" ? catalog(argument) : research)
 } else {
   console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd research")

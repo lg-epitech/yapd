@@ -1,13 +1,14 @@
 import { Effect, Option } from "effect"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import * as Config from "./Config.ts"
+import { home } from "./Home.ts"
 
 // The user's rules for new work, in their own words, since a model reads them:
 // "Fable on high for design and hard bugs, a worktree for features and fixes,
 // none for questions". Apart from .env, which holds settings rather than prose.
 
-/** Next to .env, in the yapd folder, unless `YAPD_PREFERENCES` says elsewhere. */
-export const path = Effect.map(Config.preferences, Option.getOrElse(() => join(dirname(import.meta.dir), "preferences.md")))
+/** Next to .env, in yapd's home, unless `YAPD_PREFERENCES` says elsewhere. */
+export const path = Effect.map(Config.preferences, Option.getOrElse(() => join(home, "preferences.md")))
 
 /** More than this is cut, since every prompt waits on the model reading it. */
 const longest = 6000

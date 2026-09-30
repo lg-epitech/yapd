@@ -3,6 +3,7 @@ import { mkdir, rm } from "node:fs/promises"
 import { homedir, userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import * as Config from "./Config.ts"
+import { home } from "./Home.ts"
 import { run } from "./Process.ts"
 
 export const label = "dev.yapd"
@@ -68,7 +69,7 @@ export const install = Effect.gen(function* () {
     bun: Bun.which("bun") ?? process.execPath,
     main,
     // The daemon reads .env from here.
-    workingDirectory: dirname(dirname(main)),
+    workingDirectory: home,
     path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
     log: logPath,
   }
