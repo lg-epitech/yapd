@@ -16,6 +16,7 @@ import {
   groundedThread,
   key,
   type Listing,
+  machinesNamed,
   type Material,
   parseKey,
   shortlist,
@@ -569,7 +570,18 @@ export const make = (options: {
       })
     }
 
-    /** Asks which thread, in the writer's words when it asked one, else plainly. */
+    /** Why the thread may be out of reach: the machines they named whose threads couldn't be listed, each with the machine's reason. */
+    const unlisted = (material: Material) =>
+      machinesNamed(material.lines, material.threads).flatMap((name) => {
+        const reason = material.threads.find(({ machine }) => machine === name)?.reason
+        return reason === undefined ? [] : [`I can't see ${name}'s threads right now. ${reason}`]
+      })
+
+    /**
+     * Asks which thread, in the writer's words when it asked one, else plainly,
+     * saying first why a machine they named shows none, so they know what
+     * the question is really about.
+     */
     const unsettled = (draft: Draft, material: Material, decision: Decision, plain: string) =>
       Effect.gen(function* () {
         yield* Effect.logInfo(
@@ -578,7 +590,7 @@ export const make = (options: {
           }. ${decision.why}`,
         )
         const spoken = decision.spoken.trim()
-        return yield* ask(draft, material, spoken.endsWith("?") ? spoken : plain)
+        return yield* ask(draft, material, spoken.endsWith("?") ? spoken : [...unlisted(material), plain].join(" "))
       })
 
     const message = (draft: Draft, material: Material, decision: Decision) =>

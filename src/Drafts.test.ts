@@ -120,6 +120,8 @@ const drafts = (
     readonly written?: Written
     readonly refuse?: string
     readonly rigDown?: boolean
+    /** Why rig's threads can't be listed, when they can't. */
+    readonly rigUnlisted?: string
     /** How the outbox answers every send. */
     readonly outbox?: Delivery | ThreadsError
     /** What T3 Code lists on rosie. */
@@ -168,7 +170,11 @@ const drafts = (
       ["rig", [...rigThreads]],
     ])
     const threads = (machine: string): Threads => ({
-      list: Effect.sync(() => void listings.push(machine)).pipe(Effect.map(() => [...(lists.get(machine) ?? [])])),
+      list: Effect.sync(() => void listings.push(machine)).pipe(
+        Effect.flatMap(() =>
+          machine === "rig" && options.rigUnlisted !== undefined ? Effect.fail(new ThreadsError({ reason: options.rigUnlisted })) : Effect.succeed([...(lists.get(machine) ?? [])]),
+        ),
+      ),
       detail: (id) => {
         const thread = lists.get(machine)?.find((thread) => thread.id === id)
         return thread === undefined
@@ -733,6 +739,21 @@ describe("Drafts", () => {
       }),
     )
     expect(ambiguous).toEqual({ sent: [], spoken: ["Is that the latency one in yapd, or the redis one in std?"] })
+  })
+
+  test("asks, saying why, rather than send to another machine's thread when the one the user named can't be listed", async () => {
+    // rosie has a retry fix too, and the writer picked it: the message would go to the wrong machine.
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, sent, spoken } = yield* drafts(() => addressed("message", "rosie/r1", "the retry fix on rig", "Stop there."), {
+          rosie: [...rosieThreads, listed("r1", { title: "Retry fix" })],
+          rigUnlisted: "rig isn't answering.",
+        })
+        yield* dictate("Tell the retry fix on rig to stop there.")
+        return { sent, spoken: spoken() }
+      }),
+    )
+    expect(result).toEqual({ sent: [], spoken: ["I can't see rig's threads right now. rig isn't answering. Which thread is that for?"] })
   })
 
   test("says a message to a thread mid-turn is held, when it couldn't tell whether one went, and when one couldn't be sent", async () => {

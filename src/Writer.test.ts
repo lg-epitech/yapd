@@ -276,6 +276,22 @@ describe("Writer", () => {
     expect(Writer.groundedThread({ thread: "rig/r3", threadFrom: "named", threadEvidence: "fix retries" }, both, twice, [])).toBe(false)
   })
 
+  test("keeps a message on the machine the user named, even when that machine's threads couldn't be listed", () => {
+    const lines = [{ speaker: "user" as const, text: "Tell the retry fix on rig to stop." }]
+    const retry = { threadFrom: "named" as const, threadEvidence: "the retry fix on rig" }
+    const fix = (machine: string, id: string) => ({ listed: listed(id, { project: "trainer", title: "Retry fix" }), known: Option.none() })
+    // rig can't be listed, so rosie's retry fix is the only one shown: it's still not the one they asked for.
+    const down = [{ ...threads[0]!, threads: [...threads[0]!.threads, fix("rosie", "f1")] }, { machine: "rig", here: false, threads: [], reason: "rig isn't answering." }]
+    expect(Writer.groundedThread({ thread: "rosie/f1", ...retry }, lines, down, [])).toBe(false)
+    // With rig listed, its own retry fix is settled, and rosie's isn't.
+    const up = [down[0]!, { machine: "rig", here: false, threads: [fix("rig", "r1")] }]
+    expect(Writer.groundedThread({ thread: "rig/r1", ...retry }, lines, up, [])).toBe(true)
+    expect(Writer.groundedThread({ thread: "rosie/f1", ...retry }, lines, up, [])).toBe(false)
+    // No machine named: nothing changes, and a word that only sounds like one names none.
+    const plain = [{ speaker: "user" as const, text: "Tell the retry fix to stop rigging the tests." }]
+    expect(Writer.groundedThread({ thread: "rosie/f1", threadFrom: "named", threadEvidence: "the retry fix" }, plain, down, [])).toBe(true)
+  })
+
   test("takes a name only when it sets the thread apart from the others listed", () => {
     const known = (id: string, prompt: string) => Option.some({ machine: "rosie", id, prompt, dictated: null, description: null, started: false, at: iso(60) })
     const backoff = { listed: listed("r1", { title: "Retry backoff fix" }), known: known("r1", "Make retries back off, and keep the budget for them as it is.") }

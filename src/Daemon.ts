@@ -78,9 +78,16 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
    * mustn't leave two more waiting to be taken by the user's own prompts.
    */
   const expected = new Map<string, { readonly text: string; readonly at: number }>()
+  /**
+   * Messages that have turned up, by key and when: a try after one went, its
+   * acknowledgement lost, would expect it again, and the user's own prompt
+   * with the same words would be taken for it. Kept as long as an expectation.
+   */
+  const taken = new Map<string, number>()
   /** Lets go of what has waited too long to turn up as a prompt: it never will. */
   const prune = (now: number) => {
     for (const [key, { at }] of expected) if (now - at >= expecting) expected.delete(key)
+    for (const [key, at] of taken) if (now - at >= expecting) taken.delete(key)
   }
   let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
@@ -303,6 +310,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
             if (!prompt.includes(text)) continue
             followed.set(session, { message: text })
             expected.delete(key)
+            taken.set(key, arrivedAt)
             break
           }
           // Anything but the follow-up itself means the user took over.
@@ -471,13 +479,14 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
      * Expects `text`, about to be sent to a thread as the message called `key`,
      * to turn up as some session's prompt, whose answer is then wanted however
      * quick. Said again before every try at the same message, which only
-     * renews the one expectation.
+     * renews the one expectation, and none once the message has turned up.
      */
     expect: (key: string, text: string) =>
       Effect.map(Clock.currentTimeMillis, (now) => {
         const squashed = squash(text)
         if (squashed === "") return
         prune(now)
+        if (taken.has(key)) return
         expected.set(key, { text: squashed, at: now })
       }).pipe(events.withPermits(1)),
     /** Stops expecting the message called `key`: it won't be sent, so a prompt with its words is the user's own. */

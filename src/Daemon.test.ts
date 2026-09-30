@@ -327,6 +327,24 @@ describe("Daemon", () => {
     expect(result.prompts).toEqual([Option.some("Go on."), Option.some("Go on.")])
   })
 
+  test("takes a sent message as a follow-up once, even when it's expected again after it turned up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, expected, nextEvent } = yield* make()
+        yield* expected("message-1", "Explain it.")
+        yield* turn("a", "Here's what changed.", 1, { prompt: "Explain it." })
+        const first = yield* nextEvent("Ready:", "Skipped quick turn")
+        // The outbox tries again, its acknowledgement lost: the message already went, so nothing is expected.
+        yield* expected("message-1", "Explain it.")
+        yield* turn("b", "Sure.", 1, { prompt: "Explain it." })
+        const second = yield* nextEvent("Ready:", "Skipped quick turn")
+        return { first, second }
+      }),
+    )
+    // The first turn is heard from however quick, as the answer to the message. The user's own identical prompt isn't.
+    expect(result).toEqual({ first: "Ready: yapd. Here's what changed.", second: "Skipped quick turn" })
+  })
+
   test("keeps and answers a fresh update while an older follow-up is still being delivered", async () => {
     const result = await run(
       Effect.gen(function* () {

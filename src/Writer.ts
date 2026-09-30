@@ -160,9 +160,26 @@ const apart = (telling: ReadonlyArray<string>, chosen: ReadonlySet<string>, othe
 }
 
 /**
+ * The machines the user named in this request, out of every one asked for
+ * threads, whether or not it could list them: a machine they said is where
+ * the thread has to be, so "the retry fix on rig" can't reach rosie's retry
+ * fix while rig can't be listed. Only whole words count, so "rigging" names
+ * no machine, but a short name that's also a plain word still does: better
+ * a question than a message to the wrong machine.
+ */
+export const machinesNamed = (lines: ReadonlyArray<Line>, threads: ReadonlyArray<Pick<ThreadListing, "machine">>) => {
+  const said = saidBy(lines)
+  return threads.map(({ machine }) => machine).filter((machine) => {
+    const name = words(machine)
+    return name.length > 0 && name.every((word) => said.has(word))
+  })
+}
+
+/**
  * Whether the thread is settled by something the user really said, so a
- * message can't go to the wrong agent: the key is one that was listed, and the
- * words given for it are theirs. When they named it, those words, past the
+ * message can't go to the wrong agent: the key is one that was listed, the
+ * words given for it are theirs, and when they named a machine, the thread
+ * is on one they named. When they named it, those words, past the
  * bare ones like "the agent", have to set that thread apart from every other
  * one listed, by what the listing shows: some of them have to be its, or the
  * model went by something it wasn't given, and no other thread may show all
@@ -194,6 +211,9 @@ export const groundedThread = (
   const chosen = decision.thread.trim()
   const found = threads.flatMap((listing) => listing.threads.filter(({ listed }) => key(listing.machine, listed.id) === chosen).map((thread) => ({ listing, thread })))[0]
   if (found === undefined || !quoted(decision.threadEvidence, lines)) return false
+  // The evidence is quoted from their lines, so a machine named in it is named in them.
+  const named = machinesNamed(lines, threads)
+  if (named.length > 0 && !named.includes(found.listing.machine)) return false
   const telling = words(decision.threadEvidence).filter((word) => !bare.has(word))
   if (decision.threadFrom === "named") {
     const mine = wordsShown(found.listing, found.thread)
