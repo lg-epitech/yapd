@@ -2,7 +2,7 @@
 
 I'm tired of reading my agent outputs. So I have another agent yap instead!
 
-When a Claude Code or Codex session finishes, yapd sums up the reply in a sentence or two and says it. If several finish together you hear them one at a time, and whatever needs you goes first. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting), or press a shortcut and [tell yapd what to start next](#starting-new-work).
+When a Claude Code or Codex session finishes, yapd sums up the reply in a sentence or two and says it. If several finish together you hear them one at a time, and whatever needs you goes first. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting), or press a shortcut and [talk to yapd about your work](#dictating): start something, tell an agent what to do next, or ask where things stand.
 
 Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included.
 
@@ -84,7 +84,7 @@ A session another app drives, like T3 Code, only gets follow-ups through that ap
 
 ## Dictating
 
-Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said becomes [new work](#starting-new-work).
+Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. yapd works out what you meant: [new work](#starting-new-work) to start, [something to tell an agent](#talking-to-a-thread) that's already at work, where one of them is at, or who needs you.
 
 If yapd is reading an update when you press it, it stops, and reads it again from the start once you're done, along with anything that came in meanwhile. If you forget about it, it stops listening after five minutes and drops what it heard. It doesn't need any permission beyond the microphone.
 
@@ -108,7 +108,13 @@ The one thing yapd won't guess is the project. It goes by a project you named, e
 
 Most prompts are written from what you said, in a few seconds. When a request leans on something in the project, like "do for the responder what we did for the condenser", yapd reads the project first, which takes longer, and says so before it starts: "Looking through yapd first." It reads with the provider's CLI kept from changing anything: Codex in its read-only sandbox, Claude Code with only its tools that read. With other providers it doesn't read projects, and writes from what you said.
 
-Nothing waits on this. Updates keep being read while a prompt is written, and you can dictate the next request before the last one has started. The shortcut only ever starts a new request, so answer questions by talking.
+Nothing waits on this. Updates keep being read while a prompt is written, and you can dictate the next request before the last one has started. Answer yapd's questions by talking, as you would after an update, not with the shortcut.
+
+### Talking to a thread
+
+The same shortcut reaches the agents already at work. "Tell the retry fix to keep the public API unchanged" sends that to its thread, written out as you'd have typed it, and yapd says who got it: "Sent to Fix retries in cryptio sources." "Where's the latency investigation at?" reads the thread's latest turns and sums up where it stands, and "who needs me?", "what finished since lunch?" or "anything failing on rig?" are answered across every machine. "Tell it to" right after an update or a summary goes to the thread you just heard about.
+
+The threads are what T3 Code has on each machine, and nothing else: a machine without a [T3 Code token](#where-follow-ups-go) can't be asked about, and yapd says so. Which thread you mean is settled by your own words against what the work is, and its title, project and branch as T3 Code has them. yapd keeps the prompt it wrote and a description of the work for the threads it started, and fetches the first message once for the others, so "the one about the echo canceller" works whatever the thread is called. When two fit, or none clearly does, it asks, naming them, rather than send a message to the wrong agent. It checks the matches again before sending, since another thread can appear while you're talking. If a thread has taken on newer work since the update you pointed at, it asks you to name the thread again rather than apply your reply to that newer work. A message to a thread in the middle of a turn is held until that turn ends, and yapd says when it passed it on, or why it couldn't. When it can't tell whether a message got there, say because T3 Code stopped answering, it says so and keeps trying, and the message can't arrive twice. Held messages survive a restart. A thread waiting on an approval or an answer in T3 Code can't take a message: answer it there.
 
 ### Your rules
 
@@ -187,7 +193,7 @@ YAPD_REMOTES=server=me@server.example.com
 
 A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config` works. Separate several with commas. yapd SSHes in with `BatchMode`, so it needs a key that works without a password prompt, and `yapd` has to be on the `PATH` that non-interactive SSH commands get: `ssh server yapd` should print yapd's usage, not "command not found". Adding `~/.bun/bin` to `PATH` in `~/.zshenv`, or at the top of `~/.bashrc`, is usually enough.
 
-Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in the `.env` of yapd's folder on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings.
+Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in the `.env` of yapd's folder on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings, and its T3 Code threads can be [talked to](#talking-to-a-thread) from the Mac. Both machines need the same version of yapd for that, since the Mac runs its new commands there over SSH.
 
 ## Providers
 
