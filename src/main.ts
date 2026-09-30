@@ -79,7 +79,9 @@ const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "s
 const dotenv = (): Record<string, string | undefined> => {
   if (![".env", ".env.local", ".env.development", ".env.production", ".env.test"].some((name) => existsSync(name))) return {}
   try {
-    return JSON.parse(Bun.spawnSync([process.execPath, "--print", "JSON.stringify(process.env)"], { env: {} }).stdout.toString())
+    // With NODE_ENV as it was, which picks between .env.production and the others.
+    const env = process.env.NODE_ENV === undefined ? {} : { NODE_ENV: process.env.NODE_ENV }
+    return JSON.parse(Bun.spawnSync([process.execPath, "--print", "JSON.stringify(process.env)"], { env }).stdout.toString())
   } catch {
     return {}
   }
