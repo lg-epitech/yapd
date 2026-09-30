@@ -57,13 +57,17 @@ export const serve = Effect.gen(function* () {
   const reached = yield* machines
   const own = reached.find(({ here }) => here)
   const identify = yield* T3Code.identify
+  /** The machine a hook came from: this Mac unless the hook names another's hostname. Hooks older than hostnames don't say, and were all local. */
+  const from = (host: string | undefined) => (host === undefined ? own : reached.find(({ hosts }) => hosts.some((named) => named.toLowerCase() === host.toLowerCase())))
   const daemon = yield* Daemon.make({
     // Only this machine's T3 Code is asked which thread an update came from. Another machine's hooks
     // name it, and its threads are only listed from there, so its updates go without a link.
     locate: (thread) =>
-      own === undefined || (thread.origin.host !== undefined && !own.hosts.some((host) => host.toLowerCase() === thread.origin.host?.toLowerCase()))
+      own === undefined || from(thread.origin.host) !== own
         ? Effect.succeed(Option.none())
         : Effect.map(identify(thread), Option.map((id) => ({ machine: own.name, id }))),
+    // By the name the user calls it, which is what the outbox sends by, so a message is only taken as the prompt of a session there.
+    machine: ({ host }) => Option.map(Option.fromNullable(from(host)), ({ name }) => name),
   })
   yield* Server.serve(yield* Config.port, daemon.handle)
   const preferences = yield* Preferences.path

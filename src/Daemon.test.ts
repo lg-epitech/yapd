@@ -104,7 +104,11 @@ const make = (says?: string, options: {
     })),
   )
   const context = yield* Layer.build(layer)
-  const made = yield* Daemon.make(options.locate === undefined ? {} : { locate: options.locate }).pipe(Effect.provide(context))
+  const made = yield* Daemon.make({
+    ...(options.locate === undefined ? {} : { locate: options.locate }),
+    // Hooks come from rosie unless they name another host.
+    machine: ({ host }) => Option.some(host ?? "rosie"),
+  }).pipe(Effect.provide(context))
   handle = made.handle
   const { speak: read, tell } = made
   /** What the user has heard by now, the latest first. */
@@ -126,15 +130,22 @@ const make = (says?: string, options: {
     ...Array.from({ length: defaults.silence }, () => new Float32Array([0])),
   ]).pipe(Effect.zipRight(flush))
   const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
-  /** A turn that took `seconds`, as its hooks report it. */
-  const turn = (session: string, message: string, seconds: number, extra: { readonly prompt?: string; readonly needsYou?: boolean; readonly launched?: boolean } = {}) =>
+  /** A turn that took `seconds`, as its hooks report it, in `/tmp` here unless said otherwise. */
+  const turn = (
+    session: string,
+    message: string,
+    seconds: number,
+    extra: { readonly prompt?: string; readonly needsYou?: boolean; readonly launched?: boolean; readonly host?: string; readonly cwd?: string } = {},
+  ) =>
     Effect.gen(function* () {
-      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd: "/tmp", prompt: extra.prompt ?? "Go on." }, { project: "yapd" }, false)
+      const cwd = extra.cwd ?? "/tmp"
+      const origin = { project: "yapd", ...(extra.host === undefined ? {} : { host: extra.host }) }
+      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd, prompt: extra.prompt ?? "Go on." }, origin, false)
       yield* wait(seconds)
       yield* handle(
         "claude",
-        { hook_event_name: "Stop", session_id: session, cwd: "/tmp", last_assistant_message: message, ...(extra.needsYou ? { needs_you: true } : {}) },
-        { project: "yapd", ...(extra.launched ? { launched: true } : {}) },
+        { hook_event_name: "Stop", session_id: session, cwd, last_assistant_message: message, ...(extra.needsYou ? { needs_you: true } : {}) },
+        { ...origin, ...(extra.launched ? { launched: true } : {}) },
         false,
       )
       yield* flush
@@ -331,11 +342,11 @@ describe("Daemon", () => {
     const result = await run(
       Effect.gen(function* () {
         const { turn, expected, nextEvent } = yield* make()
-        yield* expected("message-1", "Explain it.")
+        yield* expected("message-1", "Explain it.", { machine: "rosie", directory: "/tmp" })
         yield* turn("a", "Here's what changed.", 1, { prompt: "Explain it." })
         const first = yield* nextEvent("Ready:", "Skipped quick turn")
         // The outbox tries again, its acknowledgement lost: the message already went, so nothing is expected.
-        yield* expected("message-1", "Explain it.")
+        yield* expected("message-1", "Explain it.", { machine: "rosie", directory: "/tmp" })
         yield* turn("b", "Sure.", 1, { prompt: "Explain it." })
         const second = yield* nextEvent("Ready:", "Skipped quick turn")
         return { first, second }
@@ -343,6 +354,24 @@ describe("Daemon", () => {
     )
     // The first turn is heard from however quick, as the answer to the message. The user's own identical prompt isn't.
     expect(result).toEqual({ first: "Ready: yapd. Here's what changed.", second: "Skipped quick turn" })
+  })
+
+  test("takes a sent message as the prompt of a session where it went, not the same words typed elsewhere", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, expected, nextEvent } = yield* make()
+        yield* expected("message-1", "Explain it.", { machine: "rosie", directory: "/tmp" })
+        // The same words in a session on rig, then in one here in another directory: the user's own, and the message stays expected.
+        yield* turn("b", "Sure.", 1, { prompt: "Explain it.", host: "rig" })
+        const elsewhere = yield* nextEvent("Ready:", "Skipped quick turn")
+        yield* turn("c", "Sure.", 1, { prompt: "Explain it.", cwd: "/tmp/somewhere-else" })
+        const other = yield* nextEvent("Ready:", "Skipped quick turn")
+        yield* turn("a", "Here's what changed.", 1, { prompt: "Explain it." })
+        const own = yield* nextEvent("Ready:", "Skipped quick turn")
+        return { elsewhere, other, own }
+      }),
+    )
+    expect(result).toEqual({ elsewhere: "Skipped quick turn", other: "Skipped quick turn", own: "Ready: yapd. Here's what changed." })
   })
 
   test("keeps and answers a fresh update while an older follow-up is still being delivered", async () => {
@@ -565,14 +594,14 @@ describe("Daemon", () => {
       Effect.gen(function* () {
         const { turn, expected, retracted, wait, played } = yield* daemon
         // Held for a busy thread and tried three times before it went: one message, however many tries.
-        for (let tries = 0; tries < 3; tries++) yield* expected("yapd:m1", "Keep the API unchanged.")
+        for (let tries = 0; tries < 3; tries++) yield* expected("yapd:m1", "Keep the API unchanged.", { machine: "rosie", directory: "/tmp" })
         yield* turn("a", "Kept it.", 5, { prompt: "Keep the API unchanged." })
         yield* wait(11)
         // Taken once it turned up: the same words again are the user's own, typed, and the turn is theirs to watch.
         yield* turn("a", "Still kept.", 5, { prompt: "Keep the API unchanged." })
         yield* turn("b", "Quick and watched.", 5)
         // Given up on before it went: the user typing its words is their own doing too.
-        yield* expected("yapd:m2", "Drop the cache.")
+        yield* expected("yapd:m2", "Drop the cache.", { machine: "rosie", directory: "/tmp" })
         yield* retracted("yapd:m2")
         yield* turn("c", "Dropped.", 5, { prompt: "Drop the cache." })
         yield* wait(11)

@@ -558,11 +558,14 @@ export const make = (options: {
 
     /**
      * The thread a message or a question is about, when the user's own words
-     * settle it and it's one that was listed. Anything less is a guess, and a
-     * message to the wrong agent is the costly mistake.
+     * settle it and it's one the writer was shown. Their words are held
+     * against every thread listed, not only the latest few the writer saw: an
+     * older one on the same machine, or with the same title, fits them as
+     * well. Anything less is a guess, and a message to the wrong agent is the
+     * costly mistake.
      */
     const target = (material: Material, decision: Decision): Option.Option<Target> => {
-      if (!groundedThread(decision, material.lines, shortlist(material.threads, material.now), material.recent)) return Option.none()
+      if (!groundedThread(decision, material.lines, shortlist(material.threads, material.now), material.threads, material.recent)) return Option.none()
       return Option.flatMap(parseKey(decision.thread.trim()), ({ machine: name, id }) => {
         const machine = options.machines.find((machine) => machine.name === name)
         const found = material.threads.find((listing) => listing.machine === name)?.threads.find(({ listed }) => listed.id === id)

@@ -15,6 +15,7 @@ import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
 import { RelayError, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
+import { canonical } from "./T3Code.ts"
 import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
@@ -28,6 +29,12 @@ const expecting = 30 * 60_000
 /** A T3 Code thread, as what's heard names it. */
 type Link = NonNullable<Recent.Heard["thread"]>
 
+/** Where a message went: the machine, as the user calls it, and the thread's directory there. */
+export interface Destination {
+  readonly machine: string
+  readonly directory: string
+}
+
 export interface Options {
   /**
    * The T3 Code thread an update came from, when it can be told, so that "tell
@@ -35,6 +42,12 @@ export interface Options {
    * and an update goes out without a link sooner than wait on one.
    */
   readonly locate?: (thread: Thread) => Effect.Effect<Option.Option<Link>>
+  /**
+   * What the user calls the machine a hook came from, when it's one yapd
+   * reaches: this Mac unless the hook names another's hostname. Without it, no
+   * prompt is taken for a message the outbox sent.
+   */
+  readonly machine?: (origin: Origin) => Option.Option<string>
 }
 
 /**
@@ -70,14 +83,18 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   /**
    * Messages sent to threads through the outbox, by what the outbox calls
    * them, which reach the daemon only as the prompt their hooks report,
-   * without saying which session. The one whose prompt carries the text is
-   * the one that got it, and its answer is wanted like a follow-up's, however
-   * quick the turn. Each is kept for a while, since a message held for a busy
-   * thread is sent much later, and taken once it turns up. Every try at one
-   * message is the same entry: a message tried three times before it went
-   * mustn't leave two more waiting to be taken by the user's own prompts.
+   * without saying which session. The one whose prompt carries the text, on
+   * the machine and in the directory the message went to, is the one that got
+   * it, and its answer is wanted like a follow-up's, however quick the turn.
+   * The same words typed into a session elsewhere are the user's own. Each is
+   * kept for a while, since a message held for a busy thread is sent much
+   * later, and taken once it turns up. Every try at one message is the same
+   * entry: a message tried three times before it went mustn't leave two more
+   * waiting to be taken by the user's own prompts.
    */
-  const expected = new Map<string, { readonly text: string; readonly at: number }>()
+  const expected = new Map<string, { readonly text: string; readonly to: Destination; readonly at: number }>()
+  /** A directory as the filesystem has it, the way T3 Code's own matching reads paths, so a symlinked checkout is one place however it's spelt. */
+  const resolved = (path: string) => Effect.promise(() => canonical(path))
   /**
    * Messages that have turned up, by key and when: a try after one went, its
    * acknowledgement lost, would expect it again, and the user's own prompt
@@ -304,14 +321,19 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
         case "UserPromptSubmit": {
           prompts.set(session, { text: payload.prompt, at: arrivedAt })
           const prompt = squash(payload.prompt ?? "")
-          // A message the outbox sent, turning up as this session's prompt: it's followed like one sent by voice.
+          // A message the outbox sent, turning up as this session's prompt where it was sent: it's followed like one
+          // sent by voice. The same words from another machine or directory leave it expected, since they're the user's.
           prune(arrivedAt)
-          for (const [key, { text }] of expected) {
-            if (!prompt.includes(text)) continue
-            followed.set(session, { message: text })
-            expected.delete(key)
-            taken.set(key, arrivedAt)
-            break
+          if (expected.size > 0) {
+            const machine = Option.getOrUndefined(options.machine?.(origin) ?? Option.none())
+            const directory = yield* resolved(payload.cwd)
+            for (const [key, { text, to }] of expected) {
+              if (to.machine !== machine || to.directory !== directory || !prompt.includes(text)) continue
+              followed.set(session, { message: text })
+              expected.delete(key)
+              taken.set(key, arrivedAt)
+              break
+            }
           }
           // Anything but the follow-up itself means the user took over.
           const sent = followed.get(session)
@@ -476,18 +498,20 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     /** What the user had heard by `at`, the latest first, as it stood then. What's still waiting to be read out isn't theirs to point at yet. */
     recent: (at: number) => Effect.sync(() => Recent.heardBy(recent, at)),
     /**
-     * Expects `text`, about to be sent to a thread as the message called `key`,
-     * to turn up as some session's prompt, whose answer is then wanted however
-     * quick. Said again before every try at the same message, which only
-     * renews the one expectation, and none once the message has turned up.
+     * Expects `text`, about to be sent to a thread at `to` as the message
+     * called `key`, to turn up as the prompt of a session there, whose answer
+     * is then wanted however quick. Said again before every try at the same
+     * message, which only renews the one expectation, and none once the
+     * message has turned up.
      */
-    expect: (key: string, text: string) =>
-      Effect.map(Clock.currentTimeMillis, (now) => {
+    expect: (key: string, text: string, to: Destination) =>
+      Effect.gen(function* () {
         const squashed = squash(text)
         if (squashed === "") return
+        const now = yield* Clock.currentTimeMillis
         prune(now)
         if (taken.has(key)) return
-        expected.set(key, { text: squashed, at: now })
+        expected.set(key, { text: squashed, to: { machine: to.machine, directory: yield* resolved(to.directory) }, at: now })
       }).pipe(events.withPermits(1)),
     /** Stops expecting the message called `key`: it won't be sent, so a prompt with its words is the user's own. */
     retract: (key: string) =>

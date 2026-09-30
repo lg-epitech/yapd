@@ -21,8 +21,13 @@ export interface Options {
   readonly tell: (notice: Notice) => Effect.Effect<void>
   /** Notes what's about to be told, so "tell it to" right after can mean the thread it was about. */
   readonly note: (heard: Heard) => Effect.Effect<void>
-  /** Says what's about to be sent, before every try, so the answer to it is heard however quick the turn. The key is the message's, the same on every try. */
-  readonly expect?: (key: string, text: string) => Effect.Effect<void>
+  /**
+   * Says what's about to be sent, and where, before every try, so the answer
+   * to it is heard however quick the turn, and the same words typed into a
+   * session elsewhere aren't taken for it. The key is the message's, the same
+   * on every try.
+   */
+  readonly expect?: (key: string, text: string, to: { readonly machine: string; readonly directory: string }) => Effect.Effect<void>
   /** Takes back what was said to expect for a message that won't go after all. */
   readonly retract?: (key: string) => Effect.Effect<void>
   /** How long between tries at a held message, to start with. Each try that leaves it held doubles the wait, up to a minute. */
@@ -98,11 +103,20 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
     }
     /** When each held message is next tried, and how long the wait after that is, by command id. Nothing for one not tried yet. */
     const later = new Map<string, { readonly next: number; readonly wait: number }>()
-    /** Poked when something is held, so the watcher only runs while there's something to pass on. */
-    const wake = yield* Queue.sliding<void>(1)
+    const scope = yield* Effect.scope
+    /**
+     * Each machine's watcher, by what pokes it, while the machine has messages
+     * held: one for every machine rather than one for all, so a machine that
+     * takes twenty seconds to not answer holds up no message for another.
+     * Started and ended under `bookkeeping`, so a message held for a machine
+     * just as its watcher finds nothing left starts a new one, and doesn't
+     * wait for a restart.
+     */
+    const watchers = new Map<string, Queue.Queue<void>>()
+    const bookkeeping = yield* Effect.makeSemaphore(1)
 
     /** Said just before each try, so it's there before the thread's hooks can report the prompt. Under the command id, so the tries at one message renew one expectation. */
-    const expect = (row: Row) => options.expect?.(row.command_id, row.text) ?? Effect.void
+    const expect = (row: Row) => options.expect?.(row.command_id, row.text, { machine: row.machine, directory: row.directory }) ?? Effect.void
     const retract = (commandId: string) => options.retract?.(commandId) ?? Effect.void
 
     const reach = (machine: string) =>
@@ -206,49 +220,74 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
         return true
       })
 
-    /**
-     * A try at the oldest held message of each thread that's due one, so
-     * several go one turn at a time, machine by machine at once so one that's
-     * slow holds up no other. When the next try is due, if anything is held.
-     */
-    const pass = Effect.gen(function* () {
-      const rows = yield* store.transaction((database) =>
-        database.query<Row, []>(`select ${columns} from messages where state = 'held' order by created_at`).all(),
-      )
-      const oldest = new Map<string, Row>()
-      for (const row of rows) {
-        const key = `${row.machine}\n${row.thread}`
-        if (!oldest.has(key)) oldest.set(key, row)
-      }
-      const byMachine = Map.groupBy(oldest.values(), (row) => row.machine)
-      yield* Effect.forEach(
-        byMachine.values(),
-        (rows) => Effect.forEach(rows, (row) => oneAtATime(row.machine, row.thread, retry(row)), { discard: true }),
-        { concurrency: "unbounded", discard: true },
-      )
-      const held = yield* store.transaction((database) =>
-        database.query<{ command_id: string }, []>("select command_id from messages where state = 'held'").all(),
-      )
-      const now = yield* Clock.currentTimeMillis
-      // One not tried yet, like the next behind one that just went, is due at the usual pace.
-      return held.length === 0 ? Option.none() : Option.some(Math.min(...held.map(({ command_id }) => later.get(command_id)?.next ?? now + every)))
-    })
+    /** A try at the oldest held message of each of the machine's threads that's due one, so several go one turn at a time. */
+    const pass = (machine: string) =>
+      Effect.gen(function* () {
+        const rows = yield* store.transaction((database) =>
+          database.query<Row, [string]>(`select ${columns} from messages where state = 'held' and machine = ? order by created_at`).all(machine),
+        )
+        const oldest = new Map<string, Row>()
+        for (const row of rows) if (!oldest.has(row.thread)) oldest.set(row.thread, row)
+        yield* Effect.forEach(oldest.values(), (row) => oneAtATime(machine, row.thread, retry(row)), { discard: true })
+      })
 
-    yield* Effect.forkScoped(
-      Effect.forever(
+    /**
+     * When the machine's next try is due, if anything is still held for it.
+     * Nothing held ends its watcher, under the lock, so nothing is held for it
+     * without one. One not tried yet, like the next behind one that just went,
+     * is due at the usual pace.
+     */
+    const due = (machine: string) =>
+      bookkeeping.withPermits(1)(
         Effect.gen(function* () {
-          const due = yield* pass.pipe(
+          const held = yield* store.transaction((database) =>
+            database.query<{ command_id: string }, [string]>("select command_id from messages where state = 'held' and machine = ?").all(machine),
+          )
+          if (held.length === 0) {
+            watchers.delete(machine)
+            return Option.none<number>()
+          }
+          const now = yield* Clock.currentTimeMillis
+          return Option.some(Math.min(...held.map(({ command_id }) => later.get(command_id)?.next ?? now + every)))
+        }),
+      )
+
+    /** Goes through what's held for one machine, at its own pace, until nothing is. */
+    const watch = (machine: string, wake: Queue.Queue<void>): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        while (true) {
+          const next = yield* Effect.flatMap(pass(machine), () => due(machine)).pipe(
             Effect.catchAllCause((cause) =>
-              Effect.logError("Couldn't go through the held messages.", cause).pipe(Effect.zipRight(Effect.map(Clock.currentTimeMillis, (now) => Option.some(now + every)))),
+              Effect.logError(`Couldn't go through the messages held for ${machine}.`, cause).pipe(Effect.zipRight(Effect.map(Clock.currentTimeMillis, (now) => Option.some(now + every)))),
             ),
           )
-          if (Option.isNone(due)) return yield* Queue.take(wake)
+          if (Option.isNone(next)) return
           const now = yield* Clock.currentTimeMillis
           // A new message held meanwhile is worth a pass sooner.
-          yield* Effect.race(Effect.sleep(Duration.millis(Math.max(0, due.value - now))), Queue.take(wake))
+          yield* Effect.race(Effect.sleep(Duration.millis(Math.max(0, next.value - now))), Queue.take(wake))
+        }
+      })
+
+    /** Has the machine's watcher pass now, starting one when it has none. */
+    const rouse = (machine: string) =>
+      bookkeeping.withPermits(1)(
+        Effect.gen(function* () {
+          const watcher = watchers.get(machine)
+          if (watcher !== undefined) return yield* Queue.offer(watcher, undefined)
+          const wake = yield* Queue.sliding<void>(1)
+          watchers.set(machine, wake)
+          yield* Effect.forkIn(watch(machine, wake), scope)
         }),
-      ),
-    )
+      )
+
+    /** Every machine with something held. When that can't be read, the ones named, so a message just held isn't left without a watcher. */
+    const holding = (...named: ReadonlyArray<string>) =>
+      store
+        .transaction((database) => database.query<{ machine: string }, []>("select distinct machine from messages where state = 'held'").all().map(({ machine }) => machine))
+        .pipe(Effect.catchAll((error) => Effect.logError("Couldn't see which machines have messages held.", error).pipe(Effect.as(named))))
+
+    // What was held before a restart is picked up where it was left.
+    yield* Effect.forEach(yield* holding(), rouse, { discard: true })
 
     const send: Outbox["send"] = (machine, thread, dictated) =>
       Effect.gen(function* () {
@@ -294,15 +333,16 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
           return older !== null
         })
         /**
-         * Keeps the message for the watcher, with why, which is what it says
-         * if it has to give up, and has everything else held tried again at
-         * the usual pace: the user is here, and may have unblocked something.
+         * Keeps the message for its machine's watcher, with why, which is what
+         * it says if it has to give up, and has everything else held tried
+         * again at the usual pace, on every machine: the user is here, and may
+         * have unblocked something.
          */
         const hold = (reason: string | null) =>
           Effect.gen(function* () {
             later.clear()
             if (reason !== null) yield* stillHeld(row.command_id, reason)
-            yield* Queue.offer(wake, undefined)
+            yield* Effect.forEach(yield* holding(machine), rouse, { discard: true })
           })
         if (queued) {
           yield* hold(null)

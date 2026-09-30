@@ -74,7 +74,8 @@ export const turnStart = (thread: ShellThread, text: string) => ({
   createdAt: new Date().toISOString(),
 })
 
-const canonical = (path: string) => realpath(path).catch(() => path)
+/** The path as the filesystem has it, so two spellings of a directory compare as one. One that can't be resolved is taken as is. */
+export const canonical = (path: string) => realpath(path).catch(() => path)
 
 /** A read of T3 Code's API, with whatever the caller makes of its failures. */
 type Api<E> = <A, I>(path: string, schema: Schema.Schema<A, I>, init?: RequestInit) => Effect.Effect<A, E>

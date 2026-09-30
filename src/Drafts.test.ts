@@ -126,6 +126,8 @@ const drafts = (
     readonly outbox?: Delivery | ThreadsError
     /** What T3 Code lists on rosie. */
     readonly rosie?: ReadonlyArray<Listed>
+    /** What T3 Code lists on rig. */
+    readonly rig?: ReadonlyArray<Listed>
     /** What the user heard before, like an agent's update. */
     readonly heard?: ReadonlyArray<Heard>
   } = {},
@@ -167,7 +169,7 @@ const drafts = (
     /** What T3 Code lists on each machine, which can change between a question and its answer. */
     const lists = new Map<string, Array<Listed>>([
       ["rosie", [...(options.rosie ?? rosieThreads)]],
-      ["rig", [...rigThreads]],
+      ["rig", [...(options.rig ?? rigThreads)]],
     ])
     const threads = (machine: string): Threads => ({
       list: Effect.sync(() => void listings.push(machine)).pipe(
@@ -754,6 +756,21 @@ describe("Drafts", () => {
       }),
     )
     expect(result).toEqual({ sent: [], spoken: ["I can't see rig's threads right now. rig isn't answering. Which thread is that for?"] })
+  })
+
+  test("asks rather than send to the one thread shown on a machine when an older one there fits the same words", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // The clock starts in 1970: set to the listing's day, so a thread from three weeks before is old enough to be left out of what the writer sees.
+        yield* TestClock.setTime(Date.parse(at))
+        const { dictate, sent, spoken } = yield* drafts(() => addressed("message", "rig/c3", "the one on rig", "Stop there."), {
+          rig: [...rigThreads, listed("c4", { project: "trainer", directory: "/home/me/trainer", title: "Retry fix", updatedAt: "2026-09-09T10:00:00.000Z" })],
+        })
+        yield* dictate("Tell the one on rig to stop there.")
+        return { sent, spoken: spoken() }
+      }),
+    )
+    expect(result).toEqual({ sent: [], spoken: ["Which thread is that for?"] })
   })
 
   test("says a message to a thread mid-turn is held, when it couldn't tell whether one went, and when one couldn't be sent", async () => {

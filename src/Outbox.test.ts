@@ -76,7 +76,7 @@ interface Context {
   readonly told: Array<Notice>
   readonly noted: Array<Heard>
   /** What the daemon was told to expect, before each try, and what it was told to stop expecting. */
-  readonly expected: Array<{ readonly key: string; readonly text: string }>
+  readonly expected: Array<{ readonly key: string; readonly text: string; readonly to: { readonly machine: string; readonly directory: string } }>
   readonly retracted: Array<string>
   readonly machines: Map<string, Threads>
 }
@@ -87,7 +87,7 @@ const run = <A>(test: (context: Context) => Effect.Effect<A, unknown, Store.Stor
       const store = yield* Store.make(":memory:", Store.migrations)
       const told: Array<Notice> = []
       const noted: Array<Heard> = []
-      const expected: Array<{ readonly key: string; readonly text: string }> = []
+      const expected: Array<{ readonly key: string; readonly text: string; readonly to: { readonly machine: string; readonly directory: string } }> = []
       const retracted: Array<string> = []
       const machines = new Map<string, Threads>()
       return yield* test({ store, told, noted, expected, retracted, machines }).pipe(Effect.provideService(Store.Store, store))
@@ -99,7 +99,7 @@ const options = (context: Omit<Context, "store">): Outbox.Options => ({
   threads: (machine) => Option.fromNullable(context.machines.get(machine)),
   tell: (notice) => Effect.sync(() => void context.told.push(notice)),
   note: (heard) => Effect.sync(() => void context.noted.push(heard)),
-  expect: (key, text) => Effect.sync(() => void context.expected.push({ key, text })),
+  expect: (key, text, to) => Effect.sync(() => void context.expected.push({ key, text, to })),
   retract: (key) => Effect.sync(() => void context.retracted.push(key)),
 })
 
@@ -130,8 +130,8 @@ describe("Outbox", () => {
         const commandId = rosie.sent[0]?.outgoing.commandId ?? ""
         expect(commandId).toMatch(/^yapd:/)
         expect(rosie.sent.map(({ outgoing }) => outgoing.commandId)).toEqual([commandId, commandId, commandId])
-        // Expected before every try, as the one message, so its answer is heard however quick the turn that gives it.
-        expect(context.expected).toEqual(Array.from({ length: 3 }, () => ({ key: commandId, text: "Keep the API." })))
+        // Expected before every try, as the one message and where it goes, so its answer is heard however quick the turn that gives it.
+        expect(context.expected).toEqual(Array.from({ length: 3 }, () => ({ key: commandId, text: "Keep the API.", to: { machine: "rosie", directory: "/tmp/yapd" } })))
         expect(context.retracted).toEqual([])
         expect(said(context.told)).toEqual([{ priority: "done", spoken: "Passed your message on to Fix retries in yapd now that it finished." }])
         // Noted under the notice's id, for the thread, so once it plays "tell it to" means this thread.
@@ -269,6 +269,26 @@ describe("Outbox", () => {
         yield* flush
         expect(yield* outbox.send("rosie", listed("t2", "Latency"), "Quick.")).toEqual({ _tag: "Sent" })
         expect(rosie.sent.map(({ outgoing }) => outgoing.text)).toEqual(["Quick."])
+      }),
+    ))
+
+  test("passes a message held here on its own schedule while another machine hangs on a try", () =>
+    run((context) =>
+      Effect.gen(function* () {
+        const rosie = fake()
+        context.machines.set("rosie", rosie.threads)
+        // rig takes the first try as busy, then never answers.
+        let tries = 0
+        context.machines.set("rig", { ...rosie.threads, send: () => (tries++ === 0 ? Effect.succeed("busy" as const) : Effect.never) })
+        const outbox = yield* Outbox.make(options(context))
+        expect(yield* outbox.send("rig", listed("t1", "Fix retries"), "Slow.")).toEqual({ _tag: "Held" })
+        yield* wait(1)
+        expect(yield* outbox.send("rosie", listed("t2", "Latency"), "Quick.")).toEqual({ _tag: "Held" })
+        rosie.answers("sent")
+        yield* wait(5)
+        expect(tries).toBe(2)
+        expect(said(context.told)).toEqual([{ priority: "done", spoken: "Passed your message on to Latency in yapd now that it finished." }])
+        expect((yield* held(context.store)).map(({ state }) => state)).toEqual(["held", "sent"])
       }),
     ))
 

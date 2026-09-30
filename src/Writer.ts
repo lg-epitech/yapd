@@ -177,13 +177,16 @@ export const machinesNamed = (lines: ReadonlyArray<Line>, threads: ReadonlyArray
 
 /**
  * Whether the thread is settled by something the user really said, so a
- * message can't go to the wrong agent: the key is one that was listed, the
- * words given for it are theirs, and when they named a machine, the thread
- * is on one they named. When they named it, those words, past the
+ * message can't go to the wrong agent: the key is one the writer was shown,
+ * the words given for it are theirs, and when they named a machine, the
+ * thread is on one they named. When they named it, those words, past the
  * bare ones like "the agent", have to set that thread apart from every other
- * one listed, by what the listing shows: some of them have to be its, or the
- * model went by something it wasn't given, and no other thread may show all
- * of those, or they meant one of several and yapd asks which. What names a
+ * one listed on any machine, shown to the writer or not, by what the listing
+ * shows: some of them have to be its, or the model went by something it
+ * wasn't given, and no other thread may show all of those, or they meant one
+ * of several and yapd asks which. The writer only sees the latest few, so
+ * "the one on rig" is checked against every thread on rig, and an older one
+ * there with the same name is as much it as the one shown. What names a
  * thread is looked at first, and its first message only when that settles
  * nothing, so a word every prompt on the project uses doesn't make each of
  * them fit. The machine's name is one every thread there shows, so on its own
@@ -204,20 +207,23 @@ export const machinesNamed = (lines: ReadonlyArray<Line>, threads: ReadonlyArray
 export const groundedThread = (
   decision: Pick<Decision, "thread" | "threadFrom" | "threadEvidence">,
   lines: ReadonlyArray<Line>,
-  threads: ReadonlyArray<ThreadListing>,
+  /** The threads the writer was shown, which are the only ones it can pick. */
+  shown: ReadonlyArray<ThreadListing>,
+  /** Every thread listed on every machine, which is what the pick has to be told apart from. */
+  all: ReadonlyArray<ThreadListing>,
   recent: ReadonlyArray<Played>,
 ) => {
   if (decision.threadFrom === "unclear") return false
   const chosen = decision.thread.trim()
-  const found = threads.flatMap((listing) => listing.threads.filter(({ listed }) => key(listing.machine, listed.id) === chosen).map((thread) => ({ listing, thread })))[0]
+  const found = shown.flatMap((listing) => listing.threads.filter(({ listed }) => key(listing.machine, listed.id) === chosen).map((thread) => ({ listing, thread })))[0]
   if (found === undefined || !quoted(decision.threadEvidence, lines)) return false
   // The evidence is quoted from their lines, so a machine named in it is named in them.
-  const named = machinesNamed(lines, threads)
+  const named = machinesNamed(lines, all)
   if (named.length > 0 && !named.includes(found.listing.machine)) return false
   const telling = words(decision.threadEvidence).filter((word) => !bare.has(word))
   if (decision.threadFrom === "named") {
     const mine = wordsShown(found.listing, found.thread)
-    const others = threads.flatMap((listing) => listing.threads.filter((thread) => thread !== found.thread).map((thread) => wordsShown(listing, thread)))
+    const others = all.flatMap((listing) => listing.threads.filter(({ listed }) => key(listing.machine, listed.id) !== chosen).map((thread) => wordsShown(listing, thread)))
     if (apart(telling, mine.named, others.map(({ named }) => named))) return true
     const whole = ({ named, opened }: ReturnType<typeof wordsShown>) => new Set([...named, ...opened])
     return apart(telling, whole(mine), others.map(whole))
