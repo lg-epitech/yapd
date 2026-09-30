@@ -97,6 +97,20 @@ export const parseKey = (key: string): Option.Option<{ readonly machine: string;
 /** Words that name nothing on their own, so they can't be what settled a thread. */
 const bare = new Set(["the", "a", "an", "agent", "thread", "one", "ones", "it", "its", "that", "this", "those", "these", "to", "on", "in", "s", "them", "they"])
 
+/**
+ * Words that point at what was read out without saying which: where it came
+ * in the telling, what was done with it, or what became of it. "Tell the last
+ * one you told me about", "the one that just finished". Any reading fits
+ * them, so they only ever mean the latest one.
+ */
+const pointing = new Set([
+  ...["tell", "tells", "told", "ask", "asks", "asked", "say", "says", "said", "let", "know", "knew", "mention", "mentioned", "report", "reported", "read", "hear", "heard", "spoke", "spoken"],
+  ...["last", "latest", "just", "previous", "recent", "recently", "earlier", "before", "ago", "now", "then", "again", "first", "other", "new", "newest"],
+  ...["finished", "finish", "done", "ended", "completed", "update", "updates", "updated", "message", "messages", "news"],
+  ...["you", "your", "me", "my", "i", "we", "us", "our", "about", "of", "for", "from", "with", "and", "or", "what", "which", "who", "when", "where", "there", "here"],
+  ...["was", "were", "is", "are", "be", "been", "has", "have", "had", "did", "do", "does", "get", "got", "session", "work", "job", "task", "thing", "stuff", "guy"],
+])
+
 /** The words the listing shows for a thread, which is all the model had to name it by. */
 const wordsShown = ({ listed, known }: ThreadListing["threads"][number]) =>
   new Set([
@@ -118,10 +132,15 @@ const wordsShown = ({ listed, known }: ThreadListing["threads"][number]) =>
  * alone, like "the one on rig", names a thread only when it's the only one
  * listed there: with more, they meant one of several, and yapd asks which.
  * When they only pointed at something yapd read out, what they've heard has
- * to carry that thread, and a bare pointer like "that one" can only mean the
- * last thing they heard: when that carried no thread, or another, they meant
- * something yapd can't tell, and it asks. Bare words are the user's, but
- * settle nothing on their own.
+ * to carry that thread, and a bare pointer like "that one" or "the last one
+ * you told me about" can only mean the last thing they heard: when that
+ * carried no thread, or another, they meant something yapd can't tell, and it
+ * asks. Past the pointing words, what they said has to be in the words of a
+ * reading that carried the thread, what yapd said or the message it summed
+ * up: "the retry one" reaches an older reading only when that reading spoke
+ * of retries. When the latest thing they heard spoke of it too, and carried
+ * another thread or none, either could be meant, and yapd asks. Bare and
+ * pointing words are the user's, but settle nothing on their own.
  */
 export const groundedThread = (
   decision: Pick<Decision, "thread" | "threadFrom" | "threadEvidence">,
@@ -140,11 +159,16 @@ export const groundedThread = (
     const machine = words(found.listing.machine)
     return telling.length > 0 && telling.every((word) => machine.includes(word)) && found.listing.threads.length === 1
   }
-  if (telling.length === 0) {
-    const latest = recent.reduce<Played | undefined>((last, heard) => (last === undefined || heard.heardAt > last.heardAt ? heard : last), undefined)
-    return latest?.thread !== undefined && key(latest.thread.machine, latest.thread.id) === chosen
+  const carries = ({ thread }: Played) => thread !== undefined && key(thread.machine, thread.id) === chosen
+  const latest = recent.reduce<Played | undefined>((last, heard) => (last === undefined || heard.heardAt > last.heardAt ? heard : last), undefined)
+  const said = telling.filter((word) => !pointing.has(word))
+  if (said.length === 0) return latest !== undefined && carries(latest)
+  const spokeOf = ({ spoken, message }: Played) => {
+    const heard = new Set([...words(spoken), ...words(message)])
+    return said.some((word) => heard.has(word))
   }
-  return recent.some(({ thread }) => thread !== undefined && key(thread.machine, thread.id) === chosen)
+  if (latest !== undefined && spokeOf(latest) && !carries(latest)) return false
+  return recent.some((heard) => carries(heard) && spokeOf(heard))
 }
 
 /** What comes back from reading the project: the prompt, or a question it raised. */

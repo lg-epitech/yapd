@@ -226,12 +226,27 @@ describe("Writer", () => {
     const both = [heard(1, redis), heard(0, { project: "yapd", spoken: "Waiting on you.", message: "May I?", thread: { machine: "rosie", id: "a1" } })]
     expect(Writer.groundedThread({ thread: "rosie/b2", threadFrom: "referred", threadEvidence: "that one" }, pointing, threads, both)).toBe(false)
     expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "that one" }, pointing, threads, both)).toBe(true)
+    // "The one that just finished" points at nothing but its place in the telling, so it's the latest thing heard too.
     const finished = [{ speaker: "user" as const, text: "Tell the one that just finished to stop." }]
-    expect(Writer.groundedThread({ thread: "rosie/b2", threadFrom: "referred", threadEvidence: "the one that just finished" }, finished, threads, both)).toBe(true)
-    // The last thing heard was an update with no thread to its name, like one from another machine: "it" can't be an older one.
+    expect(Writer.groundedThread({ thread: "rosie/b2", threadFrom: "referred", threadEvidence: "the one that just finished" }, finished, threads, both)).toBe(false)
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "the one that just finished" }, finished, threads, both)).toBe(true)
+    // The last thing heard was an update with no thread to its name, like one from another machine: "it" can't be an older
+    // one, and neither can "tell it to" or "the last one", however the model words what they pointed with.
     const unlinked = [...both, heard(0, { project: "trainer", host: "rig", spoken: "Over on rig, the eval is done.", message: "Done.", heardAt: now + 1 })]
     expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "it" }, pointing, threads, unlinked)).toBe(false)
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "tell it to" }, [{ speaker: "user", text: "Tell it to stop." }], threads, unlinked)).toBe(false)
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "the last one" }, [{ speaker: "user", text: "Tell the last one to stop." }], threads, unlinked)).toBe(false)
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "tell that one" }, pointing, threads, unlinked)).toBe(false)
+    // Past the pointing words, their words reach an older reading only when it spoke of them.
     expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "the one that's waiting" }, standing, threads, unlinked)).toBe(true)
+    const retries = [{ speaker: "user" as const, text: "Tell the retry one you told me about to keep going." }]
+    const aboutRetry = { threadFrom: "referred" as const, threadEvidence: "the retry one you told me about" }
+    const told = [heard(1, { project: "yapd", spoken: "The retry fix is done: retries now back off.", message: "Done.", thread: { machine: "rosie", id: "a1" } }), heard(0, redis)]
+    expect(Writer.groundedThread({ thread: "rosie/a1", ...aboutRetry }, retries, threads, told)).toBe(true)
+    expect(Writer.groundedThread({ thread: "rosie/b2", ...aboutRetry }, retries, threads, told)).toBe(false)
+    // When the latest reading spoke of it too, about another thread, either could be meant.
+    const twice = [told[0]!, heard(0, { ...redis, spoken: "Redis is done, with a retry on timeouts." })]
+    expect(Writer.groundedThread({ thread: "rosie/a1", ...aboutRetry }, retries, threads, twice)).toBe(false)
     expect(Writer.parseKey("rosie/a1")).toEqual(Option.some({ machine: "rosie", id: "a1" }))
     expect(Writer.parseKey("a1")).toEqual(Option.none())
   })

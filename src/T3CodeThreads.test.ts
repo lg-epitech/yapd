@@ -196,6 +196,7 @@ describe("T3CodeThreads", () => {
       ...turns("running", [{ id: "someone-else", role: "user", text: "Go on." }]),
       ...turns("approving", [{ id: "someone-else", role: "user", text: "Go on." }]),
       ...turns("waiting", []),
+      ...turns("archived", []),
     })
     expect(await Effect.runPromise(threads.send("running", outgoing))).toBe("busy")
     expect(await Effect.runPromise(threads.send("approving", outgoing))).toBe("waiting")
@@ -237,5 +238,17 @@ describe("T3CodeThreads", () => {
     expect(await Effect.runPromise(threads.send("archived", outgoing))).toBe("sent")
     expect(await failure(threads.send("archived", { ...outgoing, messageId: "message-2" }))).toMatchObject({ gone: true })
     expect(dispatched).toEqual([])
+  })
+
+  test("doesn't give up on a message for an archived thread that can't be read right now", async () => {
+    // The shell still lists it, archived, but reading it fails for the moment. Whether the message went is unknown, so
+    // the outbox must hold it rather than tell the user it's lost: only a read without the message says that.
+    const transport: T3CodeThreads.Transport = {
+      api: (path, schema) => (path === "/api/orchestration/shell" ? Effect.orDie(Schema.decodeUnknown(schema)(shell)) : Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." }))),
+    }
+    const threads = T3CodeThreads.threads(Option.some(Redacted.make("token")), () => Effect.succeed(transport))
+    const error = await failure(threads.send("archived", outgoing))
+    expect(error.reason).toBe("T3 Code isn't answering.")
+    expect(error.gone).toBeUndefined()
   })
 })

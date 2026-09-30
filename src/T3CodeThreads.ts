@@ -229,10 +229,10 @@ export const threads = (
           // Unless this very message is already there: a try whose answer was lost finds it accepted, and any
           // number of turns may have run since, or the thread was archived since. Then it went, and saying
           // otherwise would have the user say it again. The whole thread is read for it, which takes well under
-          // a second even for a long one, and an archived thread can still be read. One that's gone and can't
-          // be read either is gone all the same.
-          const read = Effect.map(snapshot(api, id), ({ thread }) => thread.messages.some((message) => message.id === outgoing.messageId))
-          if (yield* (gone(thread) ? Effect.orElseSucceed(read, () => false) : read)) return "sent"
+          // a second even for a long one, and an archived thread can still be read. One that can't be read right
+          // now, archived or not, is asked for again: until it reads, whether the message went is unknown, and
+          // only a read that doesn't have it says it didn't. One the shell doesn't have is gone all the same.
+          if (yield* Effect.map(snapshot(api, id), ({ thread }) => thread.messages.some((message) => message.id === outgoing.messageId))) return "sent"
           if (gone(thread)) return yield* archived("didn't send it")
           return stuck(thread) ? "waiting" : "busy"
         }
