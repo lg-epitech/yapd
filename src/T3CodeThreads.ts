@@ -222,15 +222,18 @@ export const threads = (
         const shell = yield* api("/api/orchestration/shell", Shell)
         const thread = shell.threads.find((thread) => thread.id === id)
         if (thread === undefined) return yield* unlisted("didn't send it")
-        if (gone(thread)) return yield* archived("didn't send it")
         // Sending now would steer the turn that's running instead of following it. Stopped on an approval or a
-        // question, the thread won't move until the user answers in T3 Code, which yapd can't do for them.
-        if (T3Code.busy(thread) || stuck(thread)) {
+        // question, the thread won't move until the user answers in T3 Code, which yapd can't do for them. And
+        // one that's archived takes nothing more.
+        if (gone(thread) || T3Code.busy(thread) || stuck(thread)) {
           // Unless this very message is already there: a try whose answer was lost finds it accepted, and any
-          // number of turns may have run since. Then it went, and saying otherwise would have the user say it
-          // again. The whole thread is read for it, which takes well under a second even for a long one.
-          const { thread: read } = yield* snapshot(api, id)
-          if (read.messages.some((message) => message.id === outgoing.messageId)) return "sent"
+          // number of turns may have run since, or the thread was archived since. Then it went, and saying
+          // otherwise would have the user say it again. The whole thread is read for it, which takes well under
+          // a second even for a long one, and an archived thread can still be read. One that's gone and can't
+          // be read either is gone all the same.
+          const read = Effect.map(snapshot(api, id), ({ thread }) => thread.messages.some((message) => message.id === outgoing.messageId))
+          if (yield* (gone(thread) ? Effect.orElseSucceed(read, () => false) : read)) return "sent"
+          if (gone(thread)) return yield* archived("didn't send it")
           return stuck(thread) ? "waiting" : "busy"
         }
         yield* api("/api/orchestration/dispatch", Schema.Unknown, {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
+import { Clock, Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
 import { Audio, AudioError } from "./Audio.ts"
 import { Waiting } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
@@ -106,7 +106,9 @@ const make = (says?: string, options: {
   const context = yield* Layer.build(layer)
   const made = yield* Daemon.make(options.locate === undefined ? {} : { locate: options.locate }).pipe(Effect.provide(context))
   handle = made.handle
-  const { speak: read, tell, recent } = made
+  const { speak: read, tell } = made
+  /** What the user has heard by now, the latest first. */
+  const recent = Effect.flatMap(Clock.currentTimeMillis, made.recent)
   yield* Effect.forkScoped(read)
   const floor = Context.get(context, Floor.Floor)
   // Lets the fibers catch up on what the test did, since the clock only moves when told to.

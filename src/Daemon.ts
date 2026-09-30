@@ -434,8 +434,8 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     handle,
     speak: Effect.forever(speakNext),
     tell,
-    /** What the user has heard lately, the latest first. What's still waiting to be read out isn't theirs to point at yet. */
-    recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.played(recent, now)),
+    /** What the user had heard by `at`, the latest first, as it stood then. What's still waiting to be read out isn't theirs to point at yet. */
+    recent: (at: number) => Effect.sync(() => Recent.heardBy(recent, at)),
     /** Notes something yapd is about to say for itself, for the user to build on like they do on updates. Noted before it's told, since it counts once it plays. */
     note: (heard: Recent.Heard) =>
       Effect.map(Clock.currentTimeMillis, (now) => {

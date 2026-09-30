@@ -207,7 +207,7 @@ const drafts = (
         { name: "rig", here: false, hosts: ["rig"], launcher: launcher("rig", rig), researcher: researcher("rig"), threads: threads("rig", rigThreads) },
       ],
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
-      recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.played(recent, now)),
+      recent: (at) => Effect.sync(() => Recent.heardBy(recent, at)),
       note: (heard) =>
         Effect.map(Clock.currentTimeMillis, (now) => {
           noted.push(heard)
@@ -254,6 +254,11 @@ const drafts = (
       Effect.map(Clock.currentTimeMillis, (now) => {
         recent = Recent.heard(Recent.add(recent, heard, now), heard.id, now)
       })
+    /** Reads something out again now, as the daemon does with what a dictation cut off. */
+    const replay = (id: string) =>
+      Effect.map(Clock.currentTimeMillis, (now) => {
+        recent = Recent.heard(recent, id, now)
+      })
     const questions = () => said.filter(({ question }) => question !== undefined)
     /** Answers the latest question as the conversation does: worked out first, then taken in. */
     const answer = (heard: string, to = questions().at(-1)) =>
@@ -265,7 +270,7 @@ const drafts = (
       })
     const unanswered = (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush))
     const spoken = () => said.map(({ spoken }) => spoken)
-    return { ...made, dictate, hear, answer, unanswered, wait, flush, nextNotice: Queue.take(notices), started, said, spoken, questions, asked, researched, catalogs, listings, noted, sent, remembered, openings, summaries, reports }
+    return { ...made, dictate, hear, replay, answer, unanswered, wait, flush, nextNotice: Queue.take(notices), started, said, spoken, questions, asked, researched, catalogs, listings, noted, sent, remembered, openings, summaries, reports }
   })
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
@@ -836,6 +841,32 @@ describe("Drafts", () => {
     expect(await referred("rosie/a1")).toEqual({ sent: ["a1"], spoken: ["Sent to Reduce latency in yapd."], shown: ["update-1"] })
     // The writer went by what the user hadn't heard, which settles nothing.
     expect(await referred("rosie/b2")).toEqual({ sent: [], spoken: ["Which thread is that for?"], shown: ["update-1"] })
+  })
+
+  test("places what the dictation cut off where it stood when the shortcut was pressed, not where reading it again puts it", async () => {
+    const older: Heard = { id: "update-1", project: "yapd", directory: "/code/yapd", spoken: "yapd. The latency fix is ready.", message: "The latency fix is ready.", thread: { machine: "rosie", id: "a1" }, at: 0 }
+    const latest: Heard = { id: "update-2", project: "std", directory: "/code/std", spoken: "std. Redis is done.", message: "Redis is done.", thread: { machine: "rosie", id: "b2" }, at: 0 }
+    const referred = (thread: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, hear, replay, wait, sent, spoken, asked } = yield* drafts(
+            () => decision({ action: "message", about: "that one", project: "", thread, threadFrom: "referred", threadEvidence: "it", prompt: "Stop there.", spoken: "" }),
+            { heard: [older] },
+          )
+          yield* wait(1)
+          yield* hear(latest)
+          yield* wait(1)
+          const pressed = yield* Clock.currentTimeMillis
+          yield* wait(1)
+          // An earlier dictation had cut the older one off, so it's read again once this one lets go of the speaker.
+          yield* replay("update-1")
+          yield* dictate("Tell it to stop there.", pressed)
+          return { sent: sent.map(({ thread }) => thread.id), spoken: spoken(), shown: asked[0]!.recent.map(({ id, heardAt }) => [id, heardAt]) }
+        }),
+      )
+    // The latest thing heard as they spoke was the std update, and the older one is shown as heard when it first was.
+    expect(await referred("rosie/b2")).toEqual({ sent: ["b2"], spoken: ["Sent to Redis investigation in std."], shown: [["update-2", 1000], ["update-1", 0]] })
+    expect(await referred("rosie/a1")).toEqual({ sent: [], spoken: ["Which thread is that for?"], shown: [["update-2", 1000], ["update-1", 0]] })
   })
 
   test("answers a question across threads from a fresh listing, fetched again when the answer took a while", async () => {

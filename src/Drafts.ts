@@ -3,7 +3,7 @@ import type { Transcript } from "./Dictation.ts"
 import type { Notice } from "./Inbox.ts"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type { Delivery, Outbox } from "./Outbox.ts"
-import { type Heard, heardBy, type Played } from "./Recent.ts"
+import type { Heard, Played } from "./Recent.ts"
 import type { Records } from "./Records.ts"
 import { Reporter } from "./Reporter.ts"
 import type { Researcher } from "./Research.ts"
@@ -232,8 +232,8 @@ export const make = (options: {
   readonly machines: ReadonlyArray<Machine>
   /** The user's rules, read as they are now. */
   readonly rules: Effect.Effect<Option.Option<string>>
-  /** What the user has heard lately, the latest first. */
-  readonly recent: Effect.Effect<ReadonlyArray<Played>>
+  /** What the user had heard by `at`, the latest first, as it stood then. */
+  readonly recent: (at: number) => Effect.Effect<ReadonlyArray<Played>>
   /** Notes what's about to be told, by the id of the notice that will tell it. */
   readonly note: (heard: Heard) => Effect.Effect<void>
   /** Queues something to say. */
@@ -487,7 +487,11 @@ export const make = (options: {
         // What's known of the threads can have grown since the question was asked, and the question itself has
         // played by now: asked what to tell a thread, "tell it to" points at the one the question was about. Nothing
         // else plays while it's being answered, so what they've heard now is what they'd heard as they began to.
-        const refreshed: Material = { ...material, threads: yield* Effect.forEach(material.threads, recollect), recent: yield* options.recent }
+        const refreshed: Material = {
+          ...material,
+          threads: yield* Effect.forEach(material.threads, recollect),
+          recent: yield* options.recent(yield* Clock.currentTimeMillis),
+        }
         const decision = yield* decide({ ...refreshed, lines: [...draft.lines, { speaker: "user", text: heard }] })
         if (decision.action === "wait") return Option.none()
         return Option.some(
@@ -708,7 +712,7 @@ export const make = (options: {
           rules: yield* options.rules,
           // What had played when they pressed the shortcut. What was queued behind it plays the moment the
           // dictation lets go of the speaker, before this runs, and "it" was never that.
-          recent: heardBy(yield* options.recent, draft.startedAt),
+          recent: yield* options.recent(draft.startedAt),
           earlier: [...drafts.values()].filter((other) => other.open && other.at <= draft.at && other !== draft).map(({ heard }) => heard),
           lines: [...draft.lines],
           research,

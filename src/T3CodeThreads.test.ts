@@ -226,13 +226,16 @@ describe("T3CodeThreads", () => {
       { id: `later-${turn}-user`, role: "user", text: "Go on." },
       { id: `later-${turn}-assistant`, role: "assistant", text: "Going on." },
     ]).flat()
+    const delivered = [{ id: "message-1", role: "user", text: "compact keep the public API unchanged" }, ...later]
     const threads = reached(dispatched, {
-      "/api/orchestration/threads/approving": {
-        thread: { ...shell.threads[2], messages: [{ id: "message-1", role: "user", text: "compact keep the public API unchanged" }, ...later] },
-      },
+      "/api/orchestration/threads/approving": { thread: { ...shell.threads[2], messages: delivered } },
+      // Archived since the first try, which still reads: what went before that mustn't be reported as failed.
+      "/api/orchestration/threads/archived": { thread: { ...shell.threads[8], messages: delivered } },
     })
     expect(await Effect.runPromise(threads.send("approving", outgoing))).toBe("sent")
     expect(await Effect.runPromise(threads.send("approving", { ...outgoing, messageId: "message-2" }))).toBe("waiting")
+    expect(await Effect.runPromise(threads.send("archived", outgoing))).toBe("sent")
+    expect(await failure(threads.send("archived", { ...outgoing, messageId: "message-2" }))).toMatchObject({ gone: true })
     expect(dispatched).toEqual([])
   })
 })
