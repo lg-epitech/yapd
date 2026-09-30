@@ -71,6 +71,15 @@ const lifetime = 3 * 60 * 60_000
 const replays = most * 10
 /** How many that wait to be read again are kept past `most`: far more than dictations could cut off and leave waiting. */
 const cutOff = most * 5
+/**
+ * How long a dictation can be in flight from the press: five minutes of
+ * recording, then transcription and the writer, with room to spare. What was
+ * heard within it is kept past `most`, with its starts, however much plays
+ * after: once the dictation lets go of the speaker, what was queued plays
+ * before what was said is worked out, and if it forgot what had played at
+ * the press, "it" would point at nothing.
+ */
+const inFlight = 15 * 60_000
 
 const wasHeard = (heard: Heard): heard is Played => heard.heardAt !== undefined
 
@@ -82,14 +91,21 @@ const wasHeard = (heard: Heard): heard is Played => heard.heardAt !== undefined
  * is let go of too, since no dictation reaches back that far. One heard and
  * put back to be read again is kept however much plays before its turn comes,
  * and so is the start that was cut off: at the press that cut it off, it had
- * been heard, and when it plays again it's the latest thing heard.
+ * been heard, and when it plays again it's the latest thing heard. One heard
+ * within `inFlight` is kept too, since a dictation pressed then may still be
+ * on its way.
  */
 const trim = (recent: Recent, now: number): Recent => {
   const played = recent.noted.filter(wasHeard).toSorted((one, other) => other.heardAt - one.heardAt)
-  const kept = new Set([...played.slice(0, most), ...played.filter(({ again }) => again === true).slice(0, cutOff)])
+  const kept = new Set([
+    ...played.slice(0, most),
+    ...played.filter(({ again }) => again === true).slice(0, cutOff),
+    ...played.filter(({ heardAt }) => now - heardAt < inFlight),
+  ])
   const noted = recent.noted.filter((heard) => (wasHeard(heard) ? kept.has(heard) : now - heard.at < lifetime))
   const ids = new Set(noted.map(({ id }) => id))
-  return { noted, plays: recent.plays.filter((play) => ids.has(play.id) && now - play.at < lifetime).slice(0, replays) }
+  const plays = recent.plays.filter((play) => ids.has(play.id) && now - play.at < lifetime)
+  return { noted, plays: plays.filter((play, index) => index < replays || now - play.at < inFlight) }
 }
 
 /** Newest first. */

@@ -162,10 +162,15 @@ const drafts = (
           return answer instanceof ThreadsError ? Effect.fail(answer) : Effect.succeed(answer)
         }),
     }
-    const threads = (machine: string, list: ReadonlyArray<Listed>): Threads => ({
-      list: Effect.sync(() => void listings.push(machine)).pipe(Effect.as(list)),
+    /** What T3 Code lists on each machine, which can change between a question and its answer. */
+    const lists = new Map<string, Array<Listed>>([
+      ["rosie", [...(options.rosie ?? rosieThreads)]],
+      ["rig", [...rigThreads]],
+    ])
+    const threads = (machine: string): Threads => ({
+      list: Effect.sync(() => void listings.push(machine)).pipe(Effect.map(() => [...(lists.get(machine) ?? [])])),
       detail: (id) => {
-        const thread = list.find((thread) => thread.id === id)
+        const thread = lists.get(machine)?.find((thread) => thread.id === id)
         return thread === undefined
           ? Effect.fail(new ThreadsError({ reason: "That thread is gone.", gone: true }))
           : Effect.succeed({
@@ -203,8 +208,8 @@ const drafts = (
     })
     const made = yield* Drafts.make({
       machines: [
-        { name: "rosie", here: true, hosts: ["Rosie.local"], launcher: launcher("rosie", rosie), researcher: researcher("rosie"), threads: threads("rosie", options.rosie ?? rosieThreads) },
-        { name: "rig", here: false, hosts: ["rig"], launcher: launcher("rig", rig), researcher: researcher("rig"), threads: threads("rig", rigThreads) },
+        { name: "rosie", here: true, hosts: ["Rosie.local"], launcher: launcher("rosie", rosie), researcher: researcher("rosie"), threads: threads("rosie") },
+        { name: "rig", here: false, hosts: ["rig"], launcher: launcher("rig", rig), researcher: researcher("rig"), threads: threads("rig") },
       ],
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
       recent: (at) => Effect.sync(() => Recent.heardBy(recent, at)),
@@ -270,7 +275,9 @@ const drafts = (
       })
     const unanswered = (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush))
     const spoken = () => said.map(({ spoken }) => spoken)
-    return { ...made, dictate, hear, replay, answer, unanswered, wait, flush, nextNotice: Queue.take(notices), started, said, spoken, questions, asked, researched, catalogs, listings, noted, sent, remembered, openings, summaries, reports }
+    /** A thread T3 Code lists on `machine` from now on. */
+    const appears = (machine: string, thread: Listed) => Effect.sync(() => void lists.get(machine)?.push(thread))
+    return { ...made, dictate, hear, replay, answer, unanswered, appears, wait, flush, nextNotice: Queue.take(notices), started, said, spoken, questions, asked, researched, catalogs, listings, noted, sent, remembered, openings, summaries, reports }
   })
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
@@ -885,5 +892,50 @@ describe("Drafts", () => {
       }),
     )
     expect(result).toEqual({ asked: 1, answered: 2, reports: 1 })
+  })
+
+  test("decides an answer against the threads as they are now, not as they were listed when the question was asked", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, appears, wait, sent, spoken, listings, asked } = yield* drafts(({ lines }) =>
+          lines.length === 1
+            ? decision({ action: "ask", about: "the message", project: "", prompt: "", spoken: "Which thread is that for?" })
+            : addressed("message", "rig/c3", "rig", "Stop there."),
+        )
+        yield* dictate("Tell it to stop there.")
+        // Another thread starts on rig while the question waits, so "the one on rig" no longer names one.
+        yield* appears("rig", listed("d4", { project: "trainer", directory: "/home/me/trainer", title: "Tune the optimizer" }))
+        yield* wait(120)
+        yield* answer("The one on rig.")
+        return {
+          sent,
+          spoken: spoken(),
+          listed: listings.filter((machine) => machine === "rig").length,
+          shown: asked.at(-1)?.threads.find(({ machine }) => machine === "rig")?.threads.map(({ listed }) => listed.id),
+        }
+      }),
+    )
+    expect(result).toEqual({ sent: [], spoken: ["Which thread is that for?", "Which thread is that for?"], listed: 2, shown: ["c3", "d4"] })
+  })
+
+  test("keeps what had played at the press however much plays before a slow dictation is worked out", async () => {
+    const before: Heard = { id: "update-1", project: "yapd", directory: "/code/yapd", spoken: "yapd. The latency fix is ready.", message: "The latency fix is ready.", thread: { machine: "rosie", id: "a1" }, at: 0 }
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, hear, wait, sent, spoken, asked } = yield* drafts(
+          () => decision({ action: "message", about: "that one", project: "", thread: "rosie/a1", threadFrom: "referred", threadEvidence: "it", prompt: "Stop there.", spoken: "" }),
+          { heard: [before] },
+        )
+        const pressed = yield* Clock.currentTimeMillis
+        // More than are ever shown play once the dictation lets go of the speaker, while a long one is still being transcribed.
+        for (const n of [1, 2, 3, 4, 5, 6]) {
+          yield* wait(1)
+          yield* hear({ id: `update-${n + 1}`, project: "std", directory: "/code/std", spoken: `std. Redis ${n}.`, message: `Redis ${n}.`, thread: { machine: "rosie", id: "b2" }, at: 0 })
+        }
+        yield* dictate("Tell it to stop there.", pressed)
+        return { sent: sent.map(({ thread }) => thread.id), spoken: spoken(), shown: asked[0]!.recent.map(({ id }) => id) }
+      }),
+    )
+    expect(result).toEqual({ sent: ["a1"], spoken: ["Sent to Reduce latency in yapd."], shown: ["update-1"] })
   })
 })

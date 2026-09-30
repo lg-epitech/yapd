@@ -21,6 +21,8 @@ export interface Options {
   readonly tell: (notice: Notice) => Effect.Effect<void>
   /** Notes what's about to be told, so "tell it to" right after can mean the thread it was about. */
   readonly note: (heard: Heard) => Effect.Effect<void>
+  /** Says what's about to be sent, before every try, so the answer to it is heard however quick the turn. */
+  readonly expect?: (text: string) => Effect.Effect<void>
   /** How long between tries at a held message, to start with. Each try that leaves it held doubles the wait, up to a minute. */
   readonly every?: Duration.DurationInput
   /** How long a message is held before it's given up on. */
@@ -97,6 +99,9 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
     /** Poked when something is held, so the watcher only runs while there's something to pass on. */
     const wake = yield* Queue.sliding<void>(1)
 
+    /** Said just before each try, so it's there before the thread's hooks can report the prompt. */
+    const expect = (text: string) => options.expect?.(text) ?? Effect.void
+
     const reach = (machine: string) =>
       Option.match(options.threads(machine), {
         onNone: () => Effect.fail(new ThreadsError({ reason: `I don't know how to reach ${machine}.` })),
@@ -170,7 +175,7 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
           yield* notice(row, "needs-you", `I dropped your message for ${recipient(row)}: it's been held for a day. ${row.reason ?? ""}`.trim())
           return false
         }
-        const result = yield* Effect.either(Effect.flatMap(reach(row.machine), (threads) => threads.send(row.thread, outgoing(row))))
+        const result = yield* Effect.either(Effect.flatMap(reach(row.machine), (threads) => Effect.zipRight(expect(row.text), threads.send(row.thread, outgoing(row)))))
         if (result._tag === "Right") {
           if (result.right === "busy") {
             yield* stillHeld(row.command_id, "It was still in the middle of a turn.")
@@ -294,7 +299,7 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
           yield* hold(null)
           return { _tag: "Held" } as const
         }
-        const result = yield* Effect.either(oneAtATime(machine, thread.id, threads.send(thread.id, outgoing(row))))
+        const result = yield* Effect.either(oneAtATime(machine, thread.id, Effect.zipRight(expect(text), threads.send(thread.id, outgoing(row)))))
         if (result._tag === "Left") {
           if (result.left.gone) {
             yield* failed(row.command_id, result.left.reason)

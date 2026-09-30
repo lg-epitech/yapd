@@ -127,9 +127,9 @@ const make = (says?: string, options: {
   ]).pipe(Effect.zipRight(flush))
   const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
   /** A turn that took `seconds`, as its hooks report it. */
-  const turn = (session: string, message: string, seconds: number, extra: { readonly needsYou?: boolean; readonly launched?: boolean } = {}) =>
+  const turn = (session: string, message: string, seconds: number, extra: { readonly prompt?: string; readonly needsYou?: boolean; readonly launched?: boolean } = {}) =>
     Effect.gen(function* () {
-      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd: "/tmp", prompt: "Go on." }, { project: "yapd" }, false)
+      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd: "/tmp", prompt: extra.prompt ?? "Go on." }, { project: "yapd" }, false)
       yield* wait(seconds)
       yield* handle(
         "claude",
@@ -171,7 +171,7 @@ const make = (says?: string, options: {
     return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
   })
   const reading = STM.commit(TRef.get(floor.reading))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, recentBy: made.recent, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, recentBy: made.recent, expected: made.expect, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
 })
 
 const daemon = make()
@@ -540,6 +540,23 @@ describe("Daemon", () => {
       }),
     )
     expect(result).toEqual(["yapd. Quick, with nobody watching.", "yapd. It was refused when it tried to push."])
+  })
+
+  test("hears the answer to a message sent to a thread however quick the turn, and still skips a quick turn nobody sent", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, expected, wait, played } = yield* daemon
+        yield* expected("Keep the API unchanged.")
+        yield* turn("a", "Kept it.", 5, { prompt: "Keep the API unchanged." })
+        yield* wait(11)
+        // Taken once it turned up: the same words again are the user's own.
+        yield* turn("a", "Still kept.", 5, { prompt: "Keep the API unchanged." })
+        yield* turn("b", "Quick and watched.", 5)
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Kept it."])
   })
 
   test("says what yapd has to say for itself in turn, questions first", async () => {

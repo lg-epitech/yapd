@@ -484,13 +484,17 @@ export const make = (options: {
     /** What they said after a question, worked out but not acted on, since they may still be talking. */
     const answer = (draft: Draft, material: Material, heard: string) =>
       Effect.gen(function* () {
-        // What's known of the threads can have grown since the question was asked, and the question itself has
-        // played by now: asked what to tell a thread, "tell it to" points at the one the question was about. Nothing
-        // else plays while it's being answered, so what they've heard now is what they'd heard as they began to.
+        // The threads are listed again when the answer comes long after the question, since "the one on rig" names a
+        // thread only while it's the only one there, and a machine can gain one in the meantime. What's known of them
+        // can have grown too, and the question itself has played by now: asked what to tell a thread, "tell it to"
+        // points at the one the question was about. Nothing else plays while it's being answered, so what they've
+        // heard now is what they'd heard as they began to.
+        const now = yield* Clock.currentTimeMillis
         const refreshed: Material = {
           ...material,
-          threads: yield* Effect.forEach(material.threads, recollect),
-          recent: yield* options.recent(yield* Clock.currentTimeMillis),
+          threads: yield* Effect.flatMap(threads.get, Effect.forEach(recollect)),
+          recent: yield* options.recent(now),
+          now,
         }
         const decision = yield* decide({ ...refreshed, lines: [...draft.lines, { speaker: "user", text: heard }] })
         if (decision.action === "wait") return Option.none()

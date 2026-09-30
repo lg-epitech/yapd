@@ -75,6 +75,8 @@ interface Context {
   readonly store: Store.Store["Type"]
   readonly told: Array<Notice>
   readonly noted: Array<Heard>
+  /** What the daemon was told to expect, before each try. */
+  readonly expected: Array<string>
   readonly machines: Map<string, Threads>
 }
 
@@ -84,8 +86,9 @@ const run = <A>(test: (context: Context) => Effect.Effect<A, unknown, Store.Stor
       const store = yield* Store.make(":memory:", Store.migrations)
       const told: Array<Notice> = []
       const noted: Array<Heard> = []
+      const expected: Array<string> = []
       const machines = new Map<string, Threads>()
-      return yield* test({ store, told, noted, machines }).pipe(Effect.provideService(Store.Store, store))
+      return yield* test({ store, told, noted, expected, machines }).pipe(Effect.provideService(Store.Store, store))
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
   )
 
@@ -94,6 +97,7 @@ const options = (context: Omit<Context, "store">): Outbox.Options => ({
   threads: (machine) => Option.fromNullable(context.machines.get(machine)),
   tell: (notice) => Effect.sync(() => void context.told.push(notice)),
   note: (heard) => Effect.sync(() => void context.noted.push(heard)),
+  expect: (text) => Effect.sync(() => void context.expected.push(text)),
 })
 
 const said = (told: Array<Notice>) => told.map(({ priority, spoken }) => ({ priority, spoken }))
@@ -123,6 +127,8 @@ describe("Outbox", () => {
         const commandId = rosie.sent[0]?.outgoing.commandId ?? ""
         expect(commandId).toMatch(/^yapd:/)
         expect(rosie.sent.map(({ outgoing }) => outgoing.commandId)).toEqual([commandId, commandId, commandId])
+        // Expected before every try, so its answer is heard however quick the turn that gives it.
+        expect(context.expected).toEqual(["Keep the API.", "Keep the API.", "Keep the API."])
         expect(said(context.told)).toEqual([{ priority: "done", spoken: "Passed your message on to Fix retries in yapd now that it finished." }])
         // Noted under the notice's id, for the thread, so once it plays "tell it to" means this thread.
         expect(context.noted.map(({ id, thread, directory, message }) => ({ id, thread, directory, message }))).toEqual([
