@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file
 import { Cause, Console, Effect, Exit, Fiber, Option } from "effect"
 import { existsSync, realpathSync } from "node:fs"
 import { hostname } from "node:os"
@@ -88,14 +88,21 @@ const dotenv = (): Record<string, string | undefined> => {
 }
 
 // Bun reads .env from the folder it starts in, so these run in yapd's home, wherever they were started from: the
-// yapd folder, the home directory an SSH command starts in, or anywhere else. What Bun read where it started is
-// left behind, since the restart would keep it ahead of yapd's settings. YAPD_HOME is passed on as it was resolved,
-// even from there, so it doesn't resolve again from inside itself.
+// yapd folder, the home directory an SSH command starts in, or anywhere else. As `yapd`, Bun reads none there. Run
+// as `bun main.ts`, what it read is left behind, since the restart would keep it ahead of yapd's settings: yapd's
+// own by name, since one the file built from other variables comes out differently in the probe, and the rest only
+// when unchanged, since the shell may have set them too. NODE_ENV is the caller's, since the probe was given it.
+// YAPD_HOME is passed on as it was resolved, even from there, so it doesn't resolve again from inside itself.
 if (command !== undefined && settled.includes(command)) {
   Home.adopt(dirname(import.meta.dir))
-  if (realpathSync(process.cwd()) !== realpathSync(Home.home)) {
+  // As `yapd`, even from its home, since Bun was told to read no .env at all.
+  if (process.execArgv.includes("--no-env-file") || realpathSync(process.cwd()) !== realpathSync(Home.home)) {
     const loaded = dotenv()
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name, value]) => loaded[name] !== value))
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([name, value]) => name === "NODE_ENV" || !(name in loaded) || (!name.startsWith("YAPD_") && loaded[name] !== value),
+      ),
+    )
     if (process.env.YAPD_HOME !== undefined) env.YAPD_HOME = Home.home
     const child = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2)], {
       cwd: Home.home,
