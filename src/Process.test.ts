@@ -14,7 +14,7 @@ const alive = (pid: number) => {
   }
 }
 
-const withProcess = async (code: (file: string) => string, check: (pids: ReadonlyArray<number>) => Promise<void>) => {
+const withProcess = async (code: (file: string) => string, check: (pids: ReadonlyArray<number>, file: string) => Promise<void>) => {
   const folder = await mkdtemp(join(tmpdir(), "yapd-process-test-"))
   const file = join(folder, "ready")
   const running = Effect.runFork(run([process.execPath, "-e", code(file)]))
@@ -23,7 +23,7 @@ const withProcess = async (code: (file: string) => string, check: (pids: Readonl
     for (let tries = 0; tries < 500 && !(await Bun.file(file).exists()); tries++) await Bun.sleep(10)
     pids = (await Bun.file(file).text()).trim().split(" ").map(Number)
     await Effect.runPromise(Fiber.interrupt(running))
-    await check(pids)
+    await check(pids, file)
   } finally {
     await Effect.runPromise(Fiber.interrupt(running))
     for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL")
@@ -53,6 +53,20 @@ describe("Process", () => {
       return `const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(child)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }); while (!(await Bun.file(${JSON.stringify(ready)}).exists())) await Bun.sleep(5); await Bun.write(${JSON.stringify(file)}, process.pid + " " + child.pid); setInterval(() => {}, 1000);`
     },
     async (pids) => {
+      for (let tries = 0; tries < 100 && pids.some(alive); tries++) await Bun.sleep(10)
+      expect(pids.filter(alive)).toEqual([])
+    },
+  ))
+
+  test("gives subprocesses time to finish graceful shutdown after their parent exits", () => withProcess(
+    (file) => {
+      const ready = `${file}-child`
+      const cleaned = `${file}-cleaned`
+      const child = `process.on("SIGTERM", () => { setTimeout(async () => { await Bun.write(${JSON.stringify(cleaned)}, "cleaned"); process.exit(0); }, 100); }); setInterval(() => {}, 1000); await Bun.write(${JSON.stringify(ready)}, "ready");`
+      return `const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(child)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }); while (!(await Bun.file(${JSON.stringify(ready)}).exists())) await Bun.sleep(5); await Bun.write(${JSON.stringify(file)}, process.pid + " " + child.pid); setInterval(() => {}, 1000);`
+    },
+    async (pids, file) => {
+      expect(await Bun.file(`${file}-cleaned`).exists()).toBe(true)
       for (let tries = 0; tries < 100 && pids.some(alive); tries++) await Bun.sleep(10)
       expect(pids.filter(alive)).toEqual([])
     },

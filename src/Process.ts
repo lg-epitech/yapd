@@ -30,18 +30,23 @@ export const stop = (proc: Subprocess) =>
         // It may have exited between checking and signaling it.
       }
     }
-    // OS cleanup uses wall time even under a test clock, and creates no child fibers in a closing scope.
+    let reaped = proc.exitCode !== null || proc.signalCode !== null
+    proc.exited.then(() => { reaped = true }, () => { reaped = true })
+    // A leader can exit before its tools. Wait for the whole group using wall time, without child fibers in a closing scope.
     const wait = (millis: number) => Effect.promise(() => new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), millis)
-      proc.exited.then(
-        () => { clearTimeout(timer); resolve(true) },
-        () => { clearTimeout(timer); resolve(false) },
-      )
+      const deadline = performance.now() + millis
+      const check = () => {
+        if (reaped && !alive()) return resolve(true)
+        const remaining = deadline - performance.now()
+        if (remaining <= 0) return resolve(false)
+        setTimeout(check, Math.min(10, remaining))
+      }
+      check()
     }))
-    if (!alive()) return
-    signal("SIGTERM")
-    const exited = yield* wait(250)
-    if (!exited || alive()) signal("SIGKILL")
+    if (alive()) {
+      signal("SIGTERM")
+      if (!(yield* wait(250))) signal("SIGKILL")
+    }
     // Bounded even if the OS cannot finish terminating it, so shutdown can continue.
     yield* wait(1000)
   })

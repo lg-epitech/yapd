@@ -1,5 +1,5 @@
 import type { Subprocess } from "bun"
-import { Cause, Clock, Data, Deferred, Effect, Either, ExecutionStrategy, Exit, Fiber, Option, Schema, Scope } from "effect"
+import { Cause, Clock, Data, Deferred, Effect, Either, ExecutionStrategy, Exit, Fiber, FiberSet, Option, Schema, Scope } from "effect"
 import { tmpdir } from "node:os"
 import { detached, run as command, stop } from "./Process.ts"
 
@@ -102,6 +102,7 @@ const connect = (
   Effect.gen(function* () {
     const parentScope = yield* Effect.scope
     const scope = yield* Scope.fork(parentScope, ExecutionStrategy.sequential)
+    const fork = yield* FiberSet.makeRuntime<never>()
     return yield* Effect.gen(function* () {
       const process = yield* Effect.acquireRelease(Effect.try({
         try: () =>
@@ -138,10 +139,47 @@ const connect = (
         await process.stdin.flush()
       }
 
+      const call = (method: string, params: object) =>
+        Effect.gen(function* () {
+          // Nothing would ever answer.
+          if (closed) return yield* new ServerError({ cause: "Codex's app-server stopped" })
+          const id = ++next
+          const response = yield* Deferred.make<unknown, ServerError>()
+          pending.set(id, response)
+          let written = false
+          return yield* Effect.tryPromise({
+            try: () => write({ id, method, params }),
+            catch: (cause) => new ServerError({ cause }),
+          }).pipe(
+            Effect.tap(() => { written = true }),
+            Effect.tapError(dispose),
+            Effect.zipRight(Deferred.await(response)),
+            Effect.timeoutOption(method === "thread/unsubscribe" || method === "turn/interrupt" ? "5 seconds" : "15 seconds"),
+            Effect.flatMap((result) => {
+              if (Option.isSome(result)) return Effect.succeed(result.value)
+              const error = new ServerError({ cause: method === "initialize" ? silent : `${method} didn't answer` })
+              // A missing reply belongs to this request. A stalled write can leave the shared stream unusable.
+              return (method === "initialize" || !written ? dispose(error) : Effect.void).pipe(
+                Effect.zipRight(Effect.fail(error)),
+              )
+            }),
+            Effect.ensuring(Effect.sync(() => { pending.delete(id) })),
+          )
+        })
+
       const receive = async (message: Message) => {
         if (message.method === undefined) {
           const request = typeof message.id === "number" ? pending.get(message.id) : undefined
-          if (request === undefined) return
+          if (request === undefined) {
+            // A timed-out thread/start can still succeed. Forget it without retaining dead requests or blocking the reader.
+            if (message.error === undefined) Option.map(Schema.decodeUnknownOption(Started)(message.result), ({ thread }) => {
+              fork(call("thread/unsubscribe", { threadId: thread.id }).pipe(
+                Effect.ignore,
+                Effect.interruptible,
+              ))
+            })
+            return
+          }
           if (typeof message.id === "number") pending.delete(message.id)
           Deferred.unsafeDone(
             request,
@@ -194,29 +232,6 @@ const connect = (
         // Shutdown must await the reader even when it has already started closing its connection.
         Effect.forkIn(parentScope),
       )
-
-      const call = (method: string, params: object) =>
-        Effect.gen(function* () {
-          // Nothing would ever answer.
-          if (closed) return yield* new ServerError({ cause: "Codex's app-server stopped" })
-          const id = ++next
-          const response = yield* Deferred.make<unknown, ServerError>()
-          pending.set(id, response)
-          return yield* Effect.tryPromise({
-            try: () => write({ id, method, params }),
-            catch: (cause) => new ServerError({ cause }),
-          }).pipe(
-            Effect.tapError(dispose),
-            Effect.zipRight(Deferred.await(response)),
-            Effect.timeoutOption(method === "thread/unsubscribe" || method === "turn/interrupt" ? "5 seconds" : "15 seconds"),
-            Effect.flatMap((result) => {
-              if (Option.isSome(result)) return Effect.succeed(result.value)
-              const error = new ServerError({ cause: method === "initialize" ? silent : `${method} didn't answer` })
-              return dispose(error).pipe(Effect.zipRight(Effect.fail(error)))
-            }),
-            Effect.ensuring(Effect.sync(() => { pending.delete(id) })),
-          )
-        })
 
       const connection: Connection = {
         process,

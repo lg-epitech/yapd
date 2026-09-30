@@ -202,7 +202,7 @@ export const native = (
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
-        if (frames !== undefined && !echoing()) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
+        if (listening && frames !== undefined && !echoing()) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
         return
       }
       const event = decodeEvent(new TextDecoder().decode(message.payload))
@@ -217,10 +217,10 @@ export const native = (
           return
         case "active":
           // It started listening, which starts the echo cancellation over.
-          if (event.value.listening) {
-            if (frames === undefined) frames = runSync(PubSub.sliding<Float32Array>(64))
-            listening = true
-          } else runFork(endMicrophone())
+          // Device recovery can temporarily lose the microphone. Keep existing
+          // subscriptions so they receive frames when the helper recovers it.
+          listening = event.value.listening
+          if (listening && frames === undefined) frames = runSync(PubSub.sliding<Float32Array>(64))
           heard = 0
           playingSince = undefined
           return

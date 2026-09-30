@@ -82,6 +82,7 @@ const device = (delayPlaying = false, delayStopping = false) =>
       closed: Deferred.await(closed),
       disconnect: Effect.sync(() => connection?.terminate()),
       inactive: Effect.sync(() => send({ type: "active", listening: false })),
+      active: Effect.sync(() => send({ type: "active", listening: true })),
       frame: (value: number) => Effect.sync(() => frame(value)),
       acknowledge: Effect.sync(() => {
         if (playing !== undefined) send({ type: "playing", id: playing, duration: 10 })
@@ -99,7 +100,7 @@ const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>) =>
   )
 
 describe("Native audio", () => {
-  for (const ending of ["disconnect", "inactive", "rest"] as const) {
+  for (const ending of ["disconnect", "rest"] as const) {
     test(`ends microphone subscribers on ${ending}, and a later playback gets a fresh microphone`, () =>
       run(
         Effect.gen(function* () {
@@ -123,6 +124,27 @@ describe("Native audio", () => {
       ),
     )
   }
+
+  test("preserves microphone subscribers through device recovery and drops frames while inactive", () =>
+    run(
+      Effect.gen(function* () {
+        const fake = yield* device()
+        yield* fake.audio.play("/tmp/fake.wav")
+        const microphone = yield* fake.audio.microphone
+        expect(Option.isSome(microphone)).toBe(true)
+        if (Option.isNone(microphone)) return
+        yield* TestClock.adjust("3 seconds")
+        yield* fake.frame(0.5)
+        expect(yield* Queue.take(microphone.value)).toEqual(new Float32Array(512).fill(0.5))
+
+        yield* fake.inactive
+        yield* fake.frame(0.9)
+        yield* fake.active
+        yield* fake.frame(0.7)
+        expect(yield* Queue.take(microphone.value)).toEqual(new Float32Array(512).fill(0.7))
+        expect(yield* Queue.isShutdown(microphone.value)).toBe(false)
+      }),
+    ))
 
   test("stops a timed-out native startup before falling back, so a late helper cannot play over it", () =>
     run(

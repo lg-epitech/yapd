@@ -42,7 +42,7 @@ const fakeCodex = async () => {
   if (old) process.exit(1)
   const send = (message: object) => process.stdout.write(`${JSON.stringify(message)}\n`)
   const later = (action: () => void) => setTimeout(action, 300)
-  if (mode === "close-stdin") {
+  if (mode === "close-stdin" || mode === "stall-stdin") {
     const { readSync } = require("node:fs") as typeof import("node:fs")
     const byte = Buffer.alloc(1)
     let line = ""
@@ -56,11 +56,18 @@ const fakeCodex = async () => {
       else if (method === "thread/start") { send({ id, result: { thread: { id: "thread-1" } } }); break }
     }
     setInterval(() => {}, 1000)
-    setTimeout(() => process.exit(1), 100)
+    if (mode === "close-stdin") setTimeout(() => process.exit(1), 100)
     return
   }
   let threads = 0
   let turns = 0
+  let lateThread: object | undefined
+  const held: string[] = []
+  const complete = (threadId: string) => {
+    const text = JSON.stringify({ thread: threadId })
+    send({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text } } })
+    send({ method: "turn/completed", params: { threadId, turn: { status: "completed" } } })
+  }
   for await (const line of console) {
     const { id, method, params } = JSON.parse(line)
     if (id === undefined) continue
@@ -70,6 +77,7 @@ const fakeCodex = async () => {
     } else if (method === "thread/start") {
       if (mode === "hang-thread") continue
       const thread = { id, result: { thread: { id: `thread-${++threads}` } } }
+      if (mode === "late-thread" && threads === 3) { lateThread = thread; continue }
       if (mode === "slow-thread") later(() => send(thread))
       else send(thread)
       if (mode === "malformed-idle" && threads === 2) setTimeout(() => process.stdout.write("not JSON\n"), 50)
@@ -87,6 +95,10 @@ const fakeCodex = async () => {
         continue
       }
       send(started)
+      if ((mode === "late-thread" || mode === "hang-release") && params.input[0].text === "healthy") {
+        held.push(threadId)
+        continue
+      }
       if (mode === "malformed" || mode === "invalid-envelope") {
         process.stdout.write(mode === "malformed" ? "not JSON\n" : "null\n")
         continue
@@ -97,7 +109,10 @@ const fakeCodex = async () => {
       const text = JSON.stringify({ thread: threadId })
       send({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text } } })
       send({ method: "turn/completed", params: { threadId, turn: { status } } })
+      if (lateThread !== undefined) { send(lateThread); lateThread = undefined }
+      for (const healthy of held.splice(0)) complete(healthy)
     } else {
+      if (mode === "hang-release" && method === "thread/unsubscribe" && params.threadId === "thread-1") continue
       send({ id, result: {} })
     }
   }
@@ -346,6 +361,21 @@ describe("CodexServer", () => {
       expect(error.cause === "Codex's app-server stopped" || (error.cause instanceof Error && "code" in error.cause && error.cause.code === "EPIPE")).toBe(true)
     })))
 
+  test("stops a server when a buffered request cannot finish writing before its deadline", () =>
+    withServer("stall-stdin", (server, log) => Effect.gen(function* () {
+      yield* until(log, threadsStarted(1))
+      yield* settle
+      const running = yield* Effect.fork(Effect.flip(server.run({ ...turn, prompt: "x".repeat(4 * 1024 * 1024) })))
+      yield* settle
+      yield* TestClock.adjust("15 seconds")
+      // A waiting spare is retried once on a fresh thread; its stalled write must be stopped too.
+      yield* until(log, (recorded) => launches(recorded).length === 2 && calls("thread/start")(recorded).length === 2)
+      yield* settle
+      yield* TestClock.adjust("15 seconds")
+      expect(yield* Fiber.join(running)).toBeInstanceOf(CodexServer.ServerError)
+      expect(launches(yield* entries(log)).every(({ pid }) => pid !== undefined && !alive(pid))).toBe(true)
+    })))
+
   test("fails a stalled thread request in time to use the CLI fallback", () =>
     withServer("hang-thread", (server, log) => Effect.gen(function* () {
       const running = yield* Effect.fork(server.run(turn).pipe(
@@ -358,6 +388,47 @@ describe("CodexServer", () => {
       expect(yield* Fiber.join(running)).toBe("fallback")
     })))
 
+  test("isolates a thread response timeout and releases its late thread while healthy turns finish", () =>
+    withServer("late-thread", (server, log) => Effect.gen(function* () {
+      yield* until(log, threadsStarted(2))
+      yield* settle
+      const healthy = yield* Effect.fork(Effect.all([
+        server.run({ ...turn, prompt: "healthy" }),
+        server.run({ ...turn, prompt: "healthy" }),
+      ], { concurrency: "unbounded" }))
+      yield* until(log, (recorded) => calls("turn/start")(recorded).length === 2)
+      const slow = yield* Effect.fork(server.run(turn).pipe(
+        Effect.catchTag("ServerError", () => Effect.succeed("fallback")),
+      ))
+      yield* until(log, threadsStarted(3))
+      yield* settle
+      yield* TestClock.adjust("15 seconds")
+      expect(yield* Fiber.join(slow)).toBe("fallback")
+      expect((yield* Fiber.poll(healthy))._tag).toBe("None")
+      yield* until(log, threadsStarted(5))
+      yield* settle
+      expect(yield* server.run(turn)).toBe(answer("thread-4"))
+      expect((yield* Fiber.join(healthy)).toSorted()).toEqual([answer("thread-1"), answer("thread-2")])
+      yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).some(({ params }) => params.threadId === "thread-3"))
+      expect(launches(yield* entries(log))).toHaveLength(1)
+    })))
+
+  test("keeps a healthy turn running when another thread's unsubscribe never answers", () =>
+    withServer("hang-release", (server, log) => Effect.gen(function* () {
+      yield* until(log, threadsStarted(2))
+      yield* settle
+      expect(yield* server.run(turn)).toBe(answer("thread-1"))
+      yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 1)
+      const healthy = yield* Effect.fork(server.run({ ...turn, prompt: "healthy" }))
+      yield* until(log, (recorded) => calls("turn/start")(recorded).length === 2)
+      yield* settle
+      yield* TestClock.adjust("5 seconds")
+      expect((yield* Fiber.poll(healthy))._tag).toBe("None")
+      expect(yield* server.run(turn)).toBe(answer("thread-3"))
+      expect(yield* Fiber.join(healthy)).toBe(answer("thread-2"))
+      expect(launches(yield* entries(log))).toHaveLength(1)
+    })))
+
   test("bounds a canceled turn whose start was never acknowledged", () =>
     withServer("hang-ack", (server, log) => Effect.gen(function* () {
       yield* until(log, threadsStarted(2))
@@ -365,7 +436,9 @@ describe("CodexServer", () => {
       yield* until(log, (recorded) => calls("turn/start")(recorded).length === 1)
       yield* Fiber.interrupt(running)
       yield* TestClock.adjust("15 seconds")
-      yield* until(log, (recorded) => launches(recorded).every(({ pid }) => pid !== undefined && !alive(pid)))
+      const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 1)
+      expect(calls("thread/unsubscribe")(recorded)[0]?.params).toEqual({ threadId: "thread-1" })
+      expect(launches(recorded).every(({ pid }) => pid !== undefined && alive(pid))).toBe(true)
     })))
 
   test("gives up on a server that won't start, and stops it", () =>
@@ -410,6 +483,8 @@ describe("CodexServer", () => {
       Effect.gen(function* () {
         yield* until(log, (recorded) => recorded.filter((entry) => entry.listing).length === 2)
         yield* TestClock.adjust("5 seconds")
+        yield* until(log, threadsStarted(2))
+        yield* settle
         expect(yield* server.run(turn)).toContain("thread-")
       }),
     ))
