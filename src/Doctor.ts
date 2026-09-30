@@ -198,7 +198,7 @@ const marks: Record<Status, string> = { ok: "✓", warn: "!", fail: "✗" }
 /** Checks everything, says what it found, and fails when anything is broken. */
 export const doctor = (bun: string, main: string) =>
   Effect.gen(function* () {
-    const command = Setup.command(bun, main)
+    const command = Setup.command(bun, main, Setup.environment())
     const checks = [
       Effect.sync(() => settings(dirname(dirname(main)))),
       hooks("claude", command),

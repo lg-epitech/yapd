@@ -29,10 +29,23 @@ const quote = (word: string) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word
 
 /**
  * What an agent runs to reach yapd. By full paths, since agents don't run
- * hooks with the PATH of the shell yapd was installed from.
+ * hooks with the PATH of the shell yapd was installed from, and with the
+ * settings they need when yapd is set up differently, since hooks run where
+ * the agent does and don't read yapd's.
  */
-export const command = (bun: string, main: string) => (agent: Agent, wait: boolean) =>
-  [bun, main, "hook", agent, ...(wait ? ["--wait"] : [])].map(quote).join(" ")
+export const command =
+  (bun: string, main: string, env: Readonly<Record<string, string>> = {}) =>
+  (agent: Agent, wait: boolean) =>
+    [
+      ...Object.entries(env).map(([name, value]) => `${name}=${quote(value)}`),
+      ...[bun, main, "hook", agent, ...(wait ? ["--wait"] : [])].map(quote),
+    ].join(" ")
+
+/** The settings hooks need, when they're set: the port yapd listens on, and where its home is. */
+export const environment = (): Record<string, string> => ({
+  ...(process.env.YAPD_PORT === undefined ? {} : { YAPD_PORT: process.env.YAPD_PORT }),
+  ...(process.env.YAPD_HOME === undefined ? {} : { YAPD_HOME: Home.home }),
+})
 
 /**
  * Claude Code's Stop hook runs in the background and waits while yapd reads
@@ -148,7 +161,7 @@ export const setup = (bun: string, main: string) =>
     const agents = (["claude", "codex"] as const).filter(present)
     if (agents.length === 0) yield* Console.log("Neither Claude Code nor Codex is here, so there are no hooks to set up.")
     for (const agent of agents) {
-      yield* install(agent, command(bun, main)).pipe(
+      yield* install(agent, command(bun, main, environment())).pipe(
         Effect.flatMap(Console.log),
         Effect.catchAll((error) => Console.error(`${error.message}. Its hooks are in the README.`)),
       )

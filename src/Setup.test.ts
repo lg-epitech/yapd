@@ -18,6 +18,12 @@ describe("command", () => {
     )
   })
 
+  test("carries the settings hooks need, ahead of the command", () => {
+    const moved = Setup.command("/opt/bun", "/opt/yapd/src/main.ts", { YAPD_PORT: "4848", YAPD_HOME: "/Volumes/Data/my yapd" })
+    expect(moved("codex", false)).toBe("YAPD_PORT=4848 YAPD_HOME='/Volumes/Data/my yapd' /opt/bun /opt/yapd/src/main.ts hook codex")
+    expect(Setup.ours({ command: moved("codex", false) })).toBe(true)
+  })
+
   test("is known for yapd's, however it was set up", () => {
     expect(Setup.ours({ command: run("claude", true) })).toBe(true)
     expect(Setup.ours({ command: "bun /path/to/yapd/src/main.ts hook codex" })).toBe(true)
