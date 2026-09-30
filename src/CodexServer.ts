@@ -158,8 +158,9 @@ const connect = (
             Effect.flatMap((result) => {
               if (Option.isSome(result)) return Effect.succeed(result.value)
               const error = new ServerError({ cause: method === "initialize" ? silent : `${method} didn't answer` })
-              // A missing reply belongs to this request. A stalled write can leave the shared stream unusable.
-              return (method === "initialize" || !written ? dispose(error) : Effect.void).pipe(
+              // Missing turn start/interrupt replies leave generation we cannot reliably stop; stalled writes can corrupt the stream.
+              const canAbandon = method === "thread/start" || method === "thread/unsubscribe"
+              return (!written || !canAbandon ? dispose(error) : Effect.void).pipe(
                 Effect.zipRight(Effect.fail(error)),
               )
             }),

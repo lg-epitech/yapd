@@ -68,6 +68,7 @@ const fakeCodex = async () => {
     send({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text } } })
     send({ method: "turn/completed", params: { threadId, turn: { status: "completed" } } })
   }
+  const work = (threadId: string) => setInterval(() => record({ working: threadId }), 20)
   for await (const line of console) {
     const { id, method, params } = JSON.parse(line)
     if (id === undefined) continue
@@ -89,12 +90,13 @@ const fakeCodex = async () => {
         continue
       }
       const started = { id, result: { turn: { id: `turn-${turns}` } } }
-      if (mode === "hang-ack") continue
+      if (mode === "hang-ack") { work(threadId); continue }
       if (mode === "late-ack") {
         later(() => send(started))
         continue
       }
       send(started)
+      if (mode === "hang-interrupt") { work(threadId); continue }
       if ((mode === "late-thread" || mode === "hang-release") && params.input[0].text === "healthy") {
         held.push(threadId)
         continue
@@ -112,6 +114,7 @@ const fakeCodex = async () => {
       if (lateThread !== undefined) { send(lateThread); lateThread = undefined }
       for (const healthy of held.splice(0)) complete(healthy)
     } else {
+      if (mode === "hang-interrupt" && method === "turn/interrupt") continue
       if (mode === "hang-release" && method === "thread/unsubscribe" && params.threadId === "thread-1") continue
       send({ id, result: {} })
     }
@@ -132,6 +135,7 @@ type Entry = {
   readonly pid?: number
   readonly listing?: number
   readonly stopping?: number
+  readonly working?: string
   readonly method?: string
   readonly params?: any
 }
@@ -433,12 +437,29 @@ describe("CodexServer", () => {
     withServer("hang-ack", (server, log) => Effect.gen(function* () {
       yield* until(log, threadsStarted(2))
       const running = yield* Effect.fork(server.run(turn))
-      yield* until(log, (recorded) => calls("turn/start")(recorded).length === 1)
+      yield* until(log, (recorded) => recorded.some(({ working }) => working !== undefined))
       yield* Fiber.interrupt(running)
       yield* TestClock.adjust("15 seconds")
-      const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 1)
-      expect(calls("thread/unsubscribe")(recorded)[0]?.params).toEqual({ threadId: "thread-1" })
-      expect(launches(recorded).every(({ pid }) => pid !== undefined && alive(pid))).toBe(true)
+      const recorded = yield* until(log, (recorded) => launches(recorded).every(({ pid }) => pid !== undefined && !alive(pid)))
+      const work = recorded.filter(({ working }) => working !== undefined).length
+      expect(work).toBeGreaterThan(0)
+      yield* settle
+      expect((yield* entries(log)).filter(({ working }) => working !== undefined)).toHaveLength(work)
+    })))
+
+  test("stops active generation when cancellation is never acknowledged", () =>
+    withServer("hang-interrupt", (server, log) => Effect.gen(function* () {
+      yield* until(log, threadsStarted(2))
+      const running = yield* Effect.fork(server.run(turn))
+      yield* until(log, (recorded) => recorded.some(({ working }) => working !== undefined))
+      yield* Fiber.interrupt(running)
+      yield* until(log, (recorded) => calls("turn/interrupt")(recorded).length === 1)
+      yield* TestClock.adjust("5 seconds")
+      const recorded = yield* until(log, (recorded) => launches(recorded).every(({ pid }) => pid !== undefined && !alive(pid)))
+      const work = recorded.filter(({ working }) => working !== undefined).length
+      expect(work).toBeGreaterThan(0)
+      yield* settle
+      expect((yield* entries(log)).filter(({ working }) => working !== undefined)).toHaveLength(work)
     })))
 
   test("gives up on a server that won't start, and stops it", () =>
