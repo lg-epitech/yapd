@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Cause, Console, Effect, Exit, Fiber, Option } from "effect"
-import { realpathSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname } from "node:path"
 import * as CliLauncher from "./CliLauncher.ts"
@@ -75,12 +75,31 @@ const [command, argument] = process.argv.slice(2)
 /** Commands that read the user's settings. Hooks don't, and start wherever the agent runs. */
 const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "research", "mind"]
 
+/** What Bun loaded from .env files in the folder this started in, as a bun with nothing else to go on sees it. */
+const dotenv = (): Record<string, string | undefined> => {
+  if (![".env", ".env.local", ".env.development", ".env.production", ".env.test"].some((name) => existsSync(name))) return {}
+  try {
+    return JSON.parse(Bun.spawnSync([process.execPath, "--print", "JSON.stringify(process.env)"], { env: {} }).stdout.toString())
+  } catch {
+    return {}
+  }
+}
+
 // Bun reads .env from the folder it starts in, so these run in yapd's home, wherever they were started from: the
-// yapd folder, the home directory an SSH command starts in, or anywhere else.
+// yapd folder, the home directory an SSH command starts in, or anywhere else. What Bun read where it started is
+// left behind, since the restart would keep it ahead of yapd's settings. YAPD_HOME is passed on as it was resolved,
+// even from there, so it doesn't resolve again from inside itself.
 if (command !== undefined && settled.includes(command)) {
   Home.adopt(dirname(import.meta.dir))
   if (realpathSync(process.cwd()) !== realpathSync(Home.home)) {
-    const child = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2)], { cwd: Home.home, stdio: ["inherit", "inherit", "inherit"] })
+    const loaded = dotenv()
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name, value]) => loaded[name] !== value))
+    if (process.env.YAPD_HOME !== undefined) env.YAPD_HOME = Home.home
+    const child = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2)], {
+      cwd: Home.home,
+      env,
+      stdio: ["inherit", "inherit", "inherit"],
+    })
     // Passed on, so stopping this stops the daemon, rather than leave it holding the port.
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => child.kill(signal))
     process.exit(await child.exited)

@@ -78,7 +78,7 @@ export const install = Effect.gen(function* () {
     // The daemon reads .env from here.
     workingDirectory: home,
     path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
-    home: process.env.YAPD_HOME,
+    home: process.env.YAPD_HOME === undefined ? undefined : home,
     log: logPath,
   }
   yield* Effect.tryPromise(async () => {

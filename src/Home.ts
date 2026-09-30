@@ -1,9 +1,12 @@
 import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 
-/** Where yapd keeps what it remembers, and the worktrees it makes. YAPD_HOME moves it. */
-export const home = process.env.YAPD_HOME ?? join(homedir(), ".yapd")
+/**
+ * Where yapd keeps what it remembers, and the worktrees it makes. YAPD_HOME
+ * moves it. Absolute, since most commands run from inside it.
+ */
+export const home = resolve(process.env.YAPD_HOME ?? join(homedir(), ".yapd"))
 
 /** The user's settings. Bun reads them from the folder yapd runs in, which is `home`. */
 export const settings = join(home, ".env")
