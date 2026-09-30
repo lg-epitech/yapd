@@ -13,7 +13,7 @@ import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
-import type { Thread } from "./Relay.ts"
+import { RelayError, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
 import { extension, Voice } from "./Voice.ts"
 
@@ -41,10 +41,12 @@ export const make = Effect.gen(function* () {
   const inbox = yield* STM.commit(TRef.make(Inbox.empty))
   const preparing = yield* FiberMap.make<string>()
   const prompts = new Map<string, { readonly text: string | undefined; readonly at: number }>()
-  /** When each session last did anything. */
+  /** Each session's latest hook, including ones received in the same millisecond. */
   const activity = new Map<string, number>()
+  const generations = new WeakMap<Conversation.Update, number>()
+  let generation = 0
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
-  const followed = new Map<string, string>()
+  const followed = new Map<string, { readonly message: string }>()
   let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
@@ -61,19 +63,51 @@ export const make = Effect.gen(function* () {
 
   const conversation = yield* Conversation.make({
     dir,
-    moved: (update) => Effect.sync(() => (activity.get(update.session) ?? 0) > update.at),
-    sent: (session, message) =>
+    moved: (update) => Effect.sync(() => activity.get(update.session) !== generations.get(update)),
+    send: (update, message, deliver) =>
       Effect.gen(function* () {
-        followed.set(session, message)
-        // A session woken by its hook never reports this as a prompt, and the next summary should answer it.
-        prompts.set(session, { text: message, at: yield* Clock.currentTimeMillis })
+        const session = update.session
+        const pending = yield* Effect.gen(function* () {
+          if (activity.get(session) !== generations.get(update)) {
+            return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
+          }
+          const previousFollowed = followed.get(session)
+          const previousPrompt = prompts.get(session)
+          const followUp = { message }
+          const prompt = { text: message, at: yield* Clock.currentTimeMillis }
+          // A reply can arrive before delivery returns, so its context is ready before dispatch.
+          followed.set(session, followUp)
+          prompts.set(session, prompt)
+          return { previousFollowed, previousPrompt, followUp, prompt, generation: activity.get(session) }
+        }).pipe(events.withPermits(1))
+        yield* deliver.pipe(
+          Effect.onError(() =>
+            Effect.sync(() => {
+              // Hooks or another follow-up may already have consumed or replaced this context.
+              if (activity.get(session) !== pending.generation) return
+              if (followed.get(session) === pending.followUp) {
+                if (pending.previousFollowed === undefined) followed.delete(session)
+                else followed.set(session, pending.previousFollowed)
+              }
+              if (prompts.get(session) === pending.prompt) {
+                if (pending.previousPrompt === undefined) prompts.delete(session)
+                else prompts.set(session, pending.previousPrompt)
+              }
+            }).pipe(events.withPermits(1)),
+          ),
+        )
         // Put back by a dictation that started just as this was sent, and answered now.
         const answered = yield* STM.commit(
-          TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
+          TRef.modify(inbox, (current) => {
+            const queued = current.get(session)
+            return queued !== undefined && "update" in queued && queued.update === update
+              ? [queued, Inbox.remove(current, session)] as const
+              : [undefined, current] as const
+          }),
         )
         if (answered === undefined) return
         yield* removeFile(Inbox.audio(answered))
-        if ("update" in answered) yield* release(answered.hook)
+        yield* release(answered.hook)
       }),
     late: (update, spoken, failed) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) =>
@@ -98,6 +132,7 @@ export const make = Effect.gen(function* () {
     turn: Turn,
     thread: Thread,
     arrivedAt: number,
+    generation: number,
     hook: Ticket | undefined,
     needsYou: boolean,
   ) =>
@@ -118,6 +153,7 @@ export const make = Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
+      generations.set(update, generation)
       yield* STM.commit(
         TRef.update(inbox, (current) =>
           Inbox.add(current, { session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
@@ -163,7 +199,8 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const session = key(agent, payload.session_id)
       const arrivedAt = yield* Clock.currentTimeMillis
-      activity.set(session, arrivedAt)
+      const currentGeneration = ++generation
+      activity.set(session, currentGeneration)
       // Any new activity makes the session's pending update stale.
       yield* discard(session)
 
@@ -172,7 +209,7 @@ export const make = Effect.gen(function* () {
           prompts.set(session, { text: payload.prompt, at: arrivedAt })
           // Anything but the follow-up itself means the user took over.
           const sent = followed.get(session)
-          if (sent !== undefined && !squash(payload.prompt ?? "").includes(squash(sent))) followed.delete(session)
+          if (sent !== undefined && !squash(payload.prompt ?? "").includes(squash(sent.message))) followed.delete(session)
           return undefined
         }
         case "Stop": {
@@ -197,7 +234,7 @@ export const make = Effect.gen(function* () {
           }
           const turn = { prompt: Option.fromNullable(prompt?.text), message }
           const thread = { agent, session: payload.session_id, cwd: payload.cwd, message, origin }
-          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, hook, needsYou))
+          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, currentGeneration, hook, needsYou))
           return hook
         }
       }
@@ -229,9 +266,9 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const over =
         "update" in ready
-          ? (activity.get(ready.session) ?? 0) > ready.arrivedAt ||
+          ? activity.get(ready.session) !== generations.get(ready.update) ||
             followed.has(ready.session) ||
-            (yield* conversation.sending(ready.session))
+            (yield* conversation.sending(ready.session, ready.update))
           : dealtWith
       if (over) return false
       return yield* STM.commit(

@@ -1,5 +1,5 @@
 import { env } from "@huggingface/transformers"
-import { Data, Effect, Schedule } from "effect"
+import { Data, Effect, Runtime, Schedule } from "effect"
 import { mkdir, rename, rm, stat } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
@@ -154,8 +154,35 @@ export const load = <A>(repo: string, from: () => Promise<A>, files?: Files) =>
     }).pipe(
       Effect.retry({ times: 2, schedule: Schedule.exponential("1 second") }),
       // Not when it's the download that failed, which leaves what did download for the next one.
-      Effect.tapError(() => (there ? Effect.promise(() => rm(marker(repo), { force: true })) : Effect.void)),
+      Effect.tapError(() => there ? Effect.tryPromise(() => rm(marker(repo), { force: true })).pipe(
+        Effect.catchAll((error) => Effect.logWarning(`Could not invalidate ${repo}'s cache`, error)),
+      ) : Effect.void),
     )
-    yield* Effect.promise(() => Bun.write(marker(repo), ""))
+    yield* Effect.tryPromise({ try: () => Bun.write(marker(repo), ""), catch: (cause) => new LoadError({ repo, cause }) })
     return model
+  })
+
+/** Owns native models, including a load that completes after its scope was closed. */
+export const scopedLoad = <A extends { dispose: () => Promise<unknown> }>(repo: string, from: () => Promise<A>, files?: Files) =>
+  Effect.gen(function* () {
+    const runPromise = Runtime.runPromise(yield* Effect.runtime<never>())
+    const models = new Set<A>()
+    let closed = false
+    const dispose = (model: A) => Effect.tryPromise(() => model.dispose()).pipe(
+      Effect.catchAll((error) => Effect.logWarning(`Could not dispose ${repo}`, error)),
+    )
+    const release = Effect.suspend(() => {
+      closed = true
+      const owned = [...models]
+      models.clear()
+      return Effect.forEach(owned, dispose, { discard: true })
+    })
+    yield* Effect.addFinalizer(() => release)
+    return yield* load(repo, async () => {
+      const model = await from()
+      // The loader itself cannot be aborted. Its late result still belongs to this scope.
+      if (closed) await runPromise(dispose(model))
+      else models.add(model)
+      return model
+    }, files).pipe(Effect.onError(() => release))
   })

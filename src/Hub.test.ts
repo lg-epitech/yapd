@@ -1,10 +1,12 @@
 import { env } from "@huggingface/transformers"
 import { afterAll, describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Fiber, Scope } from "effect"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import * as Hub from "./Hub.ts"
+import { once } from "./Transcriber.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "yapd-hub-test-"))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -236,6 +238,82 @@ describe("headers", () => {
     } finally {
       if (token === undefined) delete process.env.HF_TOKEN
       else process.env.HF_TOKEN = token
+    }
+  })
+})
+
+describe("scoped models", () => {
+  test("shares a lazy model and disposes it once when its scope closes", async () => {
+    const cacheDir = env.cacheDir
+    env.cacheDir = dir
+    let disposed = 0
+    let loads = 0
+    const model = { dispose: async () => { disposed++ } }
+    try {
+      const found = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+        const scope = yield* Effect.scope
+        const shared = yield* once(Hub.scopedLoad("someone/scoped", async () => { loads++; return model }, async () => {}).pipe(Scope.extend(scope)))
+        const first = yield* shared
+        expect(yield* shared).toBe(first)
+        return first
+      })))
+      expect(found).toBe(model)
+      expect(loads).toBe(1)
+      expect(disposed).toBe(1)
+    } finally {
+      env.cacheDir = cacheDir
+    }
+  })
+
+  test("disposes a late load without keeping shutdown waiting for the loader", async () => {
+    const cacheDir = env.cacheDir
+    env.cacheDir = dir
+    let disposed = 0
+    let begin!: () => void
+    const began = new Promise<void>((resolve) => { begin = resolve })
+    let complete!: (model: { dispose: () => Promise<void> }) => void
+    const loaded = new Promise<{ dispose: () => Promise<void> }>((resolve) => { complete = resolve })
+    let release!: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    const model = { dispose: async () => { disposed++; release() } }
+    const fiber = Effect.runFork(Effect.scoped(Hub.scopedLoad("someone/late", () => {
+      begin()
+      return loaded
+    }, async () => {})))
+    try {
+      await began
+      await Effect.runPromise(Fiber.interrupt(fiber))
+      expect(disposed).toBe(0)
+      complete(model)
+      await released
+      expect(disposed).toBe(1)
+    } finally {
+      complete(model)
+      await Effect.runPromise(Fiber.interrupt(fiber))
+      env.cacheDir = cacheDir
+    }
+  })
+
+  test("releases an acquired model immediately when committing its cache marker fails", async () => {
+    const cacheDir = env.cacheDir
+    env.cacheDir = dir
+    let disposed = 0
+    const repo = "someone/bad-marker"
+    const model = { dispose: async () => { disposed++ } }
+    try {
+      await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+        const result = yield* Effect.either(Hub.scopedLoad(repo, async () => {
+          const cache = join(dir, repo)
+          await rm(cache, { recursive: true, force: true })
+          await Bun.write(cache, "not a directory")
+          return model
+        }, async () => {}))
+        expect(result._tag).toBe("Left")
+        expect(disposed).toBe(1)
+      })))
+      expect(disposed).toBe(1)
+    } finally {
+      env.cacheDir = cacheDir
     }
   })
 })

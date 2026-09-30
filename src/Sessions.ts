@@ -1,5 +1,5 @@
-import { Effect, Option, Schema } from "effect"
-import { chmod, mkdir, readdir, rename, rm, stat } from "node:fs/promises"
+import { Data, Effect, Option, Schema } from "effect"
+import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { home } from "./Home.ts"
 import { Agent } from "./Payload.ts"
@@ -35,6 +35,11 @@ export const Session = Schema.Struct({
 })
 export type Session = typeof Session.Type
 
+export class StorageError extends Data.TaggedError("StorageError")<{
+  readonly path: string
+  readonly cause: unknown
+}> {}
+
 export const folder = join(home, "sessions")
 
 export const record = (launch: string, root: string = folder) => join(root, `${launch}.json`)
@@ -46,14 +51,28 @@ export const log = (launch: string, root: string = folder) => join(root, `${laun
 const kept = 30 * 24 * 60 * 60_000
 
 export const write = (session: Session, root: string = folder) =>
-  Effect.promise(async () => {
-    await mkdir(root, { recursive: true })
+  Effect.suspend(() => {
     const path = record(session.launch, root)
     const aside = `${path}.${crypto.randomUUID()}`
-    await Bun.write(aside, `${JSON.stringify(session, null, 2)}\n`)
-    // Prompts can say anything, so they're the user's to read only.
-    await chmod(aside, 0o600)
-    await rename(aside, path)
+    let writing = false
+    return Effect.tryPromise({
+      try: async () => {
+        await mkdir(root, { recursive: true })
+        writing = true
+        // Private from creation, including while the record is being written.
+        await writeFile(aside, `${JSON.stringify(session, null, 2)}\n`, { mode: 0o600, flag: "wx" })
+        await rename(aside, path)
+      },
+      catch: (cause) => new StorageError({ path, cause }),
+    }).pipe(
+      Effect.ensuring(
+        Effect.suspend(() => writing ? Effect.tryPromise(() => rm(aside, { force: true })).pipe(
+          Effect.catchAll((error) => Effect.logWarning(`Could not remove temporary session record ${aside}`, error)),
+        ) : Effect.void),
+      ),
+      // Filesystem promises cannot be aborted; finish the atomic write before releasing its temporary file.
+      Effect.uninterruptible,
+    )
   })
 
 export const read = (launch: string, root: string = folder) =>
@@ -75,10 +94,13 @@ export const find = (agent: Agent, session: string, root: string = folder) =>
 
 /** Lets go of what's older than a month. */
 export const prune = (now: number, root: string = folder) =>
-  Effect.promise(async () => {
-    for (const name of await readdir(root).catch(() => [])) {
-      const path = join(root, name)
-      const { mtimeMs } = await stat(path).catch(() => ({ mtimeMs: now }))
-      if (now - mtimeMs > kept) await rm(path, { force: true })
-    }
+  Effect.tryPromise({
+    try: async () => {
+      for (const name of await readdir(root).catch(() => [])) {
+        const path = join(root, name)
+        const { mtimeMs } = await stat(path).catch(() => ({ mtimeMs: now }))
+        if (now - mtimeMs > kept) await rm(path, { force: true })
+      }
+    },
+    catch: (cause) => new StorageError({ path: root, cause }),
   })

@@ -72,7 +72,7 @@ export const install = Effect.gen(function* () {
     path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
     log: logPath,
   }
-  yield* Effect.promise(async () => {
+  yield* Effect.tryPromise(async () => {
     await mkdir(dirname(plistPath), { recursive: true })
     await mkdir(dirname(logPath), { recursive: true })
     await Bun.write(plistPath, plist(options))
@@ -93,6 +93,6 @@ export const install = Effect.gen(function* () {
 
 export const uninstall = Effect.gen(function* () {
   yield* bootout
-  yield* Effect.promise(() => rm(plistPath, { force: true }))
+  yield* Effect.tryPromise(() => rm(plistPath, { force: true }))
   yield* Console.log("yapd is stopped and won't start at login.")
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Effect, Layer, Option, PubSub, type Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import { Context, Deferred, Effect, Layer, Option, PubSub, type Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import { basename } from "node:path"
 import { Audio, AudioError } from "./Audio.ts"
 import { Dictation, WhisperDictation, windows } from "./Dictation.ts"
@@ -24,6 +24,8 @@ const dictation = (
     readonly seconds?: number
     /** Stands in for Whisper on the given call, counting from 0. */
     readonly transcribe?: (call: number) => Effect.Effect<string> | undefined
+    /** Stands in for voice detection on the given frame, counting from 0. */
+    readonly detect?: (call: number) => Effect.Effect<number> | undefined
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -38,6 +40,7 @@ const dictation = (
     const transcripts: Array<string> = []
     const remaining = [...transcribed]
     let cancelled = 0
+    let detected = 0
     const layer = WhisperDictation.pipe(
       Layer.provideMerge(
         Layer.mergeAll(
@@ -73,7 +76,9 @@ const dictation = (
             }),
           }),
           // Each frame holds the probability that it's speech.
-          Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),
+          Layer.succeed(Vad, {
+            make: Effect.succeed((frame: Float32Array) => Effect.suspend(() => options.detect?.(detected++) ?? Effect.succeed(frame[0]!))),
+          }),
           Layer.succeed(DictationTranscriber, {
             transcribe: (audio) =>
               Effect.suspend(() => {
@@ -181,6 +186,36 @@ describe("Dictation", () => {
     expect(result.cues).toEqual(["started", "sent", "started", "sent"])
     // All of what was said in the second, however long the first took to let go.
     expect(result.heard).toEqual([20 * 512, 40 * 512])
+  })
+
+  test("keeps every captured frame when the user sends while voice detection is still running", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const detecting = yield* Deferred.make<void>()
+        const finish = yield* Deferred.make<void>()
+        const { press, talk, flush, heard, transcripts, said, listening } = yield* dictation(["Second request.", "Keep the whole request."], {
+          detect: (call) =>
+            call === 0 ? Deferred.succeed(detecting, undefined).pipe(Effect.zipRight(Deferred.await(finish)), Effect.as(0.9)) : undefined,
+        })
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* Deferred.await(detecting)
+        yield* press("Sent")
+        const during = { listening: listening(), transcripts: [...transcripts], said: [...said] }
+        // Detection still owns the first recording, while the next one can listen and transcribe.
+        yield* press("Started")
+        yield* talk("x".repeat(12))
+        yield* press("Sent")
+        expect(transcripts).toEqual([])
+        yield* Deferred.succeed(finish, undefined)
+        yield* flush
+        return { during, heard, transcripts, said }
+      }),
+    )
+    expect(result.during).toEqual({ listening: false, transcripts: [], said: [] })
+    expect(result.heard).toEqual([12 * 512, 20 * 512])
+    expect(result.transcripts).toEqual(["Keep the whole request.", "Second request."])
+    expect(result.said).toEqual([])
   })
 
   test("doesn't cancel the next dictation when an earlier one fails late", async () => {

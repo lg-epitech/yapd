@@ -1,5 +1,5 @@
 import { type AutomaticSpeechRecognitionPipeline, pipeline } from "@huggingface/transformers"
-import { Cause, Context, Data, Deferred, type Duration, Effect, FiberId, Layer, type Scope } from "effect"
+import { Cause, Context, Data, Deferred, type Duration, Effect, FiberId, Layer, Scope } from "effect"
 import { rm } from "node:fs/promises"
 import * as Config from "./Config.ts"
 import * as Hub from "./Hub.ts"
@@ -157,18 +157,20 @@ export const once = <A, E>(load: Effect.Effect<A, E>): Effect.Effect<Effect.Effe
   })
 
 const load = (repo: string, without: string) =>
-  once(
-    Hub.load(
+  Effect.gen(function* () {
+    const scope = yield* Effect.scope
+    return yield* once(Hub.scopedLoad(
       repo,
       // fp32 is the fastest on Apple silicon's CPU, as with Kokoro. Only from what has downloaded, since what
       // transformers.js downloads can be left partway, in a cache that's trusted to hold nothing that is.
       () => pipeline("automatic-speech-recognition", repo, { dtype: "fp32", device: "cpu", local_files_only: true }),
       files,
     ).pipe(
+      Scope.extend(scope),
       Effect.tap(() => Effect.logInfo(`Whisper ready with ${repo}`)),
       Effect.tapError((error) => Effect.logWarning(`${without}: Whisper didn't load`, error)),
-    ),
-  )
+    ))
+  })
 
 /** `patience` includes waiting for the model to load. `expected` is the vocabulary to listen for, if any. */
 const transcribe =

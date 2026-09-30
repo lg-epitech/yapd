@@ -21,7 +21,7 @@ export const SileroVad = Layer.scoped(
   Vad,
   Effect.gen(function* () {
     let loaded: PreTrainedModel | undefined
-    const model = Hub.load(repo, () =>
+    const model = Hub.scopedLoad(repo, () =>
       // It isn't a transformers architecture, so it loads as a bare ONNX model.
       AutoModel.from_pretrained(repo, { config: { model_type: "custom" } as never, dtype: "fp32" }),
     ).pipe(

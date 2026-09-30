@@ -22,12 +22,12 @@ export const fit = (text: string) => {
 export const load = (path: string) =>
   Effect.gen(function* () {
     const file = Bun.file(path)
-    if (!(yield* Effect.promise(() => file.exists()))) return Option.none<string>()
-    const { rules, whole } = fit(yield* Effect.promise(() => file.text()))
+    if (!(yield* Effect.tryPromise(() => file.exists()))) return Option.none<string>()
+    const { rules, whole } = fit(yield* Effect.tryPromise(() => file.text()))
     if (!whole) yield* Effect.logWarning(`${path} is longer than ${longest} characters, so I only read the start of it`)
     return rules === "" ? Option.none<string>() : Option.some(rules)
   }).pipe(
-    Effect.catchAllDefect((defect) =>
-      Effect.logWarning(`Could not read ${path}, so I'm going without your rules`, defect).pipe(Effect.as(Option.none<string>())),
+    Effect.catchAll((error) =>
+      Effect.logWarning(`Could not read ${path}, so I'm going without your rules`, error).pipe(Effect.as(Option.none<string>())),
     ),
   )

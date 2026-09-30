@@ -75,14 +75,14 @@ const info = (version: string) => `<?xml version="1.0" encoding="UTF-8"?>
  * macOS asks for the microphone again, so it only happens when the source does.
  */
 export const build = Effect.gen(function* () {
-  const version = yield* Effect.promise(async () =>
+  const version = yield* Effect.tryPromise(async () =>
     new Bun.CryptoHasher("sha256")
       .update(await Bun.file(source).text())
       .update(info(""))
       .digest("hex"),
   )
   const plist = Bun.file(join(app, "Contents", "Info.plist"))
-  const built = yield* Effect.promise(async () => (await plist.exists()) && (await plist.text()).includes(version))
+  const built = yield* Effect.tryPromise(async () => (await plist.exists()) && (await plist.text()).includes(version))
   if (built) return app
 
   // Without the command line tools, swiftc is a stub that opens an installer instead.
@@ -95,22 +95,25 @@ export const build = Effect.gen(function* () {
   const staging = `${app}.${crypto.randomUUID()}`
   const binary = join(staging, "Contents", "MacOS", "yapd-audio")
   yield* Effect.acquireUseRelease(
-    Effect.promise(() => mkdir(dirname(binary), { recursive: true })),
+    Effect.succeed(staging),
     () =>
       Effect.gen(function* () {
-        yield* Effect.promise(() => Bun.write(join(staging, "Contents", "Info.plist"), info(version)))
+        yield* Effect.tryPromise(() => mkdir(dirname(binary), { recursive: true })).pipe(Effect.uninterruptible)
+        yield* Effect.tryPromise(() => Bun.write(join(staging, "Contents", "Info.plist"), info(version))).pipe(Effect.uninterruptible)
         yield* run(["swiftc", "-O", "-swift-version", "5", "-o", binary, source])
         // Ad hoc, which is enough for macOS to remember the microphone permission.
         yield* run(["codesign", "--force", "--sign", "-", staging])
-        yield* Effect.promise(async () => {
+        yield* Effect.tryPromise(async () => {
           await rm(app, { recursive: true, force: true })
           await rename(staging, app)
-        })
+        }).pipe(Effect.uninterruptible)
       }).pipe(Effect.mapError((cause) => new HelperError({ message: "Could not build the audio helper", cause }))),
-    () => Effect.promise(() => rm(staging, { recursive: true, force: true })),
+    () => Effect.tryPromise(() => rm(staging, { recursive: true, force: true })).pipe(
+      Effect.catchAll((error) => Effect.logWarning("Could not remove audio helper staging directory", error)),
+    ),
   )
   return app
-})
+}).pipe(Effect.mapError((cause) => cause instanceof HelperError ? cause : new HelperError({ message: "Could not build the audio helper", cause })))
 
 /**
  * Opening it as an app, rather than spawning it, makes it responsible for itself,

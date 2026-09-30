@@ -101,21 +101,20 @@ const once = (chosen: Chosen, command: Provider["command"], schema: object, prom
   const provider = providers[chosen.name]
   const inline = JSON.stringify(schema)
   return Effect.acquireUseRelease(
-    Effect.promise(async () => {
-      const path = join(tmpdir(), `yapd-schema-${crypto.randomUUID()}.json`)
-      await Bun.write(path, inline)
-      return path
-    }),
-    (path) => {
+    Effect.sync(() => join(tmpdir(), `yapd-schema-${crypto.randomUUID()}.json`)),
+    (path) => Effect.gen(function* () {
+      yield* Effect.tryPromise(() => Bun.write(path, inline)).pipe(Effect.uninterruptible)
       const { argv, stdin } = command({ prompt, ...chosen, schema: { json: inline, path } })
       // YAPD_INTERNAL keeps the call from triggering yapd's own hooks.
-      return run(argv, {
+      return yield* run(argv, {
         ...(stdin === undefined ? {} : { stdin }),
         ...(cwd === undefined ? {} : { cwd }),
         env: { YAPD_INTERNAL: "1" },
       }).pipe(Effect.flatMap((stdout) => Effect.try(() => (provider.reply ?? json)(stdout))))
-    },
-    (path) => Effect.promise(() => rm(path, { force: true })),
+    }),
+    (path) => Effect.tryPromise(() => rm(path, { force: true })).pipe(
+      Effect.catchAll((error) => Effect.logWarning("Couldn't remove the model's temporary schema", error)),
+    ),
   )
 }
 
@@ -141,7 +140,8 @@ const make = (chosen: Chosen) =>
 
     return {
       ask: <A, I>(schema: Schema.Schema<A, I>, prompt: string) =>
-        reply(JSONSchema.make(schema), prompt).pipe(
+        Effect.try(() => JSONSchema.make(schema)).pipe(
+          Effect.flatMap((schema) => reply(schema, prompt)),
           Effect.flatMap(Schema.decodeUnknown(schema)),
           Effect.timeout("60 seconds"),
           Effect.mapError((cause) => new ModelError({ cause })),

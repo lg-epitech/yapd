@@ -1,4 +1,4 @@
-import { Data, Effect, Option, Runtime, Schema } from "effect"
+import { Data, Effect, FiberSet, Option, Schema } from "effect"
 import { Origin } from "./Origin.ts"
 import { Agent, Payload } from "./Payload.ts"
 
@@ -20,7 +20,9 @@ export type Handle = (
 /** Accepts hook events on localhost only. */
 export const serve = (port: number, handle: Handle) =>
   Effect.gen(function* () {
-    const runPromise = Runtime.runPromise(yield* Effect.runtime<never>())
+    const requests = yield* FiberSet.make<Response>()
+    const runPromise = yield* FiberSet.runtimePromise(requests)()
+    let closing = false
 
     const receive = (request: Request, server: Bun.Server<undefined>) =>
       Effect.gen(function* () {
@@ -42,6 +44,7 @@ export const serve = (port: number, handle: Handle) =>
           const done = () => resume(Effect.succeed(undefined))
           if (request.signal.aborted) return done()
           request.signal.addEventListener("abort", done, { once: true })
+          return Effect.sync(() => request.signal.removeEventListener("abort", done))
         })
         const reply = yield* Effect.raceFirst(handle(event.agent, event.payload, origin, true), gone)
         return Response.json(reply === undefined ? {} : { reply })
@@ -51,13 +54,20 @@ export const serve = (port: number, handle: Handle) =>
         ),
       )
 
-    yield* Effect.acquireRelease(
+    const server = yield* Effect.acquireRelease(
       Effect.try({
         try: () =>
-          Bun.serve({ hostname: "127.0.0.1", port, fetch: (request, server) => runPromise(receive(request, server)) }),
+          Bun.serve({
+            hostname: "127.0.0.1", port,
+            fetch: (request, server) => closing ? new Response(null, { status: 503 }) : runPromise(receive(request, server)),
+          }),
         catch: (cause) => new ServeError({ cause }),
       }),
-      (server) => Effect.promise(() => server.stop(true)),
+      (server) => Effect.sync(() => { closing = true }).pipe(
+        Effect.zipRight(FiberSet.clear(requests)),
+        Effect.zipRight(Effect.promise(() => server.stop(true))),
+      ),
     )
-    yield* Effect.logInfo(`Listening on http://127.0.0.1:${port}`)
+    yield* Effect.logInfo(`Listening on http://127.0.0.1:${server.port}`)
+    return server
   })

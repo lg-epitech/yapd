@@ -229,7 +229,7 @@ export const make = (options: {
     /** Once more if it fails, as with summaries. */
     const decide = (material: Material) => writer.decide(material).pipe(Effect.retry({ times: 1 }), writing.withPermits(1))
 
-    const start = (draft: Draft, resolved: Resolved, spoken: string, why: string) =>
+    const start = (draft: Draft, resolved: Resolved, spoken: string, why: string, warning?: string) =>
       Effect.gen(function* () {
         const { machine, project, request } = resolved
         if (request.prompt === "") return yield* fail(draft, "I couldn't write that up, so nothing started.")
@@ -249,7 +249,7 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         yield* close(draft)
         yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}, ${((now - draft.at) / 1000).toFixed(1)} s after it was dictated`)
-        const said = confirmation(spoken, resolved, started)
+        const said = [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" ")
         yield* options.note({
           project: project.name,
           ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
@@ -349,16 +349,10 @@ export const make = (options: {
         // Written from what they said after all, which leaves what was to be looked up to the agent.
         yield* Effect.logWarning(`Could not read through ${project.name}, so it's written without`, written.left)
         const blind = yield* decide({ ...material, research: false })
-        if (blind.action !== "start") return yield* act(draft, { ...material, research: false }, blind)
-        return yield* start(
-          draft,
-          { ...resolved, request: { ...request, prompt: blind.prompt.trim() } },
-          `${blind.spoken.trim()} I couldn't read through it first.`.trim(),
-          blind.why,
-        )
+        return yield* act(draft, { ...material, research: false }, blind, "I couldn't read through it first.")
       })
 
-    const act = (draft: Draft, material: Material, decision: Decision): Effect.Effect<void> =>
+    const act = (draft: Draft, material: Material, decision: Decision, warning?: string): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (decision.about.trim() !== "") draft.about = decision.about.trim()
         switch (decision.action) {
@@ -379,7 +373,7 @@ export const make = (options: {
               return yield* ask(draft, material, resolved.left)
             }
             return decision.action === "start"
-              ? yield* start(draft, resolved.right, decision.spoken, decision.why)
+              ? yield* start(draft, resolved.right, decision.spoken, decision.why, warning)
               : yield* look(draft, material, resolved.right, decision)
           }
           case "none":

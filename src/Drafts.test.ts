@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Either, Option, type Scope, TestClock, TestContext } from "effect"
+import { Effect, Either, Option, Queue, type Scope, TestClock, TestContext } from "effect"
 import * as Drafts from "./Drafts.ts"
 import type { Notice } from "./Inbox.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
@@ -69,6 +69,7 @@ const drafts = (
   Effect.gen(function* () {
     const started: Array<{ readonly machine: string; readonly request: Request }> = []
     const said: Array<Notice> = []
+    const notices = yield* Queue.unbounded<Notice>()
     const asked: Array<Material> = []
     const researched: Array<{ readonly machine: string; readonly directory: string }> = []
     const catalogs: Array<string> = []
@@ -102,7 +103,7 @@ const drafts = (
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
       recent: Effect.succeed([]),
       note: () => Effect.void,
-      tell: (notice) => Effect.sync(() => void said.push(notice)),
+      tell: (notice) => Effect.sync(() => void said.push(notice)).pipe(Effect.zipRight(Queue.offer(notices, notice)), Effect.asVoid),
     }).pipe(
       Effect.provideService(Writer, {
         decide: (material) =>
@@ -134,7 +135,7 @@ const drafts = (
       })
     const unanswered = (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush))
     const spoken = () => said.map(({ spoken }) => spoken)
-    return { ...made, dictate, answer, unanswered, wait, flush, started, said, spoken, questions, asked, researched, catalogs }
+    return { ...made, dictate, answer, unanswered, wait, flush, nextNotice: Queue.take(notices), started, said, spoken, questions, asked, researched, catalogs }
   })
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
@@ -341,6 +342,59 @@ describe("Drafts", () => {
     expect(result.research).toEqual([true, false])
     expect(result.started.map(({ request }) => request.prompt)).toEqual(["Fix the loader."])
     expect(result.spoken).toEqual(["Looking through yapd first.", "Started in yapd, on Fable, in a worktree. I couldn't read through it first."])
+  })
+
+  test("resolves the fallback decision again when reading the project fails", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictated, nextNotice, started } = yield* drafts(({ research }) =>
+          research
+            ? decision({ action: "research", evidence: "yapd", spoken: "Looking through yapd first." })
+            : decision({
+                project: "std",
+                evidence: "std",
+                model: "opus-5.5",
+                effort: "XHigh",
+                worktree: false,
+                prompt: "Fix the loader in std.",
+                spoken: "Started in std, on Opus, without a worktree.",
+              }),
+        )
+        yield* dictated("In yapd, compare the loader with std and fix it.")
+        yield* nextNotice
+        const notice = yield* nextNotice
+        return { started, spoken: notice.spoken }
+      }),
+    )
+    expect(result.started).toEqual([
+      {
+        machine: "rosie",
+        request: { project: "/code/std", prompt: "Fix the loader in std.", model: "claude-opus-5-5", effort: "xhigh", worktree: false },
+      },
+    ])
+    expect(result.spoken).toBe("Started in std, on Opus, without a worktree. I couldn't read through it first.")
+  })
+
+  test.each([
+    { project: "std", evidence: "words they never said" },
+    { project: "billing", evidence: "billing" },
+  ])("asks when a research fallback isn't a valid grounded destination: $project / $evidence", async (fallback) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictated, nextNotice, started } = yield* drafts(({ research }) =>
+          research
+            ? decision({ action: "research", evidence: "yapd", spoken: "Looking through yapd first." })
+            : decision({ ...fallback, prompt: "Fix the loader." }),
+        )
+        yield* dictated("In yapd, compare the loader with billing and fix it.")
+        yield* nextNotice
+        const question = yield* nextNotice
+        return { started, spoken: question.spoken, question: question.question !== undefined }
+      }),
+    )
+    expect(result.started).toEqual([])
+    expect(result.spoken).toBe("Which project is the loader fix for?")
+    expect(result.question).toBe(true)
   })
 
   test("says what really started when that's not what was asked", () => {
