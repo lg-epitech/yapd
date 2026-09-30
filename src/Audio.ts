@@ -43,7 +43,7 @@ export class Audio extends Context.Tag("yapd/Audio")<
     readonly play: (path: string, from?: number) => Effect.Effect<Playback, AudioError, Scope.Scope>
     /**
      * 32 ms frames of 16 kHz mono from the microphone while playing, with yapd's
-     * own voice cancelled out, so none over its first seconds after the
+     * own voice cancelled out, so none over the first seconds it says after the
      * microphone comes on, until that's learnt. None when there's no microphone
      * to listen to.
      */
@@ -149,8 +149,10 @@ export const NativeAudio = Layer.scopedContext(
     let greeted: Deferred.Deferred<void> | undefined
     let current: Current | undefined
     let listening = false
-    /** When the helper last started listening, which starts its echo cancellation over. */
-    let listenedAt = Number.NEGATIVE_INFINITY
+    /** How long the echo cancellation has heard yapd for, in what it played to the end or stopped. */
+    let heard = 0
+    /** When what the helper is playing started, if it's playing. */
+    let playingSince: number | undefined
     let permission: string | undefined
     let closing = false
     /** What the socket hasn't taken yet; it's written out once it drains. */
@@ -175,11 +177,14 @@ export const NativeAudio = Layer.scopedContext(
     const keys = yield* Config.shortcut
     const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, send) : undefined
 
+    const now = () => runSync(Clock.currentTimeMillis)
+    /** The helper went quiet, so the echo cancellation heard yapd until now. */
+    const quiet = () => {
+      if (playingSince !== undefined) heard += now() - playingSince
+      playingSince = undefined
+    }
     /** Whether yapd is talking while the echo cancellation is still learning its voice. */
-    const echoing = () =>
-      current !== undefined &&
-      !runSync(Deferred.isDone(current.finished)) &&
-      runSync(Clock.currentTimeMillis) - listenedAt < learning
+    const echoing = () => playingSince !== undefined && heard + now() - playingSince < learning
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
@@ -197,20 +202,28 @@ export const NativeAudio = Layer.scopedContext(
           if (event.value.type === "hello" && shortcut !== undefined) runSync(shortcut.greeted)
           return
         case "active":
+          // It started listening, which starts the echo cancellation over.
           listening = event.value.listening
-          listenedAt = runSync(Clock.currentTimeMillis)
+          heard = 0
+          playingSince = undefined
           return
         case "playing":
+          // Playing something new stops what it played before without saying so.
+          quiet()
+          playingSince = now()
           if (current?.id === event.value.id) Deferred.unsafeDone(current.started, Exit.succeed(event.value.duration))
           return
         case "failed":
+          quiet()
           // Also after it started, when the helper couldn't carry on after a device change.
           if (current?.id === event.value.id) settle(current, new AudioError({ message: event.value.message }), 0)
           return
         case "finished":
+          quiet()
           if (current?.id === event.value.id) Deferred.unsafeDone(current.finished, Exit.void)
           return
         case "stopped":
+          quiet()
           // Without an id, nothing was playing anymore: it had just finished.
           if (current?.stopped !== undefined && (event.value.id === undefined || event.value.id === current.id)) {
             Deferred.unsafeDone(current.stopped, Exit.succeed(event.value.at ?? current.duration))
@@ -242,6 +255,7 @@ export const NativeAudio = Layer.scopedContext(
       connection = undefined
       unsent = []
       listening = false
+      quiet()
       if (current !== undefined) settle(current, new AudioError({ message: "The audio helper quit" }), 0)
       current = undefined
       if (shortcut !== undefined) runSync(shortcut.quit)
@@ -381,6 +395,8 @@ export const NativeAudio = Layer.scopedContext(
       rest: Effect.sync(() => {
         send({ type: "rest" })
         listening = false
+        // It stops whatever it's playing without saying so.
+        quiet()
       }),
     }
     return Context.make(Audio, audio).pipe(Context.add(Shortcut.Shortcut, shortcut?.service ?? Shortcut.none))
