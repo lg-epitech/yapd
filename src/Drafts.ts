@@ -481,8 +481,9 @@ export const make = (options: {
     /** What they said after a question, worked out but not acted on, since they may still be talking. */
     const answer = (draft: Draft, material: Material, heard: string) =>
       Effect.gen(function* () {
-        // What's known of the threads can have grown since the question was asked.
-        const refreshed: Material = { ...material, threads: yield* Effect.forEach(material.threads, recollect) }
+        // What's known of the threads can have grown since the question was asked, and the question itself has
+        // played by now: asked what to tell a thread, "tell it to" points at the one the question was about.
+        const refreshed: Material = { ...material, threads: yield* Effect.forEach(material.threads, recollect), recent: yield* options.recent }
         const decision = yield* decide({ ...refreshed, lines: [...draft.lines, { speaker: "user", text: heard }] })
         if (decision.action === "wait") return Option.none()
         return Option.some(

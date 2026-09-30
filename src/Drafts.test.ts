@@ -675,6 +675,24 @@ describe("Drafts", () => {
     expect(away).toEqual({ sent: [["rig", "c3"]], spoken: ["Sent to Stream the eval loader in trainer on rig."] })
   })
 
+  test("takes \"tell it to\" as the thread it just asked what to tell, once the question has played", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, sent, spoken } = yield* drafts(({ lines }) =>
+          lines.length === 1
+            ? addressed("message", "rosie/a1", "latency")
+            : decision({ action: "message", about: "the latency one", project: "", thread: "rosie/a1", threadFrom: "referred", threadEvidence: "it", prompt: "Keep the API unchanged.", spoken: "" }),
+        )
+        yield* dictate("Tell the latency one.")
+        yield* answer("Tell it to keep the API unchanged.")
+        return { sent: sent.map(({ thread, text }) => [thread.id, text]), spoken: spoken() }
+      }),
+    )
+    // The question was noted about the thread, and heard since the request was worked out: what "it" means is settled from now, not then.
+    expect(result.spoken).toEqual(["What should I tell Reduce latency?", "Sent to Reduce latency in yapd."])
+    expect(result.sent).toEqual([["a1", "Keep the API unchanged."]])
+  })
+
   test("asks which thread rather than send to one the user didn't settle, and sends nothing meanwhile", async () => {
     // The writer picked one, on words the user never said.
     const guessed = await run(

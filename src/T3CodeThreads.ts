@@ -23,7 +23,12 @@ const Turn = Schema.Struct({ state: text, requestedAt: nullable(Schema.String), 
 
 const Session = Schema.Struct({ status: text, lastError: nullable(Schema.String) })
 
-/** A thread as the shell lists it, and as its detail carries it. A superset of what `T3Code` reads, so its helpers apply. */
+/**
+ * A thread as the shell lists it, and as its detail carries it. A superset of
+ * what `T3Code` reads, so its helpers apply. Only the shell says what a thread
+ * waits on: its detail doesn't carry the flags, so read alone it would show a
+ * thread stopped on an approval as running along.
+ */
 const Thread = Schema.Struct({
   id: Schema.String,
   projectId: text,
@@ -72,9 +77,6 @@ export const needs = (thread: Thread): ReadonlyArray<Need> => [
  * plan is answered.
  */
 const stuck = (thread: Thread) => thread.hasPendingApprovals || thread.hasPendingUserInput
-
-/** How many of the thread's latest turns are read to see whether a message already reached it. */
-const lookback = 3
 
 /**
  * Where the thread stands. T3 Code raises an approval or a question while the
@@ -153,6 +155,10 @@ const heard = <A, R>(effect: Effect.Effect<A, ThreadsError | Server.Trouble, R>)
 
 const archived = (what: string) => new ThreadsError({ reason: `That thread is archived, so I ${what}.`, gone: true })
 
+/** The shell doesn't list the thread, so asking again won't help. */
+const unlisted = (what = "", cause?: unknown) =>
+  new ThreadsError({ reason: `T3 Code doesn't have that thread any more${what === "" ? "" : `, so I ${what}`}.`, gone: true, ...(cause === undefined ? {} : { cause }) })
+
 export const threads = (
   token: Option.Option<Redacted.Redacted>,
   reach: (token: Redacted.Redacted) => Effect.Effect<Transport, Server.Trouble> = connect,
@@ -170,7 +176,7 @@ export const threads = (
           if (!missing(error)) return yield* error
           const shell = yield* api("/api/orchestration/shell", Shell).pipe(Effect.orElseFail(() => error))
           if (shell.threads.some((thread) => thread.id === id)) return yield* error
-          return yield* new ThreadsError({ reason: "T3 Code doesn't have that thread any more.", gone: true, cause: error })
+          return yield* unlisted("", error)
         }),
       ),
     )
@@ -188,8 +194,12 @@ export const threads = (
           [api("/api/orchestration/shell", Shell), snapshot(api, id, `?turnLimit=${Math.max(1, Math.floor(turns))}`)],
           { concurrency: "unbounded" },
         )
-        if (gone(thread)) return yield* archived("can't read it")
-        return { thread: listed(shell, thread), messages: said(thread.messages) } satisfies Detail
+        // Where it stands comes from the shell, which is what carries what it waits on. One the shell doesn't list
+        // is gone, however readable it still is, like one that answers 404.
+        const shown = shell.threads.find((other) => other.id === id)
+        if (shown === undefined) return yield* unlisted()
+        if (gone(thread) || gone(shown)) return yield* archived("can't read it")
+        return { thread: listed(shell, shown), messages: said(thread.messages) } satisfies Detail
       }).pipe(heard),
 
     // T3 Code only pages from the newest turn back, so the first message means reading the whole thread. It's read once and kept.
@@ -211,16 +221,15 @@ export const threads = (
         const { api } = yield* transport
         const shell = yield* api("/api/orchestration/shell", Shell)
         const thread = shell.threads.find((thread) => thread.id === id)
-        if (thread === undefined) {
-          return yield* new ThreadsError({ reason: "T3 Code doesn't have that thread any more, so I didn't send it.", gone: true })
-        }
+        if (thread === undefined) return yield* unlisted("didn't send it")
         if (gone(thread)) return yield* archived("didn't send it")
         // Sending now would steer the turn that's running instead of following it. Stopped on an approval or a
         // question, the thread won't move until the user answers in T3 Code, which yapd can't do for them.
         if (T3Code.busy(thread) || stuck(thread)) {
-          // Unless the turn is this very message's: a try whose answer was lost finds it accepted and under way.
-          // Then it went, and saying otherwise would have the user say it again.
-          const { thread: read } = yield* snapshot(api, id, `?turnLimit=${lookback}`)
+          // Unless this very message is already there: a try whose answer was lost finds it accepted, and any
+          // number of turns may have run since. Then it went, and saying otherwise would have the user say it
+          // again. The whole thread is read for it, which takes well under a second even for a long one.
+          const { thread: read } = yield* snapshot(api, id)
           if (read.messages.some((message) => message.id === outgoing.messageId)) return "sent"
           return stuck(thread) ? "waiting" : "busy"
         }

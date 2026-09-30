@@ -158,6 +158,18 @@ describe("T3CodeThreads", () => {
     expect((await failure(threads.detail("new", 2))).gone).toBeUndefined()
   })
 
+  test("takes where a thread stands from the shell, since its detail doesn't say what it waits on", async () => {
+    // As T3 Code answers: the detail carries none of the flags, so read alone the thread would seem to be running along.
+    const { hasPendingApprovals: _, ...bare } = shell.threads[2]!
+    const detail = { thread: { ...bare, messages: [{ id: "m1", role: "user", text: "Rename the store." }] } }
+    const threads = reached([], { "/api/orchestration/threads/approving?turnLimit=3": detail, "/api/orchestration/threads/orphan?turnLimit=3": detail })
+    const read = await Effect.runPromise(threads.detail("approving", 3))
+    expect(read.thread).toMatchObject({ id: "approving", state: "waiting", needs: ["approval"] })
+    expect(read.messages).toEqual([{ role: "user", text: "Rename the store.", at: "" }])
+    // Still readable, but no longer listed: gone, the same as one that answers 404.
+    expect(await failure(threads.detail("orphan", 3))).toMatchObject({ gone: true })
+  })
+
   test("doesn't take a thread as gone on a 404 alone, when the shell can't say either way", async () => {
     const transport: T3CodeThreads.Transport = {
       api: (path) =>
@@ -176,9 +188,9 @@ describe("T3CodeThreads", () => {
 
   test("sends with the ids it was given, unless the thread is mid-turn, waiting on the user, or gone", async () => {
     const dispatched: Array<unknown> = []
-    /** The thread's latest turns, as they're read before a busy or waiting thread is turned down. */
+    /** The whole thread, as it's read before a busy or waiting thread is turned down. */
     const turns = (id: string, messages: Array<{ id: string; role: string; text: string }>) => ({
-      [`/api/orchestration/threads/${id}?turnLimit=3`]: { thread: { ...shell.threads.find((thread) => thread.id === id), messages } },
+      [`/api/orchestration/threads/${id}`]: { thread: { ...shell.threads.find((thread) => thread.id === id), messages } },
     })
     const threads = reached(dispatched, {
       ...turns("running", [{ id: "someone-else", role: "user", text: "Go on." }]),
@@ -208,10 +220,15 @@ describe("T3CodeThreads", () => {
 
   test("takes a message as sent when the thread already has it, however the thread stands, rather than send it twice", async () => {
     const dispatched: Array<unknown> = []
-    // The first try's answer was lost, and the turn it started has since stopped on an approval.
+    // The first try's answer was lost, several turns have run since, and the latest has stopped on an approval.
+    // However far back the message is, it went: the thread is read whole, not just its latest turns.
+    const later = Array.from({ length: 4 }, (_, turn) => [
+      { id: `later-${turn}-user`, role: "user", text: "Go on." },
+      { id: `later-${turn}-assistant`, role: "assistant", text: "Going on." },
+    ]).flat()
     const threads = reached(dispatched, {
-      "/api/orchestration/threads/approving?turnLimit=3": {
-        thread: { ...shell.threads[2], messages: [{ id: "message-1", role: "user", text: "compact keep the public API unchanged" }] },
+      "/api/orchestration/threads/approving": {
+        thread: { ...shell.threads[2], messages: [{ id: "message-1", role: "user", text: "compact keep the public API unchanged" }, ...later] },
       },
     })
     expect(await Effect.runPromise(threads.send("approving", outgoing))).toBe("sent")
