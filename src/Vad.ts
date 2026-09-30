@@ -14,7 +14,7 @@ export class Vad extends Context.Tag("yapd/Vad")<
   }
 >() {}
 
-const repo = "onnx-community/silero-vad"
+export const repo = "onnx-community/silero-vad"
 
 /** Silero VAD, run locally. It's tiny and takes a fraction of a millisecond per frame. */
 export const SileroVad = Layer.scoped(

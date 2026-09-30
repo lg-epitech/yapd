@@ -8,8 +8,8 @@ import { run } from "./Process.ts"
 
 export const label = "dev.yapd"
 
-const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`)
-const logPath = join(homedir(), "Library", "Logs", "yapd.log")
+export const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`)
+export const logPath = join(homedir(), "Library", "Logs", "yapd.log")
 const domain = `gui/${userInfo().uid}`
 
 export interface Options {
@@ -61,12 +61,16 @@ const healthy = Effect.gen(function* () {
   )
 })
 
+/** This copy of yapd, which the service and hooks run. */
+export const main = join(import.meta.dir, "main.ts")
+
+/** The bun on the PATH. execPath resolves symlinks, which would pin a versioned install that an upgrade removes. */
+export const bun = () => Bun.which("bun") ?? process.execPath
+
 /** Writes the LaunchAgent and (re)starts it, so config changes apply too. */
 export const install = Effect.gen(function* () {
-  const main = join(import.meta.dir, "main.ts")
   const options: Options = {
-    // execPath resolves symlinks, which would pin a versioned install that an upgrade removes.
-    bun: Bun.which("bun") ?? process.execPath,
+    bun: bun(),
     main,
     // The daemon reads .env from here.
     workingDirectory: home,

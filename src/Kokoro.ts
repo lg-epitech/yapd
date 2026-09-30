@@ -5,7 +5,7 @@ import * as ort from "onnxruntime-node"
 import * as Hub from "./Hub.ts"
 import { run } from "./Process.ts"
 import { phonemize } from "./vendor/kokoro/phonemize.js"
-import { type Device, join, type Reply, type Request, split, voices } from "./Voice.ts"
+import { type Device, join, kokoroRepo as repo, type Reply, type Request, split, voices } from "./Voice.ts"
 
 // Kokoro, in a process of its own that the daemon starts. onnxruntime runs a
 // model on the thread that asks, and in the daemon that froze everything else
@@ -18,8 +18,6 @@ const send = (reply: Reply) => void process.send?.(reply)
 
 // Nothing will ask once the daemon is gone.
 process.on("disconnect", () => process.exit(0))
-
-const repo = "onnx-community/Kokoro-82M-v1.0-ONNX"
 
 const open = (file: string, device: Device) =>
   ort.InferenceSession.create(file, { executionProviders: device === "GPU" ? ["webgpu", "cpu"] : ["cpu"], logSeverityLevel: 3 })

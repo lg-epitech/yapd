@@ -16,6 +16,9 @@ export const extension = ".wav"
 
 export class KokoroError extends Data.TaggedError("KokoroError")<{ readonly cause: unknown }> {}
 
+/** Where Kokoro's model and voices come from. */
+export const kokoroRepo = "onnx-community/Kokoro-82M-v1.0-ONNX"
+
 /** Kokoro's voices, with samples. */
 const voicesPage = "https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md"
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Cause, Effect, Exit, Fiber, Option } from "effect"
+import { Cause, Console, Effect, Exit, Fiber, Option } from "effect"
 import { realpathSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname } from "node:path"
@@ -16,6 +16,7 @@ import * as Relay from "./Relay.ts"
 import * as Remote from "./Remote.ts"
 import * as Research from "./Research.ts"
 import * as Service from "./Service.ts"
+import * as Setup from "./Setup.ts"
 import * as T3Code from "./T3Code.ts"
 
 /**
@@ -72,7 +73,7 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
 const [command, argument] = process.argv.slice(2)
 
 /** Commands that read the user's settings. Hooks don't, and start wherever the agent runs. */
-const settled = ["serve", "install", "uninstall", "relay", "start", "catalog", "research", "mind"]
+const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "research", "mind"]
 
 // Bun reads .env from the folder it starts in, so these run in yapd's home, wherever they were started from: the
 // yapd folder, the home directory an SSH command starts in, or anywhere else.
@@ -86,17 +87,35 @@ if (command !== undefined && settled.includes(command)) {
   }
 }
 
+/** Says what's wrong, and exits with 1 when anything is broken. */
+const doctor = Effect.gen(function* () {
+  // Apart from the other commands, since it reads the models' modules, which hooks shouldn't load.
+  const { doctor } = yield* Effect.promise(() => import("./Doctor.ts"))
+  if (yield* doctor(Service.bun(), Service.main)) process.exitCode = 1
+})
+
 const mac = process.platform === "darwin"
 // Intel Macs could run it before, so they can still remove the service.
 if ((command === "serve" || command === "install" || (command === "uninstall" && !mac)) && !(mac && process.arch === "arm64")) {
   console.error(
     `yapd only speaks on Macs with Apple silicon. Here it runs hooks and relays follow-ups, which need no service.${
-      mac ? " To remove one installed before, run `bun src/main.ts uninstall`." : ""
+      mac ? " To remove one installed before, run `yapd uninstall`." : ""
     }`,
   )
   process.exit(1)
 } else if (command === "serve") {
   runMain(Effect.flatMap(Effect.promise(() => import("./Serve.ts")), ({ serve }) => serve))
+} else if (command === "setup") {
+  runMain(
+    Effect.gen(function* () {
+      yield* Setup.setup(Service.bun(), Service.main)
+      if (mac && process.arch === "arm64") yield* Service.install
+      else yield* Console.log("Here yapd runs hooks and relays follow-ups. It speaks on a Mac with Apple silicon, where setup also starts it.")
+      yield* doctor
+    }),
+  )
+} else if (command === "doctor") {
+  runMain(doctor)
 } else if (command === "install") {
   runMain(Service.install)
 } else if (command === "uninstall") {
@@ -115,7 +134,7 @@ if ((command === "serve" || command === "install" || (command === "uninstall" &&
 } else if (command === "relay" || command === "start" || command === "catalog" || command === "research") {
   runMain(command === "relay" ? relay : command === "start" ? start(argument) : command === "catalog" ? catalog(argument) : research)
 } else {
-  console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd research")
+  console.error("usage: yapd setup | yapd doctor | yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd research")
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)
 }
