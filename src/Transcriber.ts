@@ -66,7 +66,7 @@ export const heard = (text: string, told: string) => {
 interface Promptable {
   readonly tokenizer: {
     readonly encode: (text: string, options: { readonly add_special_tokens: boolean }) => ReadonlyArray<number>
-    readonly model: { readonly convert_tokens_to_ids: (tokens: ReadonlyArray<string>) => ReadonlyArray<number | undefined> }
+    readonly convert_tokens_to_ids: (tokens: ReadonlyArray<string>) => ReadonlyArray<number | undefined>
   }
   readonly model: {
     readonly generation_config: object
@@ -80,7 +80,7 @@ interface Promptable {
  */
 const prompted = async (asr: AutomaticSpeechRecognitionPipeline, audio: Float32Array, language: string, terms: ReadonlyArray<string>) => {
   const { tokenizer, model } = asr as unknown as Promptable
-  const [previous] = tokenizer.model.convert_tokens_to_ids(["<|startofprev|>"])
+  const [previous] = tokenizer.convert_tokens_to_ids(["<|startofprev|>"])
   if (previous === undefined) return undefined
   const told = glossary(terms, (text) => tokenizer.encode(text, { add_special_tokens: false }).length <= most)
   const start = model._retrieve_init_tokens({ ...model.generation_config, language, task: "transcribe" })
