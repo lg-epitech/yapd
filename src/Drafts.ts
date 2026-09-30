@@ -554,7 +554,7 @@ export const make = (options: {
      * message to the wrong agent is the costly mistake.
      */
     const target = (material: Material, decision: Decision): Option.Option<Target> => {
-      if (!groundedThread(decision, material.lines, material.threads, material.recent)) return Option.none()
+      if (!groundedThread(decision, material.lines, shortlist(material.threads, material.now), material.recent)) return Option.none()
       return Option.flatMap(parseKey(decision.thread.trim()), ({ machine: name, id }) => {
         const machine = options.machines.find((machine) => machine.name === name)
         const found = material.threads.find((listing) => listing.machine === name)?.threads.find(({ listed }) => listed.id === id)

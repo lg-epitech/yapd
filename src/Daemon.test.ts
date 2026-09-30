@@ -171,7 +171,7 @@ const make = (says?: string, options: {
     return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
   })
   const reading = STM.commit(TRef.get(floor.reading))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, recentBy: made.recent, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
 })
 
 const daemon = make()
@@ -504,6 +504,27 @@ describe("Daemon", () => {
     expect(result.first).toEqual(["Update 1."])
     // Only the last few heard are kept.
     expect(result.after).toEqual(["Update 8.", "Update 7.", "Update 6.", "Update 5.", "Update 4.", "Update 3."])
+  })
+
+  test("keeps what a dictation cut off among what was heard until it's read again, however much plays first", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, turn, wait, dictate, recent, recentBy } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        yield* wait(1)
+        const dictation = yield* dictate
+        const pressed = yield* Clock.currentTimeMillis
+        // Each needs the user, so all six are read before the one put back.
+        for (const n of [1, 2, 3, 4, 5, 6]) yield* turn(`s${n}`, `Needs you ${n}.`, 1, { needsYou: true })
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        for (let n = 0; n < 6; n++) yield* wait(11)
+        return { pressed: (yield* recentBy(pressed)).map(({ message }) => message), after: (yield* recent).map(({ message }) => message) }
+      }),
+    )
+    // What they were pointing at as they pressed the shortcut, and once it's read again, the latest thing heard.
+    expect(result.pressed).toEqual(["The PR is ready."])
+    expect(result.after).toEqual(["The PR is ready.", "Needs you 6.", "Needs you 5.", "Needs you 4.", "Needs you 3.", "Needs you 2."])
   })
 
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {

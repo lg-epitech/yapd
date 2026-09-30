@@ -331,7 +331,9 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   /**
    * Puts back what a dictation cut off, to be said again from the start: an
    * update unless the session has moved on or been answered since, even by a
-   * follow-up that's still on its way, and a notice unless it has been dealt with.
+   * follow-up that's still on its way, and a notice unless it has been dealt
+   * with. What's put back stays among what was heard until it's read again,
+   * however much plays before its turn comes round.
    */
   const keep = (ready: Inbox.Entry, dealtWith: boolean) =>
     Effect.gen(function* () {
@@ -342,9 +344,11 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
             (yield* conversation.sending(ready.session, ready.update))
           : dealtWith
       if (over) return false
-      return yield* STM.commit(
+      const again = yield* STM.commit(
         TRef.modify(inbox, (current) => (current.has(ready.session) ? [false, current] : [true, Inbox.add(current, ready)])),
       )
+      if (again) recent = Recent.keep(recent, "update" in ready ? ready.id : ready.notice.id)
+      return again
     })
 
   /** A hook is let go of once the follow-up on its way has reached it, or it would get none. */

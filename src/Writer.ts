@@ -114,12 +114,14 @@ const wordsShown = ({ listed, known }: ThreadListing["threads"][number]) =>
  * message can't go to the wrong agent: the key is one that was listed, and the
  * words given for it are theirs. When they named it, one of those words, past
  * the bare ones like "the agent", has to be one the listing shows for that
- * thread, or the model went by something it wasn't given. When they only
- * pointed at something yapd read out, what they've heard has to carry that
- * thread, and a bare pointer like "that one" can only mean the last thing they
- * heard: when that carried no thread, or another, they meant something yapd
- * can't tell, and it asks. Bare words are the user's, but settle nothing on
- * their own.
+ * thread, or the model went by something it wasn't given. The machine's name
+ * alone, like "the one on rig", names a thread only when it's the only one
+ * listed there: with more, they meant one of several, and yapd asks which.
+ * When they only pointed at something yapd read out, what they've heard has
+ * to carry that thread, and a bare pointer like "that one" can only mean the
+ * last thing they heard: when that carried no thread, or another, they meant
+ * something yapd can't tell, and it asks. Bare words are the user's, but
+ * settle nothing on their own.
  */
 export const groundedThread = (
   decision: Pick<Decision, "thread" | "threadFrom" | "threadEvidence">,
@@ -129,12 +131,14 @@ export const groundedThread = (
 ) => {
   if (decision.threadFrom === "unclear") return false
   const chosen = decision.thread.trim()
-  const found = threads.flatMap(({ machine, threads }) => threads.filter(({ listed }) => key(machine, listed.id) === chosen))[0]
+  const found = threads.flatMap((listing) => listing.threads.filter(({ listed }) => key(listing.machine, listed.id) === chosen).map((thread) => ({ listing, thread })))[0]
   if (found === undefined || !quoted(decision.threadEvidence, lines)) return false
   const telling = words(decision.threadEvidence).filter((word) => !bare.has(word))
   if (decision.threadFrom === "named") {
-    const listed = wordsShown(found)
-    return telling.some((word) => listed.has(word))
+    const listed = wordsShown(found.thread)
+    if (telling.some((word) => listed.has(word))) return true
+    const machine = words(found.listing.machine)
+    return telling.length > 0 && telling.every((word) => machine.includes(word)) && found.listing.threads.length === 1
   }
   if (telling.length === 0) {
     const latest = recent.reduce<Played | undefined>((last, heard) => (last === undefined || heard.heardAt > last.heardAt ? heard : last), undefined)
@@ -274,7 +278,7 @@ const deciding = (research: boolean, answering: boolean) =>
       `Which thread, for "message" and "summary". The threads are listed below, on each machine, with what each is about: its title, project, branch and state as T3 Code has them, and for those you know more about, what the work is and how it was asked for. Only a listed thread can be picked, and only by its key.`,
       `"thread": the thread's key exactly as listed, like "rosie/6f1a2b". Empty for anything else, and when unclear.`,
       `"threadFrom": what settles the thread, which is only ever one of two things.`,
-      `- "named": they described it in their own words, and one listed thread fits: its title, its project, its branch, what the work is, or where it stands when that singles it out, like "the retry fix", "the latency investigation", "the yapd agent" when yapd has one thread, or "the one that's waiting for me" when one is waiting. Heard loosely, since dictation mangles names, but at least one of their words has to be one the listing shows for that thread.`,
+      `- "named": they described it in their own words, and one listed thread fits: its title, its project, its branch, what the work is, where it stands when that singles it out, or the machine it's on when it's the only thread listed there, like "the retry fix", "the latency investigation", "the yapd agent" when yapd has one thread, "the one that's waiting for me" when one is waiting, or "the one on rig" when rig has one thread. Heard loosely, since dictation mangles names, but at least one of their words has to be one the listing shows for that thread, or its machine's name when that machine has no other thread listed.`,
       `- "referred": they pointed at something you read out lately, like "that one", "it" or "the one that just finished", and what you read out carries the thread's key. Bare pointers like "it" or "that one" mean the last thing you read out, and only when it carries a thread: when it doesn't, that's unclear. Only what you read out counts, and only what's listed below as read out: what they dictated before points at no thread.`,
       `- "unclear": anything else, and then you ask. Two threads fitting about as well is unclear, and so is one that's only likely: the newest, or the only one still running. A thread they name that isn't listed, because it's archived or on a machine whose threads couldn't be listed, can't be reached: "ask" when a listed one could be it, else "none", saying why.`,
       `"threadEvidence": their words that settle it, copied from what they said exactly as transcribed, mistakes included: what they called it, or the words that point at what you read out. Empty when unclear.`,

@@ -9,7 +9,9 @@
 // what had played when the shortcut was pressed: what plays after, once it lets
 // go of the speaker, the user hadn't heard when they spoke. Every start of a
 // reading is logged for that, since one the dictation cut off is read again
-// after, and where it stood as they spoke is where it stood before that.
+// after, and where it stood as they spoke is where it stood before that. Until
+// it's read again it's kept, however much plays before it: to forget it would
+// make the second reading nothing the user can point at.
 //
 // Everything yapd says about the user's work is noted: an agent's update, and
 // whatever yapd says for itself in answer to a dictation, whether it started
@@ -40,6 +42,8 @@ export interface Heard {
   readonly at: number
   /** When it last started being read out: again, after a dictation cut it off. None while it waits its turn. */
   readonly heardAt?: number
+  /** Whether it's back in the inbox to be read out again, after a dictation cut it off. */
+  readonly again?: boolean
 }
 
 /** One the user has heard, placed by when it started playing. */
@@ -65,6 +69,8 @@ const most = 6
 const lifetime = 3 * 60 * 60_000
 /** How many starts are kept: room for each one kept to have been cut off and read again many times over. */
 const replays = most * 10
+/** How many that wait to be read again are kept past `most`: far more than dictations could cut off and leave waiting. */
+const cutOff = most * 5
 
 const wasHeard = (heard: Heard): heard is Played => heard.heardAt !== undefined
 
@@ -73,10 +79,14 @@ const wasHeard = (heard: Heard): heard is Played => heard.heardAt !== undefined
  * starts of what's kept. One that waits past `lifetime` is let go of all the
  * same: its notice was never queued, or its update was dropped before it was
  * noted as such, and nothing else will drop it. A start older than `lifetime`
- * is let go of too, since no dictation reaches back that far.
+ * is let go of too, since no dictation reaches back that far. One heard and
+ * put back to be read again is kept however much plays before its turn comes,
+ * and so is the start that was cut off: at the press that cut it off, it had
+ * been heard, and when it plays again it's the latest thing heard.
  */
 const trim = (recent: Recent, now: number): Recent => {
-  const kept = new Set(recent.noted.filter(wasHeard).toSorted((one, other) => other.heardAt - one.heardAt).slice(0, most))
+  const played = recent.noted.filter(wasHeard).toSorted((one, other) => other.heardAt - one.heardAt)
+  const kept = new Set([...played.slice(0, most), ...played.filter(({ again }) => again === true).slice(0, cutOff)])
   const noted = recent.noted.filter((heard) => (wasHeard(heard) ? kept.has(heard) : now - heard.at < lifetime))
   const ids = new Set(noted.map(({ id }) => id))
   return { noted, plays: recent.plays.filter((play) => ids.has(play.id) && now - play.at < lifetime).slice(0, replays) }
@@ -93,12 +103,21 @@ const change = (recent: Recent, id: string, changed: (heard: Heard) => Heard): R
 /** Marks `id` as being read out from `at`. Read out again after a dictation cut it off, it's the latest thing heard again. */
 export const heard = (recent: Recent, id: string, at: number): Recent => {
   if (!recent.noted.some((heard) => heard.id === id)) return recent
-  const played = change(recent, id, (heard) => ({ ...heard, heardAt: at }))
+  const played = change(recent, id, (heard) => ({ ...heard, heardAt: at, again: false }))
   return trim({ ...played, plays: [{ id, at }, ...played.plays] }, at)
 }
 
-/** Forgets `id` if it was never read out: its inbox entry is gone, so it won't be. */
-export const drop = (recent: Recent, id: string): Recent => ({ ...recent, noted: recent.noted.filter((heard) => heard.id !== id || wasHeard(heard)) })
+/** Marks `id` as put back in the inbox, to be read out again after the dictation that cut it off. */
+export const keep = (recent: Recent, id: string): Recent => change(recent, id, (heard) => ({ ...heard, again: true }))
+
+/**
+ * Forgets `id` if it was never read out: its inbox entry is gone, so it won't
+ * be. One that was heard stays, but no longer waits to be read again.
+ */
+export const drop = (recent: Recent, id: string): Recent => ({
+  ...recent,
+  noted: recent.noted.flatMap((heard) => (heard.id !== id ? [heard] : wasHeard(heard) ? [{ ...heard, again: false }] : [])),
+})
 
 /** Names the thread `id` was about, once that's known, which can be after it was read out. */
 export const about = (recent: Recent, id: string, thread: NonNullable<Heard["thread"]>): Recent =>

@@ -235,4 +235,20 @@ describe("Writer", () => {
     expect(Writer.parseKey("rosie/a1")).toEqual(Option.some({ machine: "rosie", id: "a1" }))
     expect(Writer.parseKey("a1")).toEqual(Option.none())
   })
+
+  test("takes the machine's name for a thread only when it's the only one listed there", () => {
+    const lines = [{ speaker: "user" as const, text: "Tell the one on rig to stop." }]
+    const byMachine = { threadFrom: "named" as const, threadEvidence: "the one on rig" }
+    const rerun = { listed: listed("r1", { project: "trainer", title: "Rerun the eval", state: "running" }), known: Option.none() }
+    const retry = { listed: listed("r2", { project: "trainer", title: "Retry fix" }), known: Option.none() }
+    const one = [...threads, { machine: "rig", here: false, threads: [rerun] }]
+    expect(Writer.groundedThread({ thread: "rig/r1", ...byMachine }, lines, one, [])).toBe(true)
+    // With two on rig, "the one on rig" is either: yapd asks.
+    const two = [...threads, { machine: "rig", here: false, threads: [rerun, retry] }]
+    expect(Writer.groundedThread({ thread: "rig/r1", ...byMachine }, lines, two, [])).toBe(false)
+    // Past the machine's name, their words have to fit the thread as usual.
+    const naming = [{ speaker: "user" as const, text: "Tell the retry fix on rig to stop." }]
+    expect(Writer.groundedThread({ thread: "rig/r2", threadFrom: "named", threadEvidence: "the retry fix on rig" }, naming, two, [])).toBe(true)
+    expect(Writer.groundedThread({ thread: "rig/r1", threadFrom: "named", threadEvidence: "the retry fix on rig" }, naming, two, [])).toBe(false)
+  })
 })
