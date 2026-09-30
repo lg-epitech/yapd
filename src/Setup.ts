@@ -23,16 +23,22 @@ export type Hooks = { readonly [event: string]: ReadonlyArray<Group> }
 /**
  * Whether a hook runs yapd's, however it was set up: `yapd hook claude`, or
  * `bun …/yapd/src/main.ts hook codex` from a clone, a worktree of one, or the
- * package. Only a main.ts inside a folder named yapd, so another tool's hook
- * that happens to be called the same way is never taken for yapd's.
+ * package, or this copy of yapd, `main`, wherever it is. Only a main.ts inside
+ * a folder named yapd otherwise, so another tool's hook that happens to be
+ * called the same way is never taken for yapd's.
  */
-export const ours = (hook: Hook) =>
-  typeof hook.command === "string" &&
-  [
-    /(?:^|[\s/'"])yapd['"]?\s+hook\s+(?:claude|codex)\b/,
-    /\/yapd(?:\/[^\s'"]*)?\/src\/main\.ts\s+hook\s+(?:claude|codex)\b/,
-    /'[^']*\/yapd(?:\/[^']*)?\/src\/main\.ts'\s+hook\s+(?:claude|codex)\b/,
-  ].some((pattern) => pattern.test(hook.command as string))
+export const ours = (hook: Hook, main?: string) => {
+  const { command } = hook
+  if (typeof command !== "string") return false
+  return (
+    [
+      /(?:^|[\s/'"])yapd['"]?\s+hook\s+(?:claude|codex)\b/,
+      /\/yapd(?:\/[^\s'"]*)?\/src\/main\.ts\s+hook\s+(?:claude|codex)\b/,
+      /'[^']*\/yapd(?:\/[^']*)?\/src\/main\.ts'\s+hook\s+(?:claude|codex)\b/,
+    ].some((pattern) => pattern.test(command)) ||
+    (main !== undefined && command.includes(`${quote(main)} hook `))
+  )
+}
 
 /** Quoted for the shell the agent runs hooks with, when it has to be. */
 const quote = (word: string) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`)
@@ -79,14 +85,14 @@ export const codex = (run: ReturnType<typeof command>): Record<string, Hook> => 
  * doesn't ask again about any but those that changed. At the end when there
  * was none. Any more of yapd's go, so it never runs twice.
  */
-export const merge = (hooks: Hooks, wanted: Record<string, Hook>): Hooks => {
+export const merge = (hooks: Hooks, wanted: Record<string, Hook>, main?: string): Hooks => {
   const merged: Record<string, ReadonlyArray<Group>> = { ...hooks }
   for (const [event, hook] of Object.entries(wanted)) {
     let placed = false
     const groups = (merged[event] ?? []).flatMap((group): Array<Group> => {
       if (!Array.isArray(group.hooks)) return [group]
       const kept = group.hooks.flatMap((existing: Hook) => {
-        if (!ours(existing)) return [existing]
+        if (!ours(existing, main)) return [existing]
         if (placed) return []
         placed = true
         return [hook]
@@ -99,9 +105,12 @@ export const merge = (hooks: Hooks, wanted: Record<string, Hook>): Hooks => {
 }
 
 /** yapd's hook for each event there is one for. */
-export const find = (hooks: Hooks): Record<string, ReadonlyArray<Hook>> =>
+export const find = (hooks: Hooks, main?: string): Record<string, ReadonlyArray<Hook>> =>
   Object.fromEntries(
-    Object.entries(hooks).map(([event, groups]) => [event, groups.flatMap((group) => (Array.isArray(group.hooks) ? group.hooks.filter(ours) : []))]),
+    Object.entries(hooks).map(([event, groups]) => [
+      event,
+      groups.flatMap((group) => (Array.isArray(group.hooks) ? group.hooks.filter((hook) => ours(hook, main)) : [])),
+    ]),
   )
 
 /** Where each agent keeps its hooks, and where in that file. */
@@ -132,11 +141,11 @@ export const read = (file: string) =>
  * changed it is kept next to it. Both keep the file's permissions, since
  * Claude Code's settings can hold keys.
  */
-export const install = (agent: Agent, run: ReturnType<typeof command>) =>
+export const install = (agent: Agent, run: ReturnType<typeof command>, main?: string) =>
   Effect.gen(function* () {
     const { file, name } = config(agent)
     const settings = yield* read(file)
-    const hooks = merge(settings.hooks ?? {}, (agent === "claude" ? claude : codex)(run))
+    const hooks = merge(settings.hooks ?? {}, (agent === "claude" ? claude : codex)(run), main)
     if (JSON.stringify(hooks) === JSON.stringify(settings.hooks ?? {})) {
       return { changed: false, message: `${name}'s hooks were already set up, in ${file}` }
     }
@@ -173,8 +182,8 @@ export const refresh = (bun: string, main: string) =>
     (agent) =>
       Effect.gen(function* () {
         const settings = yield* read(config(agent).file).pipe(Effect.option)
-        if (Option.isNone(settings) || Object.values(find(settings.value.hooks ?? {})).every((hooks) => hooks.length === 0)) return
-        const { changed, message } = yield* install(agent, command(bun, main, environment()))
+        if (Option.isNone(settings) || Object.values(find(settings.value.hooks ?? {}, main)).every((hooks) => hooks.length === 0)) return
+        const { changed, message } = yield* install(agent, command(bun, main, environment()), main)
         if (changed) yield* Console.log(message)
       }).pipe(Effect.catchAll((error) => Console.error(`${error.message}. Its hooks are in the README.`))),
     { discard: true },
@@ -200,7 +209,7 @@ export const setup = (bun: string, main: string) =>
     const agents = (["claude", "codex"] as const).filter(present)
     if (agents.length === 0) yield* Console.log("Neither Claude Code nor Codex is here, so there are no hooks to set up.")
     for (const agent of agents) {
-      yield* install(agent, command(bun, main, environment())).pipe(
+      yield* install(agent, command(bun, main, environment()), main).pipe(
         Effect.flatMap(({ message }) => Console.log(message)),
         Effect.catchAll((error) => Console.error(`${error.message}. Its hooks are in the README.`)),
       )

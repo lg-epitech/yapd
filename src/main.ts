@@ -81,15 +81,17 @@ const probe = (env: Record<string, string | undefined>): Record<string, string |
 
 /**
  * What Bun set from .env files in the folder this started in. First which
- * names they set, with NODE_ENV as it was, since it picks the files. Then what
- * they set them to with everything else as it was, since a value can be built
- * from other variables.
+ * names they set, then what they set them to with everything else as it was,
+ * since a value can be built from other variables.
  */
 const dotenv = (): Record<string, string | undefined> => {
   if (![".env", ".env.local", ".env.development", ".env.production", ".env.test"].some((name) => existsSync(name))) return {}
   try {
-    const names = Object.keys(probe(process.env.NODE_ENV === undefined ? {} : { NODE_ENV: process.env.NODE_ENV })).filter(
-      (name) => name !== "NODE_ENV",
+    // NODE_ENV picks the files, so they're read as the caller had it, unless it came from them too.
+    const unseeded = probe({})
+    const exported = process.env.NODE_ENV !== undefined && unseeded.NODE_ENV !== process.env.NODE_ENV
+    const names = Object.keys(exported ? probe({ NODE_ENV: process.env.NODE_ENV }) : unseeded).filter(
+      (name) => !(exported && name === "NODE_ENV"),
     )
     const set = probe(Object.fromEntries(Object.entries(process.env).filter(([name]) => !names.includes(name))))
     return Object.fromEntries(names.map((name) => [name, set[name]]))

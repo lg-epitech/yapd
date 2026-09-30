@@ -33,6 +33,7 @@ describe("command", () => {
     expect(Setup.ours({ command: `/opt/bun '/Users/me/My Projects/yapd/src/main.ts' hook claude` })).toBe(true)
     expect(Setup.ours(format)).toBe(false)
     expect(Setup.ours({ command: "my-hook claude" })).toBe(false)
+    expect(Setup.ours({ command: "/opt/bun --no-env-file /opt/voice/src/main.ts hook claude" }, "/opt/voice/src/main.ts")).toBe(true)
     // Another tool's, called the same way.
     expect(Setup.ours({ command: "bun /Users/me/hook-tools/main.ts hook claude" })).toBe(false)
     expect(Setup.ours({ command: "bun /Users/me/yapd-notes/src/main.ts hook claude" })).toBe(false)
@@ -55,6 +56,12 @@ describe("merge", () => {
     const old = { type: "command", command: "yapd hook codex" }
     const merged = Setup.merge({ Stop: [{ hooks: [old] }, { hooks: [old, format] }] }, Setup.codex(run))
     expect(merged.Stop).toEqual([{ hooks: [Setup.codex(run).Stop!] }, { hooks: [format] }])
+  })
+
+  test("replaces the hooks of this yapd wherever it's checked out, rather than add more", () => {
+    const voice = Setup.command("/opt/bun", "/opt/voice/src/main.ts")
+    const once = Setup.merge({}, Setup.codex(voice), "/opt/voice/src/main.ts")
+    expect(Setup.merge(once, Setup.codex(voice), "/opt/voice/src/main.ts")).toEqual(once)
   })
 
   test("changes nothing the second time", () => {

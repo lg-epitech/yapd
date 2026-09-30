@@ -44,11 +44,11 @@ const settings = (folder: string): Array<Finding> => [
 const paths = (command: string) => command.split(/\s+/).filter((word) => word.startsWith("/"))
 
 /** yapd's hooks for the agent, if it's here, and whether they run this copy of yapd. */
-export const hooks = (agent: Setup.Agent, command: ReturnType<typeof Setup.command>) =>
+export const hooks = (agent: Setup.Agent, command: ReturnType<typeof Setup.command>, main?: string) =>
   Effect.gen(function* () {
     if (!Setup.present(agent)) return []
     const { file, name } = Setup.config(agent)
-    const found = Setup.find((yield* Setup.read(file)).hooks ?? {})
+    const found = Setup.find((yield* Setup.read(file)).hooks ?? {}, main)
     const wanted = (agent === "claude" ? Setup.claude : Setup.codex)(command)
     const events = Object.entries(wanted)
     const missing = events.filter(([event]) => (found[event] ?? []).length === 0).map(([event]) => event)
@@ -201,8 +201,8 @@ export const doctor = (bun: string, main: string) =>
     const command = Setup.command(bun, main, Setup.environment())
     const checks = [
       Effect.sync(() => settings(dirname(dirname(main)))),
-      hooks("claude", command),
-      hooks("codex", command),
+      hooks("claude", command, main),
+      hooks("codex", command, main),
       daemon,
       ...(mac ? [service(main), helper, models] : [reachable]),
       t3code,
