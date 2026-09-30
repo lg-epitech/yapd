@@ -211,7 +211,8 @@ const delivered = (to: string, delivery: Delivery): { readonly spoken: string; r
 /**
  * What was asked for when the shortcut was pressed, kept while it's fresh
  * enough, and asked for again when it isn't, like when a dictation is sent
- * long after.
+ * long after. It can also be asked for anew however fresh it is, and what
+ * comes back is what's kept from then on.
  */
 const keep = <A>(fetch: Effect.Effect<A>, fresh: number, scope: Scope.Scope) => {
   let fetched: { readonly at: number; readonly fiber: Fiber.RuntimeFiber<A> } | undefined
@@ -225,7 +226,8 @@ const keep = <A>(fetch: Effect.Effect<A>, fresh: number, scope: Scope.Scope) => 
     const now = yield* Clock.currentTimeMillis
     return yield* Fiber.join(fetched !== undefined && now - fetched.at < fresh ? fetched.fiber : yield* refresh)
   })
-  return { refresh: Effect.asVoid(refresh), get }
+  const renew = Effect.flatMap(refresh, Fiber.join)
+  return { refresh: Effect.asVoid(refresh), get, renew }
 }
 
 export const make = (options: {
@@ -484,15 +486,16 @@ export const make = (options: {
     /** What they said after a question, worked out but not acted on, since they may still be talking. */
     const answer = (draft: Draft, material: Material, heard: string) =>
       Effect.gen(function* () {
-        // The threads are listed again when the answer comes long after the question, since "the one on rig" names a
-        // thread only while it's the only one there, and a machine can gain one in the meantime. What's known of them
-        // can have grown too, and the question itself has played by now: asked what to tell a thread, "tell it to"
-        // points at the one the question was about. Nothing else plays while it's being answered, so what they've
-        // heard now is what they'd heard as they began to.
+        // The threads are listed again for the answer, however fresh the listing is, since "the one on rig" names a
+        // thread only while it's the only one there, and a machine can gain one in the seconds a question takes. A
+        // machine that can't be listed keeps its reason, as ever. What's known of them can have grown too, and the
+        // question itself has played by now: asked what to tell a thread, "tell it to" points at the one the
+        // question was about. Nothing else plays while it's being answered, so what they've heard now is what
+        // they'd heard as they began to.
         const now = yield* Clock.currentTimeMillis
         const refreshed: Material = {
           ...material,
-          threads: yield* Effect.flatMap(threads.get, Effect.forEach(recollect)),
+          threads: yield* Effect.flatMap(threads.renew, Effect.forEach(recollect)),
           recent: yield* options.recent(now),
           now,
         }

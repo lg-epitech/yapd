@@ -903,9 +903,10 @@ describe("Drafts", () => {
             : addressed("message", "rig/c3", "rig", "Stop there."),
         )
         yield* dictate("Tell it to stop there.")
-        // Another thread starts on rig while the question waits, so "the one on rig" no longer names one.
+        // Another thread starts on rig while the question waits, so "the one on rig" no longer names one. The answer
+        // comes while the listing the question was asked from would still be kept, and it's listed again all the same.
         yield* appears("rig", listed("d4", { project: "trainer", directory: "/home/me/trainer", title: "Tune the optimizer" }))
-        yield* wait(120)
+        yield* wait(30)
         yield* answer("The one on rig.")
         return {
           sent,

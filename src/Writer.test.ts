@@ -251,7 +251,7 @@ describe("Writer", () => {
     expect(Writer.parseKey("a1")).toEqual(Option.none())
   })
 
-  test("takes the machine's name for a thread only when it's the only one listed there", () => {
+  test("takes the machine's name on its own only when it's the only thread listed there, and with other words to tell machines apart", () => {
     const lines = [{ speaker: "user" as const, text: "Tell the one on rig to stop." }]
     const byMachine = { threadFrom: "named" as const, threadEvidence: "the one on rig" }
     const rerun = { listed: listed("r1", { project: "trainer", title: "Rerun the eval", state: "running" }), known: Option.none() }
@@ -265,6 +265,15 @@ describe("Writer", () => {
     const naming = [{ speaker: "user" as const, text: "Tell the retry fix on rig to stop." }]
     expect(Writer.groundedThread({ thread: "rig/r2", threadFrom: "named", threadEvidence: "the retry fix on rig" }, naming, two, [])).toBe(true)
     expect(Writer.groundedThread({ thread: "rig/r1", threadFrom: "named", threadEvidence: "the retry fix on rig" }, naming, two, [])).toBe(false)
+    // The same work on both machines: the machine's name is what tells them apart, even where neither is the only thread there.
+    const twice = [
+      { machine: "rosie", here: true, threads: [{ listed: listed("f1", { title: "Fix retries" }), known: Option.none() }, ...threads[0]!.threads] },
+      { machine: "rig", here: false, threads: [{ listed: listed("r3", { title: "Fix retries" }), known: Option.none() }, rerun] },
+    ]
+    const both = [{ speaker: "user" as const, text: "Tell fix retries on rig to stop." }]
+    expect(Writer.groundedThread({ thread: "rig/r3", threadFrom: "named", threadEvidence: "fix retries on rig" }, both, twice, [])).toBe(true)
+    expect(Writer.groundedThread({ thread: "rosie/f1", threadFrom: "named", threadEvidence: "fix retries on rig" }, both, twice, [])).toBe(false)
+    expect(Writer.groundedThread({ thread: "rig/r3", threadFrom: "named", threadEvidence: "fix retries" }, both, twice, [])).toBe(false)
   })
 
   test("takes a name only when it sets the thread apart from the others listed", () => {

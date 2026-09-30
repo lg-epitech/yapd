@@ -127,11 +127,11 @@ const pointing = new Set([
 /**
  * The words the listing shows for a thread, which is all the model had to
  * name it by, in two parts. What names it: its title, project, branch, state,
- * what it waits on, its error and what the work is, and its machine's name
- * when it's the only thread listed there, since "the one on rig" names it
- * then. Apart from those, its first message, which is long, and mentions
- * things every thread on the project might: "retry" deep in one is no name
- * for it, and only counts when the rest settles nothing.
+ * what it waits on, its error, what the work is, and the machine it's on,
+ * since "the retry fix on rig" tells rig's retry fix from rosie's. Apart from
+ * those, its first message, which is long, and mentions things every thread
+ * on the project might: "retry" deep in one is no name for it, and only
+ * counts when the rest settles nothing.
  */
 const wordsShown = (listing: ThreadListing, { listed, known }: ThreadListing["threads"][number]) => ({
   named: new Set([
@@ -142,7 +142,7 @@ const wordsShown = (listing: ThreadListing, { listed, known }: ThreadListing["th
     ...listed.needs.flatMap((need) => words(needing[need])),
     ...words(listed.error ?? ""),
     ...Option.match(known, { onNone: () => [], onSome: ({ description }) => words(description ?? "") }),
-    ...(listing.threads.length === 1 ? words(listing.machine) : []),
+    ...words(listing.machine),
   ]),
   opened: new Set(Option.match(known, { onNone: () => [], onSome: ({ prompt }) => words(prompt ?? "") })),
 })
@@ -169,8 +169,10 @@ const apart = (telling: ReadonlyArray<string>, chosen: ReadonlySet<string>, othe
  * of those, or they meant one of several and yapd asks which. What names a
  * thread is looked at first, and its first message only when that settles
  * nothing, so a word every prompt on the project uses doesn't make each of
- * them fit. The machine's name is one a thread shows only when it's the only
- * one listed there. When they only pointed at something yapd read out, what
+ * them fit. The machine's name is one every thread there shows, so on its own
+ * it settles a thread only when it's the only one listed there, and past
+ * that it tells rig's retry fix from rosie's. When they only pointed at
+ * something yapd read out, what
  * they've heard has to carry that thread, and a bare pointer like "that one"
  * or "the last one you told me about" can only mean the last thing they
  * heard: when that carried no thread, or another, they meant something yapd
@@ -345,7 +347,7 @@ const deciding = (research: boolean, answering: boolean) =>
       `Which thread, for "message" and "summary". The threads are listed below, on each machine, with what each is about: its title, project, branch and state as T3 Code has them, and for those you know more about, what the work is and how it was asked for. Only a listed thread can be picked, and only by its key.`,
       `"thread": the thread's key exactly as listed, like "rosie/6f1a2b". Empty for anything else, and when unclear.`,
       `"threadFrom": what settles the thread, which is only ever one of two things.`,
-      `- "named": they described it in their own words, and one listed thread fits: its title, its project, its branch, what the work is, where it stands when that singles it out, or the machine it's on when it's the only thread listed there, like "the retry fix", "the latency investigation", "the yapd agent" when yapd has one thread, "the one that's waiting for me" when one is waiting, or "the one on rig" when rig has one thread. Heard loosely, since dictation mangles names, but at least one of their words has to be one the listing shows for that thread, or its machine's name when that machine has no other thread listed.`,
+      `- "named": they described it in their own words, and one listed thread fits: its title, its project, its branch, what the work is, where it stands when that singles it out, or the machine it's on, like "the retry fix", "the latency investigation", "the yapd agent" when yapd has one thread, "the one that's waiting for me" when one is waiting, "the one on rig" when rig has one thread, or "the retry fix on rig" when rosie has a retry fix too. Heard loosely, since dictation mangles names, but at least one of their words has to be one the listing shows for that thread, or its machine's name.`,
       `- "referred": they pointed at something you read out lately, like "that one", "it" or "the one that just finished", and what you read out carries the thread's key. Bare pointers like "it" or "that one" mean the last thing you read out, and only when it carries a thread: when it doesn't, that's unclear. Only what you read out counts, and only what's listed below as read out: what they dictated before points at no thread.`,
       `- "unclear": anything else, and then you ask. Two threads fitting about as well is unclear, and so is one that's only likely: the newest, or the only one still running. A thread they name that isn't listed, because it's archived or on a machine whose threads couldn't be listed, can't be reached: "ask" when a listed one could be it, else "none", saying why.`,
       `"threadEvidence": their words that settle it, copied from what they said exactly as transcribed, mistakes included: what they called it, or the words that point at what you read out. Empty when unclear.`,
