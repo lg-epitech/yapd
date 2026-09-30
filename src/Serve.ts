@@ -18,6 +18,7 @@ import * as Remote from "./Remote.ts"
 import { ProviderResponder } from "./Responder.ts"
 import * as Server from "./Server.ts"
 import { Shortcut } from "./Shortcut.ts"
+import * as Store from "./Store.ts"
 import * as T3Code from "./T3Code.ts"
 import { Vocabulary, WhisperTranscriber } from "./Transcriber.ts"
 import { SileroVad } from "./Vad.ts"
@@ -76,7 +77,7 @@ export const serve = Effect.gen(function* () {
       WhisperDictation,
       Relays,
     ).pipe(
-      Layer.provideMerge(Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer)),
+      Layer.provideMerge(Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Store.layer)),
       Layer.provideMerge(ClaudeCode.WaitingLive),
     ),
   ),
