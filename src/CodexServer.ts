@@ -1,7 +1,7 @@
 import type { Subprocess } from "bun"
-import { Clock, Data, Deferred, Effect, Exit, Fiber, Option, Schema } from "effect"
+import { Cause, Clock, Data, Deferred, Effect, Either, ExecutionStrategy, Exit, Fiber, FiberSet, Option, Schema, Scope } from "effect"
 import { tmpdir } from "node:os"
-import { run as command } from "./Process.ts"
+import { detached, run as command, stop } from "./Process.ts"
 
 // Codex's app-server, kept running between calls, so each summary or reply
 // skips starting the CLI. Codex also spends seconds setting up each thread
@@ -64,13 +64,20 @@ const freshFor = 20 * 60_000
 /** How an app-server that never answered fails. Other flags won't fix it. */
 const silent = "didn't start"
 
-interface Message {
-  readonly id?: number | string
-  readonly method?: string
-  readonly params?: { readonly threadId?: string; readonly [key: string]: unknown }
-  readonly result?: unknown
-  readonly error?: unknown
-}
+const Message = Schema.Struct({
+  id: Schema.optional(Schema.Union(Schema.Number, Schema.String)),
+  method: Schema.optional(Schema.String),
+  params: Schema.optional(Schema.Struct(
+    { threadId: Schema.optional(Schema.String) },
+    Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+  )),
+  result: Schema.optional(Schema.Unknown),
+  error: Schema.optional(Schema.Unknown),
+}).pipe(Schema.filter((message) => message.id !== undefined || message.method !== undefined, {
+  message: () => "A Codex message must have a request id or method",
+}))
+type Message = typeof Message.Type & { readonly interrupted?: Cause.Cause<ServerError> }
+const decodeMessage = Schema.decodeUnknownSync(Schema.parseJson(Message))
 
 const Started = Schema.Struct({ thread: Schema.Struct({ id: Schema.String }) })
 const TurnStarted = Schema.Struct({ turn: Schema.Struct({ id: Schema.String }) })
@@ -81,6 +88,7 @@ const AgentMessage = Schema.Struct({ item: Schema.Struct({ type: Schema.Literal(
 
 interface Connection {
   readonly process: Subprocess<"pipe", "pipe", "ignore">
+  readonly isClosed: () => boolean
   readonly call: (method: string, params: object) => Effect.Effect<unknown, ServerError>
   /** Notifications about a thread, until the returned function is called. */
   readonly listen: (thread: string, listener: (message: Message) => void) => () => void
@@ -92,96 +100,163 @@ const connect = (
   onExit: (process: Subprocess) => void,
 ) =>
   Effect.gen(function* () {
-    const process = yield* Effect.try({
-      try: () =>
-        Bun.spawn([...codex, "app-server", ...flags], {
-          stdin: "pipe",
-          stdout: "pipe",
-          stderr: "ignore",
-          cwd: tmpdir(),
-          // Belt and braces with disabling hooks, as for `codex exec`.
-          env: { ...Bun.env, YAPD_INTERNAL: "1" },
-        }),
-      catch: (cause) => new ServerError({ cause }),
-    })
-    let next = 0
-    let closed = false
-    const pending = new Map<number, Deferred.Deferred<unknown, ServerError>>()
-    const listeners = new Map<string, (message: Message) => void>()
-    const write = (message: object) => {
-      try {
-        process.stdin.write(`${JSON.stringify(message)}\n`)
-        process.stdin.flush()
-      } catch {
-        // It stopped; reading its output ends too, which fails whatever waits on it.
+    const parentScope = yield* Effect.scope
+    const scope = yield* Scope.fork(parentScope, ExecutionStrategy.sequential)
+    const fork = yield* FiberSet.makeRuntime<never>()
+    return yield* Effect.gen(function* () {
+      const process = yield* Effect.acquireRelease(Effect.try({
+        try: () =>
+          Bun.spawn([...codex, "app-server", ...flags], {
+            stdin: "pipe",
+            stdout: "pipe",
+            stderr: "ignore",
+            detached,
+            cwd: tmpdir(),
+            // Belt and braces with disabling hooks, as for `codex exec`.
+            env: { ...Bun.env, YAPD_INTERNAL: "1" },
+          }),
+        catch: (cause) => new ServerError({ cause }),
+      }), stop)
+      let next = 0
+      let closed = false
+      const pending = new Map<number, Deferred.Deferred<unknown, ServerError>>()
+      const listeners = new Map<string, (message: Message) => void>()
+      const close = (gone: ServerError, interrupted?: Cause.Cause<ServerError>) => {
+        if (closed) return
+        closed = true
+        for (const request of pending.values()) Deferred.unsafeDone(request, interrupted === undefined ? Exit.fail(gone) : Exit.failCause(interrupted))
+        for (const listener of listeners.values()) listener({ method: "yapd/closed", error: gone.cause, ...(interrupted === undefined ? {} : { interrupted }) })
+        pending.clear()
+        listeners.clear()
+        onExit(process)
       }
-    }
-
-    const receive = (message: Message) => {
-      if (message.method === undefined) {
-        const request = typeof message.id === "number" ? pending.get(message.id) : undefined
-        if (request === undefined) return
-        pending.delete(message.id as number)
-        Deferred.unsafeDone(
-          request,
-          message.error === undefined ? Exit.succeed(message.result) : Exit.fail(new ServerError({ cause: message.error })),
-        )
-      } else if (message.id !== undefined) {
-        // Nothing should ask, given the sandbox and approval policy, but a request left unanswered would hang the turn.
-        write({ id: message.id, error: { code: -32601, message: "yapd doesn't handle this" } })
-      } else if (message.params?.threadId !== undefined) {
-        listeners.get(message.params.threadId)?.(message)
+      const dispose = (error: ServerError) => Effect.sync(() => close(error)).pipe(
+        Effect.zipRight(Scope.close(scope, Exit.fail(error))),
+        Effect.uninterruptible,
+      )
+      const write = async (message: object) => {
+        await process.stdin.write(`${JSON.stringify(message)}\n`)
+        await process.stdin.flush()
       }
-    }
 
-    void (async () => {
-      let buffered = ""
-      const decoder = new TextDecoder()
-      for await (const chunk of process.stdout) {
-        buffered += decoder.decode(chunk, { stream: true })
-        for (let end = buffered.indexOf("\n"); end !== -1; end = buffered.indexOf("\n")) {
-          const line = buffered.slice(0, end).trim()
-          buffered = buffered.slice(end + 1)
-          if (line !== "") receive(JSON.parse(line) as Message)
+      const call = (method: string, params: object) =>
+        Effect.gen(function* () {
+          // Nothing would ever answer.
+          if (closed) return yield* new ServerError({ cause: "Codex's app-server stopped" })
+          const id = ++next
+          const response = yield* Deferred.make<unknown, ServerError>()
+          pending.set(id, response)
+          let written = false
+          return yield* Effect.tryPromise({
+            try: () => write({ id, method, params }),
+            catch: (cause) => new ServerError({ cause }),
+          }).pipe(
+            Effect.tap(() => { written = true }),
+            Effect.tapError(dispose),
+            Effect.zipRight(Deferred.await(response)),
+            Effect.timeoutOption(method === "thread/unsubscribe" || method === "turn/interrupt" ? "5 seconds" : "15 seconds"),
+            Effect.flatMap((result) => {
+              if (Option.isSome(result)) return Effect.succeed(result.value)
+              const error = new ServerError({ cause: method === "initialize" ? silent : `${method} didn't answer` })
+              // Missing turn start/interrupt replies leave generation we cannot reliably stop; stalled writes can corrupt the stream.
+              const canAbandon = method === "thread/start" || method === "thread/unsubscribe"
+              return (!written || !canAbandon ? dispose(error) : Effect.void).pipe(
+                Effect.zipRight(Effect.fail(error)),
+              )
+            }),
+            Effect.ensuring(Effect.sync(() => { pending.delete(id) })),
+          )
+        })
+
+      const receive = async (message: Message) => {
+        if (message.method === undefined) {
+          const request = typeof message.id === "number" ? pending.get(message.id) : undefined
+          if (request === undefined) {
+            // A timed-out thread/start can still succeed. Forget it without retaining dead requests or blocking the reader.
+            if (message.error === undefined) Option.map(Schema.decodeUnknownOption(Started)(message.result), ({ thread }) => {
+              fork(call("thread/unsubscribe", { threadId: thread.id }).pipe(
+                Effect.ignore,
+                Effect.interruptible,
+              ))
+            })
+            return
+          }
+          if (typeof message.id === "number") pending.delete(message.id)
+          Deferred.unsafeDone(
+            request,
+            message.error === undefined ? Exit.succeed(message.result) : Exit.fail(new ServerError({ cause: message.error })),
+          )
+        } else if (message.id !== undefined) {
+          // Nothing should ask, given the sandbox and approval policy, but a request left unanswered would hang the turn.
+          await write({ id: message.id, error: { code: -32601, message: "yapd doesn't handle this" } })
+        } else if (message.params?.threadId !== undefined) {
+          listeners.get(message.params.threadId)?.(message)
         }
       }
-    })()
-      .catch(() => {})
-      .finally(() => {
-        closed = true
-        const gone = new ServerError({ cause: "Codex's app-server stopped" })
-        for (const request of pending.values()) Deferred.unsafeDone(request, Exit.fail(gone))
-        for (const listener of listeners.values()) listener({ method: "yapd/closed" })
-        pending.clear()
-        onExit(process)
-      })
 
-    const call = (method: string, params: object) =>
-      Effect.gen(function* () {
-        // Nothing would ever answer.
-        if (closed) return yield* new ServerError({ cause: "Codex's app-server stopped" })
-        const id = ++next
-        const response = yield* Deferred.make<unknown, ServerError>()
-        pending.set(id, response)
-        write({ id, method, params })
-        return yield* Deferred.await(response)
-      })
+      yield* Effect.tryPromise({
+        try: async (signal) => {
+          let buffered = ""
+          const decoder = new TextDecoder()
+          const reader = process.stdout.getReader()
+          const cancel = () => void reader.cancel().catch(() => {})
+          signal.addEventListener("abort", cancel, { once: true })
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              buffered += decoder.decode(value, { stream: true })
+              for (let end = buffered.indexOf("\n"); end !== -1; end = buffered.indexOf("\n")) {
+                const line = buffered.slice(0, end).trim()
+                buffered = buffered.slice(end + 1)
+                if (line !== "") await receive(decodeMessage(line))
+              }
+            }
+            buffered += decoder.decode()
+            if (buffered.trim() !== "") await receive(decodeMessage(buffered.trim()))
+          } finally {
+            signal.removeEventListener("abort", cancel)
+            reader.releaseLock()
+          }
+        },
+        catch: (cause) => new ServerError({ cause }),
+      }).pipe(
+        Effect.onExit((exit) => {
+          const cause = Exit.isFailure(exit) ? Cause.squash(exit.cause) : "Codex's app-server stopped"
+          const interrupted = Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause) ? exit.cause : undefined
+          return Effect.sync(() => close(cause instanceof ServerError ? cause : new ServerError({ cause }), interrupted)).pipe(
+            Effect.zipRight(Scope.close(scope, exit)),
+          )
+        }),
+        Effect.ignore,
+        Effect.interruptible,
+        // Shutdown must await the reader even when it has already started closing its connection.
+        Effect.forkIn(parentScope),
+      )
 
-    const connection: Connection = {
-      process,
-      call,
-      listen: (thread, listener) => {
-        listeners.set(thread, listener)
-        return () => void listeners.delete(thread)
-      },
-    }
-    yield* call("initialize", { clientInfo: { name: "yapd", title: "yapd", version: "1" } }).pipe(
-      Effect.timeoutFail({ duration: "15 seconds", onTimeout: () => new ServerError({ cause: silent }) }),
-      // Also when interrupted, or nothing would ever stop it.
-      Effect.onError(() => Effect.sync(() => process.kill())),
+      const connection: Connection = {
+        process,
+        isClosed: () => closed,
+        call,
+        listen: (thread, listener) => {
+          listeners.set(thread, listener)
+          return () => void listeners.delete(thread)
+        },
+      }
+      yield* call("initialize", { clientInfo: { name: "yapd", title: "yapd", version: "1" } }).pipe(
+        Effect.timeoutFail({ duration: "15 seconds", onTimeout: () => new ServerError({ cause: silent }) }),
+        // Also when interrupted, or nothing would ever stop it.
+        Effect.onError((cause) => Scope.close(scope, Exit.failCause(cause))),
+      )
+      yield* Effect.tryPromise({
+        try: () => write({ method: "initialized" }),
+        catch: (cause) => new ServerError({ cause }),
+      }).pipe(Effect.tapError(dispose))
+      return connection
+    }).pipe(
+      Scope.extend(scope),
+      Effect.onError((cause) => Scope.close(scope, Exit.failCause(cause))),
     )
-    write({ method: "initialized" })
-    return connection
   })
 
 /** A thread started ahead of time, waiting for a turn. */
@@ -218,11 +293,12 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
             Effect.zipRight(connect(codex, isolated, onExit)),
           ),
       ),
+      Scope.extend(scope),
     )
     const lock = yield* Effect.makeSemaphore(1)
     const connection = lock.withPermits(1)(
       Effect.suspend(() =>
-        current !== undefined
+        current !== undefined && !current.isClosed()
           ? Effect.succeed(current)
           : Effect.gen(function* () {
               // One that won't start would otherwise hold every call up, with no time left for `codex exec`.
@@ -244,8 +320,6 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
             }),
       ),
     )
-    yield* Effect.addFinalizer(() => Effect.sync(() => current?.process.kill()))
-
     /** The user's MCP servers, read just before each thread starts, since Codex rereads its config then too. */
     const servers = command([...codex, ...features, "mcp", "list", "--json"], { cwd: tmpdir() }).pipe(
       Effect.flatMap(Schema.decodeUnknown(Schema.parseJson(McpServers))),
@@ -363,18 +437,24 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
           Effect.sync(() =>
             server.listen(thread, (message) => {
               if (message.method === "yapd/closed") {
-                Deferred.unsafeDone(done, Exit.fail(new ServerError({ cause: "Codex's app-server stopped" })))
+                Deferred.unsafeDone(done, message.interrupted === undefined
+                  ? Exit.fail(new ServerError({ cause: message.error ?? "Codex's app-server stopped" }))
+                  : Exit.failCause(message.interrupted))
               } else if (message.method === "item/completed") {
                 Option.map(Schema.decodeUnknownOption(AgentMessage)(message.params), ({ item }) => {
                   text = item.text
                 })
               } else if (message.method === "turn/completed") {
-                const completed = Schema.decodeUnknownOption(Completed)(message.params)
-                const failed = Option.isNone(completed) || completed.value.turn.status !== "completed" || text === undefined
+                const completed = Schema.decodeUnknownEither(Completed)(message.params)
+                if (Either.isLeft(completed)) {
+                  Deferred.unsafeDone(done, Exit.fail(new ServerError({ cause: completed.left })))
+                  return
+                }
+                const failed = completed.right.turn.status !== "completed" || text === undefined
                 Deferred.unsafeDone(
                   done,
                   failed
-                    ? Exit.fail(new TurnError({ cause: Option.getOrUndefined(completed)?.turn ?? message.params }))
+                    ? Exit.fail(new TurnError({ cause: completed.right.turn }))
                     : Exit.succeed(text!),
                 )
               }
@@ -407,7 +487,10 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
           }),
           scope,
         )
-        yield* Fiber.join(request)
+        yield* Fiber.join(request).pipe(
+          Effect.flatMap(Schema.decodeUnknown(TurnStarted)),
+          Effect.mapError((cause) => cause instanceof ServerError ? cause : new ServerError({ cause })),
+        )
         return Deferred.await(done)
       })
 

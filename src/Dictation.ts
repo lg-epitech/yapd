@@ -1,4 +1,4 @@
-import { Cause, Context, Deferred, Effect, Either, Fiber, Layer, Option, PubSub, Stream } from "effect"
+import { Cause, Chunk, Context, Deferred, Effect, Either, Fiber, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -211,7 +211,7 @@ export const WhisperDictation = Layer.scoped(
      * microphone, so the next dictation waits for them rather than have this one
      * turn its microphone off. Nothing without a microphone.
      */
-    const record = (ended: Deferred.Deferred<End>) =>
+    const record = (ended: Deferred.Deferred<End>, scope: Scope.Scope) =>
       Effect.gen(function* () {
         yield* cue("started")
         const microphone = yield* audio.microphone
@@ -222,27 +222,55 @@ export const WhisperDictation = Layer.scoped(
         const detect = yield* Effect.option(vad.make)
         const frames: Array<Float32Array> = []
         const voiced: Array<boolean> = []
-        const recording = yield* Stream.fromQueue(microphone.value).pipe(
+        const pending = yield* Queue.unbounded<Option.Option<Float32Array>>()
+        yield* Scope.addFinalizer(scope, Queue.shutdown(pending))
+        // Detection can lag behind capture. It keeps its own turn after sending,
+        // while the microphone is already free for the next dictation.
+        const classified = yield* Stream.fromQueue(pending).pipe(
+          Stream.takeWhile(Option.isSome),
+          Stream.filterMap((frame) => frame),
           Stream.runForEach((frame) =>
             Option.match(detect, {
               onNone: () => Effect.succeed(1),
               onSome: (detect) => Effect.orElseSucceed(detect(frame), () => 1),
-            }).pipe(
-              Effect.map((probability) => {
-                frames.push(frame)
-                voiced.push(probability >= defaults.on)
-              }),
-            ),
+            }).pipe(Effect.map((probability) => void voiced.push(probability >= defaults.on))),
           ),
+          Effect.forkIn(scope),
+        )
+        const capture = (waiting: Iterable<Float32Array>) =>
+          Effect.sync(() => {
+            for (const frame of waiting) {
+              frames.push(frame)
+              Queue.unsafeOffer(pending, Option.some(frame))
+            }
+          })
+        // Once a chunk leaves the microphone queue, it belongs to the recording,
+        // even if sending interrupts capture before the next chunk arrives.
+        const recording = yield* Effect.uninterruptibleMask((restore) =>
+          restore(Queue.takeBetween(microphone.value, 1, 64)).pipe(Effect.flatMap(capture)),
+        ).pipe(
+          Effect.forever,
           Effect.fork,
         )
         const end = yield* Deferred.await(ended).pipe(
           Effect.timeoutTo({ duration: longest, onSuccess: (end): End | "Expired" => end, onTimeout: () => "Expired" }),
         )
         yield* Fiber.interrupt(recording)
+        if (end === "Sent") {
+          // Also keep frames the helper had delivered before the capture fiber stopped.
+          yield* Queue.takeAll(microphone.value).pipe(
+            Effect.catchAllCause((cause) =>
+              Queue.isShutdown(microphone.value).pipe(
+                Effect.flatMap((shutdown) => (shutdown ? Effect.succeed(Chunk.empty<Float32Array>()) : Effect.failCause(cause))),
+              ),
+            ),
+            Effect.flatMap(capture),
+          )
+          yield* Queue.offer(pending, Option.none())
+        } else yield* Fiber.interrupt(classified)
         if (end === "Expired") yield* cancel(ended)
         yield* cue(end === "Sent" ? "sent" : "cancelled")
-        return { end, frames, voiced }
+        return { end, frames, voiced: Fiber.join(classified).pipe(Effect.as(voiced)) }
       }).pipe(Effect.scoped, device)
 
     /**
@@ -255,7 +283,7 @@ export const WhisperDictation = Layer.scoped(
         // While they talk, which is plenty of time.
         yield* Effect.forkIn(transcriber.prepare, scope)
         yield* Floor.take
-        const recorded = yield* record(ended)
+        const recorded = yield* record(ended, yield* Effect.scope)
         if (recorded === undefined) {
           yield* cancel(ended)
           return yield* say("I can't hear you, the microphone is off.")
@@ -266,7 +294,8 @@ export const WhisperDictation = Layer.scoped(
           return yield* say("I stopped listening after five minutes, and dropped that.")
         }
         if (end === "Cancelled") return yield* Effect.logInfo("Dictation cancelled")
-        const heard = yield* transcribe(frames, voiced).pipe(
+        const heard = yield* voiced.pipe(
+          Effect.flatMap((voiced) => transcribe(frames, voiced)),
           Effect.tapError((error) => Effect.logWarning("Could not transcribe the dictation", error)),
           Effect.either,
         )

@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Exit, Layer, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
+import { Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
 import { Audio } from "./Audio.ts"
 import { Waiting } from "./ClaudeCode.ts"
-import { Condenser } from "./Condenser.ts"
+import { Condenser, type Turn } from "./Condenser.ts"
 import * as Daemon from "./Daemon.ts"
 import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
-import { Relays } from "./Relay.ts"
+import { RelayError, Relays, type Thread } from "./Relay.ts"
 import { Responder } from "./Responder.ts"
+import type { Handle } from "./Server.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad, VadError } from "./Vad.ts"
 import { Voice } from "./Voice.ts"
@@ -17,23 +18,41 @@ import { Voice } from "./Voice.ts"
  * microphone unless the user `says` something, which is then meant for the agent
  * and takes three seconds to send.
  */
-const make = (says?: string) => Effect.gen(function* () {
+const make = (says?: string, options: {
+  readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
+} = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
   const played: Array<string> = []
   const stopped: Array<string> = []
   /** What happened to follow-ups and the hooks that wait for them, in order. */
   const followUps: Array<string> = []
+  const condensed: Array<Turn> = []
+  const logs = yield* Queue.unbounded<string>()
+  const playbacks = yield* Queue.unbounded<string>()
+  const nextEvent = (...prefixes: ReadonlyArray<string>) => Effect.gen(function* () {
+    while (true) {
+      const message = yield* Queue.take(logs)
+      if (prefixes.some((prefix) => message.startsWith(prefix))) return message
+    }
+  })
   const microphone = yield* Queue.unbounded<Float32Array>()
+  let handle: Handle
   let rests = 0
   const layer = Layer.mergeAll(
-    Layer.succeed(Condenser, { condense: (_, turn) => Effect.succeed({ priority: "done", spoken: turn.message }) }),
+    Layer.succeed(Condenser, {
+      condense: (_, turn) => Effect.sync(() => {
+        condensed.push(turn)
+        return { priority: "done" as const, spoken: turn.message }
+      }),
+    }),
     Layer.succeed(Voice, { render: (text, path) => Effect.sync(() => void rendered.set(path, text)) }),
     Layer.succeed(Audio, {
       play: (path) =>
         Effect.gen(function* () {
           const text = rendered.get(path) ?? path
           played.push(text)
+          yield* Queue.offer(playbacks, text)
           let done = false
           // Closing the scope stops it, as with the helper.
           yield* Effect.addFinalizer(() => Effect.sync(() => void (done || stopped.push(text))))
@@ -69,12 +88,21 @@ const make = (says?: string) => Effect.gen(function* () {
     }),
     Layer.succeed(Relays, {
       send: (thread, text) =>
-        Effect.sleep("3 seconds").pipe(Effect.zipRight(Effect.sync(() => void followUps.push(`${thread.session} sent: ${text}`)))),
+        Effect.suspend(() => options.send?.(thread, text, handle, nextEvent) ?? Effect.sleep("3 seconds")).pipe(
+          Effect.zipRight(Effect.sync(() => void followUps.push(`${thread.session} sent: ${text}`))),
+        ),
     }),
     Floor.layer,
+    Logger.add(Logger.make(({ message }) => {
+      for (const line of Array.isArray(message) ? message : [message]) {
+        if (typeof line === "string") Queue.unsafeOffer(logs, line)
+      }
+    })),
   )
   const context = yield* Layer.build(layer)
-  const { handle, speak: read, tell } = yield* Daemon.make.pipe(Effect.provide(context))
+  const made = yield* Daemon.make.pipe(Effect.provide(context))
+  handle = made.handle
+  const { speak: read, tell } = made
   yield* Effect.forkScoped(read)
   const floor = Context.get(context, Floor.Floor)
   // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -137,7 +165,7 @@ const make = (says?: string) => Effect.gen(function* () {
     return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
   })
   const reading = STM.commit(TRef.get(floor.reading))
-  return { finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, rests: () => rests, flush }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
 })
 
 const daemon = make()
@@ -229,6 +257,143 @@ describe("Daemon", () => {
     expect(result.sent).toEqual(["a sent: Merge it.", "claude:a let go"])
     // The update isn't read again: it was answered.
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. Okay, passed on."])
+  })
+
+  test.each([false, true])("keeps a fast follow-up answer that arrives before delivery returns, with a prompt hook: %s", async (promptHook) => {
+    let replyState = ""
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, speak, wait, nextEvent, nextPlayback, condensed, played } = yield* make("Explain it.", {
+          send: (thread, text, handle, nextEvent) => Effect.gen(function* () {
+            if (promptHook) {
+              yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: thread.session, cwd: "/tmp", prompt: text }, { project: "yapd" }, false)
+            }
+            yield* handle(
+              "claude",
+              { hook_event_name: "Stop", session_id: thread.session, cwd: "/tmp", last_assistant_message: "Here's what changed." },
+              { project: "yapd" },
+              false,
+            )
+            // The reply is prepared before delivery finishes, including when it was skipped.
+            replyState = yield* nextEvent("Ready:", "Skipped quick turn")
+          }),
+        })
+        yield* turn("a", "The PR is ready.", 21)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        const confirmation = yield* nextPlayback
+        yield* wait(14)
+        const answer = yield* nextPlayback
+        return { confirmation, answer, played: [...played], prompts: condensed.map(({ prompt }) => prompt) }
+      }),
+    )
+    expect(replyState).toBe("Ready: yapd. Here's what changed.")
+    expect(result.confirmation).toBe("Okay, passed on.")
+    expect(result.answer).toBe("yapd. Here's what changed.")
+    expect(result.played).toEqual(["yapd. The PR is ready.", "Okay, passed on.", "yapd. Here's what changed."])
+    expect(result.prompts).toEqual([Option.some("Go on."), Option.some("Explain it.")])
+  })
+
+  test("restores the previous prompt and quick-turn behavior when delivery fails", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, finish, speak, wait, nextEvent, nextPlayback, condensed } = yield* make("Merge it.", {
+          send: () => Effect.fail(new RelayError({ reason: "The agent couldn't accept that." })),
+        })
+        yield* turn("a", "May I merge the PR?", 5, { needsYou: true })
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        const failure = yield* nextPlayback
+        yield* wait(1)
+        yield* finish("a", "Another quick turn.")
+        const quick = yield* nextEvent("Ready:", "Skipped quick turn")
+        yield* wait(20)
+        yield* finish("a", "A later full update.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        return { failure, quick, prompts: condensed.map(({ prompt }) => prompt) }
+      }),
+    )
+    expect(result.failure).toBe("The agent couldn't accept that.")
+    expect(result.quick).toBe("Skipped quick turn")
+    expect(result.prompts).toEqual([Option.some("Go on."), Option.some("Go on.")])
+  })
+
+  test("keeps and answers a fresh update while an older follow-up is still being delivered", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const sending = yield* Deferred.make<void>()
+        const respond = yield* Deferred.make<void>()
+        const answered = yield* Deferred.make<void>()
+        const delivered = yield* Deferred.make<void>()
+        let dispatches = 0
+        const { finish, speak, wait, dictate, nextEvent, nextPlayback, played } = yield* make("Explain it.", {
+          send: (thread, _, handle, nextEvent) => Effect.gen(function* () {
+            dispatches++
+            if (dispatches !== 1) return
+            yield* Deferred.succeed(sending, undefined)
+            yield* Deferred.await(respond)
+            yield* handle(
+              "claude",
+              { hook_event_name: "Stop", session_id: thread.session, cwd: "/tmp", last_assistant_message: "Here's what changed." },
+              { project: "yapd" },
+              false,
+            )
+            yield* nextEvent("Ready:")
+            yield* Deferred.succeed(answered, undefined)
+            yield* Deferred.await(delivered)
+          }),
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* Deferred.await(sending)
+        const first = yield* dictate
+        yield* Deferred.succeed(respond, undefined)
+        yield* Deferred.await(answered)
+        yield* Scope.close(first, Exit.void)
+        yield* wait(1)
+        yield* nextPlayback
+        // The pending dispatch belongs to the old update, so this interruption puts the new one back.
+        const second = yield* dictate
+        yield* Scope.close(second, Exit.void)
+        yield* wait(1)
+        const repeated = yield* nextPlayback
+        // A follow-up to the new update can also start while the old dispatch is still pending.
+        yield* speak
+        const confirmation = yield* nextPlayback
+        const beforeOldDelivery = dispatches
+        yield* Deferred.succeed(delivered, undefined)
+        yield* nextEvent("Ready:")
+        return { repeated, confirmation, beforeOldDelivery, played: [...played] }
+      }),
+    )
+    expect(result.repeated).toBe("yapd. Here's what changed.")
+    expect(result.confirmation).toBe("Okay, passed on.")
+    expect(result.beforeOldDelivery).toBe(2)
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. Here's what changed.", "yapd. Here's what changed.", "Okay, passed on."])
+  })
+
+  test("rejects a follow-up after a newer hook received in the same millisecond", async () => {
+    let deliveries = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { handle, finish, speak, nextEvent, nextPlayback } = yield* make("Merge it.", {
+          send: () => Effect.sync(() => { deliveries++ }),
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Different work." }, { project: "yapd" }, false)
+        yield* speak
+        return yield* nextPlayback
+      }),
+    )
+    expect(deliveries).toBe(0)
+    expect(result).toBe("That session has moved on since, so I didn't send it.")
   })
 
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {

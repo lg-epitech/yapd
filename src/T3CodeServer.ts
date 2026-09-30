@@ -32,26 +32,34 @@ const misunderstood = (cause: unknown) => new Trouble({ reason: "T3 Code answere
 export const api =
   (server: Server, token: Redacted.Redacted) =>
   <A, I>(path: string, schema: Schema.Schema<A, I>, init: RequestInit = {}) =>
-    Effect.tryPromise((signal) =>
-      fetch(`${server.origin}${path}`, {
-        ...init,
-        headers: { authorization: `Bearer ${Redacted.value(token)}`, "content-type": "application/json" },
-        signal,
-      }),
-    ).pipe(
-      Effect.timeout("5 seconds"),
-      Effect.mapError((cause) => new Trouble({ reason: "T3 Code isn't answering.", cause })),
-      Effect.filterOrElse(
-        (response) => response.ok,
-        (response) =>
-          Effect.fail(
-            response.status === 401 || response.status === 403
-              ? new Trouble({ reason: "T3 Code turned down my token. It may have expired." })
-              : new Trouble({ reason: "T3 Code wouldn't take it.", cause: `${response.status} from ${path}` }),
-          ),
-      ),
-      Effect.flatMap((response) => Effect.tryPromise({ try: () => response.json(), catch: misunderstood })),
+    Effect.tryPromise({
+      try: async (signal) => {
+        let response: Response
+        try {
+          response = await fetch(`${server.origin}${path}`, {
+            ...init,
+            headers: { authorization: `Bearer ${Redacted.value(token)}`, "content-type": "application/json" },
+            signal,
+          })
+        } catch (cause) {
+          throw new Trouble({ reason: "T3 Code isn't answering.", cause })
+        }
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {})
+          throw response.status === 401 || response.status === 403
+            ? new Trouble({ reason: "T3 Code turned down my token. It may have expired." })
+            : new Trouble({ reason: "T3 Code wouldn't take it.", cause: `${response.status} from ${path}` })
+        }
+        try {
+          return await response.json()
+        } catch (cause) {
+          throw misunderstood(cause)
+        }
+      },
+      catch: (cause) => cause instanceof Trouble ? cause : misunderstood(cause),
+    }).pipe(
       Effect.flatMap((body) => Effect.mapError(Schema.decodeUnknown(schema)(body), misunderstood)),
+      Effect.timeoutFail({ duration: "5 seconds", onTimeout: () => new Trouble({ reason: "T3 Code isn't answering." }) }),
     )
 
 const Failure = Schema.Struct({
@@ -97,29 +105,37 @@ export const call =
   (server: Server, token: Redacted.Redacted) =>
   <A, I>(method: string, payload: unknown, schema: Schema.Schema<A, I>, patience: Duration.DurationInput = "15 seconds") =>
     Effect.acquireUseRelease(
-      Effect.sync(
-        () =>
+      Effect.try({
+        try: () =>
           new WebSocket(`${server.origin.replace(/^http/, "ws")}/ws`, {
             headers: { authorization: `Bearer ${Redacted.value(token)}` },
           }),
-      ),
+        catch: (cause) => new Trouble({ reason: "T3 Code isn't answering.", cause }),
+      }),
       (socket) =>
         Effect.async<unknown, Trouble | Refusal>((resume) => {
           let open = false
           let refused = false
+          let cause: unknown
           socket.onopen = () => {
             open = true
             // Without headers, T3 Code stops answering on this socket and doesn't say why.
-            socket.send(JSON.stringify({ _tag: "Request", id, tag: method, payload, headers: [] }))
+            try {
+              socket.send(JSON.stringify({ _tag: "Request", id, tag: method, payload, headers: [] }))
+            } catch (cause) {
+              resume(Effect.fail(new Trouble({ reason: "T3 Code isn't answering.", cause })))
+            }
           }
           // Bun only says which status it got instead of the upgrade, and T3 Code only turns down credentials.
           socket.onerror = (event) => {
+            cause = event
             refused = "message" in event && String(event.message).includes("101")
           }
           socket.onclose = () =>
             resume(
               Effect.fail(
                 new Trouble({
+                  cause,
                   reason: open
                     ? "T3 Code hung up on me."
                     : refused
@@ -138,6 +154,9 @@ export const call =
       (socket) =>
         Effect.sync(() => {
           socket.onclose = null
+          socket.onopen = null
+          socket.onmessage = null
+          socket.onerror = null
           socket.close()
         }),
     ).pipe(

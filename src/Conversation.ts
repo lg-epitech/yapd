@@ -111,7 +111,8 @@ export const make = (options: {
   readonly dir: string
   /** Whether the session has done anything since the update's turn stopped. */
   readonly moved: (update: Update) => Effect.Effect<boolean>
-  readonly sent: (session: string, message: string) => Effect.Effect<void>
+  /** Registers the follow-up before delivering it, and settles that registration afterwards. */
+  readonly send: (update: Update, message: string, deliver: Effect.Effect<void, RelayError>) => Effect.Effect<void, RelayError>
   /** Says how a follow-up went when the update it answers was cut off before yapd could. */
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
 }) =>
@@ -296,7 +297,7 @@ export const make = (options: {
           let held: R | undefined
           let more: Float32Array | undefined
           waiting: while (true) {
-            const signal = yield* carryingOn
+            const signal = yield* (speaking || carryingOn)
               ? Queue.take(ear.signals).pipe(
                   Effect.timeout(patience),
                   Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
@@ -340,8 +341,8 @@ export const make = (options: {
         }
       })
 
-    /** Follow-ups on their way, by session. */
-    const sending = new Map<string, Deferred.Deferred<void>>()
+    /** Follow-ups on their way, each attached to the update it answers. */
+    const sending = new Map<Update, Deferred.Deferred<void>>()
 
     /**
      * Sends a follow-up and returns what to say about it. Once the user has said
@@ -352,7 +353,7 @@ export const make = (options: {
       Effect.gen(function* () {
         let failed = false
         const done = yield* Deferred.make<void>()
-        sending.set(update.session, done)
+        sending.set(update, done)
         const fiber = yield* follow(update, reply.message, again).pipe(
           Effect.zipRight(onSent),
           Effect.as(reply.spoken || "Sent."),
@@ -366,7 +367,7 @@ export const make = (options: {
           ),
           Effect.ensuring(
             Effect.suspend(() => {
-              if (sending.get(update.session) === done) sending.delete(update.session)
+              if (sending.get(update) === done) sending.delete(update)
               return Deferred.succeed(done, undefined)
             }),
           ),
@@ -391,8 +392,7 @@ export const make = (options: {
           return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
         }
         const text = plain(message)
-        yield* relays.send(update.thread, text)
-        yield* options.sent(update.session, text)
+        yield* options.send(update, text, relays.send(update.thread, text))
         yield* Effect.logInfo(`Sent: ${text}`)
       })
 
@@ -509,13 +509,16 @@ export const make = (options: {
     return {
       converse,
       ask,
-      /** Whether a follow-up to the session is on its way. */
-      sending: (session: string) => Effect.sync(() => sending.has(session)),
-      /** Waits for a follow-up to the session that's on its way, if any. */
+      /** Whether a follow-up to the session, or this particular update, is on its way. */
+      sending: (session: string, update?: Update) => Effect.sync(() =>
+        update === undefined ? [...sending.keys()].some((update) => update.session === session) : sending.has(update),
+      ),
+      /** Waits for all follow-ups to the session that are on their way, if any. */
       settled: (session: string) =>
-        Effect.suspend(() => {
-          const done = sending.get(session)
-          return done === undefined ? Effect.void : Deferred.await(done)
-        }),
+        Effect.suspend(() => Effect.forEach(
+          [...sending].filter(([update]) => update.session === session),
+          ([, done]) => Deferred.await(done),
+          { concurrency: "unbounded", discard: true },
+        )),
     }
   })

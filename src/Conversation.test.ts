@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Layer, Option, Queue, type Scope, TestClock, TestContext } from "effect"
+import { Deferred, Effect, Fiber, Layer, Option, Queue, type Scope, TestClock, TestContext } from "effect"
 import { Audio } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
@@ -27,13 +27,14 @@ const update: Conversation.Update = {
  * Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply
  * and the relay `sending` seconds to send.
  */
-const conversation = (said: ReadonlyArray<string>, sending = 0) =>
+const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: ReadonlyArray<Effect.Effect<void>> = []) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
     const heard: Array<string> = []
     const sent: Array<string> = []
     const late: Array<string> = []
     const transcripts = [...said]
+    let dispatches = 0
     const layer = Layer.mergeAll(
       Layer.succeed(Audio, {
         play: () =>
@@ -57,14 +58,16 @@ const conversation = (said: ReadonlyArray<string>, sending = 0) =>
           ),
       }),
       Layer.succeed(Relays, {
-        send: (_, text) => Effect.sleep(`${sending} seconds`).pipe(Effect.zipRight(Effect.sync(() => void sent.push(text)))),
+        send: (_, text) => Effect.suspend(() => deliveries[dispatches++] ?? Effect.sleep(`${sending} seconds`)).pipe(
+          Effect.zipRight(Effect.sync(() => void sent.push(text))),
+        ),
       }),
       Layer.succeed(Voice, { render: () => Effect.void }),
     )
     const made = yield* Conversation.make({
       dir: "/tmp",
       moved: () => Effect.succeed(false),
-      sent: () => Effect.void,
+      send: (_, __, deliver) => deliver,
       late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
     }).pipe(Effect.provide(layer))
     const fiber = yield* Effect.fork(made.converse(update))
@@ -88,7 +91,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0) =>
         ),
         Effect.fork,
       )
-    return { ...made, fiber, heard, sent, late, speak, wait, ask }
+    return { ...made, fiber, heard, sent, late, speak, wait, ask, frames, disconnect: Queue.shutdown(microphone) }
   })
 
 /** Talks, then waits for the reply to be sent and read out. */
@@ -159,6 +162,52 @@ describe("Conversation", () => {
     expect(heard).toEqual(["Get that merged in and tell the agent to update the deployment."])
     expect(sent).toEqual(["Get that merged in and tell the agent to update the deployment."])
   })
+
+  test("settles a reply when the microphone disconnects during an unconfirmed onset", async () => {
+    const sent = await scoped(
+      Effect.gen(function* () {
+        const { speak, wait, frames, disconnect, sent } = yield* conversation(["Please merge it."])
+        yield* speak
+        yield* wait(2)
+        yield* frames(0.9, 1)
+        yield* disconnect
+        yield* wait(3)
+        return sent
+      }),
+    )
+    expect(sent).toEqual(["Please merge it."])
+  })
+
+  test("bounds an unconfirmed onset when the microphone stops producing frames", async () => {
+    const sent = await scoped(
+      Effect.gen(function* () {
+        const { speak, wait, frames, sent } = yield* conversation(["Please merge it."])
+        yield* speak
+        yield* wait(2)
+        yield* frames(0.9, 1)
+        yield* wait(3)
+        expect(sent).toEqual([])
+        yield* wait(40)
+        return sent
+      }),
+    )
+    expect(sent).toEqual(["Please merge it."])
+  })
+
+  test("settles the words already heard when the microphone disconnects during more speech", async () => {
+    const sent = await scoped(
+      Effect.gen(function* () {
+        const { speak, wait, frames, disconnect, sent } = yield* conversation(["Please merge it."])
+        yield* speak
+        yield* wait(2)
+        yield* frames(0.9, defaults.confirm)
+        yield* disconnect
+        yield* wait(5)
+        return sent
+      }),
+    )
+    expect(sent).toEqual(["Please merge it."])
+  })
 })
 
 describe("Follow-ups", () => {
@@ -182,6 +231,43 @@ describe("Follow-ups", () => {
     expect(result.sent).toEqual(["Please merge it."])
     expect(result.late).toEqual(["Okay."])
     expect(result.sending).toBe(false)
+  })
+
+  test("tracks pending deliveries by update and waits for every delivery to the session", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const oldStarted = yield* Deferred.make<void>()
+        const newStarted = yield* Deferred.make<void>()
+        const oldDone = yield* Deferred.make<void>()
+        const newDone = yield* Deferred.make<void>()
+        const { fiber, converse, speak, wait, sending, settled, sent } = yield* conversation(["Explain the old update.", "Explain the new update."], 0, [
+          Deferred.succeed(oldStarted, undefined).pipe(Effect.zipRight(Deferred.await(oldDone))),
+          Deferred.succeed(newStarted, undefined).pipe(Effect.zipRight(Deferred.await(newDone))),
+        ])
+        yield* speak
+        yield* wait(6)
+        yield* Deferred.await(oldStarted)
+        yield* Fiber.interrupt(fiber)
+        const fresh = { ...update, at: 1, spoken: "Here's the answer." }
+        yield* Effect.forkScoped(converse(fresh))
+        yield* wait(0)
+        const before = { old: yield* sending("s", update), fresh: yield* sending("s", fresh) }
+        yield* speak
+        yield* wait(6)
+        yield* Deferred.await(newStarted)
+        const all = yield* Effect.forkScoped(settled("s"))
+        yield* Deferred.succeed(newDone, undefined)
+        yield* wait(0)
+        const afterNew = { old: yield* sending("s", update), fresh: yield* sending("s", fresh), settled: Option.isSome(yield* Fiber.poll(all)) }
+        yield* Deferred.succeed(oldDone, undefined)
+        yield* Fiber.join(all)
+        return { before, afterNew, sending: yield* sending("s"), sent }
+      }),
+    )
+    expect(result.before).toEqual({ old: true, fresh: false })
+    expect(result.afterNew).toEqual({ old: true, fresh: false, settled: false })
+    expect(result.sending).toBe(false)
+    expect(result.sent).toEqual(["Explain the new update.", "Explain the old update."])
   })
 })
 

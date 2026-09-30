@@ -8,6 +8,7 @@ import {
   Effect,
   Exit,
   Fiber,
+  FiberSet,
   Layer,
   Option,
   PubSub,
@@ -127,23 +128,28 @@ const permissionLog = (permission: string) => {
 }
 
 /**
- * Plays and listens through the native helper, whose voice processing cancels
- * yapd's own voice out of the microphone, and which takes the shortcut. Starting
- * it asks for microphone access the first time. If it quits, the next update
- * starts it again, or right away for the shortcut, and plays with afplay if it can't.
+ * Owns a native helper connection. Its launcher and fallback playback are
+ * supplied separately, so the protocol can also run without an audio device.
  */
-export const NativeAudio = Layer.scopedContext(
+export const native = (
+  launchHelper: (path: string) => Effect.Effect<unknown, Helper.HelperError>,
+  fallback: Audio["Type"]["play"] = afplay,
+) =>
   Effect.gen(function* () {
-    yield* Helper.build
     const dir = yield* Effect.acquireRelease(
-      Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-audio-"))),
-      (dir) => Effect.promise(() => rm(dir, { recursive: true, force: true })),
+      Effect.tryPromise({
+        try: () => mkdtemp(join(tmpdir(), "yapd-audio-")),
+        catch: (cause) => new Helper.HelperError({ message: "Could not prepare the audio helper's socket directory", cause }),
+      }),
+      (dir) => Effect.tryPromise(() => rm(dir, { recursive: true, force: true })).pipe(
+        Effect.catchAll((error) => Effect.logWarning("Could not remove the audio helper's socket directory", error)),
+      ),
     )
     const path = join(dir, "socket")
     const runtime = yield* Effect.runtime<never>()
     const runSync = Runtime.runSync(runtime)
-    const runFork = Runtime.runFork(runtime)
-    const frames = yield* PubSub.sliding<Float32Array>(64)
+    const runFork = yield* FiberSet.makeRuntime<never>()
+    let frames: PubSub.PubSub<Float32Array> | undefined
 
     let connection: Socket<Helper.Decoder> | undefined
     let greeted: Deferred.Deferred<void> | undefined
@@ -157,6 +163,14 @@ export const NativeAudio = Layer.scopedContext(
     let closing = false
     /** What the socket hasn't taken yet; it's written out once it drains. */
     let unsent: Array<Uint8Array> = []
+
+    /** Detaches the old microphone immediately, and lets its listeners finish. */
+    const endMicrophone = () => {
+      const previous = frames
+      frames = undefined
+      listening = false
+      return previous === undefined ? Effect.void : PubSub.shutdown(previous)
+    }
 
     const flush = () => {
       while (connection !== undefined && unsent.length > 0) {
@@ -188,7 +202,7 @@ export const NativeAudio = Layer.scopedContext(
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
-        if (!echoing()) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
+        if (listening && frames !== undefined && !echoing()) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
         return
       }
       const event = decodeEvent(new TextDecoder().decode(message.payload))
@@ -203,7 +217,10 @@ export const NativeAudio = Layer.scopedContext(
           return
         case "active":
           // It started listening, which starts the echo cancellation over.
+          // Device recovery can temporarily lose the microphone. Keep existing
+          // subscriptions so they receive frames when the helper recovers it.
           listening = event.value.listening
+          if (listening && frames === undefined) frames = runSync(PubSub.sliding<Float32Array>(64))
           heard = 0
           playingSince = undefined
           return
@@ -254,7 +271,7 @@ export const NativeAudio = Layer.scopedContext(
     const disconnected = () => {
       connection = undefined
       unsent = []
-      listening = false
+      runFork(endMicrophone())
       quiet()
       if (current !== undefined) settle(current, new AudioError({ message: "The audio helper quit" }), 0)
       current = undefined
@@ -294,7 +311,7 @@ export const NativeAudio = Layer.scopedContext(
           // The helper quits once its connection closes.
           connection?.end()
           listener.stop(true)
-        }),
+        }).pipe(Effect.zipRight(Effect.suspend(endMicrophone))),
     )
 
     const lock = yield* Effect.makeSemaphore(1)
@@ -302,7 +319,7 @@ export const NativeAudio = Layer.scopedContext(
     const launch = Effect.gen(function* () {
       const hello = yield* Deferred.make<void>()
       greeted = hello
-      yield* Helper.launch(path, true)
+      yield* launchHelper(path)
       yield* Deferred.await(hello).pipe(
         Effect.timeoutFail({
           duration: "10 seconds",
@@ -332,75 +349,96 @@ export const NativeAudio = Layer.scopedContext(
       Effect.forkScoped,
     )
 
-    const native = (file: string, from: number) =>
+    const play = (file: string, from: number) =>
       Effect.gen(function* () {
         yield* connect.pipe(Effect.mapError((cause) => new AudioError({ message: cause.message, cause })))
-        const playback: Current = {
-          id: crypto.randomUUID(),
-          duration: 0,
-          started: yield* Deferred.make<number, AudioError>(),
-          finished: yield* Deferred.make<void, AudioError>(),
-          stopped: undefined,
-        }
-        current = playback
-        send({ type: "play", id: playback.id, path: file, from })
-        playback.duration = yield* Deferred.await(playback.started).pipe(
-          Effect.timeoutFail({
-            duration: "5 seconds",
-            onTimeout: () => new AudioError({ message: "The audio helper didn't start playing" }),
+        return yield* Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            const playback: Current = {
+              id: crypto.randomUUID(),
+              duration: 0,
+              started: yield* Deferred.make<number, AudioError>(),
+              finished: yield* Deferred.make<void, AudioError>(),
+              stopped: undefined,
+            }
+            const stop = Effect.gen(function* () {
+              if (current !== playback) return playback.duration
+              if (yield* Deferred.isDone(playback.finished)) {
+                current = undefined
+                return playback.duration
+              }
+              const stopped = yield* Deferred.make<number>()
+              playback.stopped = stopped
+              send({ type: "stop" })
+              // Interruptible, or the timeout couldn't fire when this runs as a finalizer.
+              const at = yield* Deferred.await(stopped).pipe(Effect.interruptible, Effect.timeoutOption("2 seconds"))
+              // A helper that cannot acknowledge stopping must not recover later
+              // and play over the fallback, or whoever takes the device next.
+              if (Option.isNone(at) && current === playback) {
+                const socket = connection
+                socket?.terminate()
+                if (socket !== undefined && connection === socket) disconnected()
+              }
+              if (current === playback) current = undefined
+              return Option.getOrElse(at, () => 0)
+            })
+            current = playback
+            yield* Effect.addFinalizer(() => stop)
+            send({ type: "play", id: playback.id, path: file, from })
+            playback.duration = yield* restore(
+              Deferred.await(playback.started).pipe(
+                Effect.timeoutFail({
+                  duration: "5 seconds",
+                  onTimeout: () => new AudioError({ message: "The audio helper didn't start playing" }),
+                }),
+              ),
+            ).pipe(Effect.onError(() => stop))
+
+            // Should the helper wedge, the update still ends.
+            const deadline = Duration.seconds(Math.max(0, playback.duration - from) + 10)
+            return {
+              duration: playback.duration,
+              finished: Deferred.await(playback.finished).pipe(
+                Effect.timeoutFail({ duration: deadline, onTimeout: () => new AudioError({ message: "Playback never finished" }) }),
+              ),
+              stop,
+              volume: (level: number) =>
+                Effect.sync(() => {
+                  if (current === playback) send({ type: "volume", value: level })
+                }),
+            } satisfies Playback
           }),
         )
-
-        const stop = Effect.gen(function* () {
-          if (current !== playback || (yield* Deferred.isDone(playback.finished))) return playback.duration
-          const stopped = yield* Deferred.make<number>()
-          playback.stopped = stopped
-          send({ type: "stop" })
-          // Interruptible, or the timeout couldn't fire when this runs as a finalizer.
-          const at = yield* Deferred.await(stopped).pipe(
-            Effect.interruptible,
-            Effect.timeout("2 seconds"),
-            Effect.orElseSucceed(() => 0),
-          )
-          if (current === playback) current = undefined
-          return at
-        })
-        yield* Effect.addFinalizer(() => stop)
-
-        // Should the helper wedge, the update still ends.
-        const deadline = Duration.seconds(Math.max(0, playback.duration - from) + 10)
-        return {
-          duration: playback.duration,
-          finished: Deferred.await(playback.finished).pipe(
-            Effect.timeoutFail({ duration: deadline, onTimeout: () => new AudioError({ message: "Playback never finished" }) }),
-          ),
-          stop,
-          volume: (level: number) =>
-            Effect.sync(() => {
-              if (current === playback) send({ type: "volume", value: level })
-            }),
-        } satisfies Playback
       })
 
     const audio: Audio["Type"] = {
       play: (file, from = 0) =>
-        native(file, from).pipe(
+        play(file, from).pipe(
           Effect.catchAll((error) =>
-            Effect.logWarning("Playing with afplay, without listening", error).pipe(Effect.zipRight(afplay(file))),
+            Effect.logWarning("Playing with afplay, without listening", error).pipe(Effect.zipRight(fallback(file, from))),
           ),
         ),
       microphone: Effect.suspend(() =>
-        listening ? Effect.map(PubSub.subscribe(frames), Option.some) : Effect.succeed(Option.none()),
+        listening && frames !== undefined ? Effect.map(PubSub.subscribe(frames), Option.some) : Effect.succeed(Option.none()),
       ),
-      rest: Effect.sync(() => {
+      rest: Effect.suspend(() => {
         send({ type: "rest" })
-        listening = false
         // It stops whatever it's playing without saying so.
         quiet()
+        return endMicrophone()
       }),
     }
     return Context.make(Audio, audio).pipe(Context.add(Shortcut.Shortcut, shortcut?.service ?? Shortcut.none))
-  }),
+  })
+
+/**
+ * Plays and listens through the native helper, whose voice processing cancels
+ * yapd's own voice out of the microphone, and which takes the shortcut. Starting
+ * it asks for microphone access the first time. If it quits, the next update
+ * starts it again, or right away for the shortcut, and plays with afplay if it can't.
+ */
+export const NativeAudio = Layer.scopedContext(
+  Effect.zipRight(Helper.build, native((path) => Helper.launch(path, true))),
 )
 
 /** Without the helper, nothing takes the shortcut. */
