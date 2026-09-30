@@ -199,6 +199,7 @@ export const ThreadRequest = Schema.Struct({ id: Schema.String, turns: Schema.Nu
 /** `gone` with the reason means the thread itself is out of reach, so asking again won't help. */
 export const ThreadResponse = Schema.Struct({
   detail: Schema.optional(Threads.Detail),
+  referenceChecks: Schema.optional(Schema.Boolean),
   reason: Schema.optional(Schema.String),
   gone: Schema.optional(Schema.Boolean),
 })
@@ -215,6 +216,7 @@ export const SendResponse = Schema.Struct({
   sent: Schema.optional(Threads.Sent),
   reason: Schema.optional(Schema.String),
   gone: Schema.optional(Schema.Boolean),
+  stale: Schema.optional(Schema.Boolean),
 })
 
 /**
@@ -236,10 +238,10 @@ export const threads = (host: string, destination: string, exec: Exec = ssh): Th
       ),
     )
   /** What the machine answered, or its reason as the error, kept `gone` when it said so. */
-  const answered = <A>(response: { readonly reason?: string | undefined; readonly gone?: boolean | undefined }, value: A | undefined) =>
+  const answered = <A>(response: { readonly reason?: string | undefined; readonly gone?: boolean | undefined; readonly stale?: boolean | undefined }, value: A | undefined) =>
     value !== undefined
       ? Effect.succeed(value)
-      : Effect.fail(new Threads.ThreadsError({ reason: response.reason ?? garbled(host), ...(response.gone === true ? { gone: true } : {}) }))
+      : Effect.fail(new Threads.ThreadsError({ reason: response.reason ?? garbled(host), ...(response.gone === true ? { gone: true } : {}), ...(response.stale === true ? { stale: true } : {}) }))
   return {
     list: asked(
       "threads",
@@ -262,12 +264,25 @@ export const threads = (host: string, destination: string, exec: Exec = ssh): Th
         OpeningResponse,
       ).pipe(Effect.flatMap((response) => answered(response, response.text))),
     send: (id, outgoing) =>
-      asked(
-        "send",
-        JSON.stringify(SendRequest.make({ id, outgoing })),
-        { patience: "20 seconds", silent: "isn't answering, so I don't know if it went through.", failed: "couldn't send it." },
-        SendResponse,
-      ).pipe(Effect.flatMap((response) => answered(response, response.sent))),
+      Effect.gen(function* () {
+        if (outgoing.reference !== undefined) {
+          // Older yapd silently strips unknown outgoing fields. Negotiate the guard before it can dispatch anything.
+          const capability = yield* asked(
+            "thread",
+            JSON.stringify(ThreadRequest.make({ id, turns: 1 })),
+            { patience: "20 seconds", silent: "isn't answering.", failed: "couldn't check reference support." },
+            ThreadResponse,
+          )
+          if (capability.referenceChecks !== true) return yield* new Threads.ThreadsError({ reason: `yapd on ${host} needs updating before it can safely send a reply to an earlier update.`, gone: true })
+        }
+        const response = yield* asked(
+          "send",
+          JSON.stringify(SendRequest.make({ id, outgoing })),
+          { patience: "20 seconds", silent: "isn't answering, so I don't know if it went through.", failed: "couldn't send it." },
+          SendResponse,
+        )
+        return yield* answered(response, response.sent)
+      }),
   }
 }
 
@@ -348,7 +363,7 @@ const reading = <A, I>(schema: Schema.Schema<A, I>, input: string) =>
   Schema.decodeUnknown(Schema.parseJson(schema))(input).pipe(Effect.mapError(() => new Threads.ThreadsError({ reason: mismatch })))
 
 /** Why there's nothing to print, with `gone` when asking again won't help. */
-const failed = ({ reason, gone }: Threads.ThreadsError) => ({ reason, ...(gone === true ? { gone } : {}) })
+const failed = ({ reason, gone, stale }: Threads.ThreadsError) => ({ reason, ...(gone === true ? { gone } : {}), ...(stale === true ? { stale } : {}) })
 
 /** `yapd threads`: prints the threads here. */
 export const serveThreads = (threads: Threads.Threads) =>
@@ -362,8 +377,8 @@ export const serveThreads = (threads: Threads.Threads) =>
 export const serveThread = (threads: Threads.Threads, input: string) =>
   reading(ThreadRequest, input).pipe(
     Effect.flatMap(({ id, turns }) => threads.detail(id, turns)),
-    Effect.map((detail) => ThreadResponse.make({ detail })),
-    Effect.catchTag("ThreadsError", (error) => Effect.succeed(ThreadResponse.make(failed(error)))),
+    Effect.map((detail) => ThreadResponse.make({ detail, referenceChecks: true })),
+    Effect.catchTag("ThreadsError", (error) => Effect.succeed(ThreadResponse.make({ ...failed(error), referenceChecks: true }))),
     Effect.map((response) => JSON.stringify(response)),
   )
 

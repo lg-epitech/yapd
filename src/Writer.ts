@@ -242,6 +242,20 @@ export const groundedThread = (
   return apart(said, heardIn(recent.filter(carries)), [...others.values()].map(heardIn))
 }
 
+/** The actual readings a referred request can be about, not later news from the same thread. */
+export const referredReadings = (
+  decision: Pick<Decision, "thread" | "threadEvidence">,
+  recent: ReadonlyArray<Played>,
+) => {
+  const telling = words(decision.threadEvidence).filter((word) => !bare.has(word) && !pointing.has(word))
+  const ordered = recent.toSorted((one, other) => other.heardAt - one.heardAt)
+  const candidates = telling.length === 0 ? ordered.slice(0, 1) : ordered.filter(({ spoken, message }) => {
+    const shown = new Set([...words(spoken), ...words(message)])
+    return telling.some((word) => shown.has(word))
+  })
+  return candidates.filter(({ thread }) => thread !== undefined && key(thread.machine, thread.id) === decision.thread.trim())
+}
+
 /** What comes back from reading the project: the prompt, or a question it raised. */
 export const Written = Schema.Struct({
   action: Schema.Literal("start", "ask"),

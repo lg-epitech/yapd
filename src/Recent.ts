@@ -1,3 +1,5 @@
+import type { Reference } from "./Threads.ts"
+
 // What yapd told the user lately, since new work often builds on it: "follow
 // up on what the std agent just finished". An entry is noted before it's read
 // out, and counts as heard from the moment it starts playing: until then the
@@ -38,7 +40,7 @@ export interface Heard {
   readonly message: string
   readonly started?: boolean
   /** The T3 Code thread it was about, when yapd knows which. */
-  readonly thread?: { readonly machine: string; readonly id: string }
+  readonly thread?: { readonly machine: string; readonly id: string; readonly reference?: Reference | undefined }
   readonly at: number
   /** When it last started being read out: again, after a dictation cut it off. None while it waits its turn. */
   readonly heardAt?: number

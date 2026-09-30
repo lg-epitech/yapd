@@ -241,9 +241,39 @@ describe("Remote threads", () => {
     expect(JSON.parse(await Effect.runPromise(Remote.serveThread(own, JSON.stringify({ id: "thread-1", turns: 2 }))))).toEqual({
       reason: "That thread is archived, so I can't read it.",
       gone: true,
+      referenceChecks: true,
     })
     expect(JSON.parse(await Effect.runPromise(Remote.serveOpening(own, JSON.stringify({ id: "thread-1" }))))).toEqual({ text: "Fix it." })
     expect(JSON.parse(await Effect.runPromise(Remote.serveSend(own, JSON.stringify({ id: "thread-1", outgoing }))))).toEqual({ sent: "sent" })
     expect(JSON.parse(await Effect.runPromise(Remote.serveSend(own, "{}")))).toHaveProperty("reason")
+  })
+})
+
+
+describe("Remote reference safeguards", () => {
+  const outgoing = { commandId: "yapd:test", messageId: "reply", text: "Merge it.", reference: { turnId: "turn-a", userMessageId: "user-a" } }
+  test("refuses an older remote before its send command can silently discard the guard", async () => {
+    const commands: string[] = []
+    const remote = Remote.threads("rig", "rig", command => Effect.sync(() => {
+      commands.push(command.at(-1)!)
+      return JSON.stringify({ reason: "No detail" })
+    }))
+    const result = await Effect.runPromise(Effect.flip(remote.send("t1", outgoing)))
+    expect(result.reason).toContain("needs updating")
+    expect(commands).toEqual(["cd / && yapd thread"])
+  })
+
+  test("carries the guard and stale rejection through an updated remote", async () => {
+    const requests: unknown[] = []
+    const remote = Remote.threads("rig", "rig", (command, stdin) => Effect.sync(() => {
+      requests.push(JSON.parse(stdin))
+      return command.at(-1) === "cd / && yapd thread"
+        ? JSON.stringify({ referenceChecks: true })
+        : JSON.stringify({ reason: "Moved on", gone: true, stale: true })
+    }))
+    expect(await Effect.runPromise(Effect.flip(remote.send("t1", outgoing)))).toMatchObject({ stale: true, gone: true })
+    expect(requests[1]).toEqual({ id: "t1", outgoing })
+    const fake: Threads.Threads = { list: Effect.succeed([]), opening: () => Effect.die("unused"), detail: () => Effect.die("unused"), send: () => Effect.fail(Threads.staleReference()) }
+    expect(JSON.parse(await Effect.runPromise(Remote.serveSend(fake, JSON.stringify({ id: "t1", outgoing }))))).toMatchObject({ gone: true, stale: true })
   })
 })

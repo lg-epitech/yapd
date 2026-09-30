@@ -343,3 +343,54 @@ describe("Outbox", () => {
       }),
     ))
 })
+
+
+describe("Outbox reference persistence", () => {
+  test("persists the guard before the first try and restores it on restart", () => run((context) => Effect.gen(function* () {
+    const reference = { turnId: "turn-a", userMessageId: "user-a" }
+    const rig = fake()
+    context.machines.set("rig", rig.threads)
+    const outbox = yield* Outbox.make(options(context))
+    yield* outbox.send("rig", listed("t1", "Fix retries"), "Merge it.", reference)
+    const stored = yield* context.store.transaction((database) => database.query<{ reference: string }, []>("select reference from messages").get())
+    expect(JSON.parse(stored!.reference)).toEqual(reference)
+    expect(rig.sent[0]?.outgoing.reference).toEqual(reference)
+  })))
+
+  test("a restored referenced message is dropped when newer work makes it stale", () => run((context) => Effect.gen(function* () {
+    const reference = { turnId: "turn-a", userMessageId: "user-a" }
+    yield* context.store.transaction((database) => database.run(
+      "insert into messages (command_id, message_id, machine, thread, title, project, directory, text, state, created_at, reference) values (?, ?, ?, ?, ?, ?, ?, ?, 'held', ?, ?)",
+      ["yapd:old", "reply", "rig", "t1", "Fix retries", "yapd", "/code/yapd", "Merge it.", "1970-01-01T00:00:00.000Z", JSON.stringify(reference)]))
+    const rig = fake()
+    rig.answers(new ThreadsError({ reason: "That thread has moved on.", gone: true, stale: true }))
+    context.machines.set("rig", rig.threads)
+    yield* Outbox.make(options(context))
+    yield* flush
+    expect(rig.sent[0]?.outgoing.reference).toEqual(reference)
+    expect((yield* held(context.store)).map(({ state }) => state)).toEqual(["failed"])
+    expect(context.retracted).toEqual(["yapd:old"])
+    expect(context.told[0]?.spoken).toContain("That thread has moved on.")
+  })))
+})
+
+
+describe("Outbox delivery references", () => {
+  test("only tags a delivery notice with context proven to belong to its own outgoing message", () => run((context) => Effect.gen(function* () {
+    for (const newer of [false, true]) {
+      const machine = newer ? "rig" : "rosie"
+      const fakeThread = fake()
+      fakeThread.answers("sent")
+      context.machines.set(machine, { ...fakeThread.threads, detail: () => Effect.succeed({
+        thread: listed("t1", "Fix retries"), messages: [],
+        reference: { turnId: newer ? "unrelated-turn" : "accepted-turn", userMessageId: newer ? "unrelated-user" : fakeThread.sent[0]!.outgoing.messageId },
+      }) })
+      const outbox = yield* Outbox.make(options(context))
+      const result = yield* outbox.send(machine, listed("t1", "Fix retries"), "Merge it.")
+      expect(result._tag).toBe("Sent")
+      if (result._tag === "Sent") {
+        expect(result.reference).toEqual(newer ? undefined : { turnId: "accepted-turn", userMessageId: fakeThread.sent[0]!.outgoing.messageId })
+      }
+    }
+  })))
+})

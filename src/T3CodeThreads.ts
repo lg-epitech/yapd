@@ -2,7 +2,7 @@ import { Effect, Option, type Redacted, Schema } from "effect"
 import { plain } from "./Relay.ts"
 import * as T3Code from "./T3Code.ts"
 import * as Server from "./T3CodeServer.ts"
-import { type Detail, type Listed, type Message, type Need, type Outgoing, type State, type Threads, ThreadsError } from "./Threads.ts"
+import { type Detail, type Listed, type Message, type Need, type Outgoing, type State, type Threads, ThreadsError, reference, sameReference, staleReference } from "./Threads.ts"
 
 // The threads T3 Code has on this machine, read and written through its
 // HTTP API. What the schema leaves optional is decoded leniently: a field T3
@@ -19,7 +19,7 @@ const nullable = <A, I>(schema: Schema.Schema<A, I>) => Schema.optionalWith(Sche
 const text = Schema.optionalWith(Schema.String, { default: () => "" })
 const flag = Schema.optionalWith(Schema.Boolean, { default: () => false })
 
-const Turn = Schema.Struct({ state: text, requestedAt: nullable(Schema.String), completedAt: nullable(Schema.String) })
+const Turn = Schema.Struct({ state: text, turnId: nullable(Schema.String), requestedAt: nullable(Schema.String), completedAt: nullable(Schema.String) })
 
 const Session = Schema.Struct({ status: text, lastError: nullable(Schema.String) })
 
@@ -57,7 +57,7 @@ export const Shell = Schema.Struct({
 export type Shell = typeof Shell.Type
 
 /** A message as the thread carries it. A user message's id is the messageId it was dispatched with. */
-const Said = Schema.Struct({ id: text, role: text, text, createdAt: nullable(Schema.String), updatedAt: nullable(Schema.String) })
+const Said = Schema.Struct({ id: text, role: text, text, turnId: nullable(Schema.String), createdAt: nullable(Schema.String), updatedAt: nullable(Schema.String) })
 
 const Snapshot = Schema.Struct({
   thread: Schema.Struct({ ...Thread.fields, messages: Schema.optionalWith(Schema.Array(Said), { default: () => [] }) }),
@@ -199,7 +199,7 @@ export const threads = (
         const shown = shell.threads.find((other) => other.id === id)
         if (shown === undefined) return yield* unlisted()
         if (gone(thread) || gone(shown)) return yield* archived("can't read it")
-        return { thread: listed(shell, shown), messages: said(thread.messages) } satisfies Detail
+        return { thread: listed(shell, shown), messages: said(thread.messages), reference: reference(thread) } satisfies Detail
       }).pipe(heard),
 
     // T3 Code only pages from the newest turn back, so the first message means reading the whole thread. It's read once and kept.
@@ -233,6 +233,12 @@ export const threads = (
             Effect.catchTag("Trouble", (error) => Effect.fail(missing(error) ? unlisted("didn't send it", error) : error)),
           )
           return found ? "sent" : yield* unlisted("didn't send it")
+        }
+        if (outgoing.reference !== undefined) {
+          const current = yield* snapshot(api, id)
+          // Delivery itself starts a newer turn. Reconcile its id before rejecting a stale reference.
+          if (has(current)) return "sent"
+          if (!sameReference(reference(current.thread), outgoing.reference)) return yield* staleReference()
         }
         // Sending now would steer the turn that's running instead of following it. Stopped on an approval or a
         // question, the thread won't move until the user answers in T3 Code, which yapd can't do for them. And

@@ -104,3 +104,31 @@ describe("T3Code", () => {
     expect(command).not.toHaveProperty("modelSelection")
   })
 })
+
+
+describe("T3Code hook references", () => {
+  test("captures the matched turn from its detail, rather than a shell read that was already out of date", async () => {
+    const context = { turnId: "turn-a", userMessageId: "user-a" }
+    const read = (turnId: string, newestUserTurn = "turn-a") => T3Code.matching((path, schema) => Effect.orDie(Schema.decodeUnknown(schema)(
+      path === "/api/orchestration/shell" ? shell([thread()]) : { thread: { latestTurn: { turnId }, messages: [
+        { id: "user-a", role: "user", text: "Fix it", turnId: newestUserTurn },
+        { id: "assistant-a", role: "assistant", text: "Ready.", turnId: "turn-a" },
+      ] } })), { cwd: "/repo", message: "Ready." })
+    expect((await Effect.runPromise(read("turn-a")))[0]?.reference).toEqual(context)
+    expect((await Effect.runPromise(read("turn-b")))[0]?.reference).toBeUndefined()
+    expect((await Effect.runPromise(read("turn-a", "turn-b")))[0]?.reference).toBeUndefined()
+  })
+})
+
+
+test("T3Code ties null user turn ids by the request timestamp and rejects a queued newer request", async () => {
+  const requestedAt = "2026-09-30T10:00:00.000Z"
+  for (const createdAt of [requestedAt, "2026-09-30T10:00:01.000Z"]) {
+    const matches = await Effect.runPromise(T3Code.matching((path, schema) => Effect.orDie(Schema.decodeUnknown(schema)(
+      path === "/api/orchestration/shell" ? shell([thread()]) : { thread: { latestTurn: { turnId: "turn-a", requestedAt }, messages: [
+        { id: "user-a", role: "user", text: "Fix it", turnId: null, createdAt },
+        { id: "assistant-a", role: "assistant", text: "Ready.", turnId: "turn-a" },
+      ] } })), { cwd: "/repo", message: "Ready." }))
+    expect(matches[0]?.reference).toEqual(createdAt === requestedAt ? { turnId: "turn-a", userMessageId: "user-a" } : undefined)
+  }
+})

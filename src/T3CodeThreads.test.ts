@@ -267,3 +267,53 @@ describe("T3CodeThreads", () => {
     }
   })
 })
+
+
+describe("T3CodeThreads referenced delivery", () => {
+  const reference = { turnId: "turn-a", userMessageId: "user-a" }
+  const protectedMessage = { commandId: "yapd:protected", messageId: "reply", text: "Merge it.", reference }
+  const current = (state: string, turnId = "turn-a", userMessageId = "user-a", accepted = false) => {
+    const thread = { ...shell.threads[0], latestTurn: { state, turnId }, session: { status: state === "running" ? "running" : "ready" } }
+    const dispatched: Array<unknown> = []
+    const messages = [{ id: "user-a", role: "user", text: "Fix it.", turnId: "turn-a" }, { id: "assistant-a", role: "assistant", text: "Ready." },
+      ...(userMessageId === "user-a" ? [] : [{ id: userMessageId, role: "user", text: "Different work.", turnId: "turn-b" }]),
+      ...(accepted ? [{ id: protectedMessage.messageId, role: "user", text: protectedMessage.text, turnId: "turn-b" }] : [])]
+    const threads = reached(dispatched, { "/api/orchestration/shell": { ...shell, threads: [thread] }, "/api/orchestration/threads/done": { thread: { ...thread, messages } } })
+    return { threads, dispatched }
+  }
+
+  test("records the turn and latest user message from the same detail", async () => {
+    const thread = { ...shell.threads[0], latestTurn: { state: "completed", turnId: "turn-a" }, messages: [{ id: "user-a", role: "user", text: "Fix it.", turnId: "turn-a" }] }
+    const detail = await Effect.runPromise(reached([], { "/api/orchestration/threads/done?turnLimit=1": { thread } }).detail("done", 1))
+    expect(detail.reference).toEqual(reference)
+  })
+
+  test("holds a running referenced turn, but permits delivery once that same turn finishes", async () => {
+    const running = current("running")
+    expect(await Effect.runPromise(running.threads.send("done", protectedMessage))).toBe("busy")
+    expect(running.dispatched).toEqual([])
+    const finished = current("completed")
+    expect(await Effect.runPromise(finished.threads.send("done", protectedMessage))).toBe("sent")
+    expect(finished.dispatched).toHaveLength(1)
+  })
+
+  test("rejects a newer turn, and also a newer request before its turn starts", async () => {
+    for (const changed of [current("completed", "turn-b", "user-b"), current("running", "turn-a", "user-b")]) {
+      expect(await failure(changed.threads.send("done", protectedMessage))).toMatchObject({ stale: true, gone: true })
+      expect(changed.dispatched).toEqual([])
+    }
+  })
+
+  test("reconciles an accepted message before comparing its now-stale reference", async () => {
+    const accepted = current("running", "turn-b", "user-b", true)
+    expect(await Effect.runPromise(accepted.threads.send("done", protectedMessage))).toBe("sent")
+    expect(accepted.dispatched).toEqual([])
+  })
+})
+
+
+test("T3CodeThreads never labels older trailing messages with a newer turn", async () => {
+  const thread = { ...shell.threads[0], latestTurn: { state: "running", turnId: "turn-b", requestedAt: "2026-09-30T10:00:01.000Z" }, messages: [{ id: "user-a", role: "user", text: "Fix it.", turnId: null, createdAt: "2026-09-30T10:00:00.000Z" }] }
+  const detail = await Effect.runPromise(reached([], { "/api/orchestration/threads/done?turnLimit=1": { thread } }).detail("done", 1))
+  expect(detail.reference).toBeUndefined()
+})

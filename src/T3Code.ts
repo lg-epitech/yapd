@@ -3,6 +3,7 @@ import { realpath } from "node:fs/promises"
 import * as Config from "./Config.ts"
 import { type Relay, RelayError, type Thread, Unreachable } from "./Relay.ts"
 import * as Server from "./T3CodeServer.ts"
+import { reference, type Reference } from "./Threads.ts"
 
 // T3 Code's local API, the one its own CLI uses. Sending through it keeps the
 // thread in step: resuming the agent behind T3 Code's back would fork it.
@@ -29,8 +30,11 @@ export const Shell = Schema.Struct({
 })
 export type Shell = typeof Shell.Type
 
-const Message = Schema.Struct({ role: Schema.String, text: Schema.String })
-const Detail = Schema.Struct({ thread: Schema.Struct({ messages: Schema.Array(Message) }) })
+const Message = Schema.Struct({ role: Schema.String, text: Schema.String, id: Schema.optional(Schema.String), turnId: Schema.optional(Schema.NullOr(Schema.String)), createdAt: Schema.optional(Schema.String) })
+const Detail = Schema.Struct({ thread: Schema.Struct({
+  messages: Schema.Array(Message),
+  latestTurn: Schema.optional(Schema.NullOr(Schema.Struct({ turnId: Schema.optional(Schema.String), requestedAt: Schema.optional(Schema.String) }))),
+}) })
 
 /** Threads that ran in `cwd`, newest first. `resolve` canonicalizes paths, like realpath. */
 export const inDirectory = (shell: Shell, cwd: string, resolve: (path: string) => string) => {
@@ -98,10 +102,16 @@ export const matching = <E>(api: Api<E>, thread: Pick<Thread, "cwd" | "message">
     )
     const cwd = yield* Effect.promise(() => canonical(thread.cwd))
 
-    const matches: Array<ShellThread> = []
+    const matches: Array<ShellThread & { readonly reference?: Reference }> = []
     for (const candidate of inDirectory(shell, cwd, (directory) => resolved.get(directory) ?? directory)) {
       const detail = yield* api(`/api/orchestration/threads/${encodeURIComponent(candidate.id)}?turnLimit=1`, Detail)
-      if (endsWith(detail.thread.messages, thread.message)) matches.push(candidate)
+      if (endsWith(detail.thread.messages, thread.message)) {
+        const context = reference(detail.thread)
+        const last = detail.thread.messages.at(-1)
+        // A new turn can start while the old assistant message still trails the detail.
+        const tied = context !== undefined && last?.turnId === context.turnId ? context : undefined
+        matches.push({ ...candidate, ...(tied === undefined ? {} : { reference: tied }) })
+      }
     }
     return matches
   })
@@ -122,11 +132,12 @@ const glance = "2 seconds"
  */
 export const identify = Effect.gen(function* () {
   const token = yield* Config.t3codeToken
-  return (thread: Thread): Effect.Effect<Option.Option<string>> =>
+  return (thread: Thread): Effect.Effect<Option.Option<{ readonly id: string; readonly reference?: Reference | undefined }>> =>
     Effect.gen(function* () {
-      if (thread.origin.app !== bundle || Option.isNone(token)) return Option.none<string>()
+      if (thread.origin.app !== bundle || Option.isNone(token)) return Option.none<{ readonly id: string; readonly reference?: Reference | undefined }>()
       const server = yield* Server.locate
-      return yield* identified(Server.api(server, token.value), thread)
+      const matches = yield* matching(Server.api(server, token.value), thread)
+      return matches.length === 1 ? Option.some({ id: matches[0]!.id, reference: matches[0]!.reference }) : Option.none()
     }).pipe(
       Effect.timeout(glance),
       Effect.catchAll((error) => Effect.logDebug("Couldn't tell which T3 Code thread that was", error).pipe(Effect.as(Option.none()))),

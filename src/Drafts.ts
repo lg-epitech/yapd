@@ -8,7 +8,7 @@ import type { Records } from "./Records.ts"
 import { Reporter } from "./Reporter.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
-import { type Known, type Listed, type Threads, ThreadsError } from "./Threads.ts"
+import { type Known, type Listed, type Threads, ThreadsError, sameReference } from "./Threads.ts"
 import {
   type Decision,
   type Destination,
@@ -19,6 +19,7 @@ import {
   machinesNamed,
   type Material,
   parseKey,
+  referredReadings,
   shortlist,
   type ThreadListing,
   vocabulary,
@@ -387,6 +388,7 @@ export const make = (options: {
       Effect.gen(function* () {
         const id = `draft:${draft.id}:${crypto.randomUUID()}`
         const now = yield* Clock.currentTimeMillis
+        // Carry only the context the notice actually describes; a later read may belong to unrelated work.
         yield* options.note({ id, project: "", directory: "", message: "", ...about, spoken, at: now })
         yield* options.tell({ id, priority, spoken, at: draft.at, stale: Effect.succeed(false), ...extra })
       })
@@ -598,24 +600,43 @@ export const make = (options: {
 
     const message = (draft: Draft, material: Material, decision: Decision) =>
       Effect.gen(function* () {
-        const found = target(material, decision)
-        if (Option.isNone(found)) return yield* unsettled(draft, material, decision, "Which thread is that for?")
+        // Dictation and the model can both outlive the listing. Check the same evidence against every thread now.
+        const current = { ...material, threads: yield* Effect.flatMap(threads.renew, Effect.forEach(recollect)) }
+        const found = target(current, decision)
+        if (Option.isNone(found)) return yield* unsettled(draft, current, decision, "Which thread is that for?")
         const { machine, listed } = found.value
         const to = recipient(found.value)
         const about = subject(found.value)
         const text = decision.prompt.trim()
-        if (text === "") return yield* ask(draft, material, `What should I tell ${listed.title}?`, about)
+        if (text === "") {
+          const detail = yield* Effect.option(machine.threads.detail(listed.id, 1))
+          const reference = Option.isSome(detail) ? detail.value.reference : undefined
+          return yield* ask(draft, current, `What should I tell ${listed.title}?`, { ...about, thread: { machine: machine.name, id: listed.id, reference } })
+        }
         yield* Effect.logInfo(`Message for ${key(machine.name, listed.id)}, ${to}: ${text}. ${decision.why}`)
+        const readings = decision.threadFrom === "referred" ? referredReadings(decision, material.recent) : []
+        const reference = readings[0]?.thread?.reference
+        if (decision.threadFrom === "referred" && (reference === undefined || readings.some(({ thread }) => !sameReference(thread?.reference, reference)))) {
+          return yield* ask(draft, current, "I can't tie that reference to one turn. Which thread should I send this to?")
+        }
         draft.starting = true
-        const outcome = yield* Effect.either(options.outbox.send(machine.name, listed, text))
+        const outcome = yield* Effect.either(options.outbox.send(machine.name, listed, text, reference))
         if (Either.isLeft(outcome)) {
           yield* Effect.logWarning("Could not send", outcome.left)
+          if (outcome.left._tag === "ThreadsError" && outcome.left.stale) {
+            draft.starting = false
+            return yield* ask(draft, current, "That thread has moved on since the update you heard. Which thread should I send this to?")
+          }
           return yield* fail(draft, `I couldn't send that to ${to}. ${outcome.left._tag === "ThreadsError" ? outcome.left.reason : outcome.left.message}`, about)
         }
         yield* close(draft)
         const said = delivered(to, outcome.right)
         // Noted whether it went or is still on its way: either way the user can build on it.
-        yield* say(draft, said.spoken, said.priority, { ...about, message: text })
+        yield* say(draft, said.spoken, said.priority, {
+          ...about,
+          message: text,
+          thread: { machine: machine.name, id: listed.id, reference: outcome.right._tag === "Sent" ? outcome.right.reference : undefined },
+        })
       })
 
     const summary = (draft: Draft, material: Material, decision: Decision) =>
@@ -642,6 +663,7 @@ export const make = (options: {
         // What's read out carries the thread, so "tell it to" can follow. Where it is, as just read: fresher than the listing.
         yield* say(draft, report.right.spoken, thread.state === "waiting" || thread.state === "failed" ? "needs-you" : "done", {
           ...about,
+          thread: { machine: machine.name, id: thread.id, reference: detail.right.reference },
           project: thread.project,
           directory: thread.directory,
           message: messages.findLast(({ role }) => role === "assistant")?.text ?? "",
@@ -721,8 +743,8 @@ export const make = (options: {
     const write = (draft: Draft) =>
       Effect.gen(function* () {
         yield* Effect.logInfo(`Dictated: ${draft.heard}`)
-        // The threads as listed when the shortcut was pressed, with what's been learnt of them since.
-        const [listings, listed] = yield* Effect.all([catalogs.get, Effect.flatMap(threads.get, Effect.forEach(recollect))], { concurrency: "unbounded" })
+        // Projects can stay cached; threads are refreshed after dictation so new matches are visible.
+        const [listings, listed] = yield* Effect.all([catalogs.get, Effect.flatMap(threads.renew, Effect.forEach(recollect))], { concurrency: "unbounded" })
         // Without a project to start in or a thread to talk to, there's nothing a dictation can be for.
         if (listings.every(({ catalog }) => Option.isNone(catalog)) && listed.every(({ reason }) => reason !== undefined)) {
           const reason = (listings.find(({ here }) => here) ?? listings[0])?.reason

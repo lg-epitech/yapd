@@ -42,8 +42,12 @@ export const Message = Schema.Struct({
 })
 export type Message = typeof Message.Type
 
+/** The request a spoken reference belongs to. Completion does not change these ids. */
+export const Reference = Schema.Struct({ turnId: Schema.NonEmptyString, userMessageId: Schema.NonEmptyString })
+export type Reference = typeof Reference.Type
+
 /** A thread with its latest turns' messages, oldest first. */
-export const Detail = Schema.Struct({ thread: Listed, messages: Schema.Array(Message) })
+export const Detail = Schema.Struct({ thread: Listed, messages: Schema.Array(Message), reference: Schema.optional(Reference) })
 export type Detail = typeof Detail.Type
 
 /**
@@ -51,7 +55,7 @@ export type Detail = typeof Detail.Type
  * it's sent and kept, so sending it again after a crash can't deliver it twice:
  * T3 Code answers a command it already took with what it did then.
  */
-export const Outgoing = Schema.Struct({ commandId: Schema.String, messageId: Schema.String, text: Schema.String })
+export const Outgoing = Schema.Struct({ commandId: Schema.String, messageId: Schema.String, text: Schema.String, reference: Schema.optional(Reference) })
 export type Outgoing = typeof Outgoing.Type
 
 /**
@@ -70,6 +74,7 @@ export type Sent = typeof Sent.Type
 export class ThreadsError extends Data.TaggedError("ThreadsError")<{
   readonly reason: string
   readonly gone?: boolean
+  readonly stale?: boolean
   readonly cause?: unknown
 }> {}
 
@@ -102,4 +107,35 @@ export interface Threads {
   /** The first message the user sent it, which is what the work started as. */
   readonly opening: (id: string) => Effect.Effect<string, ThreadsError>
   readonly send: (id: string, outgoing: Outgoing) => Effect.Effect<Sent, ThreadsError>
+}
+
+/** A thread has accepted different work since the update the user pointed at. */
+export const staleReference = () => new ThreadsError({
+  reason: "That thread has moved on since the update you heard. Name the thread again to address its current work.",
+  gone: true,
+  stale: true,
+})
+
+export const sameReference = (one: Reference | undefined, other: Reference) =>
+  one !== undefined && one.turnId === other.turnId && one.userMessageId === other.userMessageId
+
+/** Read from one coherent detail response. Never pair a newer turn with trailing messages from older work. */
+export const reference = (thread: {
+  readonly latestTurn?: { readonly turnId?: string | null | undefined; readonly requestedAt?: string | null | undefined } | null | undefined
+  readonly messages: ReadonlyArray<{
+    readonly id?: string | undefined
+    readonly role: string
+    readonly turnId?: string | null | undefined
+    readonly createdAt?: string | null | undefined
+  }>
+}): Reference | undefined => {
+  const turnId = thread.latestTurn?.turnId
+  const user = thread.messages.findLast(({ role }) => role === "user")
+  if (!turnId || !user?.id) return undefined
+  if (user.turnId === turnId) return { turnId, userMessageId: user.id }
+  // T3 currently leaves user-message turnId null, but stamps creation and the turn request together.
+  const requestedAt = thread.latestTurn?.requestedAt
+  if (user.turnId == null && user.createdAt && requestedAt && Number.isFinite(Date.parse(requestedAt)) &&
+      Date.parse(user.createdAt) === Date.parse(requestedAt)) return { turnId, userMessageId: user.id }
+  return undefined
 }

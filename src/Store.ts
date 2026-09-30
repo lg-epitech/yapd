@@ -52,6 +52,8 @@ export const migrations: ReadonlyArray<string> = [
     sent_at text
   ) strict;
   create index messages_held on messages (created_at) where state = 'held';`,
+  // Kept with a held message so its reference cannot silently lose its guard on restart.
+  "alter table messages add column reference text;",
 ]
 
 export class Store extends Context.Tag("yapd/Store")<

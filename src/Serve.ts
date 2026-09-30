@@ -65,7 +65,7 @@ export const serve = Effect.gen(function* () {
     locate: (thread) =>
       own === undefined || from(thread.origin.host) !== own
         ? Effect.succeed(Option.none())
-        : Effect.map(identify(thread), Option.map((id) => ({ machine: own.name, id }))),
+        : Effect.map(identify(thread), Option.map((linked) => ({ machine: own.name, ...linked }))),
     // By the name the user calls it, which is what the outbox sends by, so a message is only taken as the prompt of a session there.
     machine: ({ host }) => Option.map(Option.fromNullable(from(host)), ({ name }) => name),
   })

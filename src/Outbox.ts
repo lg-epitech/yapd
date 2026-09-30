@@ -3,7 +3,7 @@ import type { Notice } from "./Inbox.ts"
 import type { Heard } from "./Recent.ts"
 import { plain } from "./Relay.ts"
 import * as Store from "./Store.ts"
-import { type Listed, type Outgoing, type Threads, ThreadsError } from "./Threads.ts"
+import { type Listed, type Outgoing, type Reference, type Threads, ThreadsError } from "./Threads.ts"
 
 // Every message for a thread goes through here. One the thread can't take,
 // because it's in the middle of a turn, is held in the database and passed
@@ -42,7 +42,7 @@ export interface Options {
  * the try ended without saying whether it went: it's tried again with the same
  * ids, which T3 Code tells apart from a new message.
  */
-export type Delivery = { readonly _tag: "Sent" } | { readonly _tag: "Held" } | { readonly _tag: "Pending"; readonly reason: string }
+export type Delivery = { readonly _tag: "Sent"; readonly reference?: Reference } | { readonly _tag: "Held" } | { readonly _tag: "Pending"; readonly reason: string }
 
 export interface Outbox {
   /**
@@ -51,7 +51,7 @@ export interface Outbox {
    * waiting on the user in T3 Code, the machine isn't one yapd reaches, or
    * there's nothing to send.
    */
-  readonly send: (machine: string, thread: Listed, text: string) => Effect.Effect<Delivery, ThreadsError | Store.StoreError>
+  readonly send: (machine: string, thread: Listed, text: string, reference?: Reference) => Effect.Effect<Delivery, ThreadsError | Store.StoreError>
 }
 
 interface Row {
@@ -63,16 +63,17 @@ interface Row {
   readonly project: string
   readonly directory: string
   readonly text: string
+  readonly reference: string | null
   /** Why it's still held, as of the last try. */
   readonly reason: string | null
   readonly created_at: string
 }
 
-const columns = "command_id, message_id, machine, thread, title, project, directory, text, reason, created_at"
+const columns = "command_id, message_id, machine, thread, title, project, directory, text, reason, created_at, reference"
 
 const stamp = (millis: number) => new Date(millis).toISOString()
 
-const outgoing = (row: Row): Outgoing => ({ commandId: row.command_id, messageId: row.message_id, text: row.text })
+const outgoing = (row: Row): Outgoing => ({ commandId: row.command_id, messageId: row.message_id, text: row.text, ...(row.reference === null ? {} : { reference: JSON.parse(row.reference) as Reference }) })
 
 /** What the user is told when a thread has stopped on something only they can settle. */
 export const waiting = "It's waiting on an approval or an answer from you in T3 Code, which I can't give. Answer it there, then say it again."
@@ -157,6 +158,13 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
         }),
       )
 
+    /** A delivery notice may point at its accepted request, never a newer request that happened to arrive meanwhile. */
+    const acceptedReference = (row: Row) =>
+      Effect.flatMap(reach(row.machine), (threads) => threads.detail(row.thread, 1)).pipe(
+        Effect.map(({ reference }) => reference?.userMessageId === row.message_id ? reference : undefined),
+        Effect.catchAllCause(() => Effect.succeed(undefined)),
+      )
+
     const recipient = (row: Row) => `${row.title}${row.project === "" ? "" : ` in ${row.project}`}${row.machine === options.here() ? "" : ` on ${row.machine}`}`
 
     /**
@@ -168,13 +176,14 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const id = `outbox:${row.command_id}`
+        const reference = yield* acceptedReference(row)
         yield* options.note({
           id,
           project: row.project,
           directory: row.directory,
           spoken,
           message: row.text,
-          thread: { machine: row.machine, id: row.thread },
+          thread: { machine: row.machine, id: row.thread, ...(reference === undefined ? {} : { reference }) },
           at,
         })
         yield* options.tell({ id, priority, spoken, at, stale: Effect.succeed(false) })
@@ -289,7 +298,7 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
     // What was held before a restart is picked up where it was left.
     yield* Effect.forEach(yield* holding(), rouse, { discard: true })
 
-    const send: Outbox["send"] = (machine, thread, dictated) =>
+    const send: Outbox["send"] = (machine, thread, dictated, reference) =>
       Effect.gen(function* () {
         // As T3 Code will take it, since a leading slash would run as a command there: what's kept, what's expected
         // to turn up as the thread's prompt, and what every try sends are then one text.
@@ -306,6 +315,7 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
           project: thread.project,
           directory: thread.directory,
           text,
+          reference: reference === undefined ? null : JSON.stringify(reference),
           reason: null,
           created_at: stamp(now),
         }
@@ -315,8 +325,8 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
             .query<{ command_id: string }, [string, string]>("select command_id from messages where machine = ? and thread = ? and state = 'held' limit 1")
             .get(machine, thread.id)
           database
-            .query<void, [string, string, string, string, string, string, string, string, string | null, string]>(
-              `insert into messages (${columns}, state) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'held')`,
+            .query<void, [string, string, string, string, string, string, string, string, string | null, string, string | null]>(
+              `insert into messages (${columns}, state) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'held')`,
             )
             .run(
               row.command_id,
@@ -329,6 +339,7 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
               row.text,
               older === null ? null : "It's behind an older message for the same thread.",
               row.created_at,
+              row.reference,
             )
           return older !== null
         })
@@ -367,7 +378,8 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
           return { _tag: "Held" } as const
         }
         yield* sent(row.command_id)
-        return { _tag: "Sent" } as const
+        const accepted = yield* acceptedReference(row)
+        return { _tag: "Sent", ...(accepted === undefined ? {} : { reference: accepted }) } as const
       })
 
     return { send }
