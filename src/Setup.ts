@@ -1,6 +1,6 @@
-import { Console, Data, Effect } from "effect"
+import { Console, Data, Effect, Option } from "effect"
 import { existsSync } from "node:fs"
-import { rename } from "node:fs/promises"
+import { chmod, copyFile, rename, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import * as Home from "./Home.ts"
@@ -118,28 +118,51 @@ export const read = (file: string) =>
 /**
  * Writes the agent's hooks, and says what it did. Nothing is written when
  * they're already as they should be. The file as it was before yapd first
- * changed it is kept next to it.
+ * changed it is kept next to it. Both keep the file's permissions, since
+ * Claude Code's settings can hold keys.
  */
 export const install = (agent: Agent, run: ReturnType<typeof command>) =>
   Effect.gen(function* () {
     const { file, name } = config(agent)
     const settings = yield* read(file)
     const hooks = merge(settings.hooks ?? {}, (agent === "claude" ? claude : codex)(run))
-    const before = JSON.stringify(settings.hooks ?? {})
-    if (JSON.stringify(hooks) === before) return `${name}'s hooks were already set up, in ${file}`
+    if (JSON.stringify(hooks) === JSON.stringify(settings.hooks ?? {})) {
+      return { changed: false, message: `${name}'s hooks were already set up, in ${file}` }
+    }
     yield* Effect.tryPromise({
       try: async () => {
+        const mode = await stat(file).then(({ mode }) => mode & 0o777, () => undefined)
         const backup = `${file}.before-yapd`
-        if ((await Bun.file(file).exists()) && !(await Bun.file(backup).exists())) await Bun.write(backup, Bun.file(file))
+        if (mode !== undefined && !(await Bun.file(backup).exists())) await copyFile(file, backup)
         // Whole or not at all, since the agent may read it at any time.
         const staging = `${file}.${crypto.randomUUID()}`
         await Bun.write(staging, `${JSON.stringify({ ...settings, hooks }, null, 2)}\n`)
+        if (mode !== undefined) await chmod(staging, mode)
         await rename(staging, file)
       },
       catch: (cause) => new SetupError({ message: `I couldn't write ${file}`, cause }),
     })
-    return `${name}'s hooks are set up, in ${file}${agent === "codex" ? ". Codex asks you to trust them on its next start" : ""}`
+    const trust = agent === "codex" ? ". Codex asks you to trust them on its next start" : ""
+    return { changed: true, message: `${name}'s hooks are set up, in ${file}${trust}` }
   })
+
+/**
+ * Brings the hooks an agent already has for yapd in line with this yapd and
+ * its settings, like a new port, saying only what changed. Agents without
+ * any are left alone: `yapd setup` is what adds them.
+ */
+export const refresh = (bun: string, main: string) =>
+  Effect.forEach(
+    (["claude", "codex"] as const).filter(present),
+    (agent) =>
+      Effect.gen(function* () {
+        const settings = yield* read(config(agent).file).pipe(Effect.option)
+        if (Option.isNone(settings) || Object.values(find(settings.value.hooks ?? {})).every((hooks) => hooks.length === 0)) return
+        const { changed, message } = yield* install(agent, command(bun, main, environment()))
+        if (changed) yield* Console.log(message)
+      }).pipe(Effect.catchAll((error) => Console.error(`${error.message}. Its hooks are in the README.`))),
+    { discard: true },
+  )
 
 /** Starts the user's settings, so there's a file to find and edit. */
 const settings = Effect.tryPromise({
@@ -162,7 +185,7 @@ export const setup = (bun: string, main: string) =>
     if (agents.length === 0) yield* Console.log("Neither Claude Code nor Codex is here, so there are no hooks to set up.")
     for (const agent of agents) {
       yield* install(agent, command(bun, main, environment())).pipe(
-        Effect.flatMap(Console.log),
+        Effect.flatMap(({ message }) => Console.log(message)),
         Effect.catchAll((error) => Console.error(`${error.message}. Its hooks are in the README.`)),
       )
     }

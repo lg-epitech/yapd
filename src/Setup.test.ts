@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { existsSync, readFileSync } from "node:fs"
+import { chmodSync, existsSync, readFileSync, statSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -65,12 +65,16 @@ describe("install", () => {
     const file = join(dir, "settings.json")
     try {
       await Bun.write(file, JSON.stringify({ model: "opus", hooks: { Stop: [{ hooks: [format] }] } }))
-      expect(await Effect.runPromise(Setup.install("claude", run))).toContain("are set up")
+      chmodSync(file, 0o600)
+      expect((await Effect.runPromise(Setup.install("claude", run))).message).toContain("are set up")
       const written = JSON.parse(readFileSync(file, "utf8"))
       expect(written.model).toBe("opus")
       expect(written.hooks.Stop).toEqual([{ hooks: [format] }, { hooks: [Setup.claude(run).Stop] }])
       expect(JSON.parse(readFileSync(`${file}.before-yapd`, "utf8")).hooks.Stop).toEqual([{ hooks: [format] }])
-      expect(await Effect.runPromise(Setup.install("claude", run))).toContain("already set up")
+      // It can hold keys, so it stays as private as it was.
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(statSync(`${file}.before-yapd`).mode & 0o777).toBe(0o600)
+      expect((await Effect.runPromise(Setup.install("claude", run))).changed).toBe(false)
     } finally {
       if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
       else process.env.CLAUDE_CONFIG_DIR = previous

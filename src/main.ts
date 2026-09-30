@@ -136,7 +136,8 @@ if ((command === "serve" || command === "install" || (command === "uninstall" &&
 } else if (command === "doctor") {
   runMain(doctor)
 } else if (command === "install") {
-  runMain(Service.install)
+  // The hooks too, since they carry settings like the port.
+  runMain(Effect.zipRight(Setup.refresh(Service.bun(), Service.main), Service.install))
 } else if (command === "uninstall") {
   runMain(Service.uninstall)
 } else if (command === "hook" && (argument === "claude" || argument === "codex")) {
