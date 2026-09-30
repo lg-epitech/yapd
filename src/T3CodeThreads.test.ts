@@ -158,6 +158,22 @@ describe("T3CodeThreads", () => {
     expect((await failure(threads.detail("new", 2))).gone).toBeUndefined()
   })
 
+  test("doesn't take a thread as gone on a 404 alone, when the shell can't say either way", async () => {
+    const transport: T3CodeThreads.Transport = {
+      api: (path) =>
+        Effect.fail(
+          path === "/api/orchestration/shell"
+            ? new Server.Trouble({ reason: "T3 Code isn't answering." })
+            : new Server.Trouble({ reason: "T3 Code wouldn't take it.", cause: `404 from ${path}` }),
+        ),
+    }
+    const threads = T3CodeThreads.threads(Option.some(Redacted.make("token")), () => Effect.succeed(transport))
+    // Worth trying again, so a message held for it isn't dropped over a moment's outage.
+    const error = await failure(threads.opening("missing"))
+    expect(error.reason).toBe("T3 Code wouldn't take it.")
+    expect(error.gone).toBeUndefined()
+  })
+
   test("sends with the ids it was given, unless the thread is mid-turn, waiting on the user, or gone", async () => {
     const dispatched: Array<unknown> = []
     /** The thread's latest turns, as they're read before a busy or waiting thread is turned down. */

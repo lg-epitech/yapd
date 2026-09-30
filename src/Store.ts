@@ -24,7 +24,8 @@ export const migrations: ReadonlyArray<string> = [
   // What yapd knows about threads themselves, and the messages it sends them.
   // A message's ids are chosen before the first try and kept, so a try after
   // a crash sends the same command. Its title and project are kept as of when
-  // it was held, so what became of it can be told after a restart. `machine`
+  // it was held, and where its checkout is, so what became of it can be told
+  // after a restart. `machine`
   // is what the user calls the machine, so renaming one orphans its rows.
   `create table threads (
     machine text not null,
@@ -43,6 +44,7 @@ export const migrations: ReadonlyArray<string> = [
     thread text not null,
     title text not null,
     project text not null,
+    directory text not null,
     text text not null,
     state text not null check (state in ('held', 'sent', 'failed')),
     reason text,

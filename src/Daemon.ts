@@ -176,15 +176,20 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       generations.set(update, generation)
       // Noted before it's queued, since it can be read out the moment it is.
-      recent = Recent.add(recent, {
-        id,
-        project,
-        ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
-        directory: thread.cwd,
-        spoken,
-        message: turn.message,
-        at: arrivedAt,
-      })
+      const now = yield* Clock.currentTimeMillis
+      recent = Recent.add(
+        recent,
+        {
+          id,
+          project,
+          ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
+          directory: thread.cwd,
+          spoken,
+          message: turn.message,
+          at: arrivedAt,
+        },
+        now,
+      )
       yield* STM.commit(
         TRef.update(inbox, (current) =>
           Inbox.add(current, { id, session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
@@ -208,6 +213,12 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   /** Lets a waiting Stop hook go without a reply. */
   const release = (hook: Ticket | undefined) => (hook === undefined ? Effect.void : waiting.close(hook))
 
+  /** An entry that leaves the inbox without being read out leaves what the user was going to hear too. */
+  const forget = (entry: Inbox.Entry) =>
+    Effect.sync(() => {
+      recent = Recent.drop(recent, "update" in entry ? entry.id : entry.notice.id)
+    })
+
   /** Drops a session's pending update, whether it's still being prepared or already waiting. */
   const discard = (session: string) =>
     Effect.gen(function* () {
@@ -215,7 +226,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
       )
-      if (dropped !== undefined) yield* removeFile(Inbox.audio(dropped))
+      if (dropped !== undefined) yield* Effect.zipRight(removeFile(Inbox.audio(dropped)), forget(dropped))
       // Its hook, if one waits, won't be getting a reply.
       yield* waiting.drop(session)
     })
@@ -374,7 +385,8 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
           ),
         ),
       ),
-      Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : Effect.zipRight(removeFile(Inbox.audio(ready)), letGo(ready))))),
+      // Forgotten only if it never started playing: a stale notice, or an update whose session moved on.
+      Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : Effect.all([removeFile(Inbox.audio(ready)), letGo(ready), forget(ready)], { discard: true })))),
       Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
     )
     yield* Effect.sleep("400 millis")
@@ -388,8 +400,8 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.played(recent, now)),
     /** Notes something yapd is about to say for itself, for the user to build on like they do on updates. Noted before it's told, since it counts once it plays. */
     note: (heard: Recent.Heard) =>
-      Effect.sync(() => {
-        recent = Recent.add(recent, heard)
+      Effect.map(Clock.currentTimeMillis, (now) => {
+        recent = Recent.add(recent, heard, now)
       }),
   }
 })

@@ -1,8 +1,11 @@
 // What yapd told the user lately, since new work often builds on it: "follow
-// up on what the std agent just finished". Only the latest few, to keep what
-// the writer reads short. An entry is noted before it's read out, and counts
-// as heard from the moment it starts playing: until then the user knows
-// nothing of it, so "tell that one to" can't mean it.
+// up on what the std agent just finished". An entry is noted before it's read
+// out, and counts as heard from the moment it starts playing: until then the
+// user knows nothing of it, so "tell that one to" can't mean it. Only the
+// latest few heard are kept, to keep what the writer reads short. What still
+// waits its turn is all kept, however much piles up while a dictation holds
+// playback: each is history from the moment it plays, and one that never
+// plays is dropped along with its inbox entry.
 
 /** Something the user was told, or is about to be. */
 export interface Heard {
@@ -31,19 +34,34 @@ export type Recent = ReadonlyArray<Heard>
 
 export const empty: Recent = []
 
-/** How many are kept. */
+/** How many heard ones are kept. */
 const most = 6
 /** Older than this, the user would say more than "what it just finished". */
 const lifetime = 3 * 60 * 60_000
 
+const wasHeard = (heard: Heard): heard is Played => heard.heardAt !== undefined
+
+/**
+ * Everything still waiting its turn, and the last `most` heard. One that waits
+ * past `lifetime` is let go of all the same: its notice was never queued, or
+ * its update was dropped before it was noted as such, and nothing else will drop it.
+ */
+const trim = (recent: Recent, now: number): Recent => {
+  const kept = new Set(recent.filter(wasHeard).toSorted((one, other) => other.heardAt - one.heardAt).slice(0, most))
+  return recent.filter((heard) => (wasHeard(heard) ? kept.has(heard) : now - heard.at < lifetime))
+}
+
 /** Newest first. */
-export const add = (recent: Recent, heard: Heard): Recent => [heard, ...recent].slice(0, most)
+export const add = (recent: Recent, heard: Heard, now: number): Recent => trim([heard, ...recent], now)
 
 const change = (recent: Recent, id: string, changed: (heard: Heard) => Heard): Recent =>
   recent.map((heard) => (heard.id === id ? changed(heard) : heard))
 
 /** Marks `id` as being read out from `at`. Read out again after a dictation cut it off, it's the latest thing heard again. */
-export const heard = (recent: Recent, id: string, at: number): Recent => change(recent, id, (heard) => ({ ...heard, heardAt: at }))
+export const heard = (recent: Recent, id: string, at: number): Recent => trim(change(recent, id, (heard) => ({ ...heard, heardAt: at })), at)
+
+/** Forgets `id` if it was never read out: its inbox entry is gone, so it won't be. */
+export const drop = (recent: Recent, id: string): Recent => recent.filter((heard) => heard.id !== id || wasHeard(heard))
 
 /** Names the thread `id` was about, once that's known, which can be after it was read out. */
 export const about = (recent: Recent, id: string, thread: NonNullable<Heard["thread"]>): Recent =>
@@ -51,6 +69,4 @@ export const about = (recent: Recent, id: string, thread: NonNullable<Heard["thr
 
 /** What the user has heard, the latest first. Not by when it came in: what needs them is read out before what doesn't. */
 export const played = (recent: Recent, now: number): ReadonlyArray<Played> =>
-  recent
-    .filter((heard): heard is Played => heard.heardAt !== undefined && now - heard.heardAt < lifetime)
-    .toSorted((one, other) => other.heardAt - one.heardAt)
+  recent.filter((heard): heard is Played => wasHeard(heard) && now - heard.heardAt < lifetime).toSorted((one, other) => other.heardAt - one.heardAt)

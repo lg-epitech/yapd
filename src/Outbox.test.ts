@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Option, Redacted, Schema, type Scope, TestClock, TestContext } from "effect"
 import type { Notice } from "./Inbox.ts"
 import * as Outbox from "./Outbox.ts"
+import type { Heard } from "./Recent.ts"
 import * as Store from "./Store.ts"
 import * as Server from "./T3CodeServer.ts"
 import * as T3CodeThreads from "./T3CodeThreads.ts"
@@ -70,22 +71,29 @@ const held = (store: Store.Store["Type"]) =>
     database.query<{ command_id: string; state: string }, []>("select command_id, state from messages order by created_at").all(),
   )
 
-const run = <A>(
-  test: (context: { store: Store.Store["Type"]; told: Array<Notice>; machines: Map<string, Threads> }) => Effect.Effect<A, unknown, Store.Store | Scope.Scope>,
-) =>
+interface Context {
+  readonly store: Store.Store["Type"]
+  readonly told: Array<Notice>
+  readonly noted: Array<Heard>
+  readonly machines: Map<string, Threads>
+}
+
+const run = <A>(test: (context: Context) => Effect.Effect<A, unknown, Store.Store | Scope.Scope>) =>
   Effect.runPromise(
     Effect.gen(function* () {
       const store = yield* Store.make(":memory:", Store.migrations)
       const told: Array<Notice> = []
+      const noted: Array<Heard> = []
       const machines = new Map<string, Threads>()
-      return yield* test({ store, told, machines }).pipe(Effect.provideService(Store.Store, store))
+      return yield* test({ store, told, noted, machines }).pipe(Effect.provideService(Store.Store, store))
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
   )
 
-const options = (context: { told: Array<Notice>; machines: Map<string, Threads> }): Outbox.Options => ({
+const options = (context: Omit<Context, "store">): Outbox.Options => ({
   here: () => "rosie",
   threads: (machine) => Option.fromNullable(context.machines.get(machine)),
   tell: (notice) => Effect.sync(() => void context.told.push(notice)),
+  note: (heard) => Effect.sync(() => void context.noted.push(heard)),
 })
 
 const said = (told: Array<Notice>) => told.map(({ priority, spoken }) => ({ priority, spoken }))
@@ -116,6 +124,10 @@ describe("Outbox", () => {
         expect(commandId).toMatch(/^yapd:/)
         expect(rosie.sent.map(({ outgoing }) => outgoing.commandId)).toEqual([commandId, commandId, commandId])
         expect(said(context.told)).toEqual([{ priority: "done", spoken: "Passed your message on to Fix retries in yapd now that it finished." }])
+        // Noted under the notice's id, for the thread, so once it plays "tell it to" means this thread.
+        expect(context.noted.map(({ id, thread, directory, message }) => ({ id, thread, directory, message }))).toEqual([
+          { id: context.told[0]?.id ?? "", thread: { machine: "rosie", id: "t1" }, directory: "/tmp/yapd", message: "Keep the API." },
+        ])
         expect(yield* held(context.store)).toEqual([{ command_id: commandId, state: "sent" }])
 
         // Nothing left to pass on, so nothing more is tried.
@@ -191,6 +203,7 @@ describe("Outbox", () => {
         expect(said(context.told)).toEqual([
           { priority: "needs-you", spoken: "I couldn't pass your message on to Fix retries in yapd on rig. That thread was archived." },
         ])
+        expect(context.noted.map(({ thread }) => thread)).toEqual([{ machine: "rig", id: "t1" }])
         expect((yield* held(context.store)).map(({ state }) => state)).toEqual(["failed"])
       }),
     ))
@@ -236,8 +249,8 @@ describe("Outbox", () => {
       Effect.gen(function* () {
         yield* context.store.transaction((database) => {
           database.run(
-            `insert into messages (command_id, message_id, machine, thread, title, project, text, state, reason, created_at)
-            values ('yapd:old', 'm1', 'rig', 't1', 'Fix retries', 'yapd', 'From before.', 'held', null, '1970-01-01T00:00:00.000Z')`,
+            `insert into messages (command_id, message_id, machine, thread, title, project, directory, text, state, reason, created_at)
+            values ('yapd:old', 'm1', 'rig', 't1', 'Fix retries', 'yapd', '/code/yapd', 'From before.', 'held', null, '1970-01-01T00:00:00.000Z')`,
           )
         })
         const rig = fake()

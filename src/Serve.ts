@@ -79,6 +79,7 @@ export const serve = Effect.gen(function* () {
       here: () => reached.find(({ here }) => here)?.name ?? "",
       threads: (machine) => Option.fromNullable(reached.find(({ name }) => name === machine)?.threads),
       tell: daemon.tell,
+      note: daemon.note,
     }),
     expect: (yield* Vocabulary).expect,
   })

@@ -94,4 +94,26 @@ describe("Reporter", () => {
     expect(prompt).toContain("On box: couldn't be checked. box has no T3 Code token.")
     expect(prompt.endsWith("What they asked:\nWhat finished since lunch?")).toBe(true)
   })
+
+  test("keeps every machine's failures and what's running however many there are, and says how many older threads it left out", () => {
+    const running = Array.from({ length: 40 }, (_, index) => ({ listed: listed(`r${index}`, { state: "running", requestedAt: iso(index) }), known: Option.none() }))
+    const done = Array.from({ length: 15 }, (_, index) => ({ listed: listed(`d${index}`, { completedAt: iso(60 + index), updatedAt: iso(60 + index) }), known: Option.none() }))
+    const prompt = Reporter.reportPrompt(
+      {
+        question: "Anything failing?",
+        threads: [
+          { machine: "rosie", here: true, threads: [...running, ...done] },
+          { machine: "rig", here: false, threads: [{ listed: listed("f1", { title: "Eval rerun", state: "failed", error: "Out of memory", completedAt: iso(20), updatedAt: iso(20) }), known: Option.none() }] },
+        ],
+        now,
+      },
+      Option.none(),
+    )
+    expect(prompt).toContain(`On rig, newest first:\n- yapd, "Eval rerun": failed 20 min ago: Out of memory`)
+    expect(prompt).toContain(`"Thread r39"`)
+    expect(prompt).toContain(`"Thread d11"`)
+    expect(prompt).not.toContain(`"Thread d12"`)
+    expect(prompt).toContain("- yapd, \"Thread d11\": done 1 h ago, today\n(and 3 more, older and quiet, not shown)")
+    expect(prompt).toContain("rather than answering as if the list were whole")
+  })
 })

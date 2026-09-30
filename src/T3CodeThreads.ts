@@ -161,13 +161,14 @@ export const threads = (
   const transport = Option.match(token, { onNone: () => Effect.fail(new ThreadsError({ reason: tokenless, gone: true })), onSome: reach })
 
   // A 404 only means the thread is gone when the shell doesn't list it either. One the shell has that can't be
-  // read right now is worth asking for again.
+  // read right now is worth asking for again, and so is one whose absence the shell couldn't confirm: a held
+  // message must not be given up on because T3 Code was out for a moment.
   const snapshot = (api: Transport["api"], id: string, query = "") =>
     api(`/api/orchestration/threads/${encodeURIComponent(id)}${query}`, Snapshot).pipe(
       Effect.catchTag("Trouble", (error) =>
         Effect.gen(function* () {
           if (!missing(error)) return yield* error
-          const shell = yield* api("/api/orchestration/shell", Shell).pipe(Effect.orElseSucceed((): Shell => ({ projects: [], threads: [] })))
+          const shell = yield* api("/api/orchestration/shell", Shell).pipe(Effect.orElseFail(() => error))
           if (shell.threads.some((thread) => thread.id === id)) return yield* error
           return yield* new ThreadsError({ reason: "T3 Code doesn't have that thread any more.", gone: true, cause: error })
         }),

@@ -431,7 +431,8 @@ const lately = 14 * 24 * 60 * 60_000
 /** About how many threads are shown in all. More would crowd out the rest, and cost time on every call. */
 const shown = 40
 
-const when = (at: string | null) => {
+/** When, as T3 Code stamps it, if it can be read. */
+export const when = (at: string | null) => {
   const parsed = Date.parse(at ?? "")
   return Number.isNaN(parsed) ? Option.none() : Option.some(parsed)
 }
@@ -528,17 +529,17 @@ export const threadsListed = (threads: ReadonlyArray<ThreadListing>, now: number
 /** How much of an agent's message is passed on. The summary is there whole. */
 const excerpt = 700
 
-const machineOf = (listings: ReadonlyArray<Listing>, host: string | undefined) =>
-  (host === undefined
-    ? listings.find(({ here }) => here)
-    : listings.find(({ hosts }) => hosts.some((known) => known.toLowerCase() === host.toLowerCase()))
-  )?.machine ?? host
+/** The machine something heard came from: by its host when hooks named one, else the thread's, else this one's. */
+const machineOf = (listings: ReadonlyArray<Listing>, said: Played) =>
+  said.host === undefined
+    ? (said.thread?.machine ?? listings.find(({ here }) => here)?.machine)
+    : (listings.find(({ hosts }) => hosts.some((known) => known.toLowerCase() === said.host?.toLowerCase()))?.machine ?? said.host)
 
 const heard = (listings: ReadonlyArray<Listing>, now: number) => (said: Played) =>
   [
-    `- ${ago(said.heardAt, now)}, ${said.project}${Option.match(Option.fromNullable(machineOf(listings, said.host)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}, in ${said.directory}${
-      said.thread === undefined ? "" : `, thread ${key(said.thread.machine, said.thread.id)}`
-    }. You said: ${squash(said.spoken)}`,
+    `- ${ago(said.heardAt, now)}, ${said.project}${Option.match(Option.fromNullable(machineOf(listings, said)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}${
+      said.directory === "" ? "" : `, in ${said.directory}`
+    }${said.thread === undefined ? "" : `, thread ${key(said.thread.machine, said.thread.id)}`}. You said: ${squash(said.spoken)}`,
     // With a thread and no start, the text could be the agent's or a message yapd sent it, so neither is claimed.
     `  ${said.started === true ? "The prompt you started it with" : said.thread === undefined ? "The agent's message" : "What it was about"}: ${shorten(said.message, excerpt)}`,
   ].join("\n")

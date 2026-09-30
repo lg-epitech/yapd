@@ -1,5 +1,6 @@
 import { Clock, Duration, Effect, Option, Queue, type Scope } from "effect"
 import type { Notice } from "./Inbox.ts"
+import type { Heard } from "./Recent.ts"
 import { plain } from "./Relay.ts"
 import * as Store from "./Store.ts"
 import { type Listed, type Outgoing, type Threads, ThreadsError } from "./Threads.ts"
@@ -18,6 +19,8 @@ export interface Options {
   /** The threads on a machine, when it's one yapd reaches. */
   readonly threads: (machine: string) => Option.Option<Threads>
   readonly tell: (notice: Notice) => Effect.Effect<void>
+  /** Notes what's about to be told, so "tell it to" right after can mean the thread it was about. */
+  readonly note: (heard: Heard) => Effect.Effect<void>
   /** How long between tries at a held message, to start with. Each try that leaves it held doubles the wait, up to a minute. */
   readonly every?: Duration.DurationInput
   /** How long a message is held before it's given up on. */
@@ -49,13 +52,14 @@ interface Row {
   readonly thread: string
   readonly title: string
   readonly project: string
+  readonly directory: string
   readonly text: string
   /** Why it's still held, as of the last try. */
   readonly reason: string | null
   readonly created_at: string
 }
 
-const columns = "command_id, message_id, machine, thread, title, project, text, reason, created_at"
+const columns = "command_id, message_id, machine, thread, title, project, directory, text, reason, created_at"
 
 const stamp = (millis: number) => new Date(millis).toISOString()
 
@@ -130,10 +134,26 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
 
     const recipient = (row: Row) => `${row.title}${row.project === "" ? "" : ` in ${row.project}`}${row.machine === options.here() ? "" : ` on ${row.machine}`}`
 
+    /**
+     * Tells the user what became of a message, noted first under the same id
+     * with the thread it was for: once it plays, it's the latest thing they
+     * heard, and "tell it to" means that thread and not whatever played before.
+     */
     const notice = (row: Row, priority: Notice["priority"], spoken: string) =>
-      Effect.flatMap(Clock.currentTimeMillis, (at) =>
-        options.tell({ id: `outbox:${row.command_id}`, priority, spoken, at, stale: Effect.succeed(false) }),
-      )
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis
+        const id = `outbox:${row.command_id}`
+        yield* options.note({
+          id,
+          project: row.project,
+          directory: row.directory,
+          spoken,
+          message: row.text,
+          thread: { machine: row.machine, id: row.thread },
+          at,
+        })
+        yield* options.tell({ id, priority, spoken, at, stale: Effect.succeed(false) })
+      })
 
     /** One more try at a held row, when one is due. Whether it's still held after. */
     const retry = (row: Row) =>
@@ -231,6 +251,7 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
           thread: thread.id,
           title: thread.title,
           project: thread.project,
+          directory: thread.directory,
           text,
           reason: null,
           created_at: stamp(now),
@@ -241,8 +262,8 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
             .query<{ command_id: string }, [string, string]>("select command_id from messages where machine = ? and thread = ? and state = 'held' limit 1")
             .get(machine, thread.id)
           database
-            .query<void, [string, string, string, string, string, string, string, string | null, string]>(
-              `insert into messages (${columns}, state) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'held')`,
+            .query<void, [string, string, string, string, string, string, string, string, string | null, string]>(
+              `insert into messages (${columns}, state) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'held')`,
             )
             .run(
               row.command_id,
@@ -251,6 +272,7 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
               row.thread,
               row.title,
               row.project,
+              row.directory,
               row.text,
               older === null ? null : "It's behind an older message for the same thread.",
               row.created_at,

@@ -2,8 +2,8 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import { styled } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
-import type { Detail, Known } from "./Threads.ts"
-import { ago, shortlist, standing, type ThreadListing } from "./Writer.ts"
+import type { Detail, Known, Listed } from "./Threads.ts"
+import { ago, standing, type ThreadListing, when } from "./Writer.ts"
 
 // What yapd says when the user asks about their work: where one thread
 // stands, or a report across all of them. Each is one call to the model that
@@ -60,7 +60,7 @@ Reply with only a JSON object with the key "spoken".
 - Answer what they asked. When they asked nothing in particular, or for everything, lead with what needs them: approvals, input, plans to accept, failures. Then what finished, then what's running. Leave out what's quiet and old unless they asked for it.
 - A thread needs them only when its line says it's waiting on something. "Running" means it's working and has asked nothing.
 - Time words like "since lunch" or "this morning" are judged against the time given below, from when each thread finished or was last updated. "Today" starts at the midnight before that time, "yesterday" is the calendar day before, and so on: at half past one, what finished three hours ago was yesterday, and each line older than an hour says which day it was.
-- Say a machine couldn't be checked when it's listed that way, so they know the answer may be short.
+- Say a machine couldn't be checked when it's listed that way, so they know the answer may be short. When a machine's list ends with how many more it has, those are older, quiet ones left out: say so if what they asked could be among them, rather than answering as if the list were whole.
 - When there are many, give counts and name the few that matter: "Three need you: the retry fix wants an approval, ..." Name threads by their project and title, and their machine only when it isn't this one.
 - Only what's shown: a thread that's quiet isn't necessarily still working, and one that's done isn't necessarily right.
 - ${spoken}`
@@ -112,17 +112,43 @@ export const summaryPrompt = ({ question, machine, here, detail, known, now }: S
   ].join("\n\n")
 }
 
-const line = (now: number) => ({ listed }: ThreadListing["threads"][number]) =>
+const line = (now: number) => (listed: Listed) =>
   `- ${listed.project}, "${listed.title}"${listed.branch === null || listed.branch === "" ? "" : ` on ${listed.branch}`}: ${standing(listed, now)}`
+
+/** How many of a machine's threads that are neither running, waiting nor freshly failed are shown, newest first. */
+const finished = 12
+/** A failure this recent is always shown: "anything failing?" is about these. */
+const failing = 24 * 60 * 60_000
+
+/** When the thread ended, or else moved, which is what `standing` shows. One whose time can't be read sorts as the oldest. */
+const ended = (listed: Listed) => Option.getOrElse(when(listed.completedAt ?? listed.updatedAt), () => 0)
+
+/**
+ * Which of a machine's threads the model sees: every one running or waiting on
+ * the user, every failure of the last day, and the newest of the rest up to
+ * `finished`, with how many that leaves out. Machine by machine, so one with
+ * forty threads running can't crowd another's failure out. The writer's
+ * shortlist would: it picks threads to address, where a report is judged on
+ * what it leaves out.
+ */
+export const selection = (listing: ThreadListing, now: number) => {
+  const threads = listing.threads.map(({ listed }) => listed).toSorted((one, other) => ended(other) - ended(one))
+  const always = (listed: Listed) => listed.state === "running" || listed.state === "waiting" || (listed.state === "failed" && now - ended(listed) <= failing)
+  const rest = new Set(threads.filter((listed) => !always(listed)).slice(0, finished))
+  const shown = threads.filter((listed) => always(listed) || rest.has(listed))
+  return { shown, left: threads.length - shown.length }
+}
 
 /** The threads on every machine, without keys or what the work is: enough to say where things stand. */
 export const overview = (threads: ReadonlyArray<ThreadListing>, now: number) =>
-  shortlist(threads, now)
-    .map(({ machine, here, threads, reason }) => {
+  threads
+    .map((listing) => {
+      const { machine, here, reason } = listing
       const name = `${machine}${here ? ", this machine" : ""}`
       if (reason !== undefined) return `On ${name}: couldn't be checked. ${reason}`.trim()
-      if (threads.length === 0) return `On ${name}: no threads lately.`
-      return `On ${name}, newest first:\n${threads.map(line(now)).join("\n")}`
+      const { shown, left } = selection(listing, now)
+      if (shown.length === 0) return `On ${name}: no threads lately.`
+      return `On ${name}, newest first:\n${shown.map(line(now)).join("\n")}${left === 0 ? "" : `\n(and ${left} more, older and quiet, not shown)`}`
     })
     .join("\n\n")
 

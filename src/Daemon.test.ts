@@ -429,6 +429,25 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The tests pass.", "yapd. A slow one."])
   })
 
+  test("keeps every update that piles up through a dictation, and counts each as heard once it plays", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, recent } = yield* daemon
+        const dictation = yield* dictate
+        for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) yield* finish(`s${n}`, `Update ${n}.`)
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        // The oldest plays first, and is history even though seven more were queued after it.
+        const first = (yield* recent).map(({ message }) => message)
+        for (let n = 0; n < 8; n++) yield* wait(11)
+        return { first, after: (yield* recent).map(({ message }) => message) }
+      }),
+    )
+    expect(result.first).toEqual(["Update 1."])
+    // Only the last few heard are kept.
+    expect(result.after).toEqual(["Update 8.", "Update 7.", "Update 6.", "Update 5.", "Update 4.", "Update 3."])
+  })
+
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {
     const result = await run(
       Effect.gen(function* () {
