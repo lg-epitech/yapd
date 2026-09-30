@@ -5,7 +5,9 @@
 // latest few heard are kept, to keep what the writer reads short. What still
 // waits its turn is all kept, however much piles up while a dictation holds
 // playback: each is history from the moment it plays, and one that never
-// plays is dropped along with its inbox entry.
+// plays is dropped along with its inbox entry. What a dictation points at is
+// what had played when the shortcut was pressed: what plays after, once it lets
+// go of the speaker, the user hadn't heard when they spoke.
 //
 // Everything yapd says about the user's work is noted: an agent's update, and
 // whatever yapd says for itself in answer to a dictation, whether it started
@@ -34,8 +36,10 @@ export interface Heard {
   /** The T3 Code thread it was about, when yapd knows which. */
   readonly thread?: { readonly machine: string; readonly id: string }
   readonly at: number
-  /** When it last started being read out. None while it waits its turn. */
+  /** When it last started being read out: again, after a dictation cut it off. None while it waits its turn. */
   readonly heardAt?: number
+  /** When it first did, which is when the user came to know of it. */
+  readonly firstHeardAt?: number
 }
 
 /** One the user has heard. */
@@ -69,7 +73,8 @@ const change = (recent: Recent, id: string, changed: (heard: Heard) => Heard): R
   recent.map((heard) => (heard.id === id ? changed(heard) : heard))
 
 /** Marks `id` as being read out from `at`. Read out again after a dictation cut it off, it's the latest thing heard again. */
-export const heard = (recent: Recent, id: string, at: number): Recent => trim(change(recent, id, (heard) => ({ ...heard, heardAt: at })), at)
+export const heard = (recent: Recent, id: string, at: number): Recent =>
+  trim(change(recent, id, (heard) => ({ ...heard, heardAt: at, firstHeardAt: heard.firstHeardAt ?? at })), at)
 
 /** Forgets `id` if it was never read out: its inbox entry is gone, so it won't be. */
 export const drop = (recent: Recent, id: string): Recent => recent.filter((heard) => heard.id !== id || wasHeard(heard))
@@ -81,3 +86,13 @@ export const about = (recent: Recent, id: string, thread: NonNullable<Heard["thr
 /** What the user has heard, the latest first. Not by when it came in: what needs them is read out before what doesn't. */
 export const played = (recent: Recent, now: number): ReadonlyArray<Played> =>
   recent.filter((heard): heard is Played => wasHeard(heard) && now - heard.heardAt < lifetime).toSorted((one, other) => other.heardAt - one.heardAt)
+
+/**
+ * Of what the user has heard, what they had heard by `at`, like when they
+ * pressed the shortcut: what started playing after isn't what they were
+ * pointing at. By its first playing, since one cut off by that very dictation
+ * is read again after, and it's the one they most likely meant. Inclusive:
+ * what started that very millisecond, they've heard the first word of.
+ */
+export const heardBy = (played: ReadonlyArray<Played>, at: number): ReadonlyArray<Played> =>
+  played.filter((heard) => (heard.firstHeardAt ?? heard.heardAt) <= at)

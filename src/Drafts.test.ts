@@ -246,7 +246,14 @@ const drafts = (
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
-    const dictate = (heard: string) => made.dictated(heard).pipe(Effect.zipRight(flush))
+    /** Sends a dictation, pressed at `startedAt` when that was earlier than now. */
+    const dictate = (heard: string, startedAt?: number) =>
+      Effect.flatMap(Clock.currentTimeMillis, (now) => made.dictated({ heard, startedAt: startedAt ?? now })).pipe(Effect.zipRight(flush))
+    /** Reads something out now, as the daemon does once a dictation lets go of the speaker. */
+    const hear = (heard: Heard) =>
+      Effect.map(Clock.currentTimeMillis, (now) => {
+        recent = Recent.heard(Recent.add(recent, heard, now), heard.id, now)
+      })
     const questions = () => said.filter(({ question }) => question !== undefined)
     /** Answers the latest question as the conversation does: worked out first, then taken in. */
     const answer = (heard: string, to = questions().at(-1)) =>
@@ -258,7 +265,7 @@ const drafts = (
       })
     const unanswered = (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush))
     const spoken = () => said.map(({ spoken }) => spoken)
-    return { ...made, dictate, answer, unanswered, wait, flush, nextNotice: Queue.take(notices), started, said, spoken, questions, asked, researched, catalogs, listings, noted, sent, remembered, openings, summaries, reports }
+    return { ...made, dictate, hear, answer, unanswered, wait, flush, nextNotice: Queue.take(notices), started, said, spoken, questions, asked, researched, catalogs, listings, noted, sent, remembered, openings, summaries, reports }
   })
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
@@ -471,7 +478,7 @@ describe("Drafts", () => {
   test("resolves the fallback decision again when reading the project fails", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictated, nextNotice, started } = yield* drafts(({ research }) =>
+        const { dictate, nextNotice, started } = yield* drafts(({ research }) =>
           research
             ? decision({ action: "research", evidence: "yapd", spoken: "Looking through yapd first." })
             : decision({
@@ -484,7 +491,7 @@ describe("Drafts", () => {
                 spoken: "Started in std, on Opus, without a worktree.",
               }),
         )
-        yield* dictated("In yapd, compare the loader with std and fix it.")
+        yield* dictate("In yapd, compare the loader with std and fix it.")
         yield* nextNotice
         const notice = yield* nextNotice
         return { started, spoken: notice.spoken }
@@ -505,12 +512,12 @@ describe("Drafts", () => {
   ])("asks when a research fallback isn't a valid grounded destination: $project / $evidence", async (fallback) => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictated, nextNotice, started } = yield* drafts(({ research }) =>
+        const { dictate, nextNotice, started } = yield* drafts(({ research }) =>
           research
             ? decision({ action: "research", evidence: "yapd", spoken: "Looking through yapd first." })
             : decision({ ...fallback, prompt: "Fix the loader." }),
         )
-        yield* dictated("In yapd, compare the loader with billing and fix it.")
+        yield* dictate("In yapd, compare the loader with billing and fix it.")
         yield* nextNotice
         const question = yield* nextNotice
         return { started, spoken: question.spoken, question: question.question !== undefined }
@@ -806,6 +813,29 @@ describe("Drafts", () => {
     expect(result.spoken).toEqual(["Sent to Reduce latency in yapd.", "Nobody needs you.", "Which thread is that for?"])
     // The report is noted about no thread, and so is the question: what "it" means has to be settled again.
     expect(result.noted).toEqual(["a1", undefined, undefined])
+  })
+
+  test("takes a bare \"it\" as what had played when the shortcut was pressed, not what played while the dictation was worked out", async () => {
+    const before: Heard = { id: "update-1", project: "yapd", directory: "/code/yapd", spoken: "yapd. The latency fix is ready.", message: "The latency fix is ready.", thread: { machine: "rosie", id: "a1" }, at: 0 }
+    const meanwhile: Heard = { id: "update-2", project: "std", directory: "/code/std", spoken: "std. Redis is done.", message: "Redis is done.", thread: { machine: "rosie", id: "b2" }, at: 0 }
+    const referred = (thread: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, hear, wait, sent, spoken, asked } = yield* drafts(
+            () => decision({ action: "message", about: "that one", project: "", thread, threadFrom: "referred", threadEvidence: "it", prompt: "Stop there.", spoken: "" }),
+            { heard: [before] },
+          )
+          const pressed = yield* Clock.currentTimeMillis
+          yield* wait(1)
+          // Queued behind the update, it plays the moment the dictation lets go of the speaker, before what was said is worked out.
+          yield* hear(meanwhile)
+          yield* dictate("Tell it to stop there.", pressed)
+          return { sent: sent.map(({ thread }) => thread.id), spoken: spoken(), shown: asked[0]!.recent.map(({ id }) => id) }
+        }),
+      )
+    expect(await referred("rosie/a1")).toEqual({ sent: ["a1"], spoken: ["Sent to Reduce latency in yapd."], shown: ["update-1"] })
+    // The writer went by what the user hadn't heard, which settles nothing.
+    expect(await referred("rosie/b2")).toEqual({ sent: [], spoken: ["Which thread is that for?"], shown: ["update-1"] })
   })
 
   test("answers a question across threads from a fresh listing, fetched again when the answer took a while", async () => {

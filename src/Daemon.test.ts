@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
-import { Audio } from "./Audio.ts"
+import { Audio, AudioError } from "./Audio.ts"
 import { Waiting } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
 import * as Daemon from "./Daemon.ts"
@@ -21,6 +21,8 @@ import { Voice } from "./Voice.ts"
 const make = (says?: string, options: {
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
   readonly locate?: Daemon.Options["locate"]
+  /** Runs as `text` is asked to play, before it starts: what fails never plays. */
+  readonly starting?: (text: string) => Effect.Effect<void, AudioError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -53,6 +55,7 @@ const make = (says?: string, options: {
         Effect.gen(function* () {
           const text = rendered.get(path) ?? path
           played.push(text)
+          yield* options.starting?.(text) ?? Effect.void
           yield* Queue.offer(playbacks, text)
           let done = false
           // Closing the scope stops it, as with the helper.
@@ -427,6 +430,59 @@ describe("Daemon", () => {
     ])
     // Read out all the same, once the lookup is given up on.
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The tests pass.", "yapd. A slow one."])
+  })
+
+  test("counts what's read out as heard once it starts playing, and never when it can't", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, recent, played } = yield* make(undefined, {
+          starting: (text) =>
+            text.includes("PR") ? Effect.sleep("2 seconds") : text.includes("tests") ? Effect.fail(new AudioError({ message: "No device." })) : Effect.void,
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* finish("b", "The tests pass.")
+        yield* finish("c", "Merged.")
+        yield* wait(1)
+        // Asked to play, and not yet playing.
+        const asked = (yield* recent).map(({ message }) => message)
+        yield* wait(1)
+        const started = (yield* recent).map(({ message }) => message)
+        yield* wait(10)
+        yield* wait(1)
+        return { asked, started, after: (yield* recent).map(({ message }) => message), played: [...played] }
+      }),
+    )
+    expect(result.asked).toEqual([])
+    expect(result.started).toEqual(["The PR is ready."])
+    // The one that couldn't play is forgotten, and the next is read.
+    expect(result.after).toEqual(["Merged.", "The PR is ready."])
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The tests pass.", "yapd. Merged."])
+  })
+
+  test("says how a late follow-up went about the thread the update was found from, without looking it up again", async () => {
+    let looked = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, wait, dictate, recent } = yield* make("Merge it.", {
+          // Found by the message the turn ended on, which the follow-up takes the thread past: only the first look finds it.
+          locate: () => Effect.sync(() => (++looked === 1 ? Option.some({ machine: "rosie", id: "t-1" }) : Option.none())),
+        })
+        yield* finish("a", "The PR is ready.", true)
+        yield* speak
+        yield* wait(1)
+        const dictation = yield* dictate
+        yield* wait(3)
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        yield* wait(11)
+        return (yield* recent).map(({ spoken, thread }) => ({ spoken, thread }))
+      }),
+    )
+    expect(looked).toBe(1)
+    expect(result).toEqual([
+      { spoken: "yapd. Okay, passed on.", thread: { machine: "rosie", id: "t-1" } },
+      { spoken: "yapd. The PR is ready.", thread: { machine: "rosie", id: "t-1" } },
+    ])
   })
 
   test("keeps every update that piles up through a dictation, and counts each as heard once it plays", async () => {

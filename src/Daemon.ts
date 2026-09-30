@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, Fiber, FiberMap, Option, STM, TRef } from "effect"
+import { Cause, Clock, Effect, Exit, Fiber, FiberMap, Option, STM, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -22,13 +22,16 @@ const squash = (text: string) => text.replace(/\s+/g, " ").trim()
 /** How long an update waits, at most, on which thread it came from. */
 const linking = "2 seconds"
 
+/** A T3 Code thread, as what's heard names it. */
+type Link = NonNullable<Recent.Heard["thread"]>
+
 export interface Options {
   /**
    * The T3 Code thread an update came from, when it can be told, so that "tell
    * that one to" can follow it. Asked alongside the summary, never for long,
    * and an update goes out without a link sooner than wait on one.
    */
-  readonly locate?: (thread: Thread) => Effect.Effect<Option.Option<NonNullable<Recent.Heard["thread"]>>>
+  readonly locate?: (thread: Thread) => Effect.Effect<Option.Option<Link>>
 }
 
 /**
@@ -57,6 +60,8 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   const activity = new Map<string, number>()
   const generations = new WeakMap<Conversation.Update, number>()
   let generation = 0
+  /** Each update's thread being looked up, kept for what's said about the update later. */
+  const links = new WeakMap<Conversation.Update, Fiber.RuntimeFiber<Option.Option<Link>>>()
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   const followed = new Map<string, { readonly message: string }>()
   let recent = Recent.empty
@@ -75,10 +80,22 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
 
   /** The T3 Code thread `thread` is, when it can be told. Never waited on for long: what's said goes out without a link sooner than wait on one. */
   const locate = (thread: Thread) =>
-    (options.locate?.(thread) ?? Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())).pipe(
+    (options.locate?.(thread) ?? Effect.succeed(Option.none<Link>())).pipe(
       Effect.timeout(linking),
-      Effect.catchAllCause(() => Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())),
+      Effect.catchAllCause(() => Effect.succeed(Option.none<Link>())),
     )
+
+  /**
+   * The thread `update` was found to be from as it was prepared. It's found by
+   * the message its turn ended on, and a follow-up since has taken the thread
+   * past that: only one that was never found is looked for now.
+   */
+  const linked = (update: Conversation.Update) =>
+    Effect.gen(function* () {
+      const link = links.get(update)
+      const found = link === undefined ? Option.none<Link>() : Exit.getOrElse(yield* Fiber.await(link), () => Option.none<Link>())
+      return Option.isSome(found) ? found : yield* locate(update.thread)
+    })
 
   const conversation = yield* Conversation.make({
     dir,
@@ -133,7 +150,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
         const id = `late:${crypto.randomUUID()}`
         const said = introduce(update.project, spoken)
         // How the follow-up went is about the thread it went to, like the update it answered: "tell it to" can follow it.
-        const located = yield* locate(update.thread)
+        const located = yield* linked(update)
         const at = yield* Clock.currentTimeMillis
         recent = Recent.add(
           recent,
@@ -191,6 +208,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       generations.set(update, generation)
+      links.set(update, locating)
       // Noted before it's queued, since it can be read out the moment it is.
       const now = yield* Clock.currentTimeMillis
       recent = Recent.add(
@@ -335,7 +353,11 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       ? conversation.settled(ready.session).pipe(Effect.zipRight(release(ready.hook)), Effect.forkIn(scope), Effect.asVoid)
       : Effect.void
 
-  /** Counts what's about to play as heard, from its first word: a dictation over it can already point at it. */
+  /**
+   * Counts what has started playing as heard, from its first word: a dictation
+   * over it can already point at it. Only once it has: what never starts, the
+   * user knows nothing of, and it's forgotten with its entry.
+   */
   const heard = (id: string) =>
     Effect.map(Clock.currentTimeMillis, (now) => {
       recent = Recent.heard(recent, id, now)
@@ -346,15 +368,15 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     Effect.gen(function* () {
       const { question } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
-      yield* heard(said.notice.id)
       if (question === undefined) {
         const playback = yield* audio.play(said.audio)
+        yield* heard(said.notice.id)
         yield* playback.finished
         return yield* dealtWith
       }
       const answer = (heard: string) =>
         question.answer(heard).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, answer })
+      const answered = yield* conversation.ask({ audio: said.audio, started: heard(said.notice.id), answer })
       if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))
     }).pipe(Effect.scoped)
 
@@ -378,7 +400,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     let dealtWith = false
     const reading =
       "update" in ready
-        ? Effect.zipRight(heard(ready.id), conversation.converse(ready.update))
+        ? conversation.converse(ready.update, heard(ready.id))
         : say(
             ready,
             Effect.sync(() => {

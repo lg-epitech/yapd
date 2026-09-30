@@ -1,8 +1,9 @@
 import { Cause, Clock, type Duration, Effect, Either, Fiber, Option, type Scope } from "effect"
+import type { Transcript } from "./Dictation.ts"
 import type { Notice } from "./Inbox.ts"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type { Delivery, Outbox } from "./Outbox.ts"
-import type { Heard, Played } from "./Recent.ts"
+import { type Heard, heardBy, type Played } from "./Recent.ts"
 import type { Records } from "./Records.ts"
 import { Reporter } from "./Reporter.ts"
 import type { Researcher } from "./Research.ts"
@@ -68,6 +69,8 @@ const turns = 3
 interface Draft {
   readonly id: string
   readonly heard: string
+  /** When the user pressed the shortcut to say it: what they'd heard by then is what "it" can mean. */
+  readonly startedAt: number
   /** When the user sent it. */
   readonly at: number
   readonly lines: Array<Line>
@@ -482,7 +485,8 @@ export const make = (options: {
     const answer = (draft: Draft, material: Material, heard: string) =>
       Effect.gen(function* () {
         // What's known of the threads can have grown since the question was asked, and the question itself has
-        // played by now: asked what to tell a thread, "tell it to" points at the one the question was about.
+        // played by now: asked what to tell a thread, "tell it to" points at the one the question was about. Nothing
+        // else plays while it's being answered, so what they've heard now is what they'd heard as they began to.
         const refreshed: Material = { ...material, threads: yield* Effect.forEach(material.threads, recollect), recent: yield* options.recent }
         const decision = yield* decide({ ...refreshed, lines: [...draft.lines, { speaker: "user", text: heard }] })
         if (decision.action === "wait") return Option.none()
@@ -702,7 +706,9 @@ export const make = (options: {
           listings,
           threads: listed,
           rules: yield* options.rules,
-          recent: yield* options.recent,
+          // What had played when they pressed the shortcut. What was queued behind it plays the moment the
+          // dictation lets go of the speaker, before this runs, and "it" was never that.
+          recent: heardBy(yield* options.recent, draft.startedAt),
           earlier: [...drafts.values()].filter((other) => other.open && other.at <= draft.at && other !== draft).map(({ heard }) => heard),
           lines: [...draft.lines],
           research,
@@ -723,11 +729,12 @@ export const make = (options: {
       /** The user started dictating: what's ready by the time they've finished doesn't hold the prompt up. */
       prepare: Effect.all([catalogs.refresh, threads.refresh, writer.prepare], { discard: true }),
       /** Takes what the user dictated, and returns at once. */
-      dictated: (heard: string) =>
+      dictated: ({ heard, startedAt }: Transcript) =>
         Effect.gen(function* () {
           const draft: Draft = {
             id: crypto.randomUUID().slice(0, 8),
             heard,
+            startedAt,
             at: yield* Clock.currentTimeMillis,
             lines: [{ speaker: "user", text: heard }],
             about: "",
