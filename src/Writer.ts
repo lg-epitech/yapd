@@ -94,8 +94,16 @@ export const parseKey = (key: string): Option.Option<{ readonly machine: string;
   return Option.some({ machine: key.slice(0, at), id: key.slice(at + 1) })
 }
 
-/** Words that name nothing on their own, so they can't be what settled a thread. */
-const bare = new Set(["the", "a", "an", "agent", "thread", "one", "ones", "it", "its", "that", "this", "those", "these", "to", "on", "in", "s", "them", "they"])
+/**
+ * Words that name nothing on their own, so they can't be what settled a
+ * thread. In English and in French, the languages dictation is set up for
+ * (`YAPD_LANGUAGE`): "tell it to" and "dis-lui de" point the same way.
+ */
+const bare = new Set([
+  ...["the", "a", "an", "agent", "thread", "one", "ones", "it", "its", "that", "this", "those", "these", "to", "on", "in", "s", "them", "they"],
+  ...["le", "la", "les", "l", "un", "une", "des", "du", "de", "d", "au", "aux", "à", "sur", "dans", "en", "y", "fil"],
+  ...["lui", "elle", "il", "ils", "elles", "eux", "leur", "leurs", "ça", "ca", "cela", "ce", "cet", "cette", "ces", "celui", "celle", "ceux", "celles", "là", "ci"],
+])
 
 /**
  * Words that point at what was read out without saying which: where it came
@@ -109,38 +117,70 @@ const pointing = new Set([
   ...["finished", "finish", "done", "ended", "completed", "update", "updates", "updated", "message", "messages", "news"],
   ...["you", "your", "me", "my", "i", "we", "us", "our", "about", "of", "for", "from", "with", "and", "or", "what", "which", "who", "when", "where", "there", "here"],
   ...["was", "were", "is", "are", "be", "been", "has", "have", "had", "did", "do", "does", "get", "got", "session", "work", "job", "task", "thing", "stuff", "guy"],
+  ...["dis", "dit", "dites", "dire", "demande", "demandes", "demandé", "demander", "parle", "parlé", "raconte", "raconté", "mentionne", "mentionné", "signalé", "lu", "entendu", "annoncé"],
+  ...["dernier", "dernière", "derniers", "dernières", "juste", "précédent", "précédente", "récent", "récente", "récemment", "tout", "toute", "avant", "maintenant", "puis", "encore", "premier", "première", "autre", "nouveau", "nouvelle"],
+  ...["fini", "finie", "terminé", "terminée", "achevé", "achevée", "mise", "jour", "nouvelles"],
+  ...["tu", "t", "toi", "ton", "ta", "tes", "moi", "m", "mon", "ma", "mes", "je", "j", "nous", "notre", "nos", "pour", "avec", "et", "ou", "quoi", "que", "qu", "qui", "quand", "où", "ici"],
+  ...["était", "étaient", "est", "sont", "été", "être", "as", "avait", "avaient", "ont", "fait", "faire", "travail", "boulot", "tâche", "truc", "chose", "machin"],
 ])
 
-/** The words the listing shows for a thread, which is all the model had to name it by. */
-const wordsShown = ({ listed, known }: ThreadListing["threads"][number]) =>
-  new Set([
+/**
+ * The words the listing shows for a thread, which is all the model had to
+ * name it by, in two parts. What names it: its title, project, branch, state,
+ * what it waits on, its error and what the work is, and its machine's name
+ * when it's the only thread listed there, since "the one on rig" names it
+ * then. Apart from those, its first message, which is long, and mentions
+ * things every thread on the project might: "retry" deep in one is no name
+ * for it, and only counts when the rest settles nothing.
+ */
+const wordsShown = (listing: ThreadListing, { listed, known }: ThreadListing["threads"][number]) => ({
+  named: new Set([
     ...words(listed.title),
     ...words(listed.project),
     ...words(listed.branch ?? ""),
     ...words(listed.state),
     ...listed.needs.flatMap((need) => words(needing[need])),
     ...words(listed.error ?? ""),
-    ...Option.match(known, { onNone: () => [], onSome: ({ description, prompt }) => [...words(description ?? ""), ...words(prompt ?? "")] }),
-  ])
+    ...Option.match(known, { onNone: () => [], onSome: ({ description }) => words(description ?? "") }),
+    ...(listing.threads.length === 1 ? words(listing.machine) : []),
+  ]),
+  opened: new Set(Option.match(known, { onNone: () => [], onSome: ({ prompt }) => words(prompt ?? "") })),
+})
+
+/**
+ * Whether the words set the chosen one apart from the others, by what each
+ * shows: the chosen one shows some of the words, and no other shows every one
+ * of those. Two that show the same of them fit as well as each other, and
+ * "the retry one" settles nothing between a retry fix and a retry budget,
+ * where "the retry budget one" does.
+ */
+const apart = (telling: ReadonlyArray<string>, chosen: ReadonlySet<string>, others: ReadonlyArray<ReadonlySet<string>>) => {
+  const matched = telling.filter((word) => chosen.has(word))
+  return matched.length > 0 && others.every((other) => !matched.every((word) => other.has(word)))
+}
 
 /**
  * Whether the thread is settled by something the user really said, so a
  * message can't go to the wrong agent: the key is one that was listed, and the
- * words given for it are theirs. When they named it, one of those words, past
- * the bare ones like "the agent", has to be one the listing shows for that
- * thread, or the model went by something it wasn't given. The machine's name
- * alone, like "the one on rig", names a thread only when it's the only one
- * listed there: with more, they meant one of several, and yapd asks which.
- * When they only pointed at something yapd read out, what they've heard has
- * to carry that thread, and a bare pointer like "that one" or "the last one
- * you told me about" can only mean the last thing they heard: when that
- * carried no thread, or another, they meant something yapd can't tell, and it
- * asks. Past the pointing words, what they said has to be in the words of a
- * reading that carried the thread, what yapd said or the message it summed
- * up: "the retry one" reaches an older reading only when that reading spoke
- * of retries. When the latest thing they heard spoke of it too, and carried
- * another thread or none, either could be meant, and yapd asks. Bare and
- * pointing words are the user's, but settle nothing on their own.
+ * words given for it are theirs. When they named it, those words, past the
+ * bare ones like "the agent", have to set that thread apart from every other
+ * one listed, by what the listing shows: some of them have to be its, or the
+ * model went by something it wasn't given, and no other thread may show all
+ * of those, or they meant one of several and yapd asks which. What names a
+ * thread is looked at first, and its first message only when that settles
+ * nothing, so a word every prompt on the project uses doesn't make each of
+ * them fit. The machine's name is one a thread shows only when it's the only
+ * one listed there. When they only pointed at something yapd read out, what
+ * they've heard has to carry that thread, and a bare pointer like "that one"
+ * or "the last one you told me about" can only mean the last thing they
+ * heard: when that carried no thread, or another, they meant something yapd
+ * can't tell, and it asks. Past the pointing words, what they said has to set
+ * the readings that carried the thread, what yapd said and the messages it
+ * summed up, apart from the rest the same way: "the retry one" reaches an
+ * older reading only when that reading spoke of retries and none about
+ * another thread did. When the latest thing they heard spoke of it too, and
+ * carried another thread or none, either could be meant, and yapd asks. Bare
+ * and pointing words are the user's, but settle nothing on their own.
  */
 export const groundedThread = (
   decision: Pick<Decision, "thread" | "threadFrom" | "threadEvidence">,
@@ -154,21 +194,24 @@ export const groundedThread = (
   if (found === undefined || !quoted(decision.threadEvidence, lines)) return false
   const telling = words(decision.threadEvidence).filter((word) => !bare.has(word))
   if (decision.threadFrom === "named") {
-    const listed = wordsShown(found.thread)
-    if (telling.some((word) => listed.has(word))) return true
-    const machine = words(found.listing.machine)
-    return telling.length > 0 && telling.every((word) => machine.includes(word)) && found.listing.threads.length === 1
+    const mine = wordsShown(found.listing, found.thread)
+    const others = threads.flatMap((listing) => listing.threads.filter((thread) => thread !== found.thread).map((thread) => wordsShown(listing, thread)))
+    if (apart(telling, mine.named, others.map(({ named }) => named))) return true
+    const whole = ({ named, opened }: ReturnType<typeof wordsShown>) => new Set([...named, ...opened])
+    return apart(telling, whole(mine), others.map(whole))
   }
   const carries = ({ thread }: Played) => thread !== undefined && key(thread.machine, thread.id) === chosen
   const latest = recent.reduce<Played | undefined>((last, heard) => (last === undefined || heard.heardAt > last.heardAt ? heard : last), undefined)
   const said = telling.filter((word) => !pointing.has(word))
   if (said.length === 0) return latest !== undefined && carries(latest)
-  const spokeOf = ({ spoken, message }: Played) => {
-    const heard = new Set([...words(spoken), ...words(message)])
-    return said.some((word) => heard.has(word))
-  }
-  if (latest !== undefined && spokeOf(latest) && !carries(latest)) return false
-  return recent.some((heard) => carries(heard) && spokeOf(heard))
+  const heardIn = (readings: ReadonlyArray<Played>) => new Set(readings.flatMap(({ spoken, message }) => [...words(spoken), ...words(message)]))
+  if (latest !== undefined && !carries(latest) && said.some((word) => heardIn([latest]).has(word))) return false
+  // The other readings by thread, and one by one when they carried none, since those needn't be about the same thing.
+  const others = Map.groupBy(
+    recent.filter((heard) => !carries(heard)),
+    (heard) => (heard.thread === undefined ? heard.id : key(heard.thread.machine, heard.thread.id)),
+  )
+  return apart(said, heardIn(recent.filter(carries)), [...others.values()].map(heardIn))
 }
 
 /** What comes back from reading the project: the prompt, or a question it raised. */

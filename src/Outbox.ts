@@ -244,9 +244,12 @@ export const make = (options: Options): Effect.Effect<Outbox, never, Store.Store
       ),
     )
 
-    const send: Outbox["send"] = (machine, thread, text) =>
+    const send: Outbox["send"] = (machine, thread, dictated) =>
       Effect.gen(function* () {
-        if (plain(text) === "") return yield* new ThreadsError({ reason: "I didn't catch what to send." })
+        // As T3 Code will take it, since a leading slash would run as a command there: what's kept, what's expected
+        // to turn up as the thread's prompt, and what every try sends are then one text.
+        const text = plain(dictated)
+        if (text === "") return yield* new ThreadsError({ reason: "I didn't catch what to send." })
         const threads = yield* reach(machine)
         const now = yield* Clock.currentTimeMillis
         const row: Row = {

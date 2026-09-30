@@ -266,4 +266,46 @@ describe("Writer", () => {
     expect(Writer.groundedThread({ thread: "rig/r2", threadFrom: "named", threadEvidence: "the retry fix on rig" }, naming, two, [])).toBe(true)
     expect(Writer.groundedThread({ thread: "rig/r1", threadFrom: "named", threadEvidence: "the retry fix on rig" }, naming, two, [])).toBe(false)
   })
+
+  test("takes a name only when it sets the thread apart from the others listed", () => {
+    const known = (id: string, prompt: string) => Option.some({ machine: "rosie", id, prompt, dictated: null, description: null, started: false, at: iso(60) })
+    const backoff = { listed: listed("r1", { title: "Retry backoff fix" }), known: known("r1", "Make retries back off, and keep the budget for them as it is.") }
+    const budget = { listed: listed("r2", { title: "Retry budget" }), known: known("r2", "Cap the retries per minute.") }
+    const npm = { listed: listed("n1", { title: "Distribute yapd on npm" }), known: known("n1", "Publish yapd to npm, with the same retries as the installer.") }
+    const shown = [{ machine: "rosie", here: true, threads: [backoff, budget, npm] }]
+    const named = (thread: string, threadEvidence: string) => ({ thread, threadFrom: "named" as const, threadEvidence })
+    // "The retry one" fits two threads as well as each other, so it's sent to neither: yapd asks.
+    const retry = [{ speaker: "user" as const, text: "Tell the retry one to keep going." }]
+    expect(Writer.groundedThread(named("rosie/r1", "the retry one"), retry, shown, [])).toBe(false)
+    expect(Writer.groundedThread(named("rosie/r2", "the retry one"), retry, shown, [])).toBe(false)
+    // "Retry budget" is shown by one of them only, though the other's first message mentions the budget too.
+    const fuller = [{ speaker: "user" as const, text: "Tell the retry budget one to keep going." }]
+    expect(Writer.groundedThread(named("rosie/r2", "the retry budget one"), fuller, shown, [])).toBe(true)
+    expect(Writer.groundedThread(named("rosie/r1", "the retry budget one"), fuller, shown, [])).toBe(false)
+    // One npm thread, though retries come up in its first message: what names it settles it, and the message is looked at only when that doesn't.
+    const distribution = [{ speaker: "user" as const, text: "Tell the npm distribution agent to keep going." }]
+    expect(Writer.groundedThread(named("rosie/n1", "the npm distribution agent"), distribution, shown, [])).toBe(true)
+    // Their word is in the first messages only, and in one of them: that settles it too.
+    const minute = [{ speaker: "user" as const, text: "Tell the per minute one to keep going." }]
+    expect(Writer.groundedThread(named("rosie/r2", "the per minute one"), minute, shown, [])).toBe(true)
+    // The same holds for what was read out: "the retry one you told me about" reaches neither of two readings that spoke of retries.
+    const told = [{ speaker: "user" as const, text: "Tell the retry one you told me about to keep going." }]
+    const readings = [
+      heard(2, { project: "yapd", spoken: "The retry backoff is in.", message: "Done.", thread: { machine: "rosie", id: "r1" } }),
+      heard(1, { project: "yapd", spoken: "The retry budget is capped.", message: "Done.", thread: { machine: "rosie", id: "r2" } }),
+      heard(0, { project: "yapd", spoken: "npm is set up.", message: "Done.", thread: { machine: "rosie", id: "n1" } }),
+    ]
+    expect(Writer.groundedThread({ thread: "rosie/r1", threadFrom: "referred", threadEvidence: "the retry one you told me about" }, told, shown, readings)).toBe(false)
+    const toldFuller = [{ speaker: "user" as const, text: "Tell the retry budget one you told me about to keep going." }]
+    expect(Writer.groundedThread({ thread: "rosie/r2", threadFrom: "referred", threadEvidence: "the retry budget one you told me about" }, toldFuller, shown, readings)).toBe(true)
+  })
+
+  test("hears a bare pointer in French too", () => {
+    const readings = [heard(0, { project: "yapd", spoken: "Le correctif des retries est prêt.", message: "Prêt.", thread: { machine: "rosie", id: "a1" } })]
+    const lines = [{ speaker: "user" as const, text: "Dis-lui de continuer." }]
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "lui" }, lines, threads, readings)).toBe(true)
+    expect(Writer.groundedThread({ thread: "rosie/b2", threadFrom: "referred", threadEvidence: "lui" }, lines, threads, readings)).toBe(false)
+    const that = [{ speaker: "user" as const, text: "Dis à celui-là de continuer." }]
+    expect(Writer.groundedThread({ thread: "rosie/a1", threadFrom: "referred", threadEvidence: "celui-là" }, that, threads, readings)).toBe(true)
+  })
 })

@@ -142,6 +142,22 @@ describe("Outbox", () => {
       }),
     ))
 
+  test("sends, expects and keeps a message as T3 Code takes it, without the slash that would run it as a command", () =>
+    run((context) =>
+      Effect.gen(function* () {
+        const rosie = fake()
+        context.machines.set("rosie", rosie.threads)
+        const outbox = yield* Outbox.make(options(context))
+        expect(yield* outbox.send("rosie", listed("t1", "Fix retries"), " /compact the notes")).toEqual({ _tag: "Held" })
+        rosie.answers("sent")
+        yield* wait(5)
+        // The same text before every try, so the prompt the thread's hooks report is the one expected.
+        expect(context.expected).toEqual(["compact the notes", "compact the notes"])
+        expect(rosie.sent.map(({ outgoing }) => outgoing.text)).toEqual(["compact the notes", "compact the notes"])
+        expect(context.noted.map(({ message }) => message)).toEqual(["compact the notes"])
+      }),
+    ))
+
   test("keeps a message whose first try didn't say whether it went, and tries the same ids again", () =>
     run((context) =>
       Effect.gen(function* () {
