@@ -1,11 +1,11 @@
-import { AutoTokenizer, RawAudio, type Tensor } from "@huggingface/transformers"
+import { AutoTokenizer, RawAudio } from "@huggingface/transformers"
 import { Cause, Effect, Queue } from "effect"
-import { type GenerateOptions, KokoroTTS } from "kokoro-js"
 import { rename, rm } from "node:fs/promises"
 import * as ort from "onnxruntime-node"
 import * as Hub from "./Hub.ts"
 import { run } from "./Process.ts"
-import { type Device, join, type Reply, type Request, split } from "./Voice.ts"
+import { phonemize } from "./vendor/kokoro/phonemize.js"
+import { type Device, join, type Reply, type Request, split, voices } from "./Voice.ts"
 
 // Kokoro, in a process of its own that the daemon starts. onnxruntime runs a
 // model on the thread that asks, and in the daemon that froze everything else
@@ -24,12 +24,25 @@ const repo = "onnx-community/Kokoro-82M-v1.0-ONNX"
 const open = (file: string, device: Device) =>
   ort.InferenceSession.create(file, { executionProviders: device === "GPU" ? ["webgpu", "cpu"] : ["cpu"], logSeverityLevel: 3 })
 
+/** How many numbers make up the voice's style for one length of input. */
+const styleSize = 256
+
+/** Kokoro reads at most this many tokens, and silently drops the rest. */
+const longest = 510
+
+/** The rate Kokoro renders at. */
+const rate = 24000
+
 /** On the GPU when there is one, unless the daemon says otherwise. fp32, since the fp16 model only makes noise on the GPU. */
 const load = Hub.load(repo, async () => {
-  const [file, tokenizer] = await Promise.all([Hub.download(repo, "onnx/model.onnx"), AutoTokenizer.from_pretrained(repo)])
+  const [file, styles, tokenizer] = await Promise.all([
+    Hub.download(repo, "onnx/model.onnx"),
+    Hub.download(repo, `voices/${voice}.bin`).then(async (path) => new Float32Array(await Bun.file(path).arrayBuffer())),
+    AutoTokenizer.from_pretrained(repo),
+  ])
   send({ type: "loading" })
   const gpu = device === "GPU" ? await open(file, "GPU").catch(() => undefined) : undefined
-  return { file, tokenizer, device: gpu === undefined ? ("CPU" as Device) : device, session: gpu ?? (await open(file, "CPU")) }
+  return { file, styles, tokenizer, device: gpu === undefined ? ("CPU" as Device) : device, session: gpu ?? (await open(file, "CPU")) }
 })
 
 const applyEffect = (raw: string, path: string) =>
@@ -44,17 +57,12 @@ const applyEffect = (raw: string, path: string) =>
 
 const program = Effect.gen(function* () {
   // Its voices don't need the model.
-  if (!(voice in KokoroTTS.prototype.voices)) return yield* Effect.fail(`Unknown voice "${voice}"`)
-  const { file, tokenizer, ...loaded } = yield* load
+  if (!voices.has(voice)) return yield* Effect.fail(`Unknown voice "${voice}"`)
+  const { file, styles, tokenizer, ...loaded } = yield* load
   let { device, session } = loaded
 
   /** Kokoro's model, on the CPU from the first time the GPU fails, like when it goes away as the Mac sleeps. */
-  const model = async ({ input_ids, style, speed }: Record<"input_ids" | "style" | "speed", Tensor>) => {
-    const feeds = {
-      input_ids: new ort.Tensor("int64", input_ids.data as BigInt64Array, input_ids.dims),
-      style: new ort.Tensor("float32", style.data as Float32Array, style.dims),
-      speed: new ort.Tensor("float32", speed.data as Float32Array, speed.dims),
-    }
+  const model = async (feeds: Record<string, ort.Tensor>) => {
     try {
       return await session.run(feeds)
     } catch (error) {
@@ -69,23 +77,29 @@ const program = Effect.gen(function* () {
       return await session.run(feeds)
     }
   }
-  const tts = new KokoroTTS(model as never, tokenizer)
-  // Kokoro's own pipeline without the model, to count the tokens it would read. It reads at most 510 and silently
-  // drops the rest, and the count stops at 510 too, since it goes through the same tokenizer: only a count under
-  // 510 shows the whole text fits.
-  let counted = 0
-  const counter = new KokoroTTS(
-    (async ({ input_ids }: Record<"input_ids", Tensor>) => {
-      counted = input_ids.dims.at(-1)! - 2
-      return { waveform: new ort.Tensor("float32", new Float32Array(0), [0]) }
-    }) as never,
-    tokenizer,
-  )
-  const fits = (text: string) =>
-    Effect.tryPromise(() => counter.generate(text, speaker)).pipe(Effect.map(() => counted < 510))
-  const speaker = { voice: voice as NonNullable<GenerateOptions["voice"]> }
+
+  /** What Kokoro reads for the text, as the voice's accent says it. The count stops at 510, like Kokoro. */
+  const tokens = async (text: string) => {
+    const { input_ids } = tokenizer(await phonemize(text, voice.startsWith("b") ? "b" : "a"), { truncation: true })
+    return { ids: input_ids.data as BigInt64Array, dims: input_ids.dims, count: input_ids.dims.at(-1)! - 2 }
+  }
+
+  /** Only a count under 510 shows the whole text fits, since a longer text counts 510 too. */
+  const fits = (text: string) => Effect.tryPromise(() => tokens(text)).pipe(Effect.map(({ count }) => count < longest))
+
+  /** The voice has a style for each length of input, up to what Kokoro reads. */
+  const speak = async (text: string) => {
+    const { ids, dims, count } = await tokens(text)
+    const offset = Math.min(Math.max(count, 0), longest - 1) * styleSize
+    const { waveform } = await model({
+      input_ids: new ort.Tensor("int64", ids, dims),
+      style: new ort.Tensor("float32", styles.slice(offset, offset + styleSize), [1, styleSize]),
+      speed: new ort.Tensor("float32", new Float32Array([1]), [1]),
+    })
+    return waveform!.data as Float32Array
+  }
   // The GPU prepares its programs on the first run, which shouldn't hold up an update.
-  yield* Effect.promise(() => tts.generate("Ready.", speaker))
+  yield* Effect.promise(() => speak("Ready."))
 
   const requests = yield* Queue.unbounded<Extract<Request, { type: "render" }>>()
   const cancelled = new Set<number>()
@@ -100,9 +114,8 @@ const program = Effect.gen(function* () {
   const render = (text: string, path: string) =>
     Effect.gen(function* () {
       const raw = effect === "none" ? path : `${path}.raw.wav`
-      const parts = yield* Effect.forEach(yield* split(text, fits), (part) => Effect.tryPromise(() => tts.generate(part, speaker)))
-      const rate = parts[0]?.sampling_rate ?? 24000
-      yield* Effect.tryPromise(() => new RawAudio(join(parts.map((part) => part.audio), rate), rate).save(raw))
+      const parts = yield* Effect.forEach(yield* split(text, fits), (part) => Effect.tryPromise(() => speak(part)))
+      yield* Effect.tryPromise(() => new RawAudio(join(parts, rate), rate).save(raw))
       if (raw !== path) yield* applyEffect(raw, path)
     })
 

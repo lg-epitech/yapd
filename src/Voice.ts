@@ -1,9 +1,9 @@
 import type { Subprocess } from "bun"
 import { Clock, Context, Data, Deferred, Effect, Exit, Fiber, FiberId, Layer, Runtime } from "effect"
-import { KokoroTTS, TextSplitterStream } from "kokoro-js"
 import { rm } from "node:fs/promises"
 import * as Config from "./Config.ts"
 import { type ProcessError, run } from "./Process.ts"
+import { TextSplitterStream } from "./vendor/kokoro/splitter.js"
 
 /** Renders speech to an audio file ahead of time, so playback never waits on synthesis. */
 export class Voice extends Context.Tag("yapd/Voice")<
@@ -17,7 +17,14 @@ export const extension = ".wav"
 export class KokoroError extends Data.TaggedError("KokoroError")<{ readonly cause: unknown }> {}
 
 /** Kokoro's voices, with samples. */
-const voices = "https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md"
+const voicesPage = "https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md"
+
+/** The voices Kokoro has in English, which its first letter says: "a" is American and "b" British. */
+export const voices: ReadonlySet<string> = new Set([
+  "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+  "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa",
+  "bf_emma", "bf_isabella", "bf_alice", "bf_lily", "bm_george", "bm_lewis", "bm_daniel", "bm_fable",
+])
 
 const say = (text: string, path: string) => run(["say", "--data-format=LEI16@24000", "-o", path], { stdin: text })
 
@@ -318,8 +325,8 @@ export const KokoroVoice = Layer.scoped(
   Effect.gen(function* () {
     const name = yield* Config.voice
     // Kokoro's voices don't need the model, and a name it doesn't have won't start working later.
-    if (!(name in KokoroTTS.prototype.voices)) {
-      yield* Effect.logWarning(`Kokoro has no voice "${name}", so yapd uses say. Pick one from ${voices}`)
+    if (!voices.has(name)) {
+      yield* Effect.logWarning(`Kokoro has no voice "${name}", so yapd uses say. Pick one from ${voicesPage}`)
       return { render: say }
     }
     const voice = yield* kokoro([process.execPath, `${import.meta.dir}/Kokoro.ts`], name, yield* Config.effect)
