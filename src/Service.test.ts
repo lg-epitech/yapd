@@ -20,5 +20,10 @@ describe("Service", () => {
     const plist = Service.plist(options)
     expect(plist).toContain("<string>serve</string>")
     expect(plist).toContain("<key>PATH</key><string>/opt/homebrew/bin:/usr/bin</string>")
+    expect(plist).not.toContain("YAPD_HOME")
+  })
+
+  test("keeps yapd's home where YAPD_HOME moved it", () => {
+    expect(Service.plist({ ...options, home: "/Volumes/Data/yapd" })).toContain("<key>YAPD_HOME</key><string>/Volumes/Data/yapd</string>")
   })
 })

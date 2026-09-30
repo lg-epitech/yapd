@@ -18,6 +18,8 @@ export interface Options {
   readonly workingDirectory: string
   /** launchd starts agents with a bare PATH, so the provider CLIs and ffmpeg wouldn't be found. */
   readonly path: string
+  /** Where yapd's home is, when YAPD_HOME moved it, since the daemon can't read that from the .env inside it. */
+  readonly home?: string | undefined
   readonly log: string
 }
 
@@ -41,7 +43,8 @@ export const plist = (options: Options) => `<?xml version="1.0" encoding="UTF-8"
   <key>WorkingDirectory</key>${string(options.workingDirectory)}
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>${string(options.path)}
+    <key>PATH</key>${string(options.path)}${options.home === undefined ? "" : `
+    <key>YAPD_HOME</key>${string(options.home)}`}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -75,6 +78,7 @@ export const install = Effect.gen(function* () {
     // The daemon reads .env from here.
     workingDirectory: home,
     path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+    home: process.env.YAPD_HOME,
     log: logPath,
   }
   yield* Effect.tryPromise(async () => {
