@@ -73,6 +73,13 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       yield* Effect.logInfo(`Ready: ${notice.spoken}`)
     }).pipe(Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)))
 
+  /** The T3 Code thread `thread` is, when it can be told. Never waited on for long: what's said goes out without a link sooner than wait on one. */
+  const locate = (thread: Thread) =>
+    (options.locate?.(thread) ?? Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())).pipe(
+      Effect.timeout(linking),
+      Effect.catchAllCause(() => Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())),
+    )
+
   const conversation = yield* Conversation.make({
     dir,
     moved: (update) => Effect.sync(() => activity.get(update.session) !== generations.get(update)),
@@ -122,16 +129,30 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
         yield* release(answered.hook)
       }),
     late: (update, spoken, failed) =>
-      Effect.flatMap(Clock.currentTimeMillis, (at) =>
-        tell({
-          id: `late:${crypto.randomUUID()}`,
-          priority: failed ? "needs-you" : "done",
-          spoken: introduce(update.project, spoken),
+      Effect.gen(function* () {
+        const id = `late:${crypto.randomUUID()}`
+        const said = introduce(update.project, spoken)
+        // How the follow-up went is about the thread it went to, like the update it answered: "tell it to" can follow it.
+        const located = yield* locate(update.thread)
+        const at = yield* Clock.currentTimeMillis
+        recent = Recent.add(
+          recent,
+          {
+            id,
+            project: update.project,
+            ...(update.thread.origin.host === undefined ? {} : { host: update.thread.origin.host }),
+            directory: update.thread.cwd,
+            spoken: said,
+            message: update.turn.message,
+            ...(Option.isNone(located) ? {} : { thread: located.value }),
+            at,
+          },
           at,
-          stale: Effect.succeed(false),
-        }),
-      ),
+        )
+        yield* tell({ id, priority: failed ? "needs-you" : "done", spoken: said, at, stale: Effect.succeed(false) })
+      }),
   })
+
 
   const fallback = (project: string): Summary => ({
     priority: "done",
@@ -151,12 +172,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     Effect.gen(function* () {
       // Looked up while the summary is written, which takes about as long. Whatever the lookup does, the
       // update goes out: past its time, or failing, it just carries no thread. Interrupted with the rest if the session moves on.
-      const locating = yield* Effect.fork(
-        (options.locate?.(thread) ?? Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())).pipe(
-          Effect.timeout(linking),
-          Effect.catchAllCause(() => Effect.succeed(Option.none<NonNullable<Recent.Heard["thread"]>>())),
-        ),
-      )
+      const locating = yield* Effect.fork(locate(thread))
       const summary = yield* condenser.condense(project, turn).pipe(
         Effect.retry({ times: 1 }),
         Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),

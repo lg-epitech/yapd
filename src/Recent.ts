@@ -6,6 +6,17 @@
 // waits its turn is all kept, however much piles up while a dictation holds
 // playback: each is history from the moment it plays, and one that never
 // plays is dropped along with its inbox entry.
+//
+// Everything yapd says about the user's work is noted: an agent's update, and
+// whatever yapd says for itself in answer to a dictation, whether it started
+// something, sent a message, summed a thread up, reported across them, asked
+// a question, or says why it did nothing. What's noted carries a thread only
+// when it's about exactly one that yapd knows. After a report across threads,
+// a question about which one, or a failure that names none, "tell it to"
+// points at nothing yapd can tell, and it asks rather than reach whatever was
+// heard before. What says nothing about any work, like that a dictation
+// couldn't be made out or the microphone is off, isn't noted at all: it
+// leaves "it" meaning what it did.
 
 /** Something the user was told, or is about to be. */
 export interface Heard {

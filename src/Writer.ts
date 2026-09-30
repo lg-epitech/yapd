@@ -535,14 +535,21 @@ const machineOf = (listings: ReadonlyArray<Listing>, said: Played) =>
     ? (said.thread?.machine ?? listings.find(({ here }) => here)?.machine)
     : (listings.find(({ hosts }) => hosts.some((known) => known.toLowerCase() === said.host?.toLowerCase()))?.machine ?? said.host)
 
-const heard = (listings: ReadonlyArray<Listing>, now: number) => (said: Played) =>
-  [
-    `- ${ago(said.heardAt, now)}, ${said.project}${Option.match(Option.fromNullable(machineOf(listings, said)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}${
-      said.directory === "" ? "" : `, in ${said.directory}`
-    }${said.thread === undefined ? "" : `, thread ${key(said.thread.machine, said.thread.id)}`}. You said: ${squash(said.spoken)}`,
+/** Something read out, and where it came from. What was about no project or thread in particular, like a report across them, says only what it said. */
+const heard = (listings: ReadonlyArray<Listing>, now: number) => (said: Played) => {
+  const where = [
+    ...(said.project === "" ? [] : [`${said.project}${Option.match(Option.fromNullable(machineOf(listings, said)), { onNone: () => "", onSome: (machine) => ` on ${machine}` })}`]),
+    ...(said.directory === "" ? [] : [`in ${said.directory}`]),
+    ...(said.thread === undefined ? [] : [`thread ${key(said.thread.machine, said.thread.id)}`]),
+  ]
+  return [
+    `- ${[ago(said.heardAt, now), ...where].join(", ")}. You said: ${squash(said.spoken)}`,
     // With a thread and no start, the text could be the agent's or a message yapd sent it, so neither is claimed.
-    `  ${said.started === true ? "The prompt you started it with" : said.thread === undefined ? "The agent's message" : "What it was about"}: ${shorten(said.message, excerpt)}`,
+    ...(said.message === ""
+      ? []
+      : [`  ${said.started === true ? "The prompt you started it with" : said.thread === undefined ? "The agent's message" : "What it was about"}: ${shorten(said.message, excerpt)}`]),
   ].join("\n")
+}
 
 const dialogue = (lines: ReadonlyArray<Line>) => {
   const [first, ...rest] = lines

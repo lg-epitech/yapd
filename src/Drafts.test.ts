@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Either, Option, Queue, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Effect, Either, Option, Queue, type Scope, TestClock, TestContext } from "effect"
 import * as Drafts from "./Drafts.ts"
 import type { Notice } from "./Inbox.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import type { Delivery, Outbox } from "./Outbox.ts"
+import * as Recent from "./Recent.ts"
 import type { Heard } from "./Recent.ts"
 import type { Records } from "./Records.ts"
 import { ReportError, Reporter, type Reporting, type Summarizing } from "./Reporter.ts"
@@ -123,9 +124,13 @@ const drafts = (
     readonly outbox?: Delivery | ThreadsError
     /** What T3 Code lists on rosie. */
     readonly rosie?: ReadonlyArray<Listed>
+    /** What the user heard before, like an agent's update. */
+    readonly heard?: ReadonlyArray<Heard>
   } = {},
 ) =>
   Effect.gen(function* () {
+    /** What the user has heard. Every notice plays as soon as it's told. */
+    let recent = (options.heard ?? []).reduce((recent, heard) => Recent.heard(Recent.add(recent, heard, heard.at), heard.id, heard.at), Recent.empty)
     const started: Array<{ readonly machine: string; readonly request: Request }> = []
     const said: Array<Notice> = []
     const notices = yield* Queue.unbounded<Notice>()
@@ -202,9 +207,17 @@ const drafts = (
         { name: "rig", here: false, hosts: ["rig"], launcher: launcher("rig", rig), researcher: researcher("rig"), threads: threads("rig", rigThreads) },
       ],
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
-      recent: Effect.succeed([]),
-      note: (heard) => Effect.sync(() => void noted.push(heard)),
-      tell: (notice) => Effect.sync(() => void said.push(notice)).pipe(Effect.zipRight(Queue.offer(notices, notice)), Effect.asVoid),
+      recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.played(recent, now)),
+      note: (heard) =>
+        Effect.map(Clock.currentTimeMillis, (now) => {
+          noted.push(heard)
+          recent = Recent.add(recent, heard, now)
+        }),
+      tell: (notice) =>
+        Effect.map(Clock.currentTimeMillis, (now) => {
+          said.push(notice)
+          recent = Recent.heard(recent, notice.id, now)
+        }).pipe(Effect.zipRight(Queue.offer(notices, notice)), Effect.asVoid),
       records,
       outbox,
     }).pipe(
@@ -578,7 +591,7 @@ describe("Drafts", () => {
   test("asks every machine what it can start as the shortcut is pressed, and goes on without one that can't say", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { prepare, dictate, flush, catalogs, asked, started, openings, remembered } = yield* drafts(() => decision({}), { rigDown: true })
+        const { prepare, dictate, flush, catalogs, listings, asked, started, openings, remembered } = yield* drafts(() => decision({}), { rigDown: true })
         yield* prepare
         yield* flush
         const pressed = [...catalogs]
@@ -586,8 +599,9 @@ describe("Drafts", () => {
         return {
           pressed,
           catalogs,
+          listed: listings.length,
           listings: asked[0]?.listings.map(({ machine, reason }) => [machine, reason]),
-          threads: asked[0]?.threads.map(({ machine, threads }) => [machine, threads.map(({ listed, known }) => [listed.id, Option.isSome(known)])]),
+          threads: asked[0]?.threads.map(({ machine, threads }) => [machine, threads.map(({ listed, known }) => [listed.id, Option.map(known, ({ prompt }) => prompt)])]),
           started: started.length,
           openings: openings.toSorted(),
           learnt: remembered.filter(({ started }) => !started).map(({ machine, id, prompt }) => [machine, id, prompt]),
@@ -601,12 +615,14 @@ describe("Drafts", () => {
       ["rosie", undefined],
       ["rig", "I can't reach rig."],
     ])
-    expect(result.threads).toEqual([
-      ["rosie", [["a1", true], ["b2", false]]],
-      ["rig", [["c3", false]]],
-    ])
     // What the threads yapd didn't start are about is learnt in the background, once, and not for the one it did.
     expect(result.openings).toEqual(["rig/c3", "rosie/b2"])
+    // Learnt after the threads were listed, and still there for the writer, without listing them again.
+    expect(result.listed).toBe(2)
+    expect(result.threads).toEqual([
+      ["rosie", [["a1", Option.some(latency.prompt)], ["b2", Option.some("What b2 started as.")]]],
+      ["rig", [["c3", Option.some("What c3 started as.")]]],
+    ])
     expect(result.learnt.toSorted()).toEqual([
       ["rig", "c3", "What c3 started as."],
       ["rosie", "b2", "What b2 started as."],
@@ -748,6 +764,30 @@ describe("Drafts", () => {
     )
     expect(result.reports).toEqual([["Who needs me?", [["rosie", 2], ["rig", 1]]]])
     expect(result.spoken).toEqual(["Nobody needs you.", "About what's broken: I couldn't check on your threads right now."])
+  })
+
+  test("asks which thread a bare \"it\" means once a report across threads was the last thing heard", async () => {
+    const update: Heard = { id: "update-1", project: "yapd", directory: "/code/yapd", spoken: "yapd. The latency fix is ready.", message: "The latency fix is ready.", thread: { machine: "rosie", id: "a1" }, at: 0 }
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, sent, spoken, noted } = yield* drafts(
+          ({ lines }) =>
+            lines[0]!.text.startsWith("Who")
+              ? decision({ action: "status", about: "who needs you", project: "", prompt: "", spoken: "" })
+              : decision({ action: "message", about: "the latency one", project: "", thread: "rosie/a1", threadFrom: "referred", threadEvidence: "it", prompt: "Stop there.", spoken: "" }),
+          { heard: [update] },
+        )
+        // Right after the update, and after yapd said it sent that, "it" is the thread the update came from.
+        yield* dictate("Tell it to stop there.")
+        yield* dictate("Who needs me?")
+        yield* dictate("Tell it to stop there.")
+        return { sent: sent.map(({ thread }) => thread.id), spoken: spoken(), noted: noted.map(({ thread }) => thread?.id) }
+      }),
+    )
+    expect(result.sent).toEqual(["a1"])
+    expect(result.spoken).toEqual(["Sent to Reduce latency in yapd.", "Nobody needs you.", "Which thread is that for?"])
+    // The report is noted about no thread, and so is the question: what "it" means has to be settled again.
+    expect(result.noted).toEqual(["a1", undefined, undefined])
   })
 
   test("answers a question across threads from a fresh listing, fetched again when the answer took a while", async () => {

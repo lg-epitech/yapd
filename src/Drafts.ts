@@ -96,6 +96,17 @@ interface Target {
   readonly known: Option.Option<Known>
 }
 
+/** What something said is about, for what's noted of it: where, and the thread when it's about exactly one. */
+type About = Partial<Pick<Heard, "project" | "host" | "directory" | "message" | "started" | "thread">>
+
+/** A thread, and where it is, for whatever is said about it. */
+const subject = ({ machine, listed }: Target): About => ({
+  project: listed.project,
+  ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
+  directory: listed.directory,
+  thread: { machine: machine.name, id: listed.id },
+})
+
 const same = (one: string, other: string) => one.trim().toLowerCase() === other.trim().toLowerCase()
 
 const stamp = (millis: number) => new Date(millis).toISOString()
@@ -271,27 +282,32 @@ export const make = (options: {
         }),
       )
 
-    /** A machine's threads, with what yapd knows of each. What it can't recall is only logged: the listing is still worth having. */
+    /**
+     * A listing with what yapd knows of each thread, read again from its own
+     * database: a listing is kept for a minute, and in that time a thread's
+     * first message can be learnt, or a thread started, and the writer should
+     * have it. Only the database is read, so nothing waits on a network read
+     * still under way. What can't be recalled is only logged, and the listing
+     * keeps what it had: it's still worth having.
+     */
+    const recollect = (listing: ThreadListing): Effect.Effect<ThreadListing> =>
+      listing.threads.length === 0
+        ? Effect.succeed(listing)
+        : options.records.recall(listing.machine, listing.threads.map(({ listed }) => listed.id)).pipe(
+            Effect.map((known) => ({ ...listing, threads: listing.threads.map(({ listed }) => ({ listed, known: Option.fromNullable(known.get(listed.id)) })) })),
+            Effect.catchAll((error) => Effect.logWarning(`Couldn't recall what's known of the threads on ${listing.machine}`, error).pipe(Effect.as(listing))),
+          )
+
+    /** A machine's threads, with what yapd knows of each. */
     const threadListing = (machine: Machine) =>
-      Effect.gen(function* () {
-        const listed = yield* machine.threads.list.pipe(
-          Effect.timeoutFail({ duration: patience, onTimeout: () => new ThreadsError({ reason: `${machine.name} isn't answering.` }) }),
-          Effect.either,
-        )
-        if (Either.isLeft(listed)) {
-          return { machine: machine.name, here: machine.here, threads: [], reason: listed.left.reason } satisfies ThreadListing
-        }
-        const known = yield* options.records.recall(machine.name, listed.right.map(({ id }) => id)).pipe(
-          Effect.catchAll((error) =>
-            Effect.logWarning(`Couldn't recall what's known of the threads on ${machine.name}`, error).pipe(Effect.as(new Map<string, Known>())),
-          ),
-        )
-        return {
-          machine: machine.name,
-          here: machine.here,
-          threads: listed.right.map((listed) => ({ listed, known: Option.fromNullable(known.get(listed.id)) })),
-        } satisfies ThreadListing
-      })
+      machine.threads.list.pipe(
+        Effect.timeoutFail({ duration: patience, onTimeout: () => new ThreadsError({ reason: `${machine.name} isn't answering.` }) }),
+        Effect.match({
+          onSuccess: (listed): ThreadListing => ({ machine: machine.name, here: machine.here, threads: listed.map((listed) => ({ listed, known: Option.none() })) }),
+          onFailure: ({ reason }): ThreadListing => ({ machine: machine.name, here: machine.here, threads: [], reason }),
+        }),
+        Effect.flatMap(recollect),
+      )
 
     /** Threads whose first message is being fetched, so a listing that comes while it is doesn't fetch it again. */
     const learning = new Set<string>()
@@ -356,25 +372,25 @@ export const make = (options: {
         drafts.delete(draft.id)
       })
 
-    /** A notice's id, chosen ahead when what it says is noted for the user to build on. */
-    const noticeId = (draft: Draft) => `draft:${draft.id}:${crypto.randomUUID()}`
-
-    const say = (draft: Draft, spoken: string, priority: Notice["priority"], extra: Partial<Notice> = {}) =>
-      options.tell({
-        id: noticeId(draft),
-        priority,
-        spoken,
-        at: draft.at,
-        stale: Effect.succeed(false),
-        ...extra,
+    /**
+     * Says something, noted first under the notice's id: once it plays, it's
+     * the latest thing the user heard, and "tell it to" means the thread it
+     * was about when it was about one, and nothing yapd can tell when it wasn't.
+     */
+    const say = (draft: Draft, spoken: string, priority: Notice["priority"], about: About = {}, extra: Partial<Notice> = {}) =>
+      Effect.gen(function* () {
+        const id = `draft:${draft.id}:${crypto.randomUUID()}`
+        const now = yield* Clock.currentTimeMillis
+        yield* options.note({ id, project: "", directory: "", message: "", ...about, spoken, at: now })
+        yield* options.tell({ id, priority, spoken, at: draft.at, stale: Effect.succeed(false), ...extra })
       })
 
     /** Nothing done, and the user hears why. */
-    const fail = (draft: Draft, reason: string) =>
+    const fail = (draft: Draft, reason: string, about: About = {}) =>
       Effect.gen(function* () {
         yield* close(draft)
         yield* Effect.logWarning(`Nothing done: ${reason}`)
-        yield* say(draft, draft.about === "" ? reason : `About ${draft.about}: ${reason}`, "needs-you")
+        yield* say(draft, draft.about === "" ? reason : `About ${draft.about}: ${reason}`, "needs-you", about)
       })
 
     /** Once more if it fails, as with summaries. */
@@ -420,37 +436,33 @@ export const make = (options: {
           })
           .pipe(Effect.catchAll((error) => Effect.logWarning(`Couldn't keep what ${started.thread} is about`, error)))
         const said = [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" ")
-        const id = noticeId(draft)
-        yield* options.note({
-          id,
+        yield* say(draft, said, "done", {
           project: project.name,
           ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
           directory: started.directory,
-          spoken: said,
           message: request.prompt,
           started: true,
           thread: { machine: machine.name, id: started.thread },
-          at: now,
         })
-        yield* say(draft, said, "done", { id })
       })
 
-    const offer = (draft: Draft, material: Material, question: string): Effect.Effect<void> =>
-      say(draft, question, "needs-you", {
+    /** Asks, about the thread the question is about when it's one, so that even an answer that comes as a new dictation can point at it. */
+    const offer = (draft: Draft, material: Material, question: string, about: About): Effect.Effect<void> =>
+      say(draft, question, "needs-you", about, {
         stale: Effect.sync(() => !draft.open),
         question: {
           answer: (heard) => answer(draft, material, heard),
           unanswered: Effect.suspend(() => {
             draft.unanswered++
             if (draft.unanswered < asks) {
-              return background(Effect.zipRight(Effect.sleep(again), offer(draft, material, question)), draft)
+              return background(Effect.zipRight(Effect.sleep(again), offer(draft, material, question, about)), draft)
             }
             draft.open = false
             return background(
               Effect.gen(function* () {
                 yield* close(draft)
                 yield* Effect.logWarning(`Dropped, since "${question}" went unanswered: ${draft.heard}`)
-                yield* say(draft, `I didn't hear back about ${draft.about || "what you dictated"}, so I dropped it.`, "done")
+                yield* say(draft, `I didn't hear back about ${draft.about || "what you dictated"}, so I dropped it.`, "done", about)
               }),
               draft,
             )
@@ -458,30 +470,28 @@ export const make = (options: {
         },
       })
 
-    const ask = (draft: Draft, material: Material, question: string) =>
+    const ask = (draft: Draft, material: Material, question: string, about: About = {}) =>
       Effect.gen(function* () {
         draft.lines.push({ speaker: "yapd", text: question })
         draft.unanswered = 0
         yield* Effect.logInfo(`Asked: ${question}`)
-        yield* offer(draft, material, question)
+        yield* offer(draft, material, question, about)
       })
 
     /** What they said after a question, worked out but not acted on, since they may still be talking. */
     const answer = (draft: Draft, material: Material, heard: string) =>
-      decide({ ...material, lines: [...draft.lines, { speaker: "user", text: heard }] }).pipe(
-        Effect.map((decision) =>
-          decision.action === "wait"
-            ? Option.none()
-            : Option.some(
-                Effect.suspend(() => {
-                  draft.lines.push({ speaker: "user", text: heard })
-                  return background(
-                    Effect.zipRight(Effect.logInfo(`Answered: ${heard}`), act(draft, { ...material, lines: [...draft.lines] }, decision)),
-                    draft,
-                  )
-                }),
-              ),
-        ),
+      Effect.gen(function* () {
+        // What's known of the threads can have grown since the question was asked.
+        const refreshed: Material = { ...material, threads: yield* Effect.forEach(material.threads, recollect) }
+        const decision = yield* decide({ ...refreshed, lines: [...draft.lines, { speaker: "user", text: heard }] })
+        if (decision.action === "wait") return Option.none()
+        return Option.some(
+          Effect.suspend(() => {
+            draft.lines.push({ speaker: "user", text: heard })
+            return background(Effect.zipRight(Effect.logInfo(`Answered: ${heard}`), act(draft, { ...refreshed, lines: [...draft.lines] }, decision)), draft)
+          }),
+        )
+      }).pipe(
         Effect.catchAll((error) => Effect.logWarning("Could not work out the answer", error).pipe(Effect.as(Option.none()))),
         Effect.annotateLogs({ draft: draft.id }),
       )
@@ -492,9 +502,13 @@ export const make = (options: {
         let looking = true
         yield* Effect.logInfo(`Reading through ${project.name} on ${machine.name} first: ${decision.prompt}. ${decision.why}`)
         // Said before anything is read, and not at all once there's something better to say.
-        yield* say(draft, decision.spoken.trim() || `Looking through ${project.name} first.`, "needs-you", {
-          stale: Effect.sync(() => !looking),
-        })
+        yield* say(
+          draft,
+          decision.spoken.trim() || `Looking through ${project.name} first.`,
+          "needs-you",
+          { project: project.name, ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }), directory: project.path },
+          { stale: Effect.sync(() => !looking) },
+        )
         const destination: Destination = {
           about: draft.about,
           project: project.name,
@@ -557,31 +571,20 @@ export const make = (options: {
         if (Option.isNone(found)) return yield* unsettled(draft, material, decision, "Which thread is that for?")
         const { machine, listed } = found.value
         const to = recipient(found.value)
+        const about = subject(found.value)
         const text = decision.prompt.trim()
-        if (text === "") return yield* ask(draft, material, `What should I tell ${listed.title}?`)
+        if (text === "") return yield* ask(draft, material, `What should I tell ${listed.title}?`, about)
         yield* Effect.logInfo(`Message for ${key(machine.name, listed.id)}, ${to}: ${text}. ${decision.why}`)
         draft.starting = true
         const outcome = yield* Effect.either(options.outbox.send(machine.name, listed, text))
         if (Either.isLeft(outcome)) {
           yield* Effect.logWarning("Could not send", outcome.left)
-          return yield* fail(draft, `I couldn't send that to ${to}. ${outcome.left._tag === "ThreadsError" ? outcome.left.reason : outcome.left.message}`)
+          return yield* fail(draft, `I couldn't send that to ${to}. ${outcome.left._tag === "ThreadsError" ? outcome.left.reason : outcome.left.message}`, about)
         }
-        const now = yield* Clock.currentTimeMillis
         yield* close(draft)
         const said = delivered(to, outcome.right)
-        const id = noticeId(draft)
         // Noted whether it went or is still on its way: either way the user can build on it.
-        yield* options.note({
-          id,
-          project: listed.project,
-          ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
-          directory: listed.directory,
-          spoken: said.spoken,
-          message: text,
-          thread: { machine: machine.name, id: listed.id },
-          at: now,
-        })
-        yield* say(draft, said.spoken, said.priority, { id })
+        yield* say(draft, said.spoken, said.priority, { ...about, message: text })
       })
 
     const summary = (draft: Draft, material: Material, decision: Decision) =>
@@ -590,33 +593,28 @@ export const make = (options: {
         if (Option.isNone(found)) return yield* unsettled(draft, material, decision, "Which thread do you mean?")
         const { machine, listed, known } = found.value
         const to = recipient(found.value)
+        const about = subject(found.value)
         yield* Effect.logInfo(`Summing up ${key(machine.name, listed.id)}, ${to}. ${decision.why}`)
         const detail = yield* Effect.either(machine.threads.detail(listed.id, turns))
         if (Either.isLeft(detail)) {
           yield* Effect.logWarning("Could not read the thread", detail.left)
-          return yield* fail(draft, `I couldn't read ${to}. ${detail.left.reason}`)
+          return yield* fail(draft, `I couldn't read ${to}. ${detail.left.reason}`, about)
         }
         const now = yield* Clock.currentTimeMillis
         const report = yield* Effect.either(reporter.summarize({ question: asked(draft), machine: machine.name, here: machine.here, detail: detail.right, known, now }))
         if (Either.isLeft(report)) {
           yield* Effect.logWarning("Could not sum up the thread", report.left)
-          return yield* fail(draft, `I couldn't sum up ${to} right now.`)
+          return yield* fail(draft, `I couldn't sum up ${to} right now.`, about)
         }
         yield* close(draft)
         const { thread, messages } = detail.right
-        const id = noticeId(draft)
-        // What's read out carries the thread, so "tell it to" can follow.
-        yield* options.note({
-          id,
+        // What's read out carries the thread, so "tell it to" can follow. Where it is, as just read: fresher than the listing.
+        yield* say(draft, report.right.spoken, thread.state === "waiting" || thread.state === "failed" ? "needs-you" : "done", {
+          ...about,
           project: thread.project,
-          ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
           directory: thread.directory,
-          spoken: report.right.spoken,
           message: messages.findLast(({ role }) => role === "assistant")?.text ?? "",
-          thread: { machine: machine.name, id: thread.id },
-          at: now,
         })
-        yield* say(draft, report.right.spoken, thread.state === "waiting" || thread.state === "failed" ? "needs-you" : "done", { id })
       })
 
     const status = (draft: Draft, material: Material, decision: Decision) =>
@@ -632,6 +630,7 @@ export const make = (options: {
           return yield* fail(draft, "I couldn't check on your threads right now.")
         }
         yield* close(draft)
+        // About every thread and none in particular: a "tell it to" right after it has to ask which.
         yield* say(draft, report.right.spoken, "done")
       })
 
@@ -691,7 +690,8 @@ export const make = (options: {
     const write = (draft: Draft) =>
       Effect.gen(function* () {
         yield* Effect.logInfo(`Dictated: ${draft.heard}`)
-        const [listings, listed] = yield* Effect.all([catalogs.get, threads.get], { concurrency: "unbounded" })
+        // The threads as listed when the shortcut was pressed, with what's been learnt of them since.
+        const [listings, listed] = yield* Effect.all([catalogs.get, Effect.flatMap(threads.get, Effect.forEach(recollect))], { concurrency: "unbounded" })
         // Without a project to start in or a thread to talk to, there's nothing a dictation can be for.
         if (listings.every(({ catalog }) => Option.isNone(catalog)) && listed.every(({ reason }) => reason !== undefined)) {
           const reason = (listings.find(({ here }) => here) ?? listings[0])?.reason
