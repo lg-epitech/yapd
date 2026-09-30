@@ -3,10 +3,10 @@ import { Cause, Console, Effect, Exit, Fiber, Option } from "effect"
 import { realpathSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname } from "node:path"
-import * as Home from "./Home.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
 import * as Config from "./Config.ts"
+import * as Home from "./Home.ts"
 import { hook } from "./Hook.ts"
 import * as Launcher from "./Launcher.ts"
 import * as Machines from "./Machines.ts"
@@ -90,8 +90,8 @@ if (command !== undefined && settled.includes(command)) {
 /** Says what's wrong, and exits with 1 when anything is broken. */
 const doctor = Effect.gen(function* () {
   // Apart from the other commands, since it reads the models' modules, which hooks shouldn't load.
-  const { doctor } = yield* Effect.promise(() => import("./Doctor.ts"))
-  if (yield* doctor(Service.bun(), Service.main)) process.exitCode = 1
+  const Doctor = yield* Effect.promise(() => import("./Doctor.ts"))
+  if (yield* Doctor.doctor(Service.bun(), Service.main)) process.exitCode = 1
 })
 
 const mac = process.platform === "darwin"
