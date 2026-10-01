@@ -3,7 +3,6 @@ import { realpath } from "node:fs/promises"
 import * as Config from "./Config.ts"
 import { type Relay, RelayError, type Thread, Unreachable } from "./Relay.ts"
 import * as Server from "./T3CodeServer.ts"
-import { reference, type Reference } from "./Threads.ts"
 
 // T3 Code's local API, the one its own CLI uses. Sending through it keeps the
 // thread in step: resuming the agent behind T3 Code's back would fork it.
@@ -30,11 +29,8 @@ export const Shell = Schema.Struct({
 })
 export type Shell = typeof Shell.Type
 
-const Message = Schema.Struct({ role: Schema.String, text: Schema.String, id: Schema.optional(Schema.String), turnId: Schema.optional(Schema.NullOr(Schema.String)), createdAt: Schema.optional(Schema.String) })
-const Detail = Schema.Struct({ thread: Schema.Struct({
-  messages: Schema.Array(Message),
-  latestTurn: Schema.optional(Schema.NullOr(Schema.Struct({ turnId: Schema.optional(Schema.String), requestedAt: Schema.optional(Schema.String) }))),
-}) })
+const Message = Schema.Struct({ role: Schema.String, text: Schema.String })
+const Detail = Schema.Struct({ thread: Schema.Struct({ messages: Schema.Array(Message) }) })
 
 /** Threads that ran in `cwd`, newest first. `resolve` canonicalizes paths, like realpath. */
 export const inDirectory = (shell: Shell, cwd: string, resolve: (path: string) => string) => {
@@ -78,71 +74,7 @@ export const turnStart = (thread: ShellThread, text: string) => ({
   createdAt: new Date().toISOString(),
 })
 
-/** The path as the filesystem has it, so two spellings of a directory compare as one. One that can't be resolved is taken as is. */
-export const canonical = (path: string) => realpath(path).catch(() => path)
-
-/** A read of T3 Code's API, with whatever the caller makes of its failures. */
-type Api<E> = <A, I>(path: string, schema: Schema.Schema<A, I>, init?: RequestInit) => Effect.Effect<A, E>
-
-/**
- * The threads that ran in the session's directory and whose latest turn ends
- * with the message the hook saw, newest first. Two threads that ended the same
- * way, like "All tests pass.", can't be told apart, so more than one is a miss.
- */
-export const matching = <E>(api: Api<E>, thread: Pick<Thread, "cwd" | "message">) =>
-  Effect.gen(function* () {
-    const shell = yield* api("/api/orchestration/shell", Shell)
-    const directories = new Set(
-      [...shell.threads.map(({ worktreePath }) => worktreePath), ...shell.projects.map(({ workspaceRoot }) => workspaceRoot)].filter(
-        (directory) => directory !== null,
-      ),
-    )
-    const resolved = new Map(
-      yield* Effect.promise(() => Promise.all([...directories].map(async (directory) => [directory, await canonical(directory)] as const))),
-    )
-    const cwd = yield* Effect.promise(() => canonical(thread.cwd))
-
-    const matches: Array<ShellThread & { readonly reference?: Reference }> = []
-    for (const candidate of inDirectory(shell, cwd, (directory) => resolved.get(directory) ?? directory)) {
-      const detail = yield* api(`/api/orchestration/threads/${encodeURIComponent(candidate.id)}?turnLimit=1`, Detail)
-      if (endsWith(detail.thread.messages, thread.message)) {
-        const context = reference(detail.thread)
-        const last = detail.thread.messages.at(-1)
-        // A new turn can start while the old assistant message still trails the detail.
-        const tied = context !== undefined && last?.turnId === context.turnId ? context : undefined
-        matches.push({ ...candidate, ...(tied === undefined ? {} : { reference: tied }) })
-      }
-    }
-    return matches
-  })
-
-/** The thread's id when exactly one matches. None is as good as two: either way it can't be told which. */
-export const identified = <E>(api: Api<E>, thread: Pick<Thread, "cwd" | "message">) =>
-  Effect.map(matching(api, thread), (matches) => (matches.length === 1 ? Option.some(matches[0]!.id) : Option.none()))
-
-/** How long an update waits on T3 Code to say which thread it came from. Short, since the update is worth more than the link. */
-const glance = "2 seconds"
-
-/**
- * Which T3 Code thread an update came from, so that "tell that one to" can
- * follow it. Only for sessions the app started: every other session would cost
- * T3 Code a read per thread in its directory on each update, for nothing.
- * Never fails and never takes long: when T3 Code can't say in time, or two
- * threads could be it, there's no link.
- */
-export const identify = Effect.gen(function* () {
-  const token = yield* Config.t3codeToken
-  return (thread: Thread): Effect.Effect<Option.Option<{ readonly id: string; readonly reference?: Reference | undefined }>> =>
-    Effect.gen(function* () {
-      if (thread.origin.app !== bundle || Option.isNone(token)) return Option.none<{ readonly id: string; readonly reference?: Reference | undefined }>()
-      const server = yield* Server.locate
-      const matches = yield* matching(Server.api(server, token.value), thread)
-      return matches.length === 1 ? Option.some({ id: matches[0]!.id, reference: matches[0]!.reference }) : Option.none()
-    }).pipe(
-      Effect.timeout(glance),
-      Effect.catchAll((error) => Effect.logDebug("Couldn't tell which T3 Code thread that was", error).pipe(Effect.as(Option.none()))),
-    )
-})
+const canonical = (path: string) => realpath(path).catch(() => path)
 
 export const relay = Effect.gen(function* () {
   const token = yield* Config.t3codeToken
@@ -160,7 +92,23 @@ export const relay = Effect.gen(function* () {
       const api = <A, I>(path: string, schema: Schema.Schema<A, I>, init: RequestInit = {}) =>
         Effect.mapError(request(path, schema, init), reach)
 
-      const [target, ...others] = yield* matching(api, thread)
+      const shell = yield* api("/api/orchestration/shell", Shell)
+      const directories = new Set(
+        [...shell.threads.map(({ worktreePath }) => worktreePath), ...shell.projects.map(({ workspaceRoot }) => workspaceRoot)].filter(
+          (directory) => directory !== null,
+        ),
+      )
+      const resolved = new Map(
+        yield* Effect.promise(() => Promise.all([...directories].map(async (directory) => [directory, await canonical(directory)] as const))),
+      )
+      const cwd = yield* Effect.promise(() => canonical(thread.cwd))
+
+      const matches: Array<ShellThread> = []
+      for (const candidate of inDirectory(shell, cwd, (directory) => resolved.get(directory) ?? directory)) {
+        const detail = yield* api(`/api/orchestration/threads/${encodeURIComponent(candidate.id)}?turnLimit=1`, Detail)
+        if (endsWith(detail.thread.messages, thread.message)) matches.push(candidate)
+      }
+      const [target, ...others] = matches
       if (target === undefined) return yield* miss("That thread has moved on since, so I didn't send it.")
       // Two threads that ended the same way, like "All tests pass.", can't be told apart.
       if (others.length > 0) {

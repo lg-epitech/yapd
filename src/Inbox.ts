@@ -5,8 +5,6 @@ import type { Question, Update } from "./Conversation.ts"
 
 /** An update that is condensed, rendered, and waiting for its turn to be spoken. */
 export interface Ready {
-  /** Its own, unlike the session's: it names the update among what the user was told lately. */
-  readonly id: string
   readonly session: string
   readonly priority: Exclude<Priority, "trivial">
   readonly arrivedAt: number

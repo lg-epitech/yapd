@@ -38,8 +38,6 @@ const dictation = (
     const said: Array<string> = []
     const heard: Array<number> = []
     const transcripts: Array<string> = []
-    /** When each was pressed. */
-    const pressed: Array<number> = []
     const remaining = [...transcribed]
     let cancelled = 0
     let detected = 0
@@ -96,12 +94,7 @@ const dictation = (
     )
     const context = yield* Layer.build(layer)
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ heard, startedAt }) =>
-        Effect.sync(() => {
-          transcripts.push(heard)
-          pressed.push(startedAt)
-        }),
-      ),
+      Stream.runForEach(Context.get(context, Dictation).transcripts, (text) => Effect.sync(() => void transcripts.push(text))),
     )
     const floor = Context.get(context, Floor.Floor)
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -129,7 +122,6 @@ const dictation = (
       said,
       heard,
       transcripts,
-      pressed,
       cancelled: () => cancelled,
       listening: () => open,
       flush,
@@ -154,14 +146,12 @@ describe("Dictation", () => {
   test("records until the user sends, then hands on what they said", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { press, talk, wait, dictating, cues, heard, transcripts, pressed } = yield* dictation(["Add a dictation mode to yapd."])
-        yield* wait(3)
+        const { press, talk, dictating, cues, heard, transcripts } = yield* dictation(["Add a dictation mode to yapd."])
         yield* press("Started")
         const during = yield* dictating
         yield* talk(`${"x".repeat(20)}${".".repeat(100)}${"x".repeat(20)}`)
-        yield* wait(2)
         yield* press("Sent")
-        return { during, after: yield* dictating, cues, heard, transcripts, pressed }
+        return { during, after: yield* dictating, cues, heard, transcripts }
       }),
     )
     expect(result.during).toBe(1)
@@ -170,8 +160,6 @@ describe("Dictation", () => {
     // One window, without the long pause: each stretch with the margin after or before it.
     expect(result.heard).toEqual([(30 + 30) * 512])
     expect(result.transcripts).toEqual(["Add a dictation mode to yapd."])
-    // Stamped at the press, not when it was sent.
-    expect(result.pressed).toEqual([3000])
   })
 
   test("lets go of the microphone before the next dictation takes it", async () => {

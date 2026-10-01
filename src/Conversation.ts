@@ -91,21 +91,9 @@ export const cut = (text: string, fraction: number) => {
 
 const misheard: Reply = { intent: "answer", spoken: "Sorry, I didn't catch that.", message: "" }
 
-/** `effect`, the first time only. */
-const onlyOnce = (effect: Effect.Effect<void>) => {
-  let done = false
-  return Effect.suspend(() => {
-    if (done) return Effect.void
-    done = true
-    return effect
-  })
-}
-
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
 export interface Question {
   readonly audio: string
-  /** Run once it starts playing, and not again as it goes on after talk that wasn't an answer. */
-  readonly started?: Effect.Effect<void>
   /**
    * Works out what the user meant by what they said, which may be called again
    * if they carry on. What it returns is run once they've stopped, and none
@@ -180,11 +168,9 @@ export const make = (options: {
       )
     }
 
-    /** `started` runs once it plays, and not if it never does. */
-    const speak = (path: string, from: number, ear: Effect.Effect<Ear | undefined>, wait = linger, started: Effect.Effect<void> = Effect.void) =>
+    const speak = (path: string, from: number, ear: Effect.Effect<Ear | undefined>, wait = linger) =>
       Effect.gen(function* () {
         const playback = yield* audio.play(path, from)
-        yield* started
         const listening = yield* ear
         if (listening === undefined || listening.deaf) {
           yield* playback.finished
@@ -416,14 +402,12 @@ export const make = (options: {
         Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))),
       )
 
-    /** `started` runs once the update starts playing, and not again as it goes on after the user talked over it. */
-    const converse = (update: Update, started: Effect.Effect<void> = Effect.void) =>
+    const converse = (update: Update) =>
       Effect.suspend(() => {
         const rendered: Array<string> = []
         return Effect.gen(function* () {
           const ear = hearing(yield* Effect.scope)
           const lines: Array<Line> = []
-          const once = onlyOnce(started)
           let text = update.spoken
           let path = update.audio
           let from = 0
@@ -431,7 +415,7 @@ export const make = (options: {
           let sent = false
 
           while (true) {
-            const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined), linger, once)
+            const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined))
             if (outcome._tag === "Finished") return
             // Replying to something yapd had finished saying: there's nothing to go back to.
             const after = outcome.at >= outcome.duration
@@ -502,11 +486,10 @@ export const make = (options: {
     const ask = (question: Question) =>
       Effect.gen(function* () {
         const ear = hearing(yield* Effect.scope)
-        const once = onlyOnce(question.started ?? Effect.void)
         let from = 0
         let missed = 0
         while (true) {
-          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), pondering, once)
+          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), pondering)
           if (outcome._tag === "Finished") return false
           const first = yield* transcribe(outcome.audio)
           const answer =

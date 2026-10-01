@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option, Schema } from "effect"
 import * as T3Code from "./T3Code.ts"
 
 const thread = (overrides: Partial<T3Code.ShellThread> = {}): T3Code.ShellThread => ({
@@ -60,32 +59,6 @@ describe("T3Code", () => {
     expect(T3Code.endsWith(messages, "Fixed the parser. All tests pass.")).toBe(false)
   })
 
-  test("tells which thread an update came from only when exactly one ends with its message", async () => {
-    const ended = { older: "All tests pass.", twin: "All tests pass.", newer: "Fixed the loader. All tests pass.", elsewhere: "All tests pass." }
-    const listed = shell([
-      thread({ id: "older", updatedAt: "2026-09-27T09:00:00.000Z" }),
-      thread({ id: "twin", updatedAt: "2026-09-27T10:00:00.000Z" }),
-      thread({ id: "newer", updatedAt: "2026-09-27T11:00:00.000Z" }),
-      thread({ id: "elsewhere", worktreePath: "/worktrees/a" }),
-    ])
-    const reads: Array<string> = []
-    // Answers as T3 Code would, with the shell and each thread's last message.
-    const api = <A, I>(path: string, schema: Schema.Schema<A, I>) => {
-      reads.push(path)
-      const id = /threads\/([^?]+)/.exec(path)?.[1]
-      const body = id === undefined ? listed : { thread: { messages: [{ role: "assistant", text: ended[id as keyof typeof ended] }] } }
-      return Schema.decodeUnknown(schema)(body)
-    }
-    const identified = (message: string, cwd = "/repo") => Effect.runPromise(T3Code.identified(api, { cwd, message }))
-    expect(await identified("Fixed the loader. All tests pass.")).toEqual(Option.some("newer"))
-    expect(await identified("All tests pass.", "/worktrees/a")).toEqual(Option.some("elsewhere"))
-    // Two in the same place that ended the same way, and none at all.
-    expect(await identified("All tests pass.")).toEqual(Option.none())
-    expect(await identified("Something else.")).toEqual(Option.none())
-    // Only the threads in the update's directory are read.
-    expect(reads.filter((path) => path.includes("elsewhere"))).toHaveLength(1)
-  })
-
   test("counts a running turn as busy", () => {
     expect(T3Code.busy(thread())).toBe(false)
     expect(T3Code.busy(thread({ latestTurn: { state: "running" } }))).toBe(true)
@@ -103,32 +76,4 @@ describe("T3Code", () => {
     })
     expect(command).not.toHaveProperty("modelSelection")
   })
-})
-
-
-describe("T3Code hook references", () => {
-  test("captures the matched turn from its detail, rather than a shell read that was already out of date", async () => {
-    const context = { turnId: "turn-a", userMessageId: "user-a" }
-    const read = (turnId: string, newestUserTurn = "turn-a") => T3Code.matching((path, schema) => Effect.orDie(Schema.decodeUnknown(schema)(
-      path === "/api/orchestration/shell" ? shell([thread()]) : { thread: { latestTurn: { turnId }, messages: [
-        { id: "user-a", role: "user", text: "Fix it", turnId: newestUserTurn },
-        { id: "assistant-a", role: "assistant", text: "Ready.", turnId: "turn-a" },
-      ] } })), { cwd: "/repo", message: "Ready." })
-    expect((await Effect.runPromise(read("turn-a")))[0]?.reference).toEqual(context)
-    expect((await Effect.runPromise(read("turn-b")))[0]?.reference).toBeUndefined()
-    expect((await Effect.runPromise(read("turn-a", "turn-b")))[0]?.reference).toBeUndefined()
-  })
-})
-
-
-test("T3Code ties null user turn ids by the request timestamp and rejects a queued newer request", async () => {
-  const requestedAt = "2026-09-30T10:00:00.000Z"
-  for (const createdAt of [requestedAt, "2026-09-30T10:00:01.000Z"]) {
-    const matches = await Effect.runPromise(T3Code.matching((path, schema) => Effect.orDie(Schema.decodeUnknown(schema)(
-      path === "/api/orchestration/shell" ? shell([thread()]) : { thread: { latestTurn: { turnId: "turn-a", requestedAt }, messages: [
-        { id: "user-a", role: "user", text: "Fix it", turnId: null, createdAt },
-        { id: "assistant-a", role: "assistant", text: "Ready.", turnId: "turn-a" },
-      ] } })), { cwd: "/repo", message: "Ready." }))
-    expect(matches[0]?.reference).toEqual(createdAt === requestedAt ? { turnId: "turn-a", userMessageId: "user-a" } : undefined)
-  }
 })

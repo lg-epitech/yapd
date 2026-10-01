@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
-import { Audio, AudioError } from "./Audio.ts"
+import { Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
+import { Audio } from "./Audio.ts"
 import { Waiting } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
 import * as Daemon from "./Daemon.ts"
@@ -20,9 +20,6 @@ import { Voice } from "./Voice.ts"
  */
 const make = (says?: string, options: {
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
-  readonly locate?: Daemon.Options["locate"]
-  /** Runs as `text` is asked to play, before it starts: what fails never plays. */
-  readonly starting?: (text: string) => Effect.Effect<void, AudioError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -55,7 +52,6 @@ const make = (says?: string, options: {
         Effect.gen(function* () {
           const text = rendered.get(path) ?? path
           played.push(text)
-          yield* options.starting?.(text) ?? Effect.void
           yield* Queue.offer(playbacks, text)
           let done = false
           // Closing the scope stops it, as with the helper.
@@ -104,15 +100,9 @@ const make = (says?: string, options: {
     })),
   )
   const context = yield* Layer.build(layer)
-  const made = yield* Daemon.make({
-    ...(options.locate === undefined ? {} : { locate: options.locate }),
-    // Hooks come from rosie unless they name another host.
-    machine: ({ host }) => Option.some(host ?? "rosie"),
-  }).pipe(Effect.provide(context))
+  const made = yield* Daemon.make.pipe(Effect.provide(context))
   handle = made.handle
   const { speak: read, tell } = made
-  /** What the user has heard by now, the latest first. */
-  const recent = Effect.flatMap(Clock.currentTimeMillis, made.recent)
   yield* Effect.forkScoped(read)
   const floor = Context.get(context, Floor.Floor)
   // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -130,22 +120,15 @@ const make = (says?: string, options: {
     ...Array.from({ length: defaults.silence }, () => new Float32Array([0])),
   ]).pipe(Effect.zipRight(flush))
   const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
-  /** A turn that took `seconds`, as its hooks report it, in `/tmp` here unless said otherwise. */
-  const turn = (
-    session: string,
-    message: string,
-    seconds: number,
-    extra: { readonly prompt?: string; readonly needsYou?: boolean; readonly launched?: boolean; readonly host?: string; readonly cwd?: string } = {},
-  ) =>
+  /** A turn that took `seconds`, as its hooks report it. */
+  const turn = (session: string, message: string, seconds: number, extra: { readonly needsYou?: boolean; readonly launched?: boolean } = {}) =>
     Effect.gen(function* () {
-      const cwd = extra.cwd ?? "/tmp"
-      const origin = { project: "yapd", ...(extra.host === undefined ? {} : { host: extra.host }) }
-      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd, prompt: extra.prompt ?? "Go on." }, origin, false)
+      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd: "/tmp", prompt: "Go on." }, { project: "yapd" }, false)
       yield* wait(seconds)
       yield* handle(
         "claude",
-        { hook_event_name: "Stop", session_id: session, cwd, last_assistant_message: message, ...(extra.needsYou ? { needs_you: true } : {}) },
-        { ...origin, ...(extra.launched ? { launched: true } : {}) },
+        { hook_event_name: "Stop", session_id: session, cwd: "/tmp", last_assistant_message: message, ...(extra.needsYou ? { needs_you: true } : {}) },
+        { project: "yapd", ...(extra.launched ? { launched: true } : {}) },
         false,
       )
       yield* flush
@@ -182,7 +165,7 @@ const make = (says?: string, options: {
     return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
   })
   const reading = STM.commit(TRef.get(floor.reading))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, recent, recentBy: made.recent, expected: made.expect, retracted: made.retract, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
 })
 
 const daemon = make()
@@ -338,42 +321,6 @@ describe("Daemon", () => {
     expect(result.prompts).toEqual([Option.some("Go on."), Option.some("Go on.")])
   })
 
-  test("takes a sent message as a follow-up once, even when it's expected again after it turned up", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { turn, expected, nextEvent } = yield* make()
-        yield* expected("message-1", "Explain it.", { machine: "rosie", directory: "/tmp" })
-        yield* turn("a", "Here's what changed.", 1, { prompt: "Explain it." })
-        const first = yield* nextEvent("Ready:", "Skipped quick turn")
-        // The outbox tries again, its acknowledgement lost: the message already went, so nothing is expected.
-        yield* expected("message-1", "Explain it.", { machine: "rosie", directory: "/tmp" })
-        yield* turn("b", "Sure.", 1, { prompt: "Explain it." })
-        const second = yield* nextEvent("Ready:", "Skipped quick turn")
-        return { first, second }
-      }),
-    )
-    // The first turn is heard from however quick, as the answer to the message. The user's own identical prompt isn't.
-    expect(result).toEqual({ first: "Ready: yapd. Here's what changed.", second: "Skipped quick turn" })
-  })
-
-  test("takes a sent message as the prompt of a session where it went, not the same words typed elsewhere", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { turn, expected, nextEvent } = yield* make()
-        yield* expected("message-1", "Explain it.", { machine: "rosie", directory: "/tmp" })
-        // The same words in a session on rig, then in one here in another directory: the user's own, and the message stays expected.
-        yield* turn("b", "Sure.", 1, { prompt: "Explain it.", host: "rig" })
-        const elsewhere = yield* nextEvent("Ready:", "Skipped quick turn")
-        yield* turn("c", "Sure.", 1, { prompt: "Explain it.", cwd: "/tmp/somewhere-else" })
-        const other = yield* nextEvent("Ready:", "Skipped quick turn")
-        yield* turn("a", "Here's what changed.", 1, { prompt: "Explain it." })
-        const own = yield* nextEvent("Ready:", "Skipped quick turn")
-        return { elsewhere, other, own }
-      }),
-    )
-    expect(result).toEqual({ elsewhere: "Skipped quick turn", other: "Skipped quick turn", own: "Ready: yapd. Here's what changed." })
-  })
-
   test("keeps and answers a fresh update while an older follow-up is still being delivered", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -449,131 +396,6 @@ describe("Daemon", () => {
     expect(result).toBe("That session has moved on since, so I didn't send it.")
   })
 
-  test("counts an update as heard once it's read out, linked to its T3 Code thread when there's one, and goes on without when the lookup is slow", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { finish, recent, played, wait } = yield* make(undefined, {
-          locate: (thread) =>
-            thread.message.includes("PR")
-              ? Effect.succeed(Option.some({ machine: "rosie", id: "t-1" }))
-              : thread.message.includes("slow")
-                ? Effect.never
-                : Effect.succeed(Option.none()),
-        })
-        yield* finish("a", "The PR is ready.")
-        yield* finish("b", "The tests pass.")
-        yield* finish("c", "A slow one.")
-        // Only the one being read out counts as heard: the rest are queued, and "that one" can't mean them yet.
-        const meanwhile = (yield* recent).map(({ message }) => message)
-        yield* wait(11)
-        yield* wait(11)
-        yield* wait(11)
-        return { meanwhile, heard: (yield* recent).map(({ message, thread }) => ({ message, thread })), played: [...played] }
-      }),
-    )
-    expect(result.meanwhile).toEqual(["The PR is ready."])
-    expect(result.heard).toEqual([
-      { message: "A slow one.", thread: undefined },
-      { message: "The tests pass.", thread: undefined },
-      { message: "The PR is ready.", thread: { machine: "rosie", id: "t-1" } },
-    ])
-    // Read out all the same, once the lookup is given up on.
-    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The tests pass.", "yapd. A slow one."])
-  })
-
-  test("counts what's read out as heard once it starts playing, and never when it can't", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { finish, wait, recent, played } = yield* make(undefined, {
-          starting: (text) =>
-            text.includes("PR") ? Effect.sleep("2 seconds") : text.includes("tests") ? Effect.fail(new AudioError({ message: "No device." })) : Effect.void,
-        })
-        yield* finish("a", "The PR is ready.")
-        yield* finish("b", "The tests pass.")
-        yield* finish("c", "Merged.")
-        yield* wait(1)
-        // Asked to play, and not yet playing.
-        const asked = (yield* recent).map(({ message }) => message)
-        yield* wait(1)
-        const started = (yield* recent).map(({ message }) => message)
-        yield* wait(10)
-        yield* wait(1)
-        return { asked, started, after: (yield* recent).map(({ message }) => message), played: [...played] }
-      }),
-    )
-    expect(result.asked).toEqual([])
-    expect(result.started).toEqual(["The PR is ready."])
-    // The one that couldn't play is forgotten, and the next is read.
-    expect(result.after).toEqual(["Merged.", "The PR is ready."])
-    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The tests pass.", "yapd. Merged."])
-  })
-
-  test("says how a late follow-up went about the thread the update was found from, without looking it up again", async () => {
-    let looked = 0
-    const result = await run(
-      Effect.gen(function* () {
-        const { finish, speak, wait, dictate, recent } = yield* make("Merge it.", {
-          // Found by the message the turn ended on, which the follow-up takes the thread past: only the first look finds it.
-          locate: () => Effect.sync(() => (++looked === 1 ? Option.some({ machine: "rosie", id: "t-1" }) : Option.none())),
-        })
-        yield* finish("a", "The PR is ready.", true)
-        yield* speak
-        yield* wait(1)
-        const dictation = yield* dictate
-        yield* wait(3)
-        yield* Scope.close(dictation, Exit.void)
-        yield* wait(0)
-        yield* wait(11)
-        return (yield* recent).map(({ spoken, thread }) => ({ spoken, thread }))
-      }),
-    )
-    expect(looked).toBe(1)
-    expect(result).toEqual([
-      { spoken: "yapd. Okay, passed on.", thread: { machine: "rosie", id: "t-1" } },
-      { spoken: "yapd. The PR is ready.", thread: { machine: "rosie", id: "t-1" } },
-    ])
-  })
-
-  test("keeps every update that piles up through a dictation, and counts each as heard once it plays", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { finish, wait, dictate, recent } = yield* daemon
-        const dictation = yield* dictate
-        for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) yield* finish(`s${n}`, `Update ${n}.`)
-        yield* Scope.close(dictation, Exit.void)
-        yield* wait(0)
-        // The oldest plays first, and is history even though seven more were queued after it.
-        const first = (yield* recent).map(({ message }) => message)
-        for (let n = 0; n < 8; n++) yield* wait(11)
-        return { first, after: (yield* recent).map(({ message }) => message) }
-      }),
-    )
-    expect(result.first).toEqual(["Update 1."])
-    // Only the last few heard are kept.
-    expect(result.after).toEqual(["Update 8.", "Update 7.", "Update 6.", "Update 5.", "Update 4.", "Update 3."])
-  })
-
-  test("keeps what a dictation cut off among what was heard until it's read again, however much plays first", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { finish, turn, wait, dictate, recent, recentBy } = yield* daemon
-        yield* finish("a", "The PR is ready.")
-        yield* wait(1)
-        const dictation = yield* dictate
-        const pressed = yield* Clock.currentTimeMillis
-        // Each needs the user, so all six are read before the one put back.
-        for (const n of [1, 2, 3, 4, 5, 6]) yield* turn(`s${n}`, `Needs you ${n}.`, 1, { needsYou: true })
-        yield* Scope.close(dictation, Exit.void)
-        yield* wait(0)
-        for (let n = 0; n < 6; n++) yield* wait(11)
-        return { pressed: (yield* recentBy(pressed)).map(({ message }) => message), after: (yield* recent).map(({ message }) => message) }
-      }),
-    )
-    // What they were pointing at as they pressed the shortcut, and once it's read again, the latest thing heard.
-    expect(result.pressed).toEqual(["The PR is ready."])
-    expect(result.after).toEqual(["The PR is ready.", "Needs you 6.", "Needs you 5.", "Needs you 4.", "Needs you 3.", "Needs you 2."])
-  })
-
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -587,28 +409,6 @@ describe("Daemon", () => {
       }),
     )
     expect(result).toEqual(["yapd. Quick, with nobody watching.", "yapd. It was refused when it tried to push."])
-  })
-
-  test("hears the answer to a message sent to a thread however quick the turn, and still skips a quick turn nobody sent", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { turn, expected, retracted, wait, played } = yield* daemon
-        // Held for a busy thread and tried three times before it went: one message, however many tries.
-        for (let tries = 0; tries < 3; tries++) yield* expected("yapd:m1", "Keep the API unchanged.", { machine: "rosie", directory: "/tmp" })
-        yield* turn("a", "Kept it.", 5, { prompt: "Keep the API unchanged." })
-        yield* wait(11)
-        // Taken once it turned up: the same words again are the user's own, typed, and the turn is theirs to watch.
-        yield* turn("a", "Still kept.", 5, { prompt: "Keep the API unchanged." })
-        yield* turn("b", "Quick and watched.", 5)
-        // Given up on before it went: the user typing its words is their own doing too.
-        yield* expected("yapd:m2", "Drop the cache.", { machine: "rosie", directory: "/tmp" })
-        yield* retracted("yapd:m2")
-        yield* turn("c", "Dropped.", 5, { prompt: "Drop the cache." })
-        yield* wait(11)
-        return [...played]
-      }),
-    )
-    expect(result).toEqual(["yapd. Kept it."])
   })
 
   test("says what yapd has to say for itself in turn, questions first", async () => {

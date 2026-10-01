@@ -16,7 +16,6 @@ import * as Remote from "./Remote.ts"
 import * as Research from "./Research.ts"
 import * as Service from "./Service.ts"
 import * as T3Code from "./T3Code.ts"
-import * as T3CodeThreads from "./T3CodeThreads.ts"
 
 /**
  * What `yapd relay` sends through, on the machine the session runs on. The
@@ -47,25 +46,6 @@ const start = (machine: string | undefined) =>
 const catalog = (machine: string | undefined) =>
   Effect.gen(function* () {
     console.log(yield* Launcher.list(yield* launcher(machine)))
-  })
-
-/** The threads here, or on the machine that's named, as `launcher` picks it. */
-const threads = (machine: string | undefined) =>
-  Effect.gen(function* () {
-    const own = T3CodeThreads.threads(yield* Config.t3codeToken)
-    if (machine === undefined) return own
-    return Remote.threadsOn(yield* Config.remotes, hostname, own, undefined, Option.getOrUndefined(yield* Config.name))(machine)
-  })
-
-/** `yapd threads`, `yapd thread`, `yapd opening` and `yapd send`: each prints one JSON line, like `yapd start`. */
-const serving = (command: "threads" | "thread" | "opening" | "send", machine: string | undefined) =>
-  Effect.gen(function* () {
-    const own = yield* threads(machine)
-    if (command === "threads") return console.log(yield* Remote.serveThreads(own))
-    const input = yield* Effect.promise(() => Bun.stdin.text())
-    console.log(
-      yield* command === "thread" ? Remote.serveThread(own, input) : command === "opening" ? Remote.serveOpening(own, input) : Remote.serveSend(own, input),
-    )
   })
 
 /** What `yapd research` reads through a project with, on the machine the project is on. */
@@ -116,37 +96,16 @@ if ((command === "serve" || command === "install" || (command === "uninstall" &&
 } else if (command === "mind" && argument !== undefined) {
   // Not for the user to run: it's how a session yapd started is kept an eye on.
   runMain(Minder.mind(argument))
-} else if (
-  command === "relay" ||
-  command === "start" ||
-  command === "catalog" ||
-  command === "research" ||
-  command === "threads" ||
-  command === "thread" ||
-  command === "opening" ||
-  command === "send"
-) {
+} else if (command === "relay" || command === "start" || command === "catalog" || command === "research") {
   // Bun reads .env from where it starts, which for the daemon is the yapd folder, but SSH starts in the home directory.
   const folder = realpathSync(dirname(import.meta.dir))
   if (realpathSync(process.cwd()) !== folder) {
     const child = Bun.spawnSync([process.execPath, import.meta.path, ...process.argv.slice(2)], { cwd: folder, stdio: ["inherit", "inherit", "inherit"] })
     process.exit(child.exitCode ?? 1)
   }
-  runMain(
-    command === "relay"
-      ? relay
-      : command === "start"
-        ? start(argument)
-        : command === "catalog"
-          ? catalog(argument)
-          : command === "research"
-            ? research
-            : serving(command, argument),
-  )
+  runMain(command === "relay" ? relay : command === "start" ? start(argument) : command === "catalog" ? catalog(argument) : research)
 } else {
-  console.error(
-    "usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd research | yapd threads [machine] | yapd thread [machine] | yapd opening [machine] | yapd send [machine]",
-  )
+  console.error("usage: yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd research")
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)
 }

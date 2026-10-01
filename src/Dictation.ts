@@ -1,4 +1,4 @@
-import { Cause, Chunk, Clock, Context, Deferred, Effect, Either, Fiber, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
+import { Cause, Chunk, Context, Deferred, Effect, Either, Fiber, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -10,23 +10,15 @@ import { DictationTranscriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
 
-// Dictating to yapd, whether new work, a message for an agent or a question:
-// the user presses the shortcut, talks for as long as they like, pausing to
-// think, and presses it again to send. Updates wait meanwhile. It ends at what
-// they said; what's done with it is up to whoever listens.
-
-/** What the user said, once sent. */
-export interface Transcript {
-  readonly heard: string
-  /** When they pressed the shortcut to say it: what they'd heard by then is what they can point at. */
-  readonly startedAt: number
-}
+// Dictating new work: the user presses the shortcut, talks for as long as they
+// like, pausing to think, and presses it again to send. Updates wait meanwhile.
+// It ends at what they said; what's done with it is up to whoever listens.
 
 export class Dictation extends Context.Tag("yapd/Dictation")<
   Dictation,
   {
     /** What the user said, each time they send a dictation, in the order they said it. */
-    readonly transcripts: Stream.Stream<Transcript>
+    readonly transcripts: Stream.Stream<string>
   }
 >() {}
 
@@ -174,7 +166,7 @@ export const WhisperDictation = Layer.scoped(
     const voice = yield* Voice
     const device = Floor.use(yield* Floor.Floor, audio)
     const scope = yield* Effect.scope
-    const transcripts = yield* PubSub.unbounded<Transcript>()
+    const transcripts = yield* PubSub.unbounded<string>()
 
     const dir = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-dictation-"))),
@@ -286,7 +278,7 @@ export const WhisperDictation = Layer.scoped(
      * which a long one can be after a short one that followed it: what they
      * said is passed on in the order they said it, since one can build on another.
      */
-    const dictate = (ended: Deferred.Deferred<End>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>, startedAt: number) =>
+    const dictate = (ended: Deferred.Deferred<End>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
       Effect.gen(function* () {
         // While they talk, which is plenty of time.
         yield* Effect.forkIn(transcriber.prepare, scope)
@@ -319,7 +311,7 @@ export const WhisperDictation = Layer.scoped(
         }
         if (heard.right === "") return yield* say("I didn't catch anything.")
         if (before !== undefined) yield* Deferred.await(before)
-        yield* PubSub.publish(transcripts, { heard: heard.right, startedAt })
+        yield* PubSub.publish(transcripts, heard.right)
       }).pipe(
         Effect.ensuring(Deferred.succeed(done, undefined)),
         Effect.scoped,
@@ -336,14 +328,12 @@ export const WhisperDictation = Layer.scoped(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           if (event._tag === "Started") {
-            // The press itself: whatever was being read stops here, and what they go on to say is about what played before.
-            const startedAt = yield* Clock.currentTimeMillis
             const ended = yield* Deferred.make<End>()
             const done = yield* Deferred.make<void>()
             const before = last
             ending = ended
             last = done
-            return yield* Effect.forkIn(dictate(ended, before, done, startedAt), scope)
+            return yield* Effect.forkIn(dictate(ended, before, done), scope)
           }
           if (ending !== undefined) yield* Deferred.succeed(ending, event._tag)
           ending = undefined

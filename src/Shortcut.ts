@@ -1,6 +1,6 @@
 import { Context, Effect, Either, Option, PubSub, Stream } from "effect"
 
-// A global shortcut to talk to yapd about work: pressed once to start dictating,
+// A global shortcut to start new work by voice: pressed once to start dictating,
 // again to send, or Escape to cancel. The audio helper registers the keys with
 // macOS, which needs no permission, and reports presses; what they mean is
 // worked out here.
@@ -71,7 +71,7 @@ export const parse = (value: string): Either.Either<Option.Option<Keys>, string>
 export type Key = "shortcut" | "escape"
 
 export type Event =
-  /** The user pressed the shortcut to dictate something to yapd. */
+  /** The user pressed the shortcut to dictate new work. */
   | { readonly _tag: "Started" }
   /** They pressed it again, to send it. */
   | { readonly _tag: "Sent" }
@@ -130,8 +130,8 @@ export const make = (keys: Keys, send: (message: object) => void) =>
           if (ok === registered) return Effect.void
           registered = ok
           return ok
-            ? Effect.logInfo(`Press ${format(keys)} to talk to yapd about work`)
-            : Effect.logWarning(`Can't use ${format(keys)} to talk to yapd: ${message}. Pick another with YAPD_SHORTCUT.`)
+            ? Effect.logInfo(`Press ${format(keys)} to dictate new work`)
+            : Effect.logWarning(`Can't use ${format(keys)} to dictate new work: ${message}. Pick another with YAPD_SHORTCUT.`)
         }),
       pressed,
       /** The helper quit, letting go of Escape and whatever was being dictated. */

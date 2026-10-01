@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, Exit, Fiber, FiberMap, Option, STM, TRef } from "effect"
+import { Cause, Clock, Effect, FiberMap, Option, STM, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -15,46 +15,15 @@ import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
 import { RelayError, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
-import { canonical } from "./T3Code.ts"
 import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
-
-/** How long an update waits, at most, on which thread it came from. */
-const linking = "2 seconds"
-
-/** How long a message sent to a thread is expected to turn up as its prompt: a held one is tried again only just before. */
-const expecting = 30 * 60_000
-
-/** A T3 Code thread, as what's heard names it. */
-type Link = NonNullable<Recent.Heard["thread"]>
-
-/** Where a message went: the machine, as the user calls it, and the thread's directory there. */
-export interface Destination {
-  readonly machine: string
-  readonly directory: string
-}
-
-export interface Options {
-  /**
-   * The T3 Code thread an update came from, when it can be told, so that "tell
-   * that one to" can follow it. Asked alongside the summary, never for long,
-   * and an update goes out without a link sooner than wait on one.
-   */
-  readonly locate?: (thread: Thread) => Effect.Effect<Option.Option<Link>>
-  /**
-   * What the user calls the machine a hook came from, when it's one yapd
-   * reaches: this Mac unless the hook names another's hostname. Without it, no
-   * prompt is taken for a message the outbox sent.
-   */
-  readonly machine?: (origin: Origin) => Option.Option<string>
-}
 
 /**
  * Updates are condensed and rendered in parallel, then spoken one at a time,
  * along with what yapd has to say for itself.
  */
-export const make = (options: Options = {}) => Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const scope = yield* Effect.scope
   const condenser = yield* Condenser
   const voice = yield* Voice
@@ -76,36 +45,8 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   const activity = new Map<string, number>()
   const generations = new WeakMap<Conversation.Update, number>()
   let generation = 0
-  /** Each update's thread being looked up, kept for what's said about the update later. */
-  const links = new WeakMap<Conversation.Update, Fiber.RuntimeFiber<Option.Option<Link>>>()
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   const followed = new Map<string, { readonly message: string }>()
-  /**
-   * Messages sent to threads through the outbox, by what the outbox calls
-   * them, which reach the daemon only as the prompt their hooks report,
-   * without saying which session. The one whose prompt carries the text, on
-   * the machine and in the directory the message went to, is the one that got
-   * it, and its answer is wanted like a follow-up's, however quick the turn.
-   * The same words typed into a session elsewhere are the user's own. Each is
-   * kept for a while, since a message held for a busy thread is sent much
-   * later, and taken once it turns up. Every try at one message is the same
-   * entry: a message tried three times before it went mustn't leave two more
-   * waiting to be taken by the user's own prompts.
-   */
-  const expected = new Map<string, { readonly text: string; readonly to: Destination; readonly at: number }>()
-  /** A directory as the filesystem has it, the way T3 Code's own matching reads paths, so a symlinked checkout is one place however it's spelt. */
-  const resolved = (path: string) => Effect.promise(() => canonical(path))
-  /**
-   * Messages that have turned up, by key and when: a try after one went, its
-   * acknowledgement lost, would expect it again, and the user's own prompt
-   * with the same words would be taken for it. Kept as long as an expectation.
-   */
-  const taken = new Map<string, number>()
-  /** Lets go of what has waited too long to turn up as a prompt: it never will. */
-  const prune = (now: number) => {
-    for (const [key, { at }] of expected) if (now - at >= expecting) expected.delete(key)
-    for (const [key, at] of taken) if (now - at >= expecting) taken.delete(key)
-  }
   let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
@@ -119,25 +60,6 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       yield* STM.commit(TRef.update(inbox, (current) => Inbox.add(current, said)))
       yield* Effect.logInfo(`Ready: ${notice.spoken}`)
     }).pipe(Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)))
-
-  /** The T3 Code thread `thread` is, when it can be told. Never waited on for long: what's said goes out without a link sooner than wait on one. */
-  const locate = (thread: Thread) =>
-    (options.locate?.(thread) ?? Effect.succeed(Option.none<Link>())).pipe(
-      Effect.timeout(linking),
-      Effect.catchAllCause(() => Effect.succeed(Option.none<Link>())),
-    )
-
-  /**
-   * The thread `update` was found to be from as it was prepared. It's found by
-   * the message its turn ended on, and a follow-up since has taken the thread
-   * past that: only one that was never found is looked for now.
-   */
-  const linked = (update: Conversation.Update) =>
-    Effect.gen(function* () {
-      const link = links.get(update)
-      const found = link === undefined ? Option.none<Link>() : Exit.getOrElse(yield* Fiber.await(link), () => Option.none<Link>())
-      return Option.isSome(found) ? found : yield* locate(update.thread)
-    })
 
   const conversation = yield* Conversation.make({
     dir,
@@ -188,30 +110,16 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
         yield* release(answered.hook)
       }),
     late: (update, spoken, failed) =>
-      Effect.gen(function* () {
-        const id = `late:${crypto.randomUUID()}`
-        const said = introduce(update.project, spoken)
-        // How the follow-up went is about the thread it went to, like the update it answered: "tell it to" can follow it.
-        const located = yield* linked(update)
-        const at = yield* Clock.currentTimeMillis
-        recent = Recent.add(
-          recent,
-          {
-            id,
-            project: update.project,
-            ...(update.thread.origin.host === undefined ? {} : { host: update.thread.origin.host }),
-            directory: update.thread.cwd,
-            spoken: said,
-            message: update.turn.message,
-            ...(Option.isNone(located) ? {} : { thread: located.value }),
-            at,
-          },
+      Effect.flatMap(Clock.currentTimeMillis, (at) =>
+        tell({
+          id: `late:${crypto.randomUUID()}`,
+          priority: failed ? "needs-you" : "done",
+          spoken: introduce(update.project, spoken),
           at,
-        )
-        yield* tell({ id, priority: failed ? "needs-you" : "done", spoken: said, at, stale: Effect.succeed(false) })
-      }),
+          stale: Effect.succeed(false),
+        }),
+      ),
   })
-
 
   const fallback = (project: string): Summary => ({
     priority: "done",
@@ -229,9 +137,6 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     needsYou: boolean,
   ) =>
     Effect.gen(function* () {
-      // Looked up while the summary is written, which takes about as long. Whatever the lookup does, the
-      // update goes out: past its time, or failing, it just carries no thread. Interrupted with the rest if the session moves on.
-      const locating = yield* Effect.fork(locate(thread))
       const summary = yield* condenser.condense(project, turn).pipe(
         Effect.retry({ times: 1 }),
         Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),
@@ -245,36 +150,24 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       }
 
       const spoken = introduce(project, summary.spoken)
-      const id = crypto.randomUUID()
-      const audio = join(dir, `${id}${extension}`)
+      const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       generations.set(update, generation)
-      links.set(update, locating)
-      // Noted before it's queued, since it can be read out the moment it is.
-      const now = yield* Clock.currentTimeMillis
-      recent = Recent.add(
-        recent,
-        {
-          id,
-          project,
-          ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
-          directory: thread.cwd,
-          spoken,
-          message: turn.message,
-          at: arrivedAt,
-        },
-        now,
-      )
       yield* STM.commit(
         TRef.update(inbox, (current) =>
-          Inbox.add(current, { id, session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
+          Inbox.add(current, { session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
         ),
       )
+      recent = Recent.add(recent, {
+        project,
+        ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
+        directory: thread.cwd,
+        spoken,
+        message: turn.message,
+        at: arrivedAt,
+      })
       yield* Effect.logInfo(`Ready: ${spoken}`)
-      // Only this machine's threads are ever found: another machine's T3 Code isn't asked, so its updates carry no thread.
-      const located = yield* Fiber.join(locating)
-      if (Option.isSome(located)) recent = Recent.about(recent, id, located.value)
     }).pipe(
       workers.withPermits(1),
       Effect.catchAllCause((cause) =>
@@ -289,12 +182,6 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   /** Lets a waiting Stop hook go without a reply. */
   const release = (hook: Ticket | undefined) => (hook === undefined ? Effect.void : waiting.close(hook))
 
-  /** An entry that leaves the inbox without being read out leaves what the user was going to hear too. */
-  const forget = (entry: Inbox.Entry) =>
-    Effect.sync(() => {
-      recent = Recent.drop(recent, "update" in entry ? entry.id : entry.notice.id)
-    })
-
   /** Drops a session's pending update, whether it's still being prepared or already waiting. */
   const discard = (session: string) =>
     Effect.gen(function* () {
@@ -302,7 +189,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => [current.get(session), Inbox.remove(current, session)] as const),
       )
-      if (dropped !== undefined) yield* Effect.zipRight(removeFile(Inbox.audio(dropped)), forget(dropped))
+      if (dropped !== undefined) yield* removeFile(Inbox.audio(dropped))
       // Its hook, if one waits, won't be getting a reply.
       yield* waiting.drop(session)
     })
@@ -320,24 +207,9 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       switch (payload.hook_event_name) {
         case "UserPromptSubmit": {
           prompts.set(session, { text: payload.prompt, at: arrivedAt })
-          const prompt = squash(payload.prompt ?? "")
-          // A message the outbox sent, turning up as this session's prompt where it was sent: it's followed like one
-          // sent by voice. The same words from another machine or directory leave it expected, since they're the user's.
-          prune(arrivedAt)
-          if (expected.size > 0) {
-            const machine = Option.getOrUndefined(options.machine?.(origin) ?? Option.none())
-            const directory = yield* resolved(payload.cwd)
-            for (const [key, { text, to }] of expected) {
-              if (to.machine !== machine || to.directory !== directory || !prompt.includes(text)) continue
-              followed.set(session, { message: text })
-              expected.delete(key)
-              taken.set(key, arrivedAt)
-              break
-            }
-          }
           // Anything but the follow-up itself means the user took over.
           const sent = followed.get(session)
-          if (sent !== undefined && !prompt.includes(squash(sent.message))) followed.delete(session)
+          if (sent !== undefined && !squash(payload.prompt ?? "").includes(squash(sent.message))) followed.delete(session)
           return undefined
         }
         case "Stop": {
@@ -388,9 +260,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
   /**
    * Puts back what a dictation cut off, to be said again from the start: an
    * update unless the session has moved on or been answered since, even by a
-   * follow-up that's still on its way, and a notice unless it has been dealt
-   * with. What's put back stays among what was heard until it's read again,
-   * however much plays before its turn comes round.
+   * follow-up that's still on its way, and a notice unless it has been dealt with.
    */
   const keep = (ready: Inbox.Entry, dealtWith: boolean) =>
     Effect.gen(function* () {
@@ -401,11 +271,9 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
             (yield* conversation.sending(ready.session, ready.update))
           : dealtWith
       if (over) return false
-      const again = yield* STM.commit(
+      return yield* STM.commit(
         TRef.modify(inbox, (current) => (current.has(ready.session) ? [false, current] : [true, Inbox.add(current, ready)])),
       )
-      if (again) recent = Recent.keep(recent, "update" in ready ? ready.id : ready.notice.id)
-      return again
     })
 
   /** A hook is let go of once the follow-up on its way has reached it, or it would get none. */
@@ -414,16 +282,6 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       ? conversation.settled(ready.session).pipe(Effect.zipRight(release(ready.hook)), Effect.forkIn(scope), Effect.asVoid)
       : Effect.void
 
-  /**
-   * Counts what has started playing as heard, from its first word: a dictation
-   * over it can already point at it. Only once it has: what never starts, the
-   * user knows nothing of, and it's forgotten with its entry.
-   */
-  const heard = (id: string) =>
-    Effect.map(Clock.currentTimeMillis, (now) => {
-      recent = Recent.heard(recent, id, now)
-    })
-
   /** Says a notice. Only a question is listened to: whatever else they'd say to it has nowhere to go. */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>) =>
     Effect.gen(function* () {
@@ -431,13 +289,12 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
       if (yield* said.notice.stale) return yield* dealtWith
       if (question === undefined) {
         const playback = yield* audio.play(said.audio)
-        yield* heard(said.notice.id)
         yield* playback.finished
         return yield* dealtWith
       }
       const answer = (heard: string) =>
         question.answer(heard).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, started: heard(said.notice.id), answer })
+      const answered = yield* conversation.ask({ audio: said.audio, answer })
       if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))
     }).pipe(Effect.scoped)
 
@@ -461,7 +318,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     let dealtWith = false
     const reading =
       "update" in ready
-        ? conversation.converse(ready.update, heard(ready.id))
+        ? conversation.converse(ready.update)
         : say(
             ready,
             Effect.sync(() => {
@@ -484,8 +341,7 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
           ),
         ),
       ),
-      // Forgotten only if it never started playing: a stale notice, or an update whose session moved on.
-      Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : Effect.all([removeFile(Inbox.audio(ready)), letGo(ready), forget(ready)], { discard: true })))),
+      Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : Effect.zipRight(removeFile(Inbox.audio(ready)), letGo(ready))))),
       Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
     )
     yield* Effect.sleep("400 millis")
@@ -495,33 +351,12 @@ export const make = (options: Options = {}) => Effect.gen(function* () {
     handle,
     speak: Effect.forever(speakNext),
     tell,
-    /** What the user had heard by `at`, the latest first, as it stood then. What's still waiting to be read out isn't theirs to point at yet. */
-    recent: (at: number) => Effect.sync(() => Recent.heardBy(recent, at)),
-    /**
-     * Expects `text`, about to be sent to a thread at `to` as the message
-     * called `key`, to turn up as the prompt of a session there, whose answer
-     * is then wanted however quick. Said again before every try at the same
-     * message, which only renews the one expectation, and none once the
-     * message has turned up.
-     */
-    expect: (key: string, text: string, to: Destination) =>
-      Effect.gen(function* () {
-        const squashed = squash(text)
-        if (squashed === "") return
-        const now = yield* Clock.currentTimeMillis
-        prune(now)
-        if (taken.has(key)) return
-        expected.set(key, { text: squashed, to: { machine: to.machine, directory: yield* resolved(to.directory) }, at: now })
-      }).pipe(events.withPermits(1)),
-    /** Stops expecting the message called `key`: it won't be sent, so a prompt with its words is the user's own. */
-    retract: (key: string) =>
-      Effect.sync(() => {
-        expected.delete(key)
-      }).pipe(events.withPermits(1)),
-    /** Notes something yapd is about to say for itself, for the user to build on like they do on updates. Noted before it's told, since it counts once it plays. */
+    /** What the user was told lately, newest first. */
+    recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.since(recent, now)),
+    /** Notes something yapd did itself, for the user to build on like they do on updates. */
     note: (heard: Recent.Heard) =>
-      Effect.map(Clock.currentTimeMillis, (now) => {
-        recent = Recent.add(recent, heard, now)
+      Effect.sync(() => {
+        recent = Recent.add(recent, heard)
       }),
   }
 })

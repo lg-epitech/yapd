@@ -79,16 +79,3 @@ describe("Store", () => {
     expect(counts.count).toBe(0)
   })
 })
-
-
-test("Store upgrades existing outgoing messages without losing them", () => within(async path => {
-  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-    const store = yield* Store.make(path, Store.migrations.slice(0, 1))
-    yield* store.transaction(database => database.run("insert into messages (command_id, message_id, machine, thread, title, project, directory, text, state, created_at) values ('old', 'message', 'rig', 't1', 'Fix', 'yapd', '/repo', 'Keep API', 'held', '2026-09-30T00:00:00.000Z')"))
-  })))
-  const row = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-    const store = yield* Store.make(path)
-    return yield* store.transaction(database => database.query<{ text: string; state: string; reference: string | null }, []>("select text, state, reference from messages where command_id = 'old'").get())
-  })))
-  expect(row).toEqual({ text: "Keep API", state: "held", reference: null })
-}))
