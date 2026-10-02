@@ -47,6 +47,7 @@ const dictation = (
           Layer.succeed(Shortcut.Shortcut, {
             events: Stream.fromPubSub(events),
             cancel: Effect.sync(() => void cancelled++).pipe(Effect.zipRight(PubSub.publish(events, { _tag: "Cancelled" as const }))),
+            toggle: () => Effect.void,
           }),
           Layer.succeed(Audio, {
             play: (path) =>

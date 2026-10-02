@@ -73,4 +73,30 @@ describe("Shortcut", () => {
       { type: "escape", on: true },
     ])
   })
+
+  test("lets go of the keys while off, ending a dictation, and takes them again once on, even in a new helper", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sent: Array<object> = []
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message))
+        const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 2)))
+        yield* Effect.yieldNow()
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.service.toggle(false)
+        yield* shortcut.service.toggle(false)
+        yield* shortcut.greeted
+        yield* shortcut.service.toggle(true)
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
+        return { sent, events: [...events].map((event) => event._tag) }
+      }),
+    )
+    expect(result.events).toEqual(["Started", "Cancelled"])
+    expect(result.sent).toEqual([
+      { type: "escape", on: true },
+      { type: "shortcut" },
+      { type: "escape", on: false },
+      { type: "shortcut" },
+      { type: "shortcut", key: "space", modifiers: ["ctrl"] },
+    ])
+  })
 })

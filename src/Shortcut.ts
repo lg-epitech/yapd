@@ -96,11 +96,13 @@ export class Shortcut extends Context.Tag("yapd/Shortcut")<
     readonly events: Stream.Stream<Event>
     /** Ends a dictation from this side, like when it runs too long, as if the user pressed Escape. */
     readonly cancel: Effect.Effect<void>
+    /** Takes the keys, or lets them go and ends any dictation, so they work in other apps while yapd is off. */
+    readonly toggle: (on: boolean) => Effect.Effect<void>
   }
 >() {}
 
 /** When no shortcut is set, or nothing can take it. */
-export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.void }
+export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.void, toggle: () => Effect.void }
 
 /**
  * Keeps whether the user is dictating on this side, and has the helper take
@@ -112,6 +114,9 @@ export const make = (keys: Keys, send: (message: object) => void) =>
     const events = yield* PubSub.unbounded<Event>()
     let dictating = false
     let registered: boolean | undefined
+    let on = true
+    /** The shortcut, or no keys at all. */
+    const hold = () => send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
     const pressed = (key: Key) =>
       Effect.suspend(() => {
         const next = press(dictating, key)
@@ -120,10 +125,18 @@ export const make = (keys: Keys, send: (message: object) => void) =>
         return next.event === undefined ? Effect.void : Effect.asVoid(PubSub.publish(events, next.event))
       })
 
+    const toggle = (next: boolean) =>
+      Effect.suspend(() => {
+        if (next === on) return Effect.void
+        on = next
+        hold()
+        return on ? Effect.void : pressed("escape")
+      })
+
     return {
-      service: { events: Stream.fromPubSub(events), cancel: pressed("escape") } satisfies Shortcut["Type"],
+      service: { events: Stream.fromPubSub(events), cancel: pressed("escape"), toggle } satisfies Shortcut["Type"],
       /** A helper has just started. */
-      greeted: Effect.sync(() => send({ type: "shortcut", key: keys.key, modifiers: keys.modifiers })),
+      greeted: Effect.sync(hold),
       /** How registering went, logged when it changes, so a restarted helper doesn't say it again. */
       registered: (ok: boolean, message = "macOS turned it down") =>
         Effect.suspend(() => {

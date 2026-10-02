@@ -1,13 +1,38 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Exit, Scope } from "effect"
+import { Deferred, Effect, Exit, Scope, Stream, SubscriptionRef } from "effect"
 import * as Server from "./Server.ts"
 
 const payload = { hook_event_name: "Stop", session_id: "test", cwd: "/tmp", last_assistant_message: "Done." }
 
+const update = { id: "a1", project: "yapd", text: "yapd. The tests pass.", at: "2026-10-02T10:00:00.000Z" }
+
+/** An API that only handles hooks. */
+const hooks = (handle: Server.Handle): Server.Api => ({
+  handle,
+  state: Stream.succeed<Server.State>({ on: true, activity: "idle", updates: [] }),
+  turn: () => Effect.void,
+  replay: () => Effect.succeed("unknown"),
+})
+
+/** An API whose state is turned on and off for real, with one update to hear again. */
+const stateful = Effect.gen(function* () {
+  const ref = yield* SubscriptionRef.make<Server.State>({ on: true, activity: "idle", updates: [update] })
+  return {
+    ref,
+    api: {
+      handle: () => Effect.succeed(undefined),
+      state: ref.changes,
+      turn: (on) => SubscriptionRef.update(ref, (state) => ({ ...state, on })),
+      replay: (id) =>
+        Effect.map(SubscriptionRef.get(ref), (state) => (id !== update.id ? "unknown" : state.on ? "queued" : "off")),
+    } satisfies Server.Api,
+  }
+})
+
 describe("Server", () => {
   test("accepts valid events and rejects invalid payloads", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const server = yield* Server.serve(0, () => Effect.succeed("Follow up."))
+      const server = yield* Server.serve(0, hooks(() => Effect.succeed("Follow up.")))
       const url = `http://127.0.0.1:${server.port}`
       expect((yield* Effect.promise(() => fetch(`${url}/health`))).status).toBe(200)
       const reply = yield* Effect.promise(() => fetch(`${url}/events?agent=claude&wait=1`, {
@@ -24,13 +49,13 @@ describe("Server", () => {
       const started = await Effect.runPromise(Deferred.make<void>())
       const finish = await Effect.runPromise(Deferred.make<void>())
       let interrupted = false
-      const server = await Effect.runPromise(Server.serve(0, () =>
+      const server = await Effect.runPromise(Server.serve(0, hooks(() =>
         Deferred.succeed(started, undefined).pipe(
           Effect.zipRight(Deferred.await(finish)),
           Effect.onInterrupt(() => Effect.sync(() => { interrupted = true })),
           Effect.as(undefined),
         ),
-      ).pipe(Scope.extend(scope)))
+      )).pipe(Scope.extend(scope)))
       const request = fetch(`http://127.0.0.1:${server.port}/events?agent=claude${wait ? "&wait=1" : ""}`, {
         method: "POST", body: JSON.stringify(payload),
       }).catch(() => undefined)
@@ -46,4 +71,54 @@ describe("Server", () => {
       }
     })
   }
+
+  test("serves the state, turns yapd off and on, and replays an update only while it's on", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api } = yield* stateful
+      const server = yield* Server.serve(0, api)
+      const url = `http://127.0.0.1:${server.port}`
+      const call = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init))
+      const turn = (body: string) => call("/state", { method: "PUT", headers: { "content-type": "application/json" }, body })
+
+      expect(yield* Effect.promise(() => fetch(`${url}/state`).then((response) => response.json()))).toEqual({
+        on: true, activity: "idle", updates: [update],
+      })
+      expect((yield* call("/updates/a1/replay", { method: "POST" })).status).toBe(202)
+      expect((yield* call("/updates/zz/replay", { method: "POST" })).status).toBe(404)
+
+      const off = yield* turn('{"on": false}')
+      expect(off.status).toBe(200)
+      expect(yield* Effect.promise(() => off.json())).toMatchObject({ on: false })
+      expect((yield* call("/updates/a1/replay", { method: "POST" })).status).toBe(409)
+      expect((yield* turn('{"on": "no"}')).status).toBe(400)
+      expect((yield* turn("{")).status).toBe(400)
+      expect((yield* call("/nothing")).status).toBe(404)
+    })))
+  })
+
+  test("streams the state as it is, then each change", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { ref, api } = yield* stateful
+      const server = yield* Server.serve(0, api)
+      const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${server.port}/state/stream`))
+      expect(response.headers.get("content-type")).toBe("text/event-stream")
+      const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader()
+      const next = Effect.promise(() => reader.read()).pipe(Effect.map(({ value }) => JSON.parse(value!.replace(/^data: /, ""))))
+      expect(yield* next).toMatchObject({ on: true })
+      yield* SubscriptionRef.update(ref, (state) => ({ ...state, activity: "speaking" as const }))
+      expect(yield* next).toMatchObject({ on: true, activity: "speaking" })
+      yield* Effect.promise(() => reader.cancel())
+    })))
+  })
+
+  test("turns away requests addressed to another host, like a web page's DNS name pointing here", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api } = yield* stateful
+      const server = yield* Server.serve(0, api)
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${server.port}/state`, { headers: { host: `attacker.example:${server.port}` } }),
+      )
+      expect(response.status).toBe(403)
+    })))
+  })
 })

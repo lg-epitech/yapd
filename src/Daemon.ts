@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, FiberMap, Option, STM, TRef } from "effect"
+import { Cause, Clock, Effect, FiberMap, Option, STM, SubscriptionRef, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -18,6 +18,22 @@ import type { Handle } from "./Server.ts"
 import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
+
+/** An update the user heard, which they can hear again. */
+export interface HeardUpdate {
+  readonly id: string
+  readonly update: Conversation.Update
+}
+
+export interface State {
+  /** Off, yapd says nothing, and nothing that finishes meanwhile is said later. */
+  readonly on: boolean
+  /** Newest first. */
+  readonly heard: ReadonlyArray<HeardUpdate>
+}
+
+/** How many updates can be heard again. */
+const replayable = 5
 
 /**
  * Updates are condensed and rendered in parallel, then spoken one at a time,
@@ -50,6 +66,18 @@ export const make = Effect.gen(function* () {
   let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
+  /** The truth for what's said, and `state` what's shown of it. */
+  const on = yield* STM.commit(TRef.make(true))
+  const state = yield* SubscriptionRef.make<State>({ on: true, heard: [] })
+  const turning = yield* Effect.makeSemaphore(1)
+
+  /** Queues something to say, unless yapd is off, and returns whether it did. */
+  const enqueue = (entry: Inbox.Entry) =>
+    STM.commit(
+      STM.flatMap(TRef.get(on), (isOn) =>
+        isOn ? STM.as(TRef.update(inbox, (current) => Inbox.add(current, entry)), true) : STM.succeed(false),
+      ),
+    )
 
   /** Renders a notice and queues it. One that can't be rendered is only logged. */
   const tell = (notice: Inbox.Notice) =>
@@ -57,7 +85,10 @@ export const make = Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio }
-      yield* STM.commit(TRef.update(inbox, (current) => Inbox.add(current, said)))
+      if (!(yield* enqueue(said))) {
+        yield* removeFile(audio)
+        return yield* Effect.logInfo(`Not saying "${notice.spoken}", since yapd is off`)
+      }
       yield* Effect.logInfo(`Ready: ${notice.spoken}`)
     }).pipe(Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)))
 
@@ -154,11 +185,11 @@ export const make = Effect.gen(function* () {
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       generations.set(update, generation)
-      yield* STM.commit(
-        TRef.update(inbox, (current) =>
-          Inbox.add(current, { session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }),
-        ),
-      )
+      if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }))) {
+        yield* removeFile(audio)
+        yield* release(hook)
+        return yield* Effect.logInfo("Skipped update, since yapd is off")
+      }
       recent = Recent.add(recent, {
         project,
         ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
@@ -213,6 +244,11 @@ export const make = Effect.gen(function* () {
           return undefined
         }
         case "Stop": {
+          // Not kept for later, so a waiting hook is let go of at once.
+          if (!(yield* STM.commit(TRef.get(on)))) {
+            followed.delete(session)
+            return undefined
+          }
           const hook = wait ? yield* waiting.open(session) : undefined
           const message = payload.last_assistant_message?.trim()
           const followedUp = followed.delete(session)
@@ -246,9 +282,9 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((hook) => (hook === undefined ? Effect.succeed(undefined) : waiting.reply(hook))),
     )
 
-  /** Nothing is read while the user dictates. */
+  /** Nothing is read while the user dictates, or while yapd is off. */
   const takeNext = STM.gen(function* () {
-    if (yield* Floor.dictating(floor)) return yield* STM.retry
+    if (!(yield* TRef.get(on)) || (yield* Floor.dictating(floor))) return yield* STM.retry
     const current = yield* TRef.get(inbox)
     const ready = Inbox.next(current)
     if (ready === undefined) return yield* STM.retry
@@ -264,11 +300,12 @@ export const make = Effect.gen(function* () {
    */
   const keep = (ready: Inbox.Entry, dealtWith: boolean) =>
     Effect.gen(function* () {
+      // An update's own session, since one heard again waits under another key.
       const over =
         "update" in ready
-          ? activity.get(ready.session) !== generations.get(ready.update) ||
-            followed.has(ready.session) ||
-            (yield* conversation.sending(ready.session, ready.update))
+          ? activity.get(ready.update.session) !== generations.get(ready.update) ||
+            followed.has(ready.update.session) ||
+            (yield* conversation.sending(ready.update.session, ready.update))
           : dealtWith
       if (over) return false
       return yield* STM.commit(
@@ -302,6 +339,16 @@ export const make = Effect.gen(function* () {
     STM.flatMap(Floor.dictating(floor), (dictating) => (dictating ? STM.void : STM.retry)),
   )
 
+  const turnedOff = STM.commit(STM.flatMap(TRef.get(on), (isOn) => (isOn ? STM.retry : STM.void)))
+
+  /** Keeps an update the user is hearing, unless they're hearing it again. */
+  const hear = (update: Conversation.Update) =>
+    SubscriptionRef.update(state, (current) =>
+      current.heard.some((heard) => heard.update.session === update.session && heard.update.at === update.at)
+        ? current
+        : { ...current, heard: [{ id: crypto.randomUUID(), update }, ...current.heard].slice(0, replayable) },
+    )
+
   const speakNext = Effect.gen(function* () {
     const queued = yield* STM.commit(
       takeNext.pipe(
@@ -314,6 +361,7 @@ export const make = Effect.gen(function* () {
       onNone: () => Floor.use(floor, audio)(Effect.void).pipe(Effect.zipRight(STM.commit(takeNext))),
       onSome: Effect.succeed,
     })
+    if ("update" in ready) yield* hear(ready.update)
     let kept = false
     let dealtWith = false
     const reading =
@@ -341,15 +389,61 @@ export const make = Effect.gen(function* () {
           ),
         ),
       ),
+      // Stopped at once, and not kept for later.
+      Effect.raceFirst(turnedOff),
       Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : Effect.zipRight(removeFile(Inbox.audio(ready)), letGo(ready))))),
       Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
     )
     yield* Effect.sleep("400 millis")
   })
 
+  /** Off, what's being said stops, and what's waiting to be is dropped. */
+  const turn = (next: boolean) =>
+    Effect.gen(function* () {
+      if ((yield* STM.commit(TRef.get(on))) === next) return
+      const dropped = yield* STM.commit(
+        STM.zipRight(
+          TRef.set(on, next),
+          next ? STM.succeed([]) : TRef.modify(inbox, (current) => [[...current.values()], Inbox.empty] as const),
+        ),
+      )
+      // Their hooks are let go of as they stop.
+      if (!next) yield* FiberMap.clear(preparing)
+      for (const entry of dropped) {
+        yield* removeFile(Inbox.audio(entry))
+        if ("update" in entry) yield* release(entry.hook)
+      }
+      yield* SubscriptionRef.update(state, (current) => ({ ...current, on: next }))
+      yield* Effect.logInfo(next ? "Turned on" : "Turned off")
+    }).pipe(turning.withPermits(1))
+
+  /** Says an update the user heard again, as it was said, and listens for a reply like after any update. */
+  const replay = (id: string) =>
+    Effect.gen(function* () {
+      const found = (yield* SubscriptionRef.get(state)).heard.find((heard) => heard.id === id)
+      if (found === undefined) return "unknown" as const
+      if (!(yield* STM.commit(TRef.get(on)))) return "off" as const
+      const session = `replay:${id}`
+      if ((yield* STM.commit(TRef.get(inbox))).has(session)) return "queued" as const
+      const audio = join(dir, `${crypto.randomUUID()}${extension}`)
+      yield* voice.render(found.update.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      const update = { ...found.update, audio }
+      // So a reply to it is only sent if the session hasn't moved on since the update itself.
+      const generation = generations.get(found.update)
+      if (generation !== undefined) generations.set(update, generation)
+      const arrivedAt = yield* Clock.currentTimeMillis
+      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update })) return "queued" as const
+      yield* removeFile(audio)
+      return "off" as const
+    })
+
   return {
     handle,
     speak: Effect.forever(speakNext),
+    /** Whether yapd is on and what the user heard lately, then each time that changes. */
+    state: state.changes,
+    turn,
+    replay,
     tell,
     /** What the user was told lately, newest first. */
     recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.since(recent, now)),

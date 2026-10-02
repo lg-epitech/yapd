@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, TestClock, TestContext, TRef } from "effect"
+import { Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import { Audio } from "./Audio.ts"
 import { Waiting } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
@@ -165,7 +165,10 @@ const make = (says?: string, options: {
     return Deferred.succeed(done, undefined).pipe(Effect.zipRight(flush))
   })
   const reading = STM.commit(TRef.get(floor.reading))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush }
+  /** What the user heard lately, newest first, by id. */
+  const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
+  const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush, toggle, heard, replay: made.replay }
 })
 
 const daemon = make()
@@ -461,5 +464,71 @@ describe("Daemon", () => {
     expect(result.during).toEqual({ played: ["Which project is the loader fix for?"], asked: [] })
     expect(result.played).toEqual(["Which project is the loader fix for?", "Which project is the loader fix for?"])
     expect(result.asked).toEqual(["question unanswered"])
+  })
+
+  test("turned off, stops at once, drops what waits and lets its hooks go, and never says what finishes meanwhile", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, played, stopped, condensed, followUps } = yield* daemon
+        yield* finish("a", "The PR is ready.", true)
+        yield* finish("b", "The tests pass.", true)
+        yield* wait(1)
+        yield* toggle(false)
+        const letGo = [...followUps]
+        yield* finish("c", "Deployed it.", true)
+        yield* wait(30)
+        yield* toggle(true)
+        yield* wait(30)
+        return { played: [...played], stopped: [...stopped], condensed: condensed.map(({ message }) => message), letGo }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready."])
+    expect(result.stopped).toEqual(["yapd. The PR is ready."])
+    expect(result.letGo.toSorted()).toEqual(["claude:a let go", "claude:b let go"])
+    expect(result.condensed).toEqual(["The PR is ready.", "The tests pass."])
+  })
+
+  test("says an update again as it was said, only one it said and only while on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, played, condensed, heard, replay } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        yield* wait(11)
+        const [id] = yield* heard
+        const unknown = yield* replay("nope")
+        const queued = yield* replay(id!)
+        yield* wait(0)
+        yield* wait(11)
+        const after = yield* heard
+        yield* toggle(false)
+        const off = yield* replay(id!)
+        return { unknown, queued, off, after, id, played: [...played], condensed: condensed.length }
+      }),
+    )
+    expect(result).toMatchObject({ unknown: "unknown", queued: "queued", off: "off", after: [result.id], condensed: 1 })
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
+  })
+
+  test("sends no reply to an update heard again once its session has moved on", async () => {
+    let deliveries = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { handle, finish, speak, wait, nextEvent, nextPlayback, heard, replay } = yield* make("Merge it.", {
+          send: () => Effect.sync(() => { deliveries++ }),
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* wait(15)
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Different work." }, { project: "yapd" }, false)
+        const [id] = yield* heard
+        yield* replay(id!)
+        yield* nextPlayback
+        yield* speak
+        return yield* nextPlayback
+      }),
+    )
+    expect(deliveries).toBe(0)
+    expect(result).toBe("That session has moved on since, so I didn't send it.")
   })
 })

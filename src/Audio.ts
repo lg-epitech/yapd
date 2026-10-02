@@ -16,6 +16,8 @@ import {
   Runtime,
   Schema,
   type Scope,
+  Stream,
+  SubscriptionRef,
 } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -54,10 +56,39 @@ export class Audio extends Context.Tag("yapd/Audio")<
   }
 >() {}
 
-const afplay = (path: string) =>
+/** What the speaker and microphone are doing. The microphone is open while yapd speaks too, so that wins. */
+export type Doing = "idle" | "speaking" | "listening"
+
+export class Activity extends Context.Tag("yapd/Activity")<
+  Activity,
+  {
+    /** What they're doing, then each time it changes. */
+    readonly changes: Stream.Stream<Doing>
+  }
+>() {}
+
+/** Turns whether something plays and whether the microphone is open into what they're doing, for whoever watches. */
+const reporter = Effect.gen(function* () {
+  const ref = yield* SubscriptionRef.make<Doing>("idle")
+  const runSync = Runtime.runSync(yield* Effect.runtime<never>())
+  let last: Doing = "idle"
+  return {
+    activity: { changes: ref.changes } satisfies Activity["Type"],
+    report: (speaking: boolean, listening: boolean) => {
+      const doing = speaking ? "speaking" : listening ? "listening" : "idle"
+      if (doing === last) return
+      last = doing
+      runSync(SubscriptionRef.set(ref, doing))
+    },
+  }
+})
+
+/** Plays with afplay, counting each one as it starts and ends. */
+const afplay = (playing: (count: 1 | -1) => void) => (path: string) =>
   Effect.gen(function* () {
     const start = yield* Clock.currentTimeMillis
-    const fiber = yield* Effect.forkScoped(run(["afplay", path]))
+    playing(1)
+    const fiber = yield* Effect.forkScoped(run(["afplay", path]).pipe(Effect.ensuring(Effect.sync(() => playing(-1)))))
     return {
       duration: 0,
       finished: Fiber.join(fiber).pipe(
@@ -73,11 +104,21 @@ const afplay = (path: string) =>
   })
 
 /** Plays with afplay and never listens. */
-export const AfplayAudio = Layer.succeed(Audio, {
-  play: afplay,
-  microphone: Effect.succeed(Option.none()),
-  rest: Effect.void,
-})
+export const AfplayAudio = Layer.effectContext(
+  Effect.gen(function* () {
+    const { activity, report } = yield* reporter
+    let playing = 0
+    const audio: Audio["Type"] = {
+      play: afplay((count) => {
+        playing += count
+        report(playing > 0, false)
+      }),
+      microphone: Effect.succeed(Option.none()),
+      rest: Effect.void,
+    }
+    return Context.make(Audio, audio).pipe(Context.add(Activity, activity))
+  }),
+)
 
 const Event = Schema.Union(
   Schema.Struct({ type: Schema.Literal("hello", "permission"), permission: Schema.String }),
@@ -133,7 +174,7 @@ const permissionLog = (permission: string) => {
  */
 export const native = (
   launchHelper: (path: string) => Effect.Effect<unknown, Helper.HelperError>,
-  fallback: Audio["Type"]["play"] = afplay,
+  fallback?: Audio["Type"]["play"],
 ) =>
   Effect.gen(function* () {
     const dir = yield* Effect.acquireRelease(
@@ -163,6 +204,16 @@ export const native = (
     let closing = false
     /** What the socket hasn't taken yet; it's written out once it drains. */
     let unsent: Array<Uint8Array> = []
+    const { activity, report } = yield* reporter
+    let afplaying = 0
+    /** Called after anything that changes what plays or whether the microphone is open. */
+    const reportActivity = () => report(playingSince !== undefined || afplaying > 0, listening)
+    const fallbackPlay =
+      fallback ??
+      afplay((count) => {
+        afplaying += count
+        reportActivity()
+      })
 
     /** Detaches the old microphone immediately, and lets its listeners finish. */
     const endMicrophone = () => {
@@ -276,6 +327,7 @@ export const native = (
       if (current !== undefined) settle(current, new AudioError({ message: "The audio helper quit" }), 0)
       current = undefined
       if (shortcut !== undefined) runSync(shortcut.quit)
+      reportActivity()
       if (!closing) runFork(restart)
     }
 
@@ -294,6 +346,7 @@ export const native = (
               data: (socket, chunk) => {
                 if (socket !== connection) return
                 for (const message of socket.data.push(chunk)) receive(message)
+                reportActivity()
               },
               drain: (socket) => {
                 if (socket === connection) flush()
@@ -415,7 +468,7 @@ export const native = (
       play: (file, from = 0) =>
         play(file, from).pipe(
           Effect.catchAll((error) =>
-            Effect.logWarning("Playing with afplay, without listening", error).pipe(Effect.zipRight(fallback(file, from))),
+            Effect.logWarning("Playing with afplay, without listening", error).pipe(Effect.zipRight(fallbackPlay(file, from))),
           ),
         ),
       microphone: Effect.suspend(() =>
@@ -425,10 +478,15 @@ export const native = (
         send({ type: "rest" })
         // It stops whatever it's playing without saying so.
         quiet()
-        return endMicrophone()
+        const ended = endMicrophone()
+        reportActivity()
+        return ended
       }),
     }
-    return Context.make(Audio, audio).pipe(Context.add(Shortcut.Shortcut, shortcut?.service ?? Shortcut.none))
+    return Context.make(Audio, audio).pipe(
+      Context.add(Shortcut.Shortcut, shortcut?.service ?? Shortcut.none),
+      Context.add(Activity, activity),
+    )
   })
 
 /**
