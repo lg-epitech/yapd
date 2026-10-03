@@ -309,7 +309,7 @@ export const make = Effect.gen(function* () {
    * update unless the session has moved on or been answered since, even by a
    * follow-up that's still on its way, and a notice unless it has been dealt with.
    */
-  const keep = (ready: Inbox.Entry, dealtWith: boolean) =>
+  const keep = (ready: Inbox.Entry, dealtWith: boolean, turns: number) =>
     Effect.gen(function* () {
       // An update's own session, since one heard again waits under another key.
       const over =
@@ -319,8 +319,14 @@ export const make = Effect.gen(function* () {
             (yield* conversation.sending(ready.update.session, ready.update))
           : dealtWith
       if (over) return false
+      // Not if yapd was turned off meanwhile, which dropped everything waiting.
       return yield* STM.commit(
-        TRef.modify(inbox, (current) => (current.has(ready.session) ? [false, current] : [true, Inbox.add(current, ready)])),
+        STM.gen(function* () {
+          const current = yield* TRef.get(inbox)
+          if ((yield* TRef.get(power)).turns !== turns || current.has(ready.session)) return false
+          yield* TRef.set(inbox, Inbox.add(current, ready))
+          return true
+        }),
       )
     })
 
@@ -395,7 +401,7 @@ export const make = Effect.gen(function* () {
         Effect.zipRight(
           dictationStarted,
           Effect.map(
-            Effect.suspend(() => keep(ready, dealtWith)),
+            Effect.suspend(() => keep(ready, dealtWith, turns)),
             (again) => {
               kept = again
             },
@@ -435,6 +441,9 @@ export const make = Effect.gen(function* () {
       yield* Effect.logInfo(next ? "Turned on" : "Turned off")
     }).pipe(events.withPermits(1))
 
+  /** Updates being heard again that are still being rendered, so asking twice renders once. */
+  const replaying = new Set<string>()
+
   /** Says an update the user heard again, as it was said, and listens for a reply like after any update. */
   const replay = (id: string) =>
     Effect.gen(function* () {
@@ -443,7 +452,14 @@ export const make = Effect.gen(function* () {
       const { on, turns } = yield* switched
       if (!on) return "off" as const
       const session = `replay:${id}`
-      if ((yield* STM.commit(TRef.get(inbox))).has(session)) return "queued" as const
+      if ((yield* STM.commit(TRef.get(inbox))).has(session) || replaying.has(id)) return "queued" as const
+      replaying.add(id)
+      return yield* again(found, session, turns).pipe(Effect.ensuring(Effect.sync(() => replaying.delete(id))))
+    })
+
+  /** Renders an update heard before, and queues it. */
+  const again = (found: HeardUpdate, session: string, turns: number) =>
+    Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(found.update.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { ...found.update, audio }

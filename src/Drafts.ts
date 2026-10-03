@@ -51,6 +51,8 @@ interface Draft {
   open: boolean
   /** Dropped, like when yapd was turned off: it says nothing, and starts nothing unless it already was. */
   dropped: boolean
+  /** What's being done for it in the background, to stop when it's dropped. */
+  readonly jobs: Set<Fiber.RuntimeFiber<unknown, unknown>>
 }
 
 interface Resolved {
@@ -168,8 +170,13 @@ export const make = (options: {
       ),
     )
 
+    /** Nothing more is done for a draft once it's dropped. */
     const background = <A, E>(effect: Effect.Effect<A, E>, draft: Draft) =>
-      effect.pipe(
+      Effect.withFiberRuntime<A | void, E>((fiber) => {
+        if (draft.dropped) return Effect.void
+        draft.jobs.add(fiber)
+        return Effect.ensuring(effect, Effect.sync(() => draft.jobs.delete(fiber)))
+      }).pipe(
         Effect.catchAllCause((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not write the prompt", cause),
         ),
@@ -443,7 +450,10 @@ export const make = (options: {
           (draft) =>
             (draft.starting
               ? Effect.logInfo(`Starting without a word, since yapd was turned off: ${draft.heard}`)
-              : close(draft).pipe(Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)))
+              : Effect.forEach([...draft.jobs], Fiber.interrupt).pipe(
+                  Effect.zipRight(close(draft)),
+                  Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)),
+                )
             ).pipe(Effect.annotateLogs({ draft: draft.id })),
           { discard: true },
         )
@@ -463,6 +473,7 @@ export const make = (options: {
             starting: false,
             open: true,
             dropped: false,
+            jobs: new Set(),
           }
           drafts.set(draft.id, draft)
           yield* background(write(draft), draft)

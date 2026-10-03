@@ -96,7 +96,11 @@ export class Shortcut extends Context.Tag("yapd/Shortcut")<
     readonly events: Stream.Stream<Event>
     /** Ends a dictation from this side, like when it runs too long, as if the user pressed Escape. */
     readonly cancel: Effect.Effect<void>
-    /** Takes the keys, or lets them go and ends any dictation, so they work in other apps while yapd is off. */
+    /**
+     * Takes the keys, or lets them go, Escape too, so they work in other apps
+     * while yapd is off. Nothing pressed before reaches anyone after, not even
+     * if it was still on its way. A dictation going on is for Dictation to drop.
+     */
     readonly toggle: (on: boolean) => Effect.Effect<void>
   }
 >() {}
@@ -111,10 +115,13 @@ export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.voi
  */
 export const make = (keys: Keys, send: (message: object) => void) =>
   Effect.gen(function* () {
-    const events = yield* PubSub.unbounded<Event>()
+    /** Each with how many times the keys were taken or let go of before, so what's left over from before is dropped. */
+    const events = yield* PubSub.unbounded<{ readonly event: Event; readonly turns: number }>()
     let on = true
+    let turns = 0
     let dictating = false
     let registered: boolean | undefined
+    const publish = (event: Event) => Effect.asVoid(PubSub.publish(events, { event, turns }))
     /** The shortcut, or no keys at all. */
     const hold = () => send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
     const pressed = (key: Key) =>
@@ -124,19 +131,27 @@ export const make = (keys: Keys, send: (message: object) => void) =>
         const next = press(dictating, key)
         if (next.dictating !== dictating) send({ type: "escape", on: next.dictating })
         dictating = next.dictating
-        return next.event === undefined ? Effect.void : Effect.asVoid(PubSub.publish(events, next.event))
+        return next.event === undefined ? Effect.void : publish(next.event)
       })
 
     const toggle = (next: boolean) =>
-      Effect.suspend(() => {
-        if (next === on) return Effect.void
+      Effect.sync(() => {
+        if (next === on) return
         on = next
+        turns++
         hold()
-        return on ? Effect.void : pressed("escape")
+        if (dictating) send({ type: "escape", on: false })
+        dictating = false
       })
 
     return {
-      service: { events: Stream.fromPubSub(events), cancel: pressed("escape"), toggle } satisfies Shortcut["Type"],
+      service: {
+        events: Stream.fromPubSub(events).pipe(
+          Stream.filterMap((published) => (published.turns === turns ? Option.some(published.event) : Option.none())),
+        ),
+        cancel: pressed("escape"),
+        toggle,
+      } satisfies Shortcut["Type"],
       /** A helper has just started. */
       greeted: Effect.sync(hold),
       /** How registering went, logged when it changes, so a restarted helper doesn't say it again. */
@@ -153,7 +168,7 @@ export const make = (keys: Keys, send: (message: object) => void) =>
       quit: Effect.suspend(() => {
         if (!dictating) return Effect.void
         dictating = false
-        return Effect.asVoid(PubSub.publish(events, cancelled))
+        return publish(cancelled)
       }),
     }
   })

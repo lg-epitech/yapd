@@ -66,6 +66,8 @@ const drafts = (
     readonly rigDown?: boolean
     /** How long starting takes, which is at once unless said. */
     readonly startSeconds?: number
+    /** How long deciding takes, which is at once unless said. */
+    readonly decideSeconds?: number
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -110,11 +112,11 @@ const drafts = (
     }).pipe(
       Effect.provideService(Writer, {
         decide: (material) =>
-          Effect.suspend(() => {
+          Effect.sleep(`${options.decideSeconds ?? 0} seconds`).pipe(Effect.zipRight(Effect.suspend(() => {
             asked.push(material)
             const decided = decide(material)
             return decided === undefined ? Effect.fail(new WriteError({ cause: "The model is down" })) : Effect.succeed(decided)
-          }),
+          }))),
         research: (_, destination, researcher) =>
           researcher.research({ directory: destination.directory, prompt: destination.lookFor, schema: {} }).pipe(
             Effect.mapError((cause) => new WriteError({ cause })),
@@ -282,6 +284,21 @@ describe("Drafts", () => {
     expect(result.started.map(({ request }) => request.project)).toEqual(["/code/std"])
     expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?", "Started in std, on Fable, in a worktree."])
     expect(result.earlier).toEqual([])
+  })
+
+  test("stops writing up what's dropped, so it neither reads the project nor starts", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, wait, drop, started, researched, spoken } = yield* drafts(() => decision({ action: "research" }), {
+          decideSeconds: 5,
+        })
+        yield* dictate("Fix the loader like we did the parser.")
+        yield* drop
+        yield* wait(5)
+        return { started, researched, spoken: spoken() }
+      }),
+    )
+    expect(result).toEqual({ started: [], researched: [], spoken: [] })
   })
 
   test("still starts what was being started when dropped, without a word", async () => {

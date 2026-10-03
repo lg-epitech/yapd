@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Exit, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import { Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import { Audio } from "./Audio.ts"
 import { Waiting } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
@@ -173,7 +173,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush, toggle, power: made.turn, heard, replay: made.replay }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay }
 })
 
 const daemon = make()
@@ -551,6 +551,26 @@ describe("Daemon", () => {
     )
     expect(result.played).toEqual(["yapd. The PR is ready."])
     expect(result.stopped).toEqual(["yapd. The PR is ready."])
+  })
+
+  test("renders an update heard again once, however many times it's asked for meanwhile", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, played, heard, replay, renders } = yield* make(undefined, { renderSeconds: 1 })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(1)
+        yield* wait(11)
+        const [id] = yield* heard
+        const asked = yield* Effect.fork(Effect.all([replay(id!), replay(id!)], { concurrency: "unbounded" }))
+        yield* wait(1)
+        const answers = yield* Fiber.join(asked)
+        yield* wait(30)
+        return { answers, played: [...played], renders: renders() }
+      }),
+    )
+    expect(result.answers).toEqual(["queued", "queued"])
+    expect(result.renders).toBe(2)
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
   })
 
   test("says nothing that was being prepared when it was turned off, even once it's on again", async () => {
