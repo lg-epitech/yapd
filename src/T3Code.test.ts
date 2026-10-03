@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import { ConfigProvider, Effect } from "effect"
+import type { Thread } from "./Relay.ts"
 import * as T3Code from "./T3Code.ts"
 
 const thread = (overrides: Partial<T3Code.ShellThread> = {}): T3Code.ShellThread => ({
@@ -20,6 +22,11 @@ const shell = (threads: ReadonlyArray<T3Code.ShellThread>): T3Code.Shell => ({
 })
 
 const same = (path: string) => path
+
+const update: Thread = { agent: "codex", session: "provider-1", cwd: "/repo", message: "Fixed the loader.", origin: {} }
+const makeRelay = () => Effect.runPromise(T3Code.make(Effect.succeed({ origin: "http://t3.invalid" })).pipe(
+  Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_T3CODE_TOKEN", "test-token"]]))),
+))
 
 describe("T3Code", () => {
   test("finds threads by worktree, or by project when there's none", () => {
@@ -75,5 +82,75 @@ describe("T3Code", () => {
       interactionMode: "plan",
     })
     expect(command).not.toHaveProperty("modelSelection")
+  })
+})
+
+describe("T3Code follow-ups", () => {
+  const original = { role: "user", text: "Fix the loader" }
+  const clarification = { role: "user", text: "Include the streaming case" }
+  const reply = { role: "assistant", text: update.message }
+
+  test("finds the completed reply behind a pending steering message", async () => {
+    const sent: Array<unknown> = []
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === "/api/orchestration/shell") {
+        return Response.json(shell([thread({ latestTurn: { state: "pending" } })]))
+      }
+      if (url.pathname === "/api/orchestration/threads/thread-1") {
+        // T3's user-anchored window omits the provider turn's reply when it
+        // includes only the pending turn created by a message sent mid-turn.
+        return Response.json({ thread: { messages: url.searchParams.get("turnLimit") === "1"
+          ? [clarification] : [original, clarification, reply] } })
+      }
+      if (url.pathname === "/api/orchestration/dispatch") {
+        sent.push(JSON.parse(String(init?.body)))
+        return Response.json({})
+      }
+      throw new Error(`Unexpected request: ${url.pathname}`)
+    }, { preconnect: globalThis.fetch.preconnect }))
+    try {
+      await Effect.runPromise((await makeRelay()).send(update, "Please commit it."))
+      expect(sent).toEqual([expect.objectContaining({
+        threadId: "thread-1", message: expect.objectContaining({ role: "user", text: "Please commit it." }),
+      })])
+    } finally { fetch.mockRestore() }
+  })
+
+  test("doesn't send to an older reply when the user has moved on", async () => {
+    const paths: Array<string> = []
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      const path = new URL(String(input)).pathname
+      paths.push(path)
+      if (path === "/api/orchestration/shell") return Response.json(shell([thread()]))
+      if (path === "/api/orchestration/threads/thread-1") {
+        return Response.json({ thread: { messages: [original, reply, clarification] } })
+      }
+      throw new Error(`Unexpected request: ${path}`)
+    }, { preconnect: globalThis.fetch.preconnect }))
+    try {
+      expect(await Effect.runPromise(Effect.flip((await makeRelay()).send(update, "Please commit it."))))
+        .toMatchObject({ _tag: "Unreachable" })
+      expect(paths).not.toContain("/api/orchestration/dispatch")
+    } finally { fetch.mockRestore() }
+  })
+
+  test("doesn't confuse a thread's older matching reply with another thread's latest reply", async () => {
+    const sent: Array<{ threadId: string }> = []
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === "/api/orchestration/shell") return Response.json(shell([thread(), thread({ id: "thread-2" })]))
+      if (path === "/api/orchestration/threads/thread-1") return Response.json({ thread: { messages: [original, reply, clarification] } })
+      if (path === "/api/orchestration/threads/thread-2") return Response.json({ thread: { messages: [original, clarification, reply] } })
+      if (path === "/api/orchestration/dispatch") {
+        sent.push(JSON.parse(String(init?.body)))
+        return Response.json({})
+      }
+      throw new Error(`Unexpected request: ${path}`)
+    }, { preconnect: globalThis.fetch.preconnect }))
+    try {
+      await Effect.runPromise((await makeRelay()).send(update, "Please commit it."))
+      expect(sent.map(({ threadId }) => threadId)).toEqual(["thread-2"])
+    } finally { fetch.mockRestore() }
   })
 })

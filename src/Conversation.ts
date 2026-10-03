@@ -358,7 +358,7 @@ export const make = (options: {
           Effect.zipRight(onSent),
           Effect.as(reply.spoken || "Sent."),
           Effect.catchAll((error) =>
-            Effect.logWarning("Could not send the follow-up", error).pipe(
+            Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
               Effect.tap(() => {
                 failed = true
               }),
