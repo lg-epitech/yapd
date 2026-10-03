@@ -17,7 +17,7 @@ bun add -g @lg-epitech/yapd
 yapd setup
 ```
 
-This adds yapd's hooks to Claude Code and Codex, whichever you have, next to any of your own, and keeps each file as it was beside it, ending in `.before-yapd`. Codex asks you to accept its hooks on your next session. Claude Code's Stop hook runs in the background and waits while yapd reads the update, so it can hand the session [your reply](#where-follow-ups-go).
+This adds yapd's hooks to Claude Code and Codex, whichever you have, next to any of your own, and keeps each file as it was beside it, ending in `.before-yapd`. Codex asks you to accept its hooks on your next session. Claude Code's Stop hook runs in the background and waits while yapd reads the update, and after, until the session does something else or nine minutes have passed, so it can hand the session [your reply](#where-follow-ups-go), even to an update you [hear again](#menu-bar).
 
 Then it runs yapd in the background with launchd, starts it at login and restarts it if it stops. Logs go to `~/Library/Logs/yapd.log`. It keeps the `PATH` of the shell you set it up from, so run `yapd install` after changing your settings or moving a CLI. `yapd uninstall` stops it. To run it in the foreground instead, uninstall it and use `yapd serve`.
 
@@ -35,6 +35,24 @@ yapd install
 ```
 
 To run it from a clone instead, `bun install` and `bun link` in it, then `yapd setup`. The hooks and the service then run the clone. A `.env` or `preferences.md` in the clone moves to `~/.yapd` the first time yapd runs.
+
+## Menu bar
+
+The menu bar app turns yapd off and on, and shows what it's doing without opening the menu. Take `yapd-menu-bar-<version>.zip` from the [latest release](https://github.com/lg-epitech/yapd/releases/latest) and move `yapd.app` into Applications. It isn't notarized, so macOS blocks it the first time you open it: choose Open Anyway in System Settings, Privacy & Security. From then on it opens at login, which System Settings, General, Login Items can stop.
+
+From a clone, `bun run app` builds it with Xcode into `~/Applications` and opens it instead. If `xcodebuild` says it needs Xcode, point the command line tools at it with `sudo xcode-select -s /Applications/Xcode.app`.
+
+| Icon | |
+| --- | --- |
+| Speech bubble with a y | On, and quiet |
+| Speaker | Speaking |
+| Microphone | Listening, for your reply or while you dictate |
+| Speech bubble with a y, struck through | Off |
+| Speech bubble with an exclamation mark | yapd isn't running |
+
+Off, yapd says nothing, never opens the microphone and lets go of the shortcut. Turning it off drops whatever hasn't started yet: what it was about to say, a dictation, and new work it was still writing up or asking you about. Updates that finish meanwhile aren't said later, and it stays off when it restarts, until you turn it on again. The menu also has the last few updates, to hear one again and reply to it.
+
+The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux too.
 
 ## Interrupting
 

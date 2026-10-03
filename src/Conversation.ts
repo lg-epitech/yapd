@@ -1,4 +1,4 @@
-import { Clock, Deferred, type Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
+import { Clock, type Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, type Playback } from "./Audio.ts"
@@ -341,8 +341,8 @@ export const make = (options: {
         }
       })
 
-    /** Follow-ups on their way, each attached to the update it answers. */
-    const sending = new Map<Update, Deferred.Deferred<void>>()
+    /** Follow-ups on their way, each attached to the update it answers, with its own mark, so one ending doesn't clear a later one. */
+    const sending = new Map<Update, object>()
 
     /**
      * Sends a follow-up and returns what to say about it. Once the user has said
@@ -352,8 +352,8 @@ export const make = (options: {
     const pass = (update: Update, reply: Reply, again: boolean, onSent: Effect.Effect<void>) =>
       Effect.gen(function* () {
         let failed = false
-        const done = yield* Deferred.make<void>()
-        sending.set(update, done)
+        const mark = {}
+        sending.set(update, mark)
         const fiber = yield* follow(update, reply.message, again).pipe(
           Effect.zipRight(onSent),
           Effect.as(reply.spoken || "Sent."),
@@ -366,9 +366,8 @@ export const make = (options: {
             ),
           ),
           Effect.ensuring(
-            Effect.suspend(() => {
-              if (sending.get(update) === done) sending.delete(update)
-              return Deferred.succeed(done, undefined)
+            Effect.sync(() => {
+              if (sending.get(update) === mark) sending.delete(update)
             }),
           ),
           Effect.annotateLogs({ project: update.project }),
@@ -513,12 +512,5 @@ export const make = (options: {
       sending: (session: string, update?: Update) => Effect.sync(() =>
         update === undefined ? [...sending.keys()].some((update) => update.session === session) : sending.has(update),
       ),
-      /** Waits for all follow-ups to the session that are on their way, if any. */
-      settled: (session: string) =>
-        Effect.suspend(() => Effect.forEach(
-          [...sending].filter(([update]) => update.session === session),
-          ([, done]) => Deferred.await(done),
-          { concurrency: "unbounded", discard: true },
-        )),
     }
   })

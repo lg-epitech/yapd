@@ -1,11 +1,54 @@
 name: Release
 
+# Every merge to master updates a release PR with the next version and its
+# changelog. Merging that PR tags the version, makes the GitHub Release, and
+# then publishes it: the menu bar app goes on the release, and the CLI to npm.
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
+
+permissions: {}
 
 jobs:
-  publish:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  app:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.release-please.outputs.tag }}
+      ZIP: yapd-menu-bar-${{ needs.release-please.outputs.version }}.zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - run: xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet install DSTROOT="$RUNNER_TEMP/root"
+      # ditto keeps the app's signature and attributes, which zip alone doesn't.
+      - run: ditto -c -k --keepParent "$RUNNER_TEMP/root/Applications/yapd.app" "$ZIP"
+      - run: gh release upload "$TAG" "$ZIP"
+
+  npm:
+    needs: release-please
+    # Off until the first version is on npm and this workflow is its trusted publisher.
+    if: needs.release-please.outputs.created == 'true' && vars.NPM_PUBLISH == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -13,6 +56,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run check
@@ -23,6 +68,4 @@ jobs:
           registry-url: https://registry.npmjs.org
       # Trusted publishing needs npm 11.5.1 or later.
       - run: npm install -g npm@latest
-      - name: Check the tag is the package's version
-        run: test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
       - run: npm publish --provenance

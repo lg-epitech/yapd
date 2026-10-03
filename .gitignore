@@ -1,3 +1,5 @@
 node_modules/
 .env
 preferences.md
+app/build/
+xcuserdata/

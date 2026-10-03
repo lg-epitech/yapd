@@ -11,6 +11,14 @@ export interface Ready {
   readonly update: Update
   /** The session's Stop hook, waiting in case the user replies to this update. */
   readonly hook?: Ticket
+  /** For an update heard again, how it was asked for. */
+  readonly replay?: Replay
+}
+
+/** An update asked for again, by its id among those heard, while yapd was on for the `turns`th time. */
+export interface Replay {
+  readonly id: string
+  readonly turns: number
 }
 
 /**

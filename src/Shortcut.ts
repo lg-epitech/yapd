@@ -96,37 +96,80 @@ export class Shortcut extends Context.Tag("yapd/Shortcut")<
     readonly events: Stream.Stream<Event>
     /** Ends a dictation from this side, like when it runs too long, as if the user pressed Escape. */
     readonly cancel: Effect.Effect<void>
+    /**
+     * Takes the keys, or lets them go, Escape too, so they work in other apps
+     * while yapd is off. Nothing pressed before reaches anyone after, not even
+     * if it was still on its way. A dictation going on is for Dictation to drop.
+     */
+    readonly toggle: (on: boolean) => Effect.Effect<void>
   }
 >() {}
 
 /** When no shortcut is set, or nothing can take it. */
-export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.void }
+export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.void, toggle: () => Effect.void }
 
 /**
  * Keeps whether the user is dictating on this side, and has the helper take
  * Escape only while they are, since a registered key is kept from every other
- * app. The helper holds no keys when it starts, so each one is told the shortcut.
+ * app. The helper holds no keys when it starts, so each one is told the shortcut,
+ * once it's `on`.
  */
-export const make = (keys: Keys, send: (message: object) => void) =>
+export const make = (keys: Keys, send: (message: object) => void, initially: boolean) =>
   Effect.gen(function* () {
-    const events = yield* PubSub.unbounded<Event>()
+    /** Each with how many times the keys were taken or let go of before, so what's left over from before is dropped. */
+    const events = yield* PubSub.unbounded<{ readonly event: Event; readonly turns: number }>()
+    let on = initially
+    let turns = 0
     let dictating = false
     let registered: boolean | undefined
-    const pressed = (key: Key) =>
+    /** Registrations the helper hasn't said how they went yet. It says so for each, in order with the presses. */
+    let unanswered = 0
+    const publish = (event: Event) => Effect.asVoid(PubSub.publish(events, { event, turns }))
+    /** The shortcut, or no keys at all. */
+    const hold = () => {
+      if (on) unanswered++
+      send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
+    }
+    const step = (key: Key) =>
       Effect.suspend(() => {
         const next = press(dictating, key)
         if (next.dictating !== dictating) send({ type: "escape", on: next.dictating })
         dictating = next.dictating
-        return next.event === undefined ? Effect.void : Effect.asVoid(PubSub.publish(events, next.event))
+        return next.event === undefined ? Effect.void : publish(next.event)
+      })
+    /**
+     * From the helper, only while it holds the keys as last asked, so a press
+     * still on its way from before they were let go of and taken again does nothing.
+     */
+    const pressed = (key: Key) => Effect.suspend(() => (on && unanswered === 0 ? step(key) : Effect.void))
+
+    const toggle = (next: boolean) =>
+      Effect.sync(() => {
+        if (next === on) return
+        on = next
+        turns++
+        hold()
+        if (dictating) send({ type: "escape", on: false })
+        dictating = false
       })
 
     return {
-      service: { events: Stream.fromPubSub(events), cancel: pressed("escape") } satisfies Shortcut["Type"],
-      /** A helper has just started. */
-      greeted: Effect.sync(() => send({ type: "shortcut", key: keys.key, modifiers: keys.modifiers })),
+      service: {
+        events: Stream.fromPubSub(events).pipe(
+          Stream.filterMap((published) => (published.turns === turns ? Option.some(published.event) : Option.none())),
+        ),
+        cancel: step("escape"),
+        toggle,
+      } satisfies Shortcut["Type"],
+      /** A helper has just started, holding no keys and with nothing on its way. */
+      greeted: Effect.sync(() => {
+        unanswered = 0
+        hold()
+      }),
       /** How registering went, logged when it changes, so a restarted helper doesn't say it again. */
       registered: (ok: boolean, message = "macOS turned it down") =>
         Effect.suspend(() => {
+          unanswered = Math.max(0, unanswered - 1)
           if (ok === registered) return Effect.void
           registered = ok
           return ok
@@ -138,7 +181,7 @@ export const make = (keys: Keys, send: (message: object) => void) =>
       quit: Effect.suspend(() => {
         if (!dictating) return Effect.void
         dictating = false
-        return Effect.asVoid(PubSub.publish(events, cancelled))
+        return publish(cancelled)
       }),
     }
   })

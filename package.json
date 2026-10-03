@@ -34,7 +34,8 @@
   "scripts": {
     "start": "bun src/main.ts serve",
     "check": "tsc",
-    "test": "bun test"
+    "test": "bun test",
+    "app": "xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet install DSTROOT=\"$HOME\" && (pkill -x yapd && sleep 1 || true) && open \"$HOME/Applications/yapd.app\""
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
