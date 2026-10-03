@@ -57,6 +57,8 @@ bun run app
 
 That puts it in `~/Applications` and opens it, and from then on it opens at login, which System Settings, General, Login Items can stop. If `xcodebuild` says it needs Xcode, point the command line tools at it with `sudo xcode-select -s /Applications/Xcode.app`.
 
+Without Xcode, take `yapd-menu-bar-<version>.zip` from the [latest release](https://github.com/lg-epitech/yapd/releases/latest) and move `yapd.app` into Applications. It isn't notarized, so macOS blocks it the first time you open it: choose Open Anyway in System Settings, Privacy & Security.
+
 | Icon | |
 | --- | --- |
 | Speech bubble with a y | On, and quiet |

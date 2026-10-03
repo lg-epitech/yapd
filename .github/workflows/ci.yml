@@ -14,3 +14,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun test
+
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet build
