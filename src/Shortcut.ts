@@ -122,18 +122,26 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
     let turns = 0
     let dictating = false
     let registered: boolean | undefined
+    /** Registrations the helper hasn't said how they went yet. It says so for each, in order with the presses. */
+    let unanswered = 0
     const publish = (event: Event) => Effect.asVoid(PubSub.publish(events, { event, turns }))
     /** The shortcut, or no keys at all. */
-    const hold = () => send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
-    const pressed = (key: Key) =>
+    const hold = () => {
+      if (on) unanswered++
+      send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
+    }
+    const step = (key: Key) =>
       Effect.suspend(() => {
-        // A press already on its way as the keys were let go of starts nothing.
-        if (!on && key === "shortcut") return Effect.void
         const next = press(dictating, key)
         if (next.dictating !== dictating) send({ type: "escape", on: next.dictating })
         dictating = next.dictating
         return next.event === undefined ? Effect.void : publish(next.event)
       })
+    /**
+     * From the helper, only while it holds the keys as last asked, so a press
+     * still on its way from before they were let go of and taken again does nothing.
+     */
+    const pressed = (key: Key) => Effect.suspend(() => (on && unanswered === 0 ? step(key) : Effect.void))
 
     const toggle = (next: boolean) =>
       Effect.sync(() => {
@@ -150,14 +158,18 @@ export const make = (keys: Keys, send: (message: object) => void, initially: boo
         events: Stream.fromPubSub(events).pipe(
           Stream.filterMap((published) => (published.turns === turns ? Option.some(published.event) : Option.none())),
         ),
-        cancel: pressed("escape"),
+        cancel: step("escape"),
         toggle,
       } satisfies Shortcut["Type"],
-      /** A helper has just started. */
-      greeted: Effect.sync(hold),
+      /** A helper has just started, holding no keys and with nothing on its way. */
+      greeted: Effect.sync(() => {
+        unanswered = 0
+        hold()
+      }),
       /** How registering went, logged when it changes, so a restarted helper doesn't say it again. */
       registered: (ok: boolean, message = "macOS turned it down") =>
         Effect.suspend(() => {
+          unanswered = Math.max(0, unanswered - 1)
           if (ok === registered) return Effect.void
           registered = ok
           return ok

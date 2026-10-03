@@ -302,7 +302,8 @@ export const native = (
           runFork(Effect.logWarning(`Audio helper: ${event.value.message}`))
           return
         case "shortcut":
-          if (shortcut !== undefined) runFork(shortcut.registered(event.value.registered, event.value.message))
+          // In order with the presses that follow, which only count once it's said.
+          if (shortcut !== undefined) runSync(shortcut.registered(event.value.registered, event.value.message))
           return
         case "pressed":
           if (shortcut !== undefined) runSync(shortcut.pressed(event.value.key))

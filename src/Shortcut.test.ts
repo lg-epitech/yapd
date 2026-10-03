@@ -14,6 +14,7 @@ const drive = (presses: ReadonlyArray<Shortcut.Key | "quit">, expected: number) 
     // Lets the stream subscribe before anything is pressed.
     yield* Effect.yieldNow()
     yield* shortcut.greeted
+    yield* shortcut.registered(true)
     for (const press of presses) yield* press === "quit" ? shortcut.quit : shortcut.pressed(press)
     const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
     return { sent, events: [...events].map((event) => event._tag) }
@@ -89,6 +90,10 @@ describe("Shortcut", () => {
         yield* shortcut.pressed("shortcut")
         yield* shortcut.greeted
         yield* shortcut.service.toggle(true)
+        // Still on its way from before, as the helper hasn't said it holds the keys again yet.
+        yield* shortcut.pressed("escape")
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.registered(true)
         yield* shortcut.pressed("shortcut")
         yield* shortcut.pressed("shortcut")
         const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
@@ -117,6 +122,7 @@ describe("Shortcut", () => {
         yield* shortcut.greeted
         yield* shortcut.pressed("shortcut")
         yield* shortcut.service.toggle(true)
+        yield* shortcut.registered(true)
         yield* shortcut.pressed("shortcut")
         yield* shortcut.pressed("shortcut")
         const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
@@ -130,5 +136,27 @@ describe("Shortcut", () => {
       { type: "escape", on: true },
       { type: "escape", on: false },
     ])
+  })
+
+  test("counts on each registration being answered, so an answer from before doesn't let presses from before through", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, () => {}, true)
+        const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 2)))
+        yield* Effect.yieldNow()
+        yield* shortcut.greeted
+        yield* shortcut.service.toggle(false)
+        yield* shortcut.service.toggle(true)
+        // The answer to the first registration, then a press from before the keys were let go of.
+        yield* shortcut.registered(true)
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.registered(true)
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.pressed("escape")
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
+        return [...events].map((event) => event._tag)
+      }),
+    )
+    expect(result).toEqual(["Started", "Cancelled"])
   })
 })
