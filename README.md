@@ -13,51 +13,34 @@ With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis.
 ## Setup
 
 ```sh
-bun install
-bun src/main.ts install
+bun add -g @launatic/yapd
+yapd setup
 ```
 
-This runs yapd in the background with launchd, starts it at login and restarts it if it stops. Logs go to `~/Library/Logs/yapd.log`. It keeps the `PATH` of the shell you install from, so run it again after changing `.env` or moving a CLI. `bun src/main.ts uninstall` removes it. To run it in the foreground instead, uninstall it and use `bun start`.
+This adds yapd's hooks to Claude Code and Codex, whichever you have, next to any of your own, and keeps each file as it was beside it, ending in `.before-yapd`. Codex asks you to accept its hooks on your next session. Claude Code's Stop hook runs in the background and waits while yapd reads the update, and after, until the session does something else or nine minutes have passed, so it can hand the session [your reply](#where-follow-ups-go), even to an update you [hear again](#menu-bar).
 
-Then add the hook to `~/.claude/settings.json`:
+Then it runs yapd in the background with launchd, starts it at login and restarts it if it stops. Logs go to `~/Library/Logs/yapd.log`. It keeps the `PATH` of the shell you set it up from, so run `yapd install` after changing your settings or moving a CLI. `yapd uninstall` stops it. To run it in the foreground instead, uninstall it and use `yapd serve`.
 
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bun /path/to/yapd/src/main.ts hook claude --wait",
-            "async": true,
-            "asyncRewake": true
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "bun /path/to/yapd/src/main.ts hook claude" }] }]
-  }
-}
-```
+Last, it runs `yapd doctor`, which checks all of that and says how to fix what's missing. Run it whenever yapd seems off.
 
-The Stop hook runs in the background and waits while yapd reads the update, and after, until the session does something else or nine minutes have passed, so it can hand the session [your reply](#where-follow-ups-go), even to an update you [hear again](#menu-bar).
-
-For Codex, put both hooks in `~/.codex/hooks.json` as plain commands with `hook codex`, without `--wait` or the two async settings. You will be prompted to accept the hooks on your next session.
+Your settings go in `~/.yapd/.env`, where yapd also keeps what it downloads and remembers.
 
 On first start yapd asks for the microphone, so you can interrupt it.
 
-## Menu bar
-
-The menu bar app turns yapd off and on, and shows what it's doing without opening the menu. Building it needs Xcode:
+To update, then restart it:
 
 ```sh
-bun run app
+bun add -g @launatic/yapd@latest
+yapd install
 ```
 
-That puts it in `~/Applications` and opens it, and from then on it opens at login, which System Settings, General, Login Items can stop. If `xcodebuild` says it needs Xcode, point the command line tools at it with `sudo xcode-select -s /Applications/Xcode.app`.
+To run it from a clone instead, `bun install` and `bun link` in it, then `yapd setup`. The hooks and the service then run the clone. A `.env` or `preferences.md` in the clone moves to `~/.yapd` the first time yapd runs.
 
-Without Xcode, take `yapd-menu-bar-<version>.zip` from the [latest release](https://github.com/lg-epitech/yapd/releases/latest) and move `yapd.app` into Applications. It isn't notarized, so macOS blocks it the first time you open it: choose Open Anyway in System Settings, Privacy & Security.
+## Menu bar
+
+The menu bar app turns yapd off and on, and shows what it's doing without opening the menu. Take `yapd-menu-bar-<version>.zip` from the [latest release](https://github.com/lg-epitech/yapd/releases/latest) and move `yapd.app` into Applications. It isn't notarized, so macOS blocks it the first time you open it: choose Open Anyway in System Settings, Privacy & Security. From then on it opens at login, which System Settings, General, Login Items can stop.
+
+From a clone, `bun run app` builds it with Xcode into `~/Applications` and opens it instead. If `xcodebuild` says it needs Xcode, point the command line tools at it with `sudo xcode-select -s /Applications/Xcode.app`.
 
 | Icon | |
 | --- | --- |
@@ -102,7 +85,7 @@ yapd hands a follow-up to the session the update came from, through whatever tha
     auth session issue --label yapd --ttl 365d --token-only
   ```
 
-  Put it in `.env` as `YAPD_T3CODE_TOKEN=...` and run `bun src/main.ts install` again. If yapd says T3 Code turned down its token, issue a new one.
+  Put it in `~/.yapd/.env` as `YAPD_T3CODE_TOKEN=...` and run `yapd install` again. If yapd says T3 Code turned down its token, issue a new one. `yapd doctor` says whether it takes the one you have.
 
 A session another app drives, like T3 Code, only gets follow-ups through that app, so its own view stays in step. yapd won't send anything to a session that has moved on since the update, like when you've already typed something else, and says so when it can't reach one.
 
@@ -136,7 +119,7 @@ Nothing waits on this. Updates keep being read while a prompt is written, and yo
 
 ### Your rules
 
-Put what yapd should go by in `preferences.md` in the yapd folder, in your own words. A model reads it with each request, so there's no format to follow, and changes apply to the next thing you dictate:
+Put what yapd should go by in `~/.yapd/preferences.md`, in your own words. A model reads it with each request, so there's no format to follow, and changes apply to the next thing you dictate:
 
 ```md
 Fable on high for design work and hard bugs. Opus 5.5 on high for everyday features and fixes.
@@ -146,11 +129,11 @@ A worktree for features and fixes. None for questions and anything that only rea
 When I say "the rig" I mean rig.
 ```
 
-`YAPD_PREFERENCES` in `.env` points to a file somewhere else. Keep it short, since every prompt waits on it being read: past 6,000 characters, the rest is left out.
+`YAPD_PREFERENCES` in your settings points to a file somewhere else. Keep it short, since every prompt waits on it being read: past 6,000 characters, the rest is left out.
 
 ### Where sessions start
 
-With a [T3 Code token](#where-follow-ups-go) in `.env`, new work starts as a T3 Code thread, in the projects T3 Code knows and with its defaults.
+With a [T3 Code token](#where-follow-ups-go) in your settings, new work starts as a T3 Code thread, in the projects T3 Code knows and with its defaults.
 
 Without one, yapd starts Claude Code or Codex from the command line, headless. It finds your projects in the folders you list, and in any repository an agent has run in since the hooks were set up:
 
@@ -174,7 +157,7 @@ You reply to a headless session like to any other. It has no terminal to type in
 
 ### On other machines
 
-Work starts on the machine the project is on. yapd asks every machine in `YAPD_REMOTES` what it can start as you press the shortcut, so that it knows by the time you've finished talking, and starts the session there over SSH, as with follow-ups. Reading a project happens on its machine too, with the provider set in that machine's `.env`.
+Work starts on the machine the project is on. yapd asks every machine in `YAPD_REMOTES` what it can start as you press the shortcut, so that it knows by the time you've finished talking, and starts the session there over SSH, as with follow-ups. Reading a project happens on its machine too, with the provider set in that machine's settings.
 
 Tell yapd what you call this Mac, since its hostname is rarely that:
 
@@ -190,32 +173,32 @@ Prompts are written by the model that writes summaries. To use another one, set 
 
 ## Agents on another machine
 
-yapd speaks on one Mac, but the agents can run anywhere, like on a Linux server you SSH into. Install yapd there too, without `install`, since that machine only runs the hooks:
+yapd speaks on one Mac, but the agents can run anywhere, like on a Linux server you SSH into. Set yapd up there too. Only the hooks go in, since that machine never speaks:
 
 ```sh
-bun install
-bun link
+bun add -g @launatic/yapd
+yapd setup
 ```
 
-Add the hooks there as above. They send to `127.0.0.1:4747`, so forward that port to the Mac, however you like. From the Mac, a reverse tunnel does it:
+The hooks send to `127.0.0.1:4747`, so forward that port to the Mac, however you like. From the Mac, a reverse tunnel does it:
 
 ```sh
 ssh -N -R 127.0.0.1:4747:127.0.0.1:4747 me@server
 ```
 
-Updates then come through, named after each session's repository. For follow-ups, the Mac reaches back over SSH and runs `yapd relay` on the server, which sends them there. List the server in the Mac's `.env`, by the hostname it reports and how to SSH into it, then run `bun src/main.ts install` again:
+Updates then come through, named after each session's repository. For follow-ups, the Mac reaches back over SSH and runs `yapd relay` on the server, which sends them there. List the server in the Mac's settings, by the hostname it reports and how to SSH into it, then run `yapd install` again:
 
 ```sh
 YAPD_REMOTES=server=me@server.example.com
 ```
 
-A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config` works. Separate several with commas. yapd SSHes in with `BatchMode`, so it needs a key that works without a password prompt, and `yapd` has to be on the `PATH` that non-interactive SSH commands get: `ssh server yapd` should print yapd's usage, not "command not found". Adding `~/.bun/bin` to `PATH` in `~/.zshenv`, or at the top of `~/.bashrc`, is usually enough.
+A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config` works. Separate several with commas. yapd SSHes in with `BatchMode`, so it needs a key that works without a password prompt, and `yapd` has to be on the `PATH` that non-interactive SSH commands get: `ssh server yapd` should print yapd's usage, not "command not found". Adding `~/.bun/bin` to `PATH` in `~/.zshenv`, or at the top of `~/.bashrc`, is usually enough. `yapd doctor` on the Mac tries each server this way.
 
-Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in the `.env` of yapd's folder on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings.
+Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in `~/.yapd/.env` on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings.
 
 ## Providers
 
-The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high, on its fast tier, which for Luna costs no extra usage. yapd keeps Codex running between calls, with a thread ready for the next one and without your MCP servers, apps or plugins, which saves a few seconds each time. To use a different one, put this in a `.env` file in the yapd folder and run `bun src/main.ts install` again:
+The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high, on its fast tier, which for Luna costs no extra usage. yapd keeps Codex running between calls, with a thread ready for the next one and without your MCP servers, apps or plugins, which saves a few seconds each time. To use a different one, put this in `~/.yapd/.env` and run `yapd install` again:
 
 ```sh
 YAPD_PROVIDER=claude
@@ -237,7 +220,7 @@ Leave out the model or the effort to get that CLI's default. Both are passed thr
 
 ## Style
 
-yapd talks plainly unless you tell it otherwise. Describe how it should talk in `.env` and run `bun src/main.ts install` again:
+yapd talks plainly unless you tell it otherwise. Describe how it should talk in `~/.yapd/.env` and run `yapd install` again:
 
 ```sh
 YAPD_STYLE="Talk like Jarvis from Iron Man: calm, precise, with a dry British wit. Call me sir."
@@ -247,4 +230,4 @@ The style applies to the summaries, to its answers when you interrupt, and to wh
 
 ## Quick turns
 
-yapd skips turns that finish in under 20 seconds, since you were probably watching. Set `YAPD_MIN_SECONDS` in `.env` to change the cutoff, or to `0` to hear every turn.
+yapd skips turns that finish in under 20 seconds, since you were probably watching. Set `YAPD_MIN_SECONDS` in `~/.yapd/.env` to change the cutoff, or to `0` to hear every turn.

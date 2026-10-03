@@ -83,7 +83,7 @@ const ask = <E>(
   wording: { readonly patience: Duration.DurationInput; readonly silent: string; readonly failed: string },
   fail: (reason: string, cause?: unknown) => E,
 ) =>
-  // From /, since Bun would load a .env in the home directory SSH starts in, ahead of the yapd folder's.
+  // From /, since Bun would load a .env in the home directory SSH starts in, ahead of yapd's own.
   exec(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, `cd / && yapd ${command}`], stdin).pipe(
     Effect.catchTag("ProcessError", (error) =>
       Effect.fail(

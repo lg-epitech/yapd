@@ -45,7 +45,7 @@ export const writerTier = optional("YAPD_WRITER_TIER")
 /** What the user calls this machine, like "rosie", since a Mac's hostname is rarely it. Defaults to the hostname, without its domain. */
 export const name = optional("YAPD_NAME")
 
-/** Where the user's rules for new work are, in plain language. Defaults to `preferences.md` in the yapd folder. */
+/** Where the user's rules for new work are, in plain language. Defaults to `preferences.md` in yapd's home, `~/.yapd`. */
 export const preferences = optional("YAPD_PREFERENCES")
 
 /** How yapd talks, in the user's words, like "Talk like Jarvis and call me sir". Unset, it talks plainly. */

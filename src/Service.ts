@@ -3,12 +3,14 @@ import { mkdir, rm } from "node:fs/promises"
 import { homedir, userInfo } from "node:os"
 import { dirname, join } from "node:path"
 import * as Config from "./Config.ts"
+import { home } from "./Home.ts"
+import { environment } from "./Setup.ts"
 import { run } from "./Process.ts"
 
 export const label = "dev.yapd"
 
-const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`)
-const logPath = join(homedir(), "Library", "Logs", "yapd.log")
+export const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`)
+export const logPath = join(homedir(), "Library", "Logs", "yapd.log")
 const domain = `gui/${userInfo().uid}`
 
 export interface Options {
@@ -17,6 +19,8 @@ export interface Options {
   readonly workingDirectory: string
   /** launchd starts agents with a bare PATH, so the provider CLIs and ffmpeg wouldn't be found. */
   readonly path: string
+  /** The settings hooks carry too, like YAPD_HOME, which the daemon can't read from the .env inside it. */
+  readonly environment?: Readonly<Record<string, string>>
   readonly log: string
 }
 
@@ -40,7 +44,10 @@ export const plist = (options: Options) => `<?xml version="1.0" encoding="UTF-8"
   <key>WorkingDirectory</key>${string(options.workingDirectory)}
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>${string(options.path)}
+    <key>PATH</key>${string(options.path)}${Object.entries(options.environment ?? {})
+      .map(([name, value]) => `
+    <key>${escape(name)}</key>${string(value)}`)
+      .join("")}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -60,16 +67,22 @@ const healthy = Effect.gen(function* () {
   )
 })
 
+/** This copy of yapd, which the service and hooks run. */
+export const main = join(import.meta.dir, "main.ts")
+
+/** The bun on the PATH. execPath resolves symlinks, which would pin a versioned install that an upgrade removes. */
+export const bun = () => Bun.which("bun") ?? process.execPath
+
 /** Writes the LaunchAgent and (re)starts it, so config changes apply too. */
 export const install = Effect.gen(function* () {
-  const main = join(import.meta.dir, "main.ts")
   const options: Options = {
-    // execPath resolves symlinks, which would pin a versioned install that an upgrade removes.
-    bun: Bun.which("bun") ?? process.execPath,
+    bun: bun(),
     main,
     // The daemon reads .env from here.
-    workingDirectory: dirname(dirname(main)),
+    workingDirectory: home,
     path: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
+    // The same as the hooks get, so they reach the port it listens on, even one set only for this command.
+    environment: environment(),
     log: logPath,
   }
   yield* Effect.tryPromise(async () => {
