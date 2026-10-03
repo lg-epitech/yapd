@@ -657,4 +657,54 @@ describe("Daemon", () => {
     expect(result.waiting).toEqual({ followUps: [], heard: 6 })
     expect(result.after).toEqual({ followUps: ["claude:a let go"], heard: 5 })
   })
+
+  test("sends no second reply to an update heard again while the first is still on its way", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, wait, dictate, nextPlayback, followUps, heard, replay } = yield* make("Merge it.")
+        yield* finish("a", "The PR is ready.")
+        yield* nextPlayback
+        yield* speak
+        // On its way to the agent, which takes three seconds, when a dictation cuts the update off.
+        yield* wait(1)
+        const dictation = yield* dictate
+        yield* Scope.close(dictation, Exit.void)
+        const [id] = yield* heard
+        yield* replay(id!)
+        // Past the pause after what the dictation cut off.
+        yield* wait(1)
+        yield* nextPlayback
+        yield* speak
+        const answer = yield* nextPlayback
+        yield* wait(3)
+        return { answer, followUps: [...followUps] }
+      }),
+    )
+    expect(result.answer).toBe("It's still on what I sent it, so I didn't send that.")
+    expect(result.followUps).toEqual(["a sent: Merge it."])
+  })
+
+  test("says an update asked for again once it's back on, even if it was being rendered for when turned off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, power, played, heard, replay } = yield* make(undefined, { renderSeconds: 5 })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(5)
+        yield* wait(11)
+        const [id] = yield* heard
+        const dropped = yield* Effect.fork(replay(id!))
+        yield* wait(1)
+        yield* power(false)
+        yield* power(true)
+        const asked = yield* Effect.fork(replay(id!))
+        yield* wait(4)
+        yield* wait(1)
+        const answers = { dropped: yield* Fiber.join(dropped), asked: yield* Fiber.join(asked) }
+        yield* wait(11)
+        return { answers, played: [...played] }
+      }),
+    )
+    expect(result.answers).toEqual({ dropped: "off", asked: "queued" })
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
+  })
 })

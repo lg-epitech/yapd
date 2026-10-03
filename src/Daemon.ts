@@ -116,6 +116,10 @@ export const make = Effect.gen(function* () {
           if (activity.get(session) !== generations.get(update)) {
             return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
           }
+          // One is on its way, or being worked on, like after a reply to an update the user is now hearing again.
+          if (followed.has(session)) {
+            return yield* new RelayError({ reason: "It's still on what I sent it, so I didn't send that." })
+          }
           const previousFollowed = followed.get(session)
           const previousPrompt = prompts.get(session)
           const followUp = { message }
@@ -371,8 +375,12 @@ export const make = Effect.gen(function* () {
   const turnedOff = (since: number) =>
     STM.commit(STM.flatMap(TRef.get(power), ({ turns }) => (turns === since ? STM.retry : STM.void)))
 
-  /** Updates heard again that are being rendered, waiting their turn or being said, by id. */
-  const replays = new Set<string>()
+  /**
+   * Updates heard again that are being rendered, waiting their turn or being
+   * said, by id, each as it was asked for, so one asked for since yapd was
+   * turned off and on isn't taken for one that was dropped.
+   */
+  const replays = new Map<string, Inbox.Replay>()
 
   /**
    * Keeps the latest few updates, and any older one being heard again, along
@@ -398,9 +406,9 @@ export const make = Effect.gen(function* () {
     )
 
   /** An update heard again has been said, or won't be. */
-  const replayed = (id: string) =>
+  const replayed = (replay: Inbox.Replay) =>
     Effect.suspend(() => {
-      replays.delete(id)
+      if (replays.get(replay.id) === replay) replays.delete(replay.id)
       return remember((heard) => heard)
     })
 
@@ -499,16 +507,17 @@ export const make = Effect.gen(function* () {
       const { on, turns } = yield* switched
       if (!on) return "off" as const
       // Once, however many times it's asked for before it's said.
-      if (replays.has(id)) return "queued" as const
-      replays.add(id)
-      return yield* again(found, turns).pipe(
-        Effect.tap((result) => (result === "queued" ? Effect.void : replayed(id))),
-        Effect.onError(() => replayed(id)),
+      if (replays.get(id)?.turns === turns) return "queued" as const
+      const asked: Inbox.Replay = { id, turns }
+      replays.set(id, asked)
+      return yield* again(found, asked).pipe(
+        Effect.tap((result) => (result === "queued" ? Effect.void : replayed(asked))),
+        Effect.onError(() => replayed(asked)),
       )
     })
 
   /** Renders an update heard before, and queues it. */
-  const again = (found: HeardUpdate, turns: number) =>
+  const again = (found: HeardUpdate, asked: Inbox.Replay) =>
     Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(found.update.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
@@ -518,7 +527,7 @@ export const make = Effect.gen(function* () {
       if (generation !== undefined) generations.set(update, generation)
       const arrivedAt = yield* Clock.currentTimeMillis
       const session = `replay:${found.id}`
-      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: found.id }, turns)) return "queued" as const
+      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: asked }, asked.turns)) return "queued" as const
       yield* removeFile(audio)
       return "off" as const
     })
