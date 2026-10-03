@@ -6,13 +6,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Setup from "./Setup.ts"
 
-const run = Setup.command("/Users/me/.bun/bin/bun", "/Users/me/.bun/install/global/node_modules/@lg-epitech/yapd/src/main.ts")
+const run = Setup.command("/Users/me/.bun/bin/bun", "/Users/me/.bun/install/global/node_modules/@launatic/yapd/src/main.ts")
 
 const format = { type: "command", command: "prettier --write ." }
 
 describe("command", () => {
   test("runs yapd by full paths, quoted only when they need it", () => {
-    expect(run("claude", true)).toBe("/Users/me/.bun/bin/bun --no-env-file /Users/me/.bun/install/global/node_modules/@lg-epitech/yapd/src/main.ts hook claude --wait")
+    expect(run("claude", true)).toBe("/Users/me/.bun/bin/bun --no-env-file /Users/me/.bun/install/global/node_modules/@launatic/yapd/src/main.ts hook claude --wait")
     expect(Setup.command("/opt/bun", "/Users/me/My Projects/yapd's/src/main.ts")("codex", false)).toBe(
       `/opt/bun --no-env-file '/Users/me/My Projects/yapd'\\''s/src/main.ts' hook codex`,
     )

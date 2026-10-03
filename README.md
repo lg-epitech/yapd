@@ -13,7 +13,7 @@ With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis.
 ## Setup
 
 ```sh
-bun add -g @lg-epitech/yapd
+bun add -g @launatic/yapd
 yapd setup
 ```
 
@@ -30,7 +30,7 @@ On first start yapd asks for the microphone, so you can interrupt it.
 To update, then restart it:
 
 ```sh
-bun add -g @lg-epitech/yapd@latest
+bun add -g @launatic/yapd@latest
 yapd install
 ```
 
@@ -176,7 +176,7 @@ Prompts are written by the model that writes summaries. To use another one, set 
 yapd speaks on one Mac, but the agents can run anywhere, like on a Linux server you SSH into. Set yapd up there too. Only the hooks go in, since that machine never speaks:
 
 ```sh
-bun add -g @lg-epitech/yapd
+bun add -g @launatic/yapd
 yapd setup
 ```
 
