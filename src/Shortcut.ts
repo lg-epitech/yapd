@@ -111,13 +111,14 @@ export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.voi
 /**
  * Keeps whether the user is dictating on this side, and has the helper take
  * Escape only while they are, since a registered key is kept from every other
- * app. The helper holds no keys when it starts, so each one is told the shortcut.
+ * app. The helper holds no keys when it starts, so each one is told the shortcut,
+ * once it's `on`.
  */
-export const make = (keys: Keys, send: (message: object) => void) =>
+export const make = (keys: Keys, send: (message: object) => void, initially: boolean) =>
   Effect.gen(function* () {
     /** Each with how many times the keys were taken or let go of before, so what's left over from before is dropped. */
     const events = yield* PubSub.unbounded<{ readonly event: Event; readonly turns: number }>()
-    let on = true
+    let on = initially
     let turns = 0
     let dictating = false
     let registered: boolean | undefined

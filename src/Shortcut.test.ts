@@ -9,7 +9,7 @@ const drive = (presses: ReadonlyArray<Shortcut.Key | "quit">, expected: number) 
   Effect.gen(function* () {
     const sent: Array<object> = []
     const keys = { key: "space", modifiers: ["ctrl", "option", "cmd"] } as const
-    const shortcut = yield* Shortcut.make(keys, (message) => sent.push(message))
+    const shortcut = yield* Shortcut.make(keys, (message) => sent.push(message), true)
     const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, expected)))
     // Lets the stream subscribe before anything is pressed.
     yield* Effect.yieldNow()
@@ -48,7 +48,7 @@ describe("Shortcut", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const sent: Array<object> = []
-        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message))
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message), true)
         const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 2)))
         yield* Effect.yieldNow()
         yield* shortcut.service.cancel
@@ -78,7 +78,7 @@ describe("Shortcut", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const sent: Array<object> = []
-        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message))
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message), true)
         const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 2)))
         yield* Effect.yieldNow()
         // Let go of before anyone hears of it.
@@ -100,6 +100,31 @@ describe("Shortcut", () => {
       { type: "escape", on: true },
       { type: "shortcut" },
       { type: "escape", on: false },
+      { type: "shortcut" },
+      { type: "shortcut", key: "space", modifiers: ["ctrl"] },
+      { type: "escape", on: true },
+      { type: "escape", on: false },
+    ])
+  })
+
+  test("holds no keys and starts nothing until it's on", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sent: Array<object> = []
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message), false)
+        const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 1)))
+        yield* Effect.yieldNow()
+        yield* shortcut.greeted
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.service.toggle(true)
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.pressed("shortcut")
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
+        return { sent, events: [...events].map((event) => event._tag) }
+      }),
+    )
+    expect(result.events).toEqual(["Started"])
+    expect(result.sent).toEqual([
       { type: "shortcut" },
       { type: "shortcut", key: "space", modifiers: ["ctrl"] },
       { type: "escape", on: true },

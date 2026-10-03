@@ -76,7 +76,9 @@ export const serve = Effect.gen(function* () {
       ? Effect.zipRight(daemon.turn(true), shortcut.toggle(true))
       : Effect.all([shortcut.toggle(false), dictation.drop, drafts.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
-  if (!(yield* settings.on)) {
+  // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
+  if (yield* settings.on) yield* turn(true)
+  else {
     yield* turn(false)
     yield* Effect.logInfo("yapd is off, until it's turned on from the menu bar or the API")
   }

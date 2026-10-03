@@ -628,4 +628,33 @@ describe("Daemon", () => {
     expect(result.followUps).toEqual(["a sent: Merge it."])
     expect(result.played).toEqual(["yapd. The PR is ready."])
   })
+
+  test("keeps the hook of an update waiting to be heard again, even past the latest few", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { handle, finish, wait, flush, followUps, heard, replay } = yield* daemon
+        for (const session of ["a", "b", "c", "d"]) {
+          yield* finish(session, `Done with ${session}.`, true)
+          yield* wait(11)
+        }
+        yield* finish("e", "Done with e.", true)
+        const oldest = (yield* heard).at(-1)!
+        // As e is read, something that needs the user comes in, and then the oldest is asked for again.
+        yield* handle(
+          "claude",
+          { hook_event_name: "Stop", session_id: "f", cwd: "/tmp", last_assistant_message: "Which branch?", needs_you: true },
+          { project: "yapd" },
+          true,
+        )
+        yield* flush
+        yield* replay(oldest)
+        yield* wait(11)
+        const waiting = { followUps: [...followUps], heard: (yield* heard).length }
+        yield* wait(22)
+        return { waiting, after: { followUps: [...followUps], heard: (yield* heard).length } }
+      }),
+    )
+    expect(result.waiting).toEqual({ followUps: [], heard: 6 })
+    expect(result.after).toEqual({ followUps: ["claude:a let go"], heard: 5 })
+  })
 })

@@ -240,7 +240,8 @@ export const native = (
       if (unsent.length === 1) flush()
     }
     const keys = yield* Config.shortcut
-    const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, send) : undefined
+    // Taken once yapd knows whether it's on, which it may have been turned off before it stopped.
+    const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, send, false) : undefined
 
     const now = () => runSync(Clock.currentTimeMillis)
     /** The helper went quiet, so the echo cancellation heard yapd until now. */

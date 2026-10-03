@@ -11,6 +11,8 @@ export interface Ready {
   readonly update: Update
   /** The session's Stop hook, waiting in case the user replies to this update. */
   readonly hook?: Ticket
+  /** For an update heard again, its id among those heard. */
+  readonly replay?: string
 }
 
 /**

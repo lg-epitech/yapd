@@ -371,21 +371,37 @@ export const make = Effect.gen(function* () {
   const turnedOff = (since: number) =>
     STM.commit(STM.flatMap(TRef.get(power), ({ turns }) => (turns === since ? STM.retry : STM.void)))
 
+  /** Updates heard again that are being rendered, waiting their turn or being said, by id. */
+  const replays = new Set<string>()
+
   /**
-   * Keeps an update the user is hearing, unless they're hearing it again,
-   * along with its hook, which waits for as long as the update can be heard
-   * again, or until the session does something else or the hook gives up.
+   * Keeps the latest few updates, and any older one being heard again, along
+   * with their hooks, which wait for as long as the update can be heard again,
+   * or until the session does something else or the hook gives up.
    */
-  const hear = ({ update, hook }: Inbox.Ready) =>
+  const remember = (change: (heard: ReadonlyArray<HeardUpdate>) => ReadonlyArray<HeardUpdate>) =>
     Effect.gen(function* () {
       const forgotten = yield* SubscriptionRef.modify(state, (current): readonly [ReadonlyArray<HeardUpdate>, State] => {
-        if (current.heard.some((heard) => heard.update.session === update.session && heard.update.at === update.at)) {
-          return [[], current]
-        }
-        const heard = [{ id: crypto.randomUUID(), update, ...(hook === undefined ? {} : { hook }) }, ...current.heard]
-        return [heard.slice(replayable), { ...current, heard: heard.slice(0, replayable) }]
+        const changed = change(current.heard)
+        const kept = changed.filter((heard, index) => index < replayable || replays.has(heard.id))
+        return [changed.filter((heard) => !kept.includes(heard)), { ...current, heard: kept }]
       })
       yield* Effect.forEach(forgotten, (heard) => letGo(heard.update.session, heard.hook), { discard: true })
+    })
+
+  /** Keeps an update the user is hearing, unless they're hearing it again. */
+  const hear = ({ update, hook }: Inbox.Ready) =>
+    remember((heard) =>
+      heard.some((heard) => heard.update.session === update.session && heard.update.at === update.at)
+        ? heard
+        : [{ id: crypto.randomUUID(), update, ...(hook === undefined ? {} : { hook }) }, ...heard],
+    )
+
+  /** An update heard again has been said, or won't be. */
+  const replayed = (id: string) =>
+    Effect.suspend(() => {
+      replays.delete(id)
+      return remember((heard) => heard)
     })
 
   const speakNext = Effect.gen(function* () {
@@ -433,7 +449,16 @@ export const make = Effect.gen(function* () {
       ),
       // Stopped at once, and not kept for later.
       Effect.raceFirst(turnedOff(turns)),
-      Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : removeFile(Inbox.audio(ready))))),
+      Effect.ensuring(
+        Effect.suspend(() =>
+          kept
+            ? Effect.void
+            : Effect.zipRight(
+                removeFile(Inbox.audio(ready)),
+                "update" in ready && ready.replay !== undefined ? replayed(ready.replay) : Effect.void,
+              ),
+        ),
+      ),
       Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
     )
     yield* Effect.sleep("400 millis")
@@ -462,11 +487,9 @@ export const make = Effect.gen(function* () {
       for (const entry of dropped) {
         yield* removeFile(Inbox.audio(entry))
         if ("update" in entry) yield* release(entry.hook)
+        if ("update" in entry && entry.replay !== undefined) yield* replayed(entry.replay)
       }
     })
-
-  /** Updates being heard again that are still being rendered, so asking twice renders once. */
-  const replaying = new Set<string>()
 
   /** Says an update the user heard again, as it was said, and listens for a reply like after any update. */
   const replay = (id: string) =>
@@ -475,14 +498,17 @@ export const make = Effect.gen(function* () {
       if (found === undefined) return "unknown" as const
       const { on, turns } = yield* switched
       if (!on) return "off" as const
-      const session = `replay:${id}`
-      if ((yield* STM.commit(TRef.get(inbox))).has(session) || replaying.has(id)) return "queued" as const
-      replaying.add(id)
-      return yield* again(found, session, turns).pipe(Effect.ensuring(Effect.sync(() => replaying.delete(id))))
+      // Once, however many times it's asked for before it's said.
+      if (replays.has(id)) return "queued" as const
+      replays.add(id)
+      return yield* again(found, turns).pipe(
+        Effect.tap((result) => (result === "queued" ? Effect.void : replayed(id))),
+        Effect.onError(() => replayed(id)),
+      )
     })
 
   /** Renders an update heard before, and queues it. */
-  const again = (found: HeardUpdate, session: string, turns: number) =>
+  const again = (found: HeardUpdate, turns: number) =>
     Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(found.update.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
@@ -491,7 +517,8 @@ export const make = Effect.gen(function* () {
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)
       const arrivedAt = yield* Clock.currentTimeMillis
-      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update }, turns)) return "queued" as const
+      const session = `replay:${found.id}`
+      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: found.id }, turns)) return "queued" as const
       yield* removeFile(audio)
       return "off" as const
     })
