@@ -52,13 +52,31 @@ const Relays = Layer.effect(
 
 export const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make
-  const settings = yield* Settings.Settings
+  const preferences = yield* Preferences.path
+  const drafts = yield* Drafts.make({
+    machines: yield* machines,
+    rules: Preferences.load(preferences),
+    recent: daemon.recent,
+    note: daemon.note,
+    tell: daemon.tell,
+    expect: (yield* Vocabulary).expect,
+  })
+  yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
   const shortcut = yield* Shortcut
-  const turn = (on: boolean) => Effect.zipRight(daemon.turn(on), shortcut.toggle(on))
+  const dictation = yield* Dictation
+  const settings = yield* Settings.Settings
+
+  /** Off, whatever hasn't started yet is dropped, from a dictation to what was waiting to be said. */
+  const turn = (on: boolean) =>
+    on
+      ? Effect.zipRight(daemon.turn(true), shortcut.toggle(true))
+      : Effect.all([daemon.turn(false), dictation.drop, drafts.drop, shortcut.toggle(false)], { discard: true })
+  const switching = yield* Effect.makeSemaphore(1)
   if (!(yield* settings.on)) {
     yield* turn(false)
     yield* Effect.logInfo("yapd is off, until it's turned on from the menu bar or the API")
   }
+
   const state = Stream.zipLatestWith(daemon.state, (yield* Activity).changes, (state, activity): Server.State => ({
     on: state.on,
     activity,
@@ -72,24 +90,13 @@ export const serve = Effect.gen(function* () {
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state,
-    turn: (on) => Effect.zipRight(settings.remember(on), turn(on)),
+    // One at a time, so what's remembered is what's in effect.
+    turn: (on) => Effect.zipRight(settings.remember(on), turn(on)).pipe(switching.withPermits(1)),
     replay: daemon.replay,
   })
-  const preferences = yield* Preferences.path
-  const drafts = yield* Drafts.make({
-    machines: yield* machines,
-    rules: Preferences.load(preferences),
-    recent: daemon.recent,
-    note: daemon.note,
-    tell: daemon.tell,
-    expect: (yield* Vocabulary).expect,
-  })
-  yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
-  const { events } = shortcut
-  const { transcripts } = yield* Dictation
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(events, (event) => (event._tag === "Started" ? drafts.prepare : Effect.void)))
-  yield* Effect.forkScoped(Stream.runForEach(transcripts, drafts.dictated))
+  yield* Effect.forkScoped(Stream.runForEach(shortcut.events, (event) => (event._tag === "Started" ? drafts.prepare : Effect.void)))
+  yield* Effect.forkScoped(Stream.runForEach(dictation.transcripts, drafts.dictated))
   return yield* daemon.speak
 }).pipe(
   Effect.scoped,

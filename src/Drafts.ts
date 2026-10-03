@@ -49,6 +49,8 @@ interface Draft {
   /** Whether it's being started right now, which can't be taken back. */
   starting: boolean
   open: boolean
+  /** Dropped before it started, like when yapd was turned off: whatever was under way for it says nothing and starts nothing. */
+  dropped: boolean
 }
 
 interface Resolved {
@@ -209,14 +211,18 @@ export const make = (options: {
       })
 
     const say = (draft: Draft, spoken: string, priority: Notice["priority"], extra: Partial<Notice> = {}) =>
-      options.tell({
-        id: `draft:${draft.id}:${crypto.randomUUID()}`,
-        priority,
-        spoken,
-        at: draft.at,
-        stale: Effect.succeed(false),
-        ...extra,
-      })
+      Effect.suspend(() =>
+        draft.dropped
+          ? Effect.void
+          : options.tell({
+              id: `draft:${draft.id}:${crypto.randomUUID()}`,
+              priority,
+              spoken,
+              at: draft.at,
+              stale: Effect.succeed(false),
+              ...extra,
+            }),
+      )
 
     /** Nothing started, and the user hears why. */
     const fail = (draft: Draft, reason: string) =>
@@ -239,6 +245,7 @@ export const make = (options: {
           }${request.baseBranch === undefined ? "" : ` from ${request.baseBranch}`}. ${why}`,
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
+        if (draft.dropped) return
         draft.starting = true
         const outcome = yield* Effect.either(machine.launcher.start(request))
         if (Either.isLeft(outcome)) {
@@ -423,6 +430,21 @@ export const make = (options: {
       })
 
     return {
+      /** Drops every request that isn't being started already, without a word, like when yapd is turned off. */
+      drop: Effect.suspend(() => {
+        // All at once, so none starts halfway through.
+        const dropping = [...drafts.values()].filter(({ starting }) => !starting)
+        for (const draft of dropping) draft.dropped = true
+        return Effect.forEach(
+          dropping,
+          (draft) =>
+            close(draft).pipe(
+              Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)),
+              Effect.annotateLogs({ draft: draft.id }),
+            ),
+          { discard: true },
+        )
+      }),
       /** The user started dictating: what's ready by the time they've finished doesn't hold the prompt up. */
       prepare: Effect.zipRight(fetch, writer.prepare).pipe(Effect.asVoid),
       /** Takes what the user dictated, and returns at once. */
@@ -437,6 +459,7 @@ export const make = (options: {
             unanswered: 0,
             starting: false,
             open: true,
+            dropped: false,
           }
           drafts.set(draft.id, draft)
           yield* background(write(draft), draft)

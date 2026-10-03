@@ -66,26 +66,32 @@ export const make = Effect.gen(function* () {
   let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
-  /** The truth for what's said, and `state` what's shown of it. */
-  const on = yield* STM.commit(TRef.make(true))
+  /**
+   * Whether yapd is on, and how many times it was turned on or off, so what
+   * was under way before can tell it's out of date. `state` is what's shown of it.
+   */
+  const power = yield* STM.commit(TRef.make({ on: true, turns: 0 }))
+  const switched = STM.commit(TRef.get(power))
   const state = yield* SubscriptionRef.make<State>({ on: true, heard: [] })
-  const turning = yield* Effect.makeSemaphore(1)
 
-  /** Queues something to say, unless yapd is off, and returns whether it did. */
-  const enqueue = (entry: Inbox.Entry) =>
+  /** Queues something to say, unless yapd is off or was turned off and on since `turns`, and returns whether it did. */
+  const enqueue = (entry: Inbox.Entry, turns: number) =>
     STM.commit(
-      STM.flatMap(TRef.get(on), (isOn) =>
-        isOn ? STM.as(TRef.update(inbox, (current) => Inbox.add(current, entry)), true) : STM.succeed(false),
+      STM.flatMap(TRef.get(power), (current) =>
+        current.on && current.turns === turns
+          ? STM.as(TRef.update(inbox, (queued) => Inbox.add(queued, entry)), true)
+          : STM.succeed(false),
       ),
     )
 
   /** Renders a notice and queues it. One that can't be rendered is only logged. */
   const tell = (notice: Inbox.Notice) =>
     Effect.gen(function* () {
+      const { turns } = yield* switched
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio }
-      if (!(yield* enqueue(said))) {
+      if (!(yield* enqueue(said, turns))) {
         yield* removeFile(audio)
         return yield* Effect.logInfo(`Not saying "${notice.spoken}", since yapd is off`)
       }
@@ -166,6 +172,7 @@ export const make = Effect.gen(function* () {
     generation: number,
     hook: Ticket | undefined,
     needsYou: boolean,
+    turns: number,
   ) =>
     Effect.gen(function* () {
       const summary = yield* condenser.condense(project, turn).pipe(
@@ -185,7 +192,7 @@ export const make = Effect.gen(function* () {
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       generations.set(update, generation)
-      if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }))) {
+      if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns))) {
         yield* removeFile(audio)
         yield* release(hook)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
@@ -201,6 +208,8 @@ export const make = Effect.gen(function* () {
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
       workers.withPermits(1),
+      // Stopped from outside, like when yapd is turned off, which skips what's caught below.
+      Effect.onInterrupt(() => release(hook)),
       Effect.catchAllCause((cause) =>
         Effect.zipRight(
           release(hook),
@@ -245,7 +254,8 @@ export const make = Effect.gen(function* () {
         }
         case "Stop": {
           // Not kept for later, so a waiting hook is let go of at once.
-          if (!(yield* STM.commit(TRef.get(on)))) {
+          const { on, turns } = yield* switched
+          if (!on) {
             followed.delete(session)
             return undefined
           }
@@ -270,7 +280,7 @@ export const make = Effect.gen(function* () {
           }
           const turn = { prompt: Option.fromNullable(prompt?.text), message }
           const thread = { agent, session: payload.session_id, cwd: payload.cwd, message, origin }
-          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, currentGeneration, hook, needsYou))
+          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, currentGeneration, hook, needsYou, turns))
           return hook
         }
       }
@@ -284,7 +294,7 @@ export const make = Effect.gen(function* () {
 
   /** Nothing is read while the user dictates, or while yapd is off. */
   const takeNext = STM.gen(function* () {
-    if (!(yield* TRef.get(on)) || (yield* Floor.dictating(floor))) return yield* STM.retry
+    if (!(yield* TRef.get(power)).on || (yield* Floor.dictating(floor))) return yield* STM.retry
     const current = yield* TRef.get(inbox)
     const ready = Inbox.next(current)
     if (ready === undefined) return yield* STM.retry
@@ -339,7 +349,7 @@ export const make = Effect.gen(function* () {
     STM.flatMap(Floor.dictating(floor), (dictating) => (dictating ? STM.void : STM.retry)),
   )
 
-  const turnedOff = STM.commit(STM.flatMap(TRef.get(on), (isOn) => (isOn ? STM.retry : STM.void)))
+  const turnedOff = STM.commit(STM.flatMap(TRef.get(power), ({ on }) => (on ? STM.retry : STM.void)))
 
   /** Keeps an update the user is hearing, unless they're hearing it again. */
   const hear = (update: Conversation.Update) =>
@@ -397,16 +407,21 @@ export const make = Effect.gen(function* () {
     yield* Effect.sleep("400 millis")
   })
 
-  /** Off, what's being said stops, and what's waiting to be is dropped. */
+  /**
+   * Off, what's being said stops, and what's waiting to be, or still being
+   * prepared, is dropped. Between events, so none gets past it half taken in.
+   */
   const turn = (next: boolean) =>
     Effect.gen(function* () {
-      if ((yield* STM.commit(TRef.get(on))) === next) return
       const dropped = yield* STM.commit(
-        STM.zipRight(
-          TRef.set(on, next),
-          next ? STM.succeed([]) : TRef.modify(inbox, (current) => [[...current.values()], Inbox.empty] as const),
-        ),
+        STM.gen(function* () {
+          const { on, turns } = yield* TRef.get(power)
+          if (on === next) return undefined
+          yield* TRef.set(power, { on: next, turns: turns + 1 })
+          return next ? [] : yield* TRef.modify(inbox, (queued) => [[...queued.values()], Inbox.empty] as const)
+        }),
       )
+      if (dropped === undefined) return
       // Their hooks are let go of as they stop.
       if (!next) yield* FiberMap.clear(preparing)
       for (const entry of dropped) {
@@ -415,14 +430,15 @@ export const make = Effect.gen(function* () {
       }
       yield* SubscriptionRef.update(state, (current) => ({ ...current, on: next }))
       yield* Effect.logInfo(next ? "Turned on" : "Turned off")
-    }).pipe(turning.withPermits(1))
+    }).pipe(events.withPermits(1))
 
   /** Says an update the user heard again, as it was said, and listens for a reply like after any update. */
   const replay = (id: string) =>
     Effect.gen(function* () {
       const found = (yield* SubscriptionRef.get(state)).heard.find((heard) => heard.id === id)
       if (found === undefined) return "unknown" as const
-      if (!(yield* STM.commit(TRef.get(on)))) return "off" as const
+      const { on, turns } = yield* switched
+      if (!on) return "off" as const
       const session = `replay:${id}`
       if ((yield* STM.commit(TRef.get(inbox))).has(session)) return "queued" as const
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
@@ -432,7 +448,7 @@ export const make = Effect.gen(function* () {
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)
       const arrivedAt = yield* Clock.currentTimeMillis
-      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update })) return "queued" as const
+      if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update }, turns)) return "queued" as const
       yield* removeFile(audio)
       return "off" as const
     })

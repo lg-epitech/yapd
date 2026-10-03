@@ -258,6 +258,29 @@ describe("Drafts", () => {
     expect(result.stale).toBe(true)
   })
 
+  test("drops what hasn't started without a word, so it's neither asked about again nor built on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, unanswered, wait, drop, started, spoken, questions, asked } = yield* drafts(({ lines }) =>
+          lines[0]?.text === "Fix the loader."
+            ? decision({ action: "ask", project: "", prompt: "", spoken: "For the loader fix, is that yapd or std?" })
+            : decision({ project: "std", evidence: "std", spoken: "Started in std, on Fable, in a worktree." }),
+        )
+        yield* dictate("Fix the loader.")
+        yield* unanswered()
+        yield* drop
+        yield* wait(120)
+        const stale = yield* questions()[0]!.stale
+        yield* dictate("Tidy up the tests in std.")
+        return { stale, started, spoken: spoken(), earlier: asked.at(-1)?.earlier }
+      }),
+    )
+    expect(result.stale).toBe(true)
+    expect(result.started.map(({ request }) => request.project)).toEqual(["/code/std"])
+    expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?", "Started in std, on Fable, in a worktree."])
+    expect(result.earlier).toEqual([])
+  })
+
   test("drops it when the user calls it off, and keeps asking when what they said wasn't an answer", async () => {
     const result = await run(
       Effect.gen(function* () {

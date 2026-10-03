@@ -49,7 +49,7 @@ curl -sN http://127.0.0.1:4747/state/stream | sed -un 's/^data: //p' | jq --unbu
 curl -X PUT -H 'Content-Type: application/json' -d '{"on": false}' http://127.0.0.1:4747/state
 ```
 
-Turning it off stops whatever yapd is saying at once, and drops what was waiting to be said, along with a dictation in progress and any question it was waiting on an answer to.
+Turning it off stops whatever yapd is saying at once, and drops whatever hasn't started yet: what was waiting to be said, a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it.
 
 ## Hearing an update again
 

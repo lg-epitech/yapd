@@ -126,6 +126,7 @@ const dictation = (
       cancelled: () => cancelled,
       listening: () => open,
       flush,
+      drop: Context.get(context, Dictation).drop.pipe(Effect.zipRight(flush)),
     }
   })
 
@@ -240,6 +241,30 @@ describe("Dictation", () => {
     expect(result.cancelled).toBe(0)
     expect(result.heard).toEqual([20 * 512, 40 * 512])
     expect(result.transcripts).toEqual(["Second."])
+  })
+
+  test("drops dictations being recorded or transcribed without a sound, and hands neither on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, wait, drop, cues, said, transcripts, dictating, listening } = yield* dictation(["", "Second."], {
+          transcribe: (call) => (call === 0 ? Effect.sleep("5 seconds").pipe(Effect.as("")) : undefined),
+        })
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* press("Sent")
+        // The first is being transcribed, and would say it didn't catch anything, as the second records.
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* drop
+        yield* wait(10)
+        return { cues, said, transcripts, dictating: yield* dictating, listening: listening() }
+      }),
+    )
+    expect(result.cues).toEqual(["started", "sent", "started"])
+    expect(result.said).toEqual([])
+    expect(result.transcripts).toEqual([])
+    expect(result.dictating).toBe(0)
+    expect(result.listening).toBe(false)
   })
 
   test("hands on what the user said in the order they said it", async () => {

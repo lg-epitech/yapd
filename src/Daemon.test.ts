@@ -19,6 +19,8 @@ import { Voice } from "./Voice.ts"
  * and takes three seconds to send.
  */
 const make = (says?: string, options: {
+  /** How long rendering takes, which is at once unless said. */
+  readonly renderSeconds?: number
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -46,7 +48,10 @@ const make = (says?: string, options: {
         return { priority: "done" as const, spoken: turn.message }
       }),
     }),
-    Layer.succeed(Voice, { render: (text, path) => Effect.sync(() => void rendered.set(path, text)) }),
+    Layer.succeed(Voice, {
+      render: (text, path) =>
+        Effect.sleep(`${options.renderSeconds ?? 0} seconds`).pipe(Effect.zipRight(Effect.sync(() => void rendered.set(path, text)))),
+    }),
     Layer.succeed(Audio, {
       play: (path) =>
         Effect.gen(function* () {
@@ -530,5 +535,23 @@ describe("Daemon", () => {
     )
     expect(deliveries).toBe(0)
     expect(result).toBe("That session has moved on since, so I didn't send it.")
+  })
+
+  test("says nothing that was being prepared when it was turned off, even once it's on again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, notice, wait, toggle, played, followUps } = yield* make(undefined, { renderSeconds: 5 })
+        yield* finish("a", "The PR is ready.", true)
+        yield* Effect.fork(notice("started", "Started in yapd."))
+        yield* wait(1)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* wait(5)
+        yield* wait(30)
+        return { played: [...played], followUps: [...followUps] }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.followUps).toEqual(["claude:a let go"])
   })
 })
