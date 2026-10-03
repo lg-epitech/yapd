@@ -76,7 +76,7 @@ export const turnStart = (thread: ShellThread, text: string) => ({
 
 const canonical = (path: string) => realpath(path).catch(() => path)
 
-export const relay = Effect.gen(function* () {
+export const make = (locate = Server.locate) => Effect.gen(function* () {
   const token = yield* Config.t3codeToken
 
   const send = (thread: Thread, text: string) =>
@@ -87,7 +87,7 @@ export const relay = Effect.gen(function* () {
         thread.agent === "claude" && thread.origin.app === bundle ? new RelayError({ reason, cause }) : new Unreachable()
       if (Option.isNone(token)) return yield* miss("I need a T3 Code token to send it messages.")
       const reach = ({ reason, cause }: Server.Trouble) => miss(reason, cause)
-      const server = yield* Effect.mapError(Server.locate, reach)
+      const server = yield* Effect.mapError(locate, reach)
       const request = Server.api(server, token.value)
       const api = <A, I>(path: string, schema: Schema.Schema<A, I>, init: RequestInit = {}) =>
         Effect.mapError(request(path, schema, init), reach)
@@ -105,7 +105,10 @@ export const relay = Effect.gen(function* () {
 
       const matches: Array<ShellThread> = []
       for (const candidate of inDirectory(shell, cwd, (directory) => resolved.get(directory) ?? directory)) {
-        const detail = yield* api(`/api/orchestration/threads/${encodeURIComponent(candidate.id)}?turnLimit=1`, Detail)
+        // A message sent during a running turn can leave a pending turn after it.
+        // Include the preceding turn so its final reply isn't hidden by that input.
+        // endsWith still rejects a user message sent after the reply.
+        const detail = yield* api(`/api/orchestration/threads/${encodeURIComponent(candidate.id)}?turnLimit=2`, Detail)
         if (endsWith(detail.thread.messages, thread.message)) matches.push(candidate)
       }
       const [target, ...others] = matches
@@ -124,3 +127,5 @@ export const relay = Effect.gen(function* () {
 
   return { send } satisfies Relay
 })
+
+export const relay = make()
