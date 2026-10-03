@@ -30,13 +30,14 @@ final class Yapd {
     Task { await watch() }
   }
 
-  var symbol: String {
-    guard let state else { return "waveform.badge.exclamationmark" }
-    guard state.on else { return "waveform.slash" }
+  /// yapd's own mark while it's on and quiet, off or not running, and what it's doing otherwise.
+  var icon: some View {
+    guard let state else { return Image(nsImage: Mark.down).accessibilityLabel("yapd isn't running") }
+    guard state.on else { return Image(nsImage: Mark.off).accessibilityLabel("yapd is off") }
     switch state.activity {
-    case "speaking": return "speaker.wave.2.fill"
-    case "listening": return "mic.fill"
-    default: return "waveform"
+    case "speaking": return Image(systemName: "speaker.wave.2.fill").accessibilityLabel("yapd is speaking")
+    case "listening": return Image(systemName: "mic.fill").accessibilityLabel("yapd is listening")
+    default: return Image(nsImage: Mark.on).accessibilityLabel("yapd is on")
     }
   }
 
@@ -114,7 +115,7 @@ struct YapdApp: App {
       Button("Quit") { NSApplication.shared.terminate(nil) }
         .keyboardShortcut("q")
     } label: {
-      Image(systemName: yapd.symbol)
+      yapd.icon
     }
   }
 }

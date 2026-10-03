@@ -59,11 +59,11 @@ That puts it in `~/Applications` and opens it, and from then on it opens at logi
 
 | Icon | |
 | --- | --- |
-| Waveform | On, and quiet |
+| Speech bubble with a y | On, and quiet |
 | Speaker | Speaking |
 | Microphone | Listening, for your reply or while you dictate |
-| Waveform, struck through | Off |
-| Waveform with an exclamation mark | yapd isn't running |
+| Speech bubble with a y, struck through | Off |
+| Speech bubble with an exclamation mark | yapd isn't running |
 
 Off, yapd says nothing, never opens the microphone and lets go of the shortcut. Turning it off drops whatever hasn't started yet: what it was about to say, a dictation, and new work it was still writing up or asking you about. Updates that finish meanwhile aren't said later, and it stays off when it restarts, until you turn it on again. The menu also has the last few updates, to hear one again and reply to it.
 
