@@ -349,9 +349,10 @@ export const WhisperDictation = Layer.scoped(
 
     return {
       transcripts: Stream.fromPubSub(transcripts).pipe(Stream.filterMap(({ heard, drops: before }) => before === drops ? Option.some(heard) : Option.none())),
+      // Without waiting for them to stop, since nothing they do after can reach anyone.
       drop: Effect.suspend(() => {
         drops++
-        return FiberSet.clear(dictations)
+        return Effect.forEach([...dictations], Fiber.interruptFork, { discard: true })
       }),
     }
   }),

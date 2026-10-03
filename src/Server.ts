@@ -76,6 +76,8 @@ export const serve = (port: number, api: Api) =>
           })
         }
         if (route === "PUT /state") {
+          // Turning off can wait on what it stops.
+          server.timeout(request, 0)
           const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.flatMap(decodeTurn), Effect.option)
           if (Option.isNone(body)) return new Response('Send {"on": true} or {"on": false}.', { status: 400 })
           return yield* api.turn(body.value.on).pipe(
@@ -86,6 +88,8 @@ export const serve = (port: number, api: Api) =>
         }
         const replay = request.method === "POST" ? /^\/updates\/([^/]+)\/replay$/.exec(url.pathname) : null
         if (replay !== null) {
+          // Rendering waits its turn, and for the voice to load.
+          server.timeout(request, 0)
           return yield* api.replay(decodeURIComponent(replay[1]!)).pipe(
             Effect.map((result) =>
               result === "queued"

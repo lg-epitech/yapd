@@ -450,7 +450,7 @@ export const make = (options: {
           (draft) =>
             (draft.starting
               ? Effect.logInfo(`Starting without a word, since yapd was turned off: ${draft.heard}`)
-              : Effect.forEach([...draft.jobs], Fiber.interrupt).pipe(
+              : Effect.forEach([...draft.jobs], Fiber.interruptFork).pipe(
                   Effect.zipRight(close(draft)),
                   Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)),
                 )

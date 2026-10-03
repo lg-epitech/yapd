@@ -417,8 +417,9 @@ export const make = Effect.gen(function* () {
   })
 
   /**
-   * Off, what's being said stops, and what's waiting to be, or still being
-   * prepared, is dropped. Between events, so none gets past it half taken in.
+   * Off, what's being said stops at once, and what's waiting to be, or still
+   * being prepared, is dropped. The preparing waits for the events going on, so
+   * none gets past it half taken in.
    */
   const turn = (next: boolean) =>
     Effect.gen(function* () {
@@ -431,15 +432,15 @@ export const make = Effect.gen(function* () {
         }),
       )
       if (dropped === undefined) return
+      yield* SubscriptionRef.update(state, (current) => ({ ...current, on: next }))
+      yield* Effect.logInfo(next ? "Turned on" : "Turned off")
       // Their hooks are let go of as they stop.
-      if (!next) yield* FiberMap.clear(preparing)
+      if (!next) yield* FiberMap.clear(preparing).pipe(events.withPermits(1))
       for (const entry of dropped) {
         yield* removeFile(Inbox.audio(entry))
         if ("update" in entry) yield* release(entry.hook)
       }
-      yield* SubscriptionRef.update(state, (current) => ({ ...current, on: next }))
-      yield* Effect.logInfo(next ? "Turned on" : "Turned off")
-    }).pipe(events.withPermits(1))
+    })
 
   /** Updates being heard again that are still being rendered, so asking twice renders once. */
   const replaying = new Set<string>()

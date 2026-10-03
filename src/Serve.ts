@@ -68,12 +68,13 @@ export const serve = Effect.gen(function* () {
 
   /**
    * Off, whatever hasn't started yet is dropped, from a dictation to what was
-   * waiting to be said. The keys go before the dictations, so none starts in between.
+   * waiting to be said. The keys go before the dictations, so none starts in
+   * between, and all of it before the daemon waits on anything.
    */
   const turn = (on: boolean) =>
     on
       ? Effect.zipRight(daemon.turn(true), shortcut.toggle(true))
-      : Effect.all([daemon.turn(false), shortcut.toggle(false), dictation.drop, drafts.drop], { discard: true })
+      : Effect.all([shortcut.toggle(false), dictation.drop, drafts.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
   if (!(yield* settings.on)) {
     yield* turn(false)
