@@ -1,7 +1,7 @@
 import type { Socket } from "bun"
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Option, Queue, Runtime, type Scope, TestClock, TestContext } from "effect"
-import { Audio, native } from "./Audio.ts"
+import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Option, Queue, Runtime, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Activity, Audio, native } from "./Audio.ts"
 import * as Helper from "./Helper.ts"
 
 interface Command {
@@ -57,15 +57,13 @@ const device = (delayPlaying = false, delayStopping = false) =>
           }),
         catch: (cause) => new Helper.HelperError({ message: "Could not connect the fake helper", cause }),
       })
-    const audio = Context.get(
-      yield* native(launch, () =>
-        Effect.sync(() => {
-          order.push("fallback")
-          return { duration: 10, finished: Effect.void, stop: Effect.succeed(10), volume: () => Effect.void }
-        }),
-      ),
-      Audio,
+    const context = yield* native(launch, () =>
+      Effect.sync(() => {
+        order.push("fallback")
+        return { duration: 10, finished: Effect.void, stop: Effect.succeed(10), volume: () => Effect.void }
+      }),
     )
+    const audio = Context.get(context, Audio)
     const next = (type: string) => Queue.take(commands).pipe(Effect.repeat({ until: (command) => command.type === type }))
     const frame = (value: number) => {
       const samples = new Float32Array(512).fill(value)
@@ -77,6 +75,11 @@ const device = (delayPlaying = false, delayStopping = false) =>
     }
     return {
       audio,
+      activity: Context.get(context, Activity).changes,
+      finish: Effect.sync(() => {
+        if (playing !== undefined) send({ type: "finished", id: playing })
+        playing = undefined
+      }),
       next,
       order,
       closed: Deferred.await(closed),
@@ -100,6 +103,23 @@ const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>) =>
   )
 
 describe("Native audio", () => {
+  test("reports speaking while it plays, listening while only the microphone is open, and idle once it rests", () =>
+    run(
+      Effect.gen(function* () {
+        const fake = yield* device()
+        const seen = yield* Queue.unbounded<string>()
+        yield* fake.activity.pipe(Stream.runForEach((doing) => Queue.offer(seen, doing)), Effect.forkScoped)
+        const until = (doing: string) => Queue.take(seen).pipe(Effect.repeat({ until: (seen) => seen === doing }))
+        yield* until("idle")
+        yield* fake.audio.play("/tmp/fake.wav")
+        yield* until("speaking")
+        yield* fake.finish
+        yield* until("listening")
+        yield* fake.audio.rest
+        yield* until("idle")
+      }),
+    ))
+
   for (const ending of ["disconnect", "rest"] as const) {
     test(`ends microphone subscribers on ${ending}, and a later playback gets a fresh microphone`, () =>
       run(

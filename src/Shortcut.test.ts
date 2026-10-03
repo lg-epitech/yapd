@@ -9,11 +9,12 @@ const drive = (presses: ReadonlyArray<Shortcut.Key | "quit">, expected: number) 
   Effect.gen(function* () {
     const sent: Array<object> = []
     const keys = { key: "space", modifiers: ["ctrl", "option", "cmd"] } as const
-    const shortcut = yield* Shortcut.make(keys, (message) => sent.push(message))
+    const shortcut = yield* Shortcut.make(keys, (message) => sent.push(message), true)
     const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, expected)))
     // Lets the stream subscribe before anything is pressed.
     yield* Effect.yieldNow()
     yield* shortcut.greeted
+    yield* shortcut.registered(true)
     for (const press of presses) yield* press === "quit" ? shortcut.quit : shortcut.pressed(press)
     const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
     return { sent, events: [...events].map((event) => event._tag) }
@@ -48,7 +49,7 @@ describe("Shortcut", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const sent: Array<object> = []
-        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message))
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message), true)
         const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 2)))
         yield* Effect.yieldNow()
         yield* shortcut.service.cancel
@@ -72,5 +73,90 @@ describe("Shortcut", () => {
       { type: "escape", on: true },
       { type: "escape", on: true },
     ])
+  })
+
+  test("lets go of the keys while off, and of whatever was pressed before, then takes them again once on, even in a new helper", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sent: Array<object> = []
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message), true)
+        const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 2)))
+        yield* Effect.yieldNow()
+        // Let go of before anyone hears of it.
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.service.toggle(false)
+        yield* shortcut.service.toggle(false)
+        // On its way from the helper as the keys were let go of.
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.greeted
+        yield* shortcut.service.toggle(true)
+        // Still on its way from before, as the helper hasn't said it holds the keys again yet.
+        yield* shortcut.pressed("escape")
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.registered(true)
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.pressed("shortcut")
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
+        return { sent, events: [...events].map((event) => event._tag) }
+      }),
+    )
+    expect(result.events).toEqual(["Started", "Sent"])
+    expect(result.sent).toEqual([
+      { type: "escape", on: true },
+      { type: "shortcut" },
+      { type: "escape", on: false },
+      { type: "shortcut" },
+      { type: "shortcut", key: "space", modifiers: ["ctrl"] },
+      { type: "escape", on: true },
+      { type: "escape", on: false },
+    ])
+  })
+
+  test("holds no keys and starts nothing until it's on", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sent: Array<object> = []
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, (message) => sent.push(message), false)
+        const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 1)))
+        yield* Effect.yieldNow()
+        yield* shortcut.greeted
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.service.toggle(true)
+        yield* shortcut.registered(true)
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.pressed("shortcut")
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
+        return { sent, events: [...events].map((event) => event._tag) }
+      }),
+    )
+    expect(result.events).toEqual(["Started"])
+    expect(result.sent).toEqual([
+      { type: "shortcut" },
+      { type: "shortcut", key: "space", modifiers: ["ctrl"] },
+      { type: "escape", on: true },
+      { type: "escape", on: false },
+    ])
+  })
+
+  test("counts on each registration being answered, so an answer from before doesn't let presses from before through", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const shortcut = yield* Shortcut.make({ key: "space", modifiers: ["ctrl"] }, () => {}, true)
+        const fiber = yield* Effect.fork(Stream.runCollect(Stream.take(shortcut.service.events, 2)))
+        yield* Effect.yieldNow()
+        yield* shortcut.greeted
+        yield* shortcut.service.toggle(false)
+        yield* shortcut.service.toggle(true)
+        // The answer to the first registration, then a press from before the keys were let go of.
+        yield* shortcut.registered(true)
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.registered(true)
+        yield* shortcut.pressed("shortcut")
+        yield* shortcut.pressed("escape")
+        const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
+        return [...events].map((event) => event._tag)
+      }),
+    )
+    expect(result).toEqual(["Started", "Cancelled"])
   })
 })

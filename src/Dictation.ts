@@ -1,4 +1,4 @@
-import { Cause, Chunk, Context, Deferred, Effect, Either, Fiber, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
+import { Cause, Chunk, Context, Deferred, Effect, Either, Fiber, FiberSet, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -19,6 +19,8 @@ export class Dictation extends Context.Tag("yapd/Dictation")<
   {
     /** What the user said, each time they send a dictation, in the order they said it. */
     readonly transcripts: Stream.Stream<string>
+    /** Drops every dictation not handed on yet, without a sound, like when yapd is turned off. */
+    readonly drop: Effect.Effect<void>
   }
 >() {}
 
@@ -166,7 +168,10 @@ export const WhisperDictation = Layer.scoped(
     const voice = yield* Voice
     const device = Floor.use(yield* Floor.Floor, audio)
     const scope = yield* Effect.scope
-    const transcripts = yield* PubSub.unbounded<string>()
+    /** Each with how many times dictations were dropped before it was sent, so one handed on just before isn't taken in after. */
+    const transcripts = yield* PubSub.unbounded<{ readonly heard: string; readonly drops: number }>()
+    const dictations = yield* FiberSet.make()
+    let drops = 0
 
     const dir = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-dictation-"))),
@@ -311,7 +316,7 @@ export const WhisperDictation = Layer.scoped(
         }
         if (heard.right === "") return yield* say("I didn't catch anything.")
         if (before !== undefined) yield* Deferred.await(before)
-        yield* PubSub.publish(transcripts, heard.right)
+        yield* PubSub.publish(transcripts, { heard: heard.right, drops })
       }).pipe(
         Effect.ensuring(Deferred.succeed(done, undefined)),
         Effect.scoped,
@@ -333,7 +338,7 @@ export const WhisperDictation = Layer.scoped(
             const before = last
             ending = ended
             last = done
-            return yield* Effect.forkIn(dictate(ended, before, done), scope)
+            return yield* FiberSet.run(dictations, dictate(ended, before, done))
           }
           if (ending !== undefined) yield* Deferred.succeed(ending, event._tag)
           ending = undefined
@@ -342,6 +347,13 @@ export const WhisperDictation = Layer.scoped(
       Effect.forkScoped,
     )
 
-    return { transcripts: Stream.fromPubSub(transcripts) }
+    return {
+      transcripts: Stream.fromPubSub(transcripts).pipe(Stream.filterMap(({ heard, drops: before }) => before === drops ? Option.some(heard) : Option.none())),
+      // Without waiting for them to stop, since nothing they do after can reach anyone.
+      drop: Effect.suspend(() => {
+        drops++
+        return Effect.forEach([...dictations], Fiber.interruptFork, { discard: true })
+      }),
+    }
   }),
 )

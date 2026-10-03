@@ -49,6 +49,10 @@ interface Draft {
   /** Whether it's being started right now, which can't be taken back. */
   starting: boolean
   open: boolean
+  /** Dropped, like when yapd was turned off: it says nothing, and starts nothing unless it already was. */
+  dropped: boolean
+  /** What's being done for it in the background, to stop when it's dropped. */
+  readonly jobs: Set<Fiber.RuntimeFiber<unknown, unknown>>
 }
 
 interface Resolved {
@@ -166,8 +170,13 @@ export const make = (options: {
       ),
     )
 
+    /** Nothing more is done for a draft once it's dropped. */
     const background = <A, E>(effect: Effect.Effect<A, E>, draft: Draft) =>
-      effect.pipe(
+      Effect.withFiberRuntime<A | void, E>((fiber) => {
+        if (draft.dropped) return Effect.void
+        draft.jobs.add(fiber)
+        return Effect.ensuring(effect, Effect.sync(() => draft.jobs.delete(fiber)))
+      }).pipe(
         Effect.catchAllCause((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not write the prompt", cause),
         ),
@@ -209,14 +218,18 @@ export const make = (options: {
       })
 
     const say = (draft: Draft, spoken: string, priority: Notice["priority"], extra: Partial<Notice> = {}) =>
-      options.tell({
-        id: `draft:${draft.id}:${crypto.randomUUID()}`,
-        priority,
-        spoken,
-        at: draft.at,
-        stale: Effect.succeed(false),
-        ...extra,
-      })
+      Effect.suspend(() =>
+        draft.dropped
+          ? Effect.void
+          : options.tell({
+              id: `draft:${draft.id}:${crypto.randomUUID()}`,
+              priority,
+              spoken,
+              at: draft.at,
+              stale: Effect.succeed(false),
+              ...extra,
+            }),
+      )
 
     /** Nothing started, and the user hears why. */
     const fail = (draft: Draft, reason: string) =>
@@ -239,6 +252,7 @@ export const make = (options: {
           }${request.baseBranch === undefined ? "" : ` from ${request.baseBranch}`}. ${why}`,
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
+        if (draft.dropped) return
         draft.starting = true
         const outcome = yield* Effect.either(machine.launcher.start(request))
         if (Either.isLeft(outcome)) {
@@ -423,6 +437,27 @@ export const make = (options: {
       })
 
     return {
+      /**
+       * Drops every request, without a word, like when yapd is turned off. One
+       * being started can't be taken back, so it still starts, but says nothing.
+       */
+      drop: Effect.suspend(() => {
+        // All at once, so none starts halfway through.
+        const dropping = [...drafts.values()]
+        for (const draft of dropping) draft.dropped = true
+        return Effect.forEach(
+          dropping,
+          (draft) =>
+            (draft.starting
+              ? Effect.logInfo(`Starting without a word, since yapd was turned off: ${draft.heard}`)
+              : Effect.forEach([...draft.jobs], Fiber.interruptFork).pipe(
+                  Effect.zipRight(close(draft)),
+                  Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)),
+                )
+            ).pipe(Effect.annotateLogs({ draft: draft.id })),
+          { discard: true },
+        )
+      }),
       /** The user started dictating: what's ready by the time they've finished doesn't hold the prompt up. */
       prepare: Effect.zipRight(fetch, writer.prepare).pipe(Effect.asVoid),
       /** Takes what the user dictated, and returns at once. */
@@ -437,6 +472,8 @@ export const make = (options: {
             unanswered: 0,
             starting: false,
             open: true,
+            dropped: false,
+            jobs: new Set(),
           }
           drafts.set(draft.id, draft)
           yield* background(write(draft), draft)

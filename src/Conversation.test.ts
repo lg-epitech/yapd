@@ -214,16 +214,14 @@ describe("Follow-ups", () => {
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {
     const result = await scoped(
       Effect.gen(function* () {
-        const { fiber, sent, late, speak, wait, sending, settled } = yield* conversation(["Please merge it."], 3)
+        const { fiber, sent, late, speak, wait, sending } = yield* conversation(["Please merge it."], 3)
         yield* speak
         // The reply is worked out, and on its way to the agent.
         yield* wait(6)
         const during = { sent: [...sent], sending: yield* sending("s") }
         // As a dictation does.
         yield* Fiber.interrupt(fiber)
-        const waited = yield* Effect.fork(settled("s"))
         yield* wait(3)
-        yield* Fiber.join(waited)
         return { during, sent, late, sending: yield* sending("s") }
       }),
     )
@@ -233,14 +231,14 @@ describe("Follow-ups", () => {
     expect(result.sending).toBe(false)
   })
 
-  test("tracks pending deliveries by update and waits for every delivery to the session", async () => {
+  test("tracks pending deliveries by update", async () => {
     const result = await scoped(
       Effect.gen(function* () {
         const oldStarted = yield* Deferred.make<void>()
         const newStarted = yield* Deferred.make<void>()
         const oldDone = yield* Deferred.make<void>()
         const newDone = yield* Deferred.make<void>()
-        const { fiber, converse, speak, wait, sending, settled, sent } = yield* conversation(["Explain the old update.", "Explain the new update."], 0, [
+        const { fiber, converse, speak, wait, sending, sent } = yield* conversation(["Explain the old update.", "Explain the new update."], 0, [
           Deferred.succeed(oldStarted, undefined).pipe(Effect.zipRight(Deferred.await(oldDone))),
           Deferred.succeed(newStarted, undefined).pipe(Effect.zipRight(Deferred.await(newDone))),
         ])
@@ -255,17 +253,16 @@ describe("Follow-ups", () => {
         yield* speak
         yield* wait(6)
         yield* Deferred.await(newStarted)
-        const all = yield* Effect.forkScoped(settled("s"))
         yield* Deferred.succeed(newDone, undefined)
         yield* wait(0)
-        const afterNew = { old: yield* sending("s", update), fresh: yield* sending("s", fresh), settled: Option.isSome(yield* Fiber.poll(all)) }
+        const afterNew = { old: yield* sending("s", update), fresh: yield* sending("s", fresh), session: yield* sending("s") }
         yield* Deferred.succeed(oldDone, undefined)
-        yield* Fiber.join(all)
+        yield* wait(0)
         return { before, afterNew, sending: yield* sending("s"), sent }
       }),
     )
     expect(result.before).toEqual({ old: true, fresh: false })
-    expect(result.afterNew).toEqual({ old: true, fresh: false, settled: false })
+    expect(result.afterNew).toEqual({ old: true, fresh: false, session: true })
     expect(result.sending).toBe(false)
     expect(result.sent).toEqual(["Explain the new update.", "Explain the old update."])
   })

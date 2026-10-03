@@ -41,11 +41,33 @@ Then add the hook to `~/.claude/settings.json`:
 }
 ```
 
-The Stop hook runs in the background and waits while yapd reads the update, so it can hand the session [your reply](#where-follow-ups-go).
+The Stop hook runs in the background and waits while yapd reads the update, and after, until the session does something else or nine minutes have passed, so it can hand the session [your reply](#where-follow-ups-go), even to an update you [hear again](#menu-bar).
 
 For Codex, put both hooks in `~/.codex/hooks.json` as plain commands with `hook codex`, without `--wait` or the two async settings. You will be prompted to accept the hooks on your next session.
 
 On first start yapd asks for the microphone, so you can interrupt it.
+
+## Menu bar
+
+The menu bar app turns yapd off and on, and shows what it's doing without opening the menu. Building it needs Xcode:
+
+```sh
+bun run app
+```
+
+That puts it in `~/Applications` and opens it, and from then on it opens at login, which System Settings, General, Login Items can stop. If `xcodebuild` says it needs Xcode, point the command line tools at it with `sudo xcode-select -s /Applications/Xcode.app`.
+
+| Icon | |
+| --- | --- |
+| Waveform | On, and quiet |
+| Speaker | Speaking |
+| Microphone | Listening, for your reply or while you dictate |
+| Waveform, struck through | Off |
+| Waveform with an exclamation mark | yapd isn't running |
+
+Off, yapd says nothing, never opens the microphone and lets go of the shortcut. Turning it off drops whatever hasn't started yet: what it was about to say, a dictation, and new work it was still writing up or asking you about. Updates that finish meanwhile aren't said later, and it stays off when it restarts, until you turn it on again. The menu also has the last few updates, to hear one again and reply to it.
+
+The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux too.
 
 ## Interrupting
 

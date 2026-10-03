@@ -64,6 +64,10 @@ const drafts = (
     readonly written?: Written
     readonly refuse?: string
     readonly rigDown?: boolean
+    /** How long starting takes, which is at once unless said. */
+    readonly startSeconds?: number
+    /** How long deciding takes, which is at once unless said. */
+    readonly decideSeconds?: number
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -80,6 +84,7 @@ const drafts = (
       start: (request: Request) =>
         Effect.gen(function* () {
           started.push({ machine, request })
+          if (options.startSeconds !== undefined) yield* Effect.sleep(`${options.startSeconds} seconds`)
           if (options.refuse !== undefined) return yield* new LaunchError({ reason: options.refuse })
           return {
             thread: "thread-1",
@@ -107,11 +112,11 @@ const drafts = (
     }).pipe(
       Effect.provideService(Writer, {
         decide: (material) =>
-          Effect.suspend(() => {
+          Effect.sleep(`${options.decideSeconds ?? 0} seconds`).pipe(Effect.zipRight(Effect.suspend(() => {
             asked.push(material)
             const decided = decide(material)
             return decided === undefined ? Effect.fail(new WriteError({ cause: "The model is down" })) : Effect.succeed(decided)
-          }),
+          }))),
         research: (_, destination, researcher) =>
           researcher.research({ directory: destination.directory, prompt: destination.lookFor, schema: {} }).pipe(
             Effect.mapError((cause) => new WriteError({ cause })),
@@ -256,6 +261,58 @@ describe("Drafts", () => {
     ])
     // Nothing is left to ask about.
     expect(result.stale).toBe(true)
+  })
+
+  test("drops what hasn't started without a word, so it's neither asked about again nor built on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, unanswered, wait, drop, started, spoken, questions, asked } = yield* drafts(({ lines }) =>
+          lines[0]?.text === "Fix the loader."
+            ? decision({ action: "ask", project: "", prompt: "", spoken: "For the loader fix, is that yapd or std?" })
+            : decision({ project: "std", evidence: "std", spoken: "Started in std, on Fable, in a worktree." }),
+        )
+        yield* dictate("Fix the loader.")
+        yield* unanswered()
+        yield* drop
+        yield* wait(120)
+        const stale = yield* questions()[0]!.stale
+        yield* dictate("Tidy up the tests in std.")
+        return { stale, started, spoken: spoken(), earlier: asked.at(-1)?.earlier }
+      }),
+    )
+    expect(result.stale).toBe(true)
+    expect(result.started.map(({ request }) => request.project)).toEqual(["/code/std"])
+    expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?", "Started in std, on Fable, in a worktree."])
+    expect(result.earlier).toEqual([])
+  })
+
+  test("stops writing up what's dropped, so it neither reads the project nor starts", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, wait, drop, started, researched, spoken } = yield* drafts(() => decision({ action: "research" }), {
+          decideSeconds: 5,
+        })
+        yield* dictate("Fix the loader like we did the parser.")
+        yield* drop
+        yield* wait(5)
+        return { started, researched, spoken: spoken() }
+      }),
+    )
+    expect(result).toEqual({ started: [], researched: [], spoken: [] })
+  })
+
+  test("still starts what was being started when dropped, without a word", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, wait, drop, started, spoken } = yield* drafts(() => decision({}), { startSeconds: 5 })
+        yield* dictate("Fix the loader.")
+        yield* drop
+        yield* wait(5)
+        return { started, spoken: spoken() }
+      }),
+    )
+    expect(result.started.map(({ request }) => request.project)).toEqual(["/code/yapd"])
+    expect(result.spoken).toEqual([])
   })
 
   test("drops it when the user calls it off, and keeps asking when what they said wasn't an answer", async () => {

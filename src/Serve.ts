@@ -1,6 +1,6 @@
 import { Effect, Layer, Logger, Stream } from "effect"
 import { hostname } from "node:os"
-import { DeviceAudio } from "./Audio.ts"
+import { Activity, DeviceAudio } from "./Audio.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
@@ -17,6 +17,7 @@ import * as Relay from "./Relay.ts"
 import * as Remote from "./Remote.ts"
 import { ProviderResponder } from "./Responder.ts"
 import * as Server from "./Server.ts"
+import * as Settings from "./Settings.ts"
 import { Shortcut } from "./Shortcut.ts"
 import * as T3Code from "./T3Code.ts"
 import { Vocabulary, WhisperTranscriber } from "./Transcriber.ts"
@@ -51,7 +52,6 @@ const Relays = Layer.effect(
 
 export const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make
-  yield* Server.serve(yield* Config.port, daemon.handle)
   const preferences = yield* Preferences.path
   const drafts = yield* Drafts.make({
     machines: yield* machines,
@@ -62,11 +62,47 @@ export const serve = Effect.gen(function* () {
     expect: (yield* Vocabulary).expect,
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
-  const { events } = yield* Shortcut
-  const { transcripts } = yield* Dictation
+  const shortcut = yield* Shortcut
+  const dictation = yield* Dictation
+  const settings = yield* Settings.Settings
+
+  /**
+   * Off, whatever hasn't started yet is dropped, from a dictation to what was
+   * waiting to be said. The keys go before the dictations, so none starts in
+   * between, and all of it before the daemon waits on anything.
+   */
+  const turn = (on: boolean) =>
+    on
+      ? Effect.zipRight(daemon.turn(true), shortcut.toggle(true))
+      : Effect.all([shortcut.toggle(false), dictation.drop, drafts.drop, daemon.turn(false)], { discard: true })
+  const switching = yield* Effect.makeSemaphore(1)
+  // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
+  if (yield* settings.on) yield* turn(true)
+  else {
+    yield* turn(false)
+    yield* Effect.logInfo("yapd is off, until it's turned on from the menu bar or the API")
+  }
+
+  const state = Stream.zipLatestWith(daemon.state, (yield* Activity).changes, (state, activity): Server.State => ({
+    on: state.on,
+    activity,
+    updates: state.heard.map(({ id, update }) => ({
+      id,
+      project: update.project,
+      text: update.spoken,
+      at: new Date(update.at).toISOString(),
+    })),
+  }))
+  yield* Server.serve(yield* Config.port, {
+    handle: daemon.handle,
+    state,
+    // One at a time, so what's remembered is what's in effect.
+    turn: (on) => Effect.zipRight(settings.remember(on), turn(on)).pipe(switching.withPermits(1)),
+    replay: daemon.replay,
+  })
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(events, (event) => (event._tag === "Started" ? drafts.prepare : Effect.void)))
-  yield* Effect.forkScoped(Stream.runForEach(transcripts, drafts.dictated))
+  yield* Effect.forkScoped(Stream.runForEach(shortcut.events, (event) => (event._tag === "Started" ? drafts.prepare : Effect.void)))
+  yield* Effect.forkScoped(Stream.runForEach(dictation.transcripts, drafts.dictated))
   return yield* daemon.speak
 }).pipe(
   Effect.scoped,
@@ -76,7 +112,7 @@ export const serve = Effect.gen(function* () {
       WhisperDictation,
       Relays,
     ).pipe(
-      Layer.provideMerge(Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer)),
+      Layer.provideMerge(Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer)),
       Layer.provideMerge(ClaudeCode.WaitingLive),
     ),
   ),
