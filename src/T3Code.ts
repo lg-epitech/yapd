@@ -119,10 +119,10 @@ export const make = (locate = Server.locate) => Effect.gen(function* () {
       }
       if (target.archivedAt !== null) return yield* new RelayError({ reason: "That thread is archived, so I didn't send it." })
       if (busy(target)) return yield* new RelayError({ reason: "It's in the middle of another turn, so I didn't send it." })
-      yield* api("/api/orchestration/dispatch", Schema.Unknown, {
+      yield* request("/api/orchestration/dispatch", Schema.Unknown, {
         method: "POST",
         body: JSON.stringify(turnStart(target, text)),
-      })
+      }).pipe(Effect.mapError(({ reason, cause }) => new RelayError({ reason, cause })))
     })
 
   return { send } satisfies Relay

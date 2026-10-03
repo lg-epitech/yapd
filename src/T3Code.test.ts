@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test"
 import { ConfigProvider, Effect } from "effect"
-import type { Thread } from "./Relay.ts"
+import { make as makeRelays, type Thread } from "./Relay.ts"
 import * as T3Code from "./T3Code.ts"
 
 const thread = (overrides: Partial<T3Code.ShellThread> = {}): T3Code.ShellThread => ({
@@ -89,6 +89,24 @@ describe("T3Code follow-ups", () => {
   const original = { role: "user", text: "Fix the loader" }
   const clarification = { role: "user", text: "Include the streaming case" }
   const reply = { role: "assistant", text: update.message }
+
+  test("doesn't try another relay after an uncertain T3 dispatch", async () => {
+    let dispatches = 0
+    let fallbacks = 0
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof globalThis.fetch>[0]) => {
+      const path = new URL(String(input)).pathname
+      if (path === "/api/orchestration/shell") return Response.json(shell([thread()]))
+      if (path === "/api/orchestration/threads/thread-1") return Response.json({ thread: { messages: [original, reply] } })
+      dispatches++
+      throw new Error("Connection lost after dispatch")
+    }, { preconnect: globalThis.fetch.preconnect }))
+    try {
+      const relays = makeRelays([await makeRelay(), { send: () => Effect.sync(() => { fallbacks++ }) }])
+      expect(await Effect.runPromise(Effect.flip(relays.send(update, "Merge it."))))
+        .toMatchObject({ _tag: "RelayError", reason: "T3 Code isn't answering." })
+      expect([dispatches, fallbacks]).toEqual([1, 0])
+    } finally { fetch.mockRestore() }
+  })
 
   test("finds the completed reply behind a pending steering message", async () => {
     const sent: Array<unknown> = []

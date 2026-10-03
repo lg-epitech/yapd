@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, Layer, Option, Queue, type Scope, TestClock, TestContext } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Option, Queue, type Scope, TestClock, TestContext } from "effect"
 import { Audio } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
@@ -64,12 +64,13 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       }),
       Layer.succeed(Voice, { render: () => Effect.void }),
     )
+    const context = yield* Layer.build(layer)
     const made = yield* Conversation.make({
       dir: "/tmp",
       moved: () => Effect.succeed(false),
-      send: (_, __, deliver) => deliver,
+      send: (update, message) => Context.get(context, Relays).send(update.thread, message).pipe(Effect.as("sent" as const)),
       late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
-    }).pipe(Effect.provide(layer))
+    }).pipe(Effect.provide(context))
     const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -211,6 +212,16 @@ describe("Conversation", () => {
 })
 
 describe("Follow-ups", () => {
+  test("sends consecutive messages while listening to the same update", async () => {
+    const result = await run(["Please merge it.", "Then deploy it."], (speak, wait) => Effect.gen(function* () {
+      yield* speak
+      yield* wait(5)
+      yield* speak
+      yield* wait(5)
+    }))
+    expect(result.sent).toEqual(["Please merge it.", "Then deploy it."])
+  })
+
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {
     const result = await scoped(
       Effect.gen(function* () {
