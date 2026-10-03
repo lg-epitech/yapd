@@ -6,7 +6,7 @@ import SwiftUI
 // UI can do all of this too.
 
 /// What `GET /state` returns.
-struct State: Decodable {
+struct Status: Decodable {
   struct Update: Decodable, Identifiable {
     let id: String
     let text: String
@@ -20,7 +20,7 @@ struct State: Decodable {
 @MainActor @Observable
 final class Yapd {
   /// None while yapd isn't running.
-  private(set) var state: State?
+  private(set) var state: Status?
   private let api: URL
 
   init() {
@@ -50,7 +50,7 @@ final class Yapd {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
         for try await line in bytes.lines where line.hasPrefix("data: ") {
-          state = try JSONDecoder().decode(State.self, from: Data(line.dropFirst(6).utf8))
+          state = try JSONDecoder().decode(Status.self, from: Data(line.dropFirst(6).utf8))
         }
       } catch {}
       state = nil
@@ -62,7 +62,7 @@ final class Yapd {
     send("PUT", "state", body: try? JSONEncoder().encode(["on": on]))
   }
 
-  func replay(_ update: State.Update) {
+  func replay(_ update: Status.Update) {
     send("POST", "updates/\(update.id)/replay")
   }
 
