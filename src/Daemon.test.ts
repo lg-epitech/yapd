@@ -261,8 +261,8 @@ describe("Daemon", () => {
       }),
     )
     expect(result.during).toEqual([])
-    // Its hook is only let go of once the reply has had its chance to reach it.
-    expect(result.sent).toEqual(["a sent: Merge it.", "claude:a let go"])
+    // Its hook stays, so a reply to the update heard again can reach it too.
+    expect(result.sent).toEqual(["a sent: Merge it."])
     // The update isn't read again: it was answered.
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. Okay, passed on."])
   })
@@ -489,7 +489,8 @@ describe("Daemon", () => {
     )
     expect(result.played).toEqual(["yapd. The PR is ready."])
     expect(result.stopped).toEqual(["yapd. The PR is ready."])
-    expect(result.letGo.toSorted()).toEqual(["claude:a let go", "claude:b let go"])
+    // The one it was reading was heard, so its hook waits for a reply to it heard again.
+    expect(result.letGo).toEqual(["claude:b let go"])
     expect(result.condensed).toEqual(["The PR is ready.", "The tests pass."])
   })
 
@@ -589,5 +590,42 @@ describe("Daemon", () => {
     )
     expect(result.played).toEqual([])
     expect(result.followUps).toEqual(["claude:a let go"])
+  })
+
+  test("keeps a heard update's hook waiting for as long as it can be heard again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, followUps } = yield* daemon
+        for (const session of ["a", "b", "c", "d", "e"]) {
+          yield* finish(session, `Done with ${session}.`, true)
+          yield* wait(11)
+        }
+        const five = [...followUps]
+        yield* finish("f", "Done with f.", true)
+        yield* wait(11)
+        return { five, six: [...followUps] }
+      }),
+    )
+    expect(result.five).toEqual([])
+    expect(result.six).toEqual(["claude:a let go"])
+  })
+
+  test("says nothing about a reply still on its way when it was turned off, even once it's on again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, wait, power, followUps, played } = yield* make("Merge it.")
+        yield* finish("a", "The PR is ready.")
+        yield* speak
+        // On its way to the agent, which takes three seconds.
+        yield* wait(1)
+        yield* power(false)
+        yield* power(true)
+        yield* wait(3)
+        yield* wait(30)
+        return { followUps: [...followUps], played: [...played] }
+      }),
+    )
+    expect(result.followUps).toEqual(["a sent: Merge it."])
+    expect(result.played).toEqual(["yapd. The PR is ready."])
   })
 })
