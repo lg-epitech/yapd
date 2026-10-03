@@ -41,7 +41,7 @@ Then add the hook to `~/.claude/settings.json`:
 }
 ```
 
-The Stop hook runs in the background and waits while yapd reads the update, and for a few minutes after, while you can still [hear it again](#menu-bar), so it can hand the session [your reply](#where-follow-ups-go).
+The Stop hook runs in the background and waits while yapd reads the update, and after, until the session does something else or nine minutes have passed, so it can hand the session [your reply](#where-follow-ups-go), even to an update you [hear again](#menu-bar).
 
 For Codex, put both hooks in `~/.codex/hooks.json` as plain commands with `hook codex`, without `--wait` or the two async settings. You will be prompted to accept the hooks on your next session.
 

@@ -19,12 +19,14 @@ import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
 
-/** An update the user heard, which they can hear again. */
+/**
+ * An update the user heard, which they can hear again. Its session's Stop hook
+ * isn't let go of, so a reply to it heard again still gets there: it waits
+ * until the session does something else, or until it gives up.
+ */
 export interface HeardUpdate {
   readonly id: string
   readonly update: Conversation.Update
-  /** Its session's Stop hook, kept waiting so a reply to the update heard again still reaches it. */
-  readonly hook?: Ticket
 }
 
 export interface State {
@@ -42,7 +44,6 @@ const replayable = 5
  * along with what yapd has to say for itself.
  */
 export const make = Effect.gen(function* () {
-  const scope = yield* Effect.scope
   const condenser = yield* Condenser
   const voice = yield* Voice
   const audio = yield* Audio
@@ -345,12 +346,6 @@ export const make = Effect.gen(function* () {
       )
     })
 
-  /** A hook is let go of once the follow-up on its way has reached it, or it would get none. */
-  const letGo = (session: string, hook: Ticket | undefined) =>
-    hook === undefined
-      ? Effect.void
-      : conversation.settled(session).pipe(Effect.zipRight(release(hook)), Effect.forkIn(scope), Effect.asVoid)
-
   /** Says a notice. Only a question is listened to: whatever else they'd say to it has nowhere to go. */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>) =>
     Effect.gen(function* () {
@@ -382,34 +377,21 @@ export const make = Effect.gen(function* () {
    */
   const replays = new Map<string, Inbox.Replay>()
 
-  /**
-   * Keeps the latest few updates, and any older one being heard again, along
-   * with their hooks, which wait for as long as the update can be heard again,
-   * or until the session does something else or the hook gives up.
-   */
-  const remember = (change: (heard: ReadonlyArray<HeardUpdate>) => ReadonlyArray<HeardUpdate>) =>
-    Effect.gen(function* () {
-      const forgotten = yield* SubscriptionRef.modify(state, (current): readonly [ReadonlyArray<HeardUpdate>, State] => {
-        const changed = change(current.heard)
-        const kept = changed.filter((heard, index) => index < replayable || replays.has(heard.id))
-        return [changed.filter((heard) => !kept.includes(heard)), { ...current, heard: kept }]
-      })
-      yield* Effect.forEach(forgotten, (heard) => letGo(heard.update.session, heard.hook), { discard: true })
-    })
+  const heardAlready = (heard: ReadonlyArray<HeardUpdate>, update: Conversation.Update) =>
+    heard.some((heard) => heard.update.session === update.session && heard.update.at === update.at)
 
   /** Keeps an update the user is hearing, unless they're hearing it again. */
-  const hear = ({ update, hook }: Inbox.Ready) =>
-    remember((heard) =>
-      heard.some((heard) => heard.update.session === update.session && heard.update.at === update.at)
-        ? heard
-        : [{ id: crypto.randomUUID(), update, ...(hook === undefined ? {} : { hook }) }, ...heard],
+  const hear = (update: Conversation.Update) =>
+    SubscriptionRef.update(state, (current) =>
+      heardAlready(current.heard, update)
+        ? current
+        : { ...current, heard: [{ id: crypto.randomUUID(), update }, ...current.heard].slice(0, replayable) },
     )
 
   /** An update heard again has been said, or won't be. */
   const replayed = (replay: Inbox.Replay) =>
-    Effect.suspend(() => {
+    Effect.sync(() => {
       if (replays.get(replay.id) === replay) replays.delete(replay.id)
-      return remember((heard) => heard)
     })
 
   const speakNext = Effect.gen(function* () {
@@ -426,7 +408,7 @@ export const make = Effect.gen(function* () {
     })
     if ("update" in ready) {
       readSince.set(ready.update, turns)
-      yield* hear(ready)
+      yield* hear(ready.update)
     }
     let kept = false
     let dealtWith = false
@@ -492,10 +474,13 @@ export const make = Effect.gen(function* () {
       yield* Effect.logInfo(next ? "Turned on" : "Turned off")
       // Their hooks are let go of as they stop.
       if (!next) yield* FiberMap.clear(preparing).pipe(events.withPermits(1))
+      // The hook of one the user heard, cut off by a dictation, waits on for a reply to it heard again.
+      const { heard } = yield* SubscriptionRef.get(state)
       for (const entry of dropped) {
         yield* removeFile(Inbox.audio(entry))
-        if ("update" in entry) yield* release(entry.hook)
-        if ("update" in entry && entry.replay !== undefined) yield* replayed(entry.replay)
+        if (!("update" in entry)) continue
+        if (!heardAlready(heard, entry.update)) yield* release(entry.hook)
+        if (entry.replay !== undefined) yield* replayed(entry.replay)
       }
     })
 

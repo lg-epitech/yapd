@@ -592,22 +592,18 @@ describe("Daemon", () => {
     expect(result.followUps).toEqual(["claude:a let go"])
   })
 
-  test("keeps a heard update's hook waiting for as long as it can be heard again", async () => {
+  test("leaves the hooks of updates it read waiting, for a reply to one heard again", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { finish, wait, followUps } = yield* daemon
-        for (const session of ["a", "b", "c", "d", "e"]) {
+        for (const session of ["a", "b", "c", "d", "e", "f"]) {
           yield* finish(session, `Done with ${session}.`, true)
           yield* wait(11)
         }
-        const five = [...followUps]
-        yield* finish("f", "Done with f.", true)
-        yield* wait(11)
-        return { five, six: [...followUps] }
+        return [...followUps]
       }),
     )
-    expect(result.five).toEqual([])
-    expect(result.six).toEqual(["claude:a let go"])
+    expect(result).toEqual([])
   })
 
   test("says nothing about a reply still on its way when it was turned off, even once it's on again", async () => {
@@ -629,33 +625,21 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["yapd. The PR is ready."])
   })
 
-  test("keeps the hook of an update waiting to be heard again, even past the latest few", async () => {
+  test("turned off, lets go of the hooks of what the user hasn't heard, but not of one a dictation cut off", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { handle, finish, wait, flush, followUps, heard, replay } = yield* daemon
-        for (const session of ["a", "b", "c", "d"]) {
-          yield* finish(session, `Done with ${session}.`, true)
-          yield* wait(11)
-        }
-        yield* finish("e", "Done with e.", true)
-        const oldest = (yield* heard).at(-1)!
-        // As e is read, something that needs the user comes in, and then the oldest is asked for again.
-        yield* handle(
-          "claude",
-          { hook_event_name: "Stop", session_id: "f", cwd: "/tmp", last_assistant_message: "Which branch?", needs_you: true },
-          { project: "yapd" },
-          true,
-        )
-        yield* flush
-        yield* replay(oldest)
-        yield* wait(11)
-        const waiting = { followUps: [...followUps], heard: (yield* heard).length }
-        yield* wait(22)
-        return { waiting, after: { followUps: [...followUps], heard: (yield* heard).length } }
+        const { finish, wait, dictate, power, followUps } = yield* daemon
+        yield* finish("a", "The PR is ready.", true)
+        yield* finish("b", "The tests pass.", true)
+        yield* wait(1)
+        // Cut off, and waiting to be read again from the start.
+        yield* dictate
+        yield* power(false)
+        yield* wait(1)
+        return [...followUps]
       }),
     )
-    expect(result.waiting).toEqual({ followUps: [], heard: 6 })
-    expect(result.after).toEqual({ followUps: ["claude:a let go"], heard: 5 })
+    expect(result).toEqual(["claude:b let go"])
   })
 
   test("sends no second reply to an update heard again while the first is still on its way", async () => {
