@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { Audio, type Playback } from "./Audio.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
-import { plain, Relays, RelayError, type Thread } from "./Relay.ts"
+import { plain, RelayError, type Thread } from "./Relay.ts"
 import { type Line, type Reply, Responder } from "./Responder.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -109,10 +109,10 @@ export interface Question {
  */
 export const make = (options: {
   readonly dir: string
-  /** Whether the session has done anything since the update's turn stopped. */
+  /** Whether unrelated activity has made the update stale. */
   readonly moved: (update: Update) => Effect.Effect<boolean>
-  /** Registers the follow-up before delivering it, and settles that registration afterwards. */
-  readonly send: (update: Update, message: string, deliver: Effect.Effect<void, RelayError>) => Effect.Effect<void, RelayError>
+  /** Delivers the follow-up, or queues it until the session can receive it, using its latest thread. */
+  readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued", RelayError>
   /** Says how a follow-up went when the update it answers was cut off before yapd could. */
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
 }) =>
@@ -122,7 +122,6 @@ export const make = (options: {
     const vad = yield* Vad
     const transcriber = yield* Transcriber
     const responder = yield* Responder
-    const relays = yield* Relays
     const voice = yield* Voice
 
     let ids = 0
@@ -349,14 +348,13 @@ export const make = (options: {
      * it, it's sent whatever happens to the conversation, like a dictation
      * cutting it off: what's then left unsaid is said later.
      */
-    const pass = (update: Update, reply: Reply, again: boolean, onSent: Effect.Effect<void>) =>
+    const pass = (update: Update, reply: Reply) =>
       Effect.gen(function* () {
         let failed = false
         const mark = {}
         sending.set(update, mark)
-        const fiber = yield* follow(update, reply.message, again).pipe(
-          Effect.zipRight(onSent),
-          Effect.as(reply.spoken || "Sent."),
+        const fiber = yield* follow(update, reply.message).pipe(
+          Effect.map((result) => result === "queued" ? "Queued. I'll send it after the current turn finishes." : reply.spoken || "Sent."),
           Effect.catchAll((error) =>
             Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
               Effect.tap(() => {
@@ -383,16 +381,16 @@ export const make = (options: {
         )
       })
 
-    const follow = (update: Update, message: string, again: boolean) =>
+    const follow = (update: Update, message: string) =>
       Effect.gen(function* () {
-        if (again) return yield* new RelayError({ reason: "It's still on what I sent it, so I didn't send that." })
         // Typing into a session that started something else would steer it, or answer one of its prompts.
         if (yield* options.moved(update)) {
           return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
         }
         const text = plain(message)
-        yield* options.send(update, text, relays.send(update.thread, text))
-        yield* Effect.logInfo(`Sent: ${text}`)
+        const result = yield* options.send(update, text)
+        yield* Effect.logInfo(`${result === "queued" ? "Queued" : "Sent"}: ${text}`)
+        return result
       })
 
     const transcribe = (audio: Float32Array) =>
@@ -411,7 +409,6 @@ export const make = (options: {
           let path = update.audio
           let from = 0
           let missed = 0
-          let sent = false
 
           while (true) {
             const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined))
@@ -455,14 +452,7 @@ export const make = (options: {
             lines.push({ speaker: "yapd", text: said }, { speaker: "user", text: heard })
             text =
               reply.intent === "send"
-                ? yield* pass(
-                    update,
-                    reply,
-                    sent,
-                    Effect.sync(() => {
-                      sent = true
-                    }),
-                  )
+                ? yield* pass(update, reply)
                 : reply.spoken
             if (text === "") return
             path = join(options.dir, `${crypto.randomUUID()}${extension}`)

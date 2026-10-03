@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Audio } from "./Audio.ts"
-import { type Ticket, Waiting } from "./ClaudeCode.ts"
+import { type Ticket, Waiting, wake } from "./ClaudeCode.ts"
 import { Condenser, introduce, type Summary, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Conversation from "./Conversation.ts"
@@ -13,7 +13,7 @@ import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
-import { RelayError, type Thread } from "./Relay.ts"
+import { RelayError, Relays, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
 import { extension, Voice } from "./Voice.ts"
 
@@ -44,10 +44,12 @@ const replayable = 5
  * along with what yapd has to say for itself.
  */
 export const make = Effect.gen(function* () {
+  const lifetime = yield* Effect.scope
   const condenser = yield* Condenser
   const voice = yield* Voice
   const audio = yield* Audio
   const waiting = yield* Waiting
+  const relays = yield* Relays
   const floor = yield* Floor.Floor
   const minMillis = (yield* Config.minSeconds) * 1000
 
@@ -61,13 +63,22 @@ export const make = Effect.gen(function* () {
   const preparing = yield* FiberMap.make<string>()
   const prompts = new Map<string, { readonly text: string | undefined; readonly at: number }>()
   /** Each session's latest hook, including ones received in the same millisecond. */
-  const activity = new Map<string, number>()
-  const generations = new WeakMap<Conversation.Update, number>()
+  const activity = new Map<string, { readonly chain: object }>()
+  const generations = new WeakMap<Conversation.Update, { readonly chain: object }>()
   /** When yapd was last turned on as each update started being read, so what comes of it later can tell. */
   const readSince = new WeakMap<Conversation.Update, number>()
-  let generation = 0
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
-  const followed = new Map<string, { readonly message: string }>()
+  interface FollowUp {
+    readonly update: Conversation.Update
+    readonly message: string
+  }
+  interface Replies {
+    current?: FollowUp
+    thread: Thread
+    readonly queued: Array<FollowUp>
+    hook?: Ticket
+  }
+  const followed = new Map<string, Replies>()
   let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
@@ -107,71 +118,117 @@ export const make = Effect.gen(function* () {
       yield* Effect.logInfo(`Ready: ${notice.spoken}`)
     }).pipe(Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)))
 
+  const late = (update: Conversation.Update, spoken: string, failed: boolean) =>
+    Effect.flatMap(Clock.currentTimeMillis, (at) =>
+      tell(
+        { id: `late:${crypto.randomUUID()}`, priority: failed ? "needs-you" : "done", spoken: introduce(update.project, spoken), at, stale: Effect.succeed(false) },
+        readSince.get(update),
+      ),
+    )
+
+  const moved = (update: Conversation.Update) => activity.get(update.session)?.chain !== generations.get(update)?.chain
+
+  /** Called with the event lock held, before dispatch, since its reply can arrive immediately. */
+  const register = (followUp: FollowUp, channel: Replies) => Effect.gen(function* () {
+    const session = followUp.update.session
+    const previousPrompt = prompts.get(session)
+    const prompt = { text: followUp.message, at: yield* Clock.currentTimeMillis }
+    channel.current = followUp
+    prompts.set(session, prompt)
+    return { followUp, thread: channel.thread, previousPrompt, prompt, generation: activity.get(session) }
+  })
+
+  const deliver = (pending: Effect.Effect.Success<ReturnType<typeof register>>) =>
+    Effect.gen(function* () {
+      const { followUp } = pending
+      const { update, message } = followUp
+      const session = update.session
+      yield* relays.send(pending.thread, message).pipe(
+        Effect.onError(() =>
+          Effect.sync(() => {
+            // Hooks or another follow-up may already have consumed or replaced this context.
+            if (activity.get(session) !== pending.generation) return
+            const channel = followed.get(session)
+            if (channel?.current === followUp) delete channel.current
+            if (prompts.get(session) === pending.prompt) {
+              if (pending.previousPrompt === undefined) prompts.delete(session)
+              else prompts.set(session, pending.previousPrompt)
+            }
+          }).pipe(events.withPermits(1)),
+        ),
+      )
+      yield* Effect.logInfo(`Delivered: ${message}`)
+      // Put back by a dictation that started just as this was sent, and answered now.
+      const answered = yield* STM.commit(
+        TRef.modify(inbox, (current) => {
+          const queued = current.get(session)
+          return queued !== undefined && "update" in queued && queued.update === update
+            ? [queued, Inbox.remove(current, session)] as const
+            : [undefined, current] as const
+        }),
+      )
+      if (answered === undefined) return
+      yield* removeFile(Inbox.audio(answered))
+      yield* release(answered.hook)
+    }).pipe(Effect.tapError(() => Effect.forkIn(sendNext(pending.followUp.update.session), lifetime)))
+
+  /** Dispatches queued replies in order, without holding up incoming hooks or other sessions. */
+  const sendNext = (session: string): Effect.Effect<void> => Effect.gen(function* () {
+    const pending = yield* Effect.gen(function* () {
+      const channel = followed.get(session)
+      if (channel === undefined || channel.current !== undefined) return undefined
+      const power = yield* switched
+      if (!power.on) {
+        channel.queued.length = 0
+        yield* release(channel.hook)
+        return undefined
+      }
+      const followUp = channel.queued.shift()
+      return followUp === undefined ? undefined : yield* register(followUp, channel)
+    }).pipe(events.withPermits(1))
+    if (pending === undefined) return
+    yield* deliver(pending).pipe(
+      Effect.zipRight(late(pending.followUp.update, `Sent the queued message: ${pending.followUp.message}`, false)),
+      Effect.catchAll(({ reason }) => late(pending.followUp.update, `Couldn't send the queued message "${pending.followUp.message}". ${reason}`, true)),
+    )
+  })
+
+  /** Called with the event lock held. Unrelated input cancels queued replies to the old work. */
+  const invalidate = (session: string) => Effect.gen(function* () {
+    activity.set(session, { chain: {} })
+    const channel = followed.get(session)
+    followed.delete(session)
+    for (const queued of channel?.queued ?? []) {
+      yield* Effect.forkIn(late(queued.update, `The session moved on, so I didn't send the queued message "${queued.message}".`, true), lifetime)
+    }
+  })
+
   const conversation = yield* Conversation.make({
     dir,
-    moved: (update) => Effect.sync(() => activity.get(update.session) !== generations.get(update)),
-    send: (update, message, deliver) =>
-      Effect.gen(function* () {
+    moved: (update) => Effect.sync(() => moved(update)),
+    send: (update, message) => Effect.gen(function* () {
+      const pending = yield* Effect.gen(function* () {
+        if (moved(update)) return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
+        const { on } = yield* switched
+        if (!on) return yield* new RelayError({ reason: "yapd is off, so I didn't send it." })
         const session = update.session
-        const pending = yield* Effect.gen(function* () {
-          if (activity.get(session) !== generations.get(update)) {
-            return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
-          }
-          // One is on its way, or being worked on, like after a reply to an update the user is now hearing again.
-          if (followed.has(session)) {
-            return yield* new RelayError({ reason: "It's still on what I sent it, so I didn't send that." })
-          }
-          const previousFollowed = followed.get(session)
-          const previousPrompt = prompts.get(session)
-          const followUp = { message }
-          const prompt = { text: message, at: yield* Clock.currentTimeMillis }
-          // A reply can arrive before delivery returns, so its context is ready before dispatch.
-          followed.set(session, followUp)
-          prompts.set(session, prompt)
-          return { previousFollowed, previousPrompt, followUp, prompt, generation: activity.get(session) }
-        }).pipe(events.withPermits(1))
-        yield* deliver.pipe(
-          Effect.onError(() =>
-            Effect.sync(() => {
-              // Hooks or another follow-up may already have consumed or replaced this context.
-              if (activity.get(session) !== pending.generation) return
-              if (followed.get(session) === pending.followUp) {
-                if (pending.previousFollowed === undefined) followed.delete(session)
-                else followed.set(session, pending.previousFollowed)
-              }
-              if (prompts.get(session) === pending.prompt) {
-                if (pending.previousPrompt === undefined) prompts.delete(session)
-                else prompts.set(session, pending.previousPrompt)
-              }
-            }).pipe(events.withPermits(1)),
-          ),
-        )
-        // Put back by a dictation that started just as this was sent, and answered now.
-        const answered = yield* STM.commit(
-          TRef.modify(inbox, (current) => {
-            const queued = current.get(session)
-            return queued !== undefined && "update" in queued && queued.update === update
-              ? [queued, Inbox.remove(current, session)] as const
-              : [undefined, current] as const
-          }),
-        )
-        if (answered === undefined) return
-        yield* removeFile(Inbox.audio(answered))
-        yield* release(answered.hook)
-      }),
-    late: (update, spoken, failed) =>
-      Effect.flatMap(Clock.currentTimeMillis, (at) =>
-        tell(
-          {
-            id: `late:${crypto.randomUUID()}`,
-            priority: failed ? "needs-you" : "done",
-            spoken: introduce(update.project, spoken),
-            at,
-            stale: Effect.succeed(false),
-          },
-          readSince.get(update),
-        ),
-      ),
+        let channel = followed.get(session)
+        if (channel === undefined) {
+          channel = { thread: update.thread, queued: [] }
+          followed.set(session, channel)
+        }
+        const followUp = { update, message }
+        if (channel.current !== undefined || channel.queued.length > 0) {
+          channel.queued.push(followUp)
+          return undefined
+        }
+        return yield* register(followUp, channel)
+      }).pipe(events.withPermits(1))
+      if (pending === undefined) return "queued" as const
+      yield* deliver(pending)
+      return "sent" as const
+    }),
+    late,
   })
 
   const fallback = (project: string): Summary => ({
@@ -185,7 +242,7 @@ export const make = Effect.gen(function* () {
     turn: Turn,
     thread: Thread,
     arrivedAt: number,
-    generation: number,
+    generation: { readonly chain: object },
     hook: Ticket | undefined,
     needsYou: boolean,
     turns: number,
@@ -255,7 +312,11 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const session = key(agent, payload.session_id)
       const arrivedAt = yield* Clock.currentTimeMillis
-      const currentGeneration = ++generation
+      const sent = followed.get(session)?.current
+      const prompt = payload.hook_event_name === "UserPromptSubmit" ? squash(payload.prompt ?? "") : undefined
+      const own = sent !== undefined && (payload.hook_event_name === "Stop" || prompt === squash(sent.message) || prompt === squash(wake(sent.message)))
+      const currentGeneration = { chain: own ? activity.get(session)!.chain : {} }
+      if (!own) yield* invalidate(session)
       activity.set(session, currentGeneration)
       // Any new activity makes the session's pending update stale.
       yield* discard(session)
@@ -263,25 +324,25 @@ export const make = Effect.gen(function* () {
       switch (payload.hook_event_name) {
         case "UserPromptSubmit": {
           prompts.set(session, { text: payload.prompt, at: arrivedAt })
-          // Anything but the follow-up itself means the user took over.
-          const sent = followed.get(session)
-          if (sent !== undefined && !squash(payload.prompt ?? "").includes(squash(sent.message))) followed.delete(session)
           return undefined
         }
         case "Stop": {
           // Not kept for later, so a waiting hook is let go of at once.
           const { on, turns } = yield* switched
           if (!on) {
-            followed.delete(session)
+            yield* invalidate(session)
             return undefined
           }
           const hook = wait ? yield* waiting.open(session) : undefined
           const message = payload.last_assistant_message?.trim()
-          const followedUp = followed.delete(session)
+          const channel = followed.get(session)
+          const followedUp = channel?.current !== undefined
+          if (channel !== undefined) delete channel.current
           // Hooks older than project names leave it to the daemon, which only sees its own machine's directories.
           const project = origin.project ?? (yield* Project.name(payload.cwd))
           const prompt = prompts.get(session)
           if (!message) {
+            yield* invalidate(session)
             yield* release(hook)
             return hook
           }
@@ -296,7 +357,13 @@ export const make = Effect.gen(function* () {
           }
           const turn = { prompt: Option.fromNullable(prompt?.text), message }
           const thread = { agent, session: payload.session_id, cwd: payload.cwd, message, origin }
-          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, currentGeneration, hook, needsYou, turns))
+          if (channel !== undefined) channel.thread = thread
+          yield* Effect.forkIn(sendNext(session), lifetime)
+          // Queued delivery owns the waiting hook. A trivial summary mustn't close it before dispatch.
+          const queued = channel !== undefined && channel.queued.length > 0
+          if (queued && hook !== undefined) channel.hook = hook
+          const summaryHook = queued ? undefined : hook
+          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, currentGeneration, summaryHook, needsYou, turns))
           return hook
         }
       }
@@ -331,7 +398,7 @@ export const make = Effect.gen(function* () {
       const over =
         "update" in ready
           ? activity.get(ready.update.session) !== generations.get(ready.update) ||
-            followed.has(ready.update.session) ||
+            followed.get(ready.update.session)?.current !== undefined ||
             (yield* conversation.sending(ready.update.session, ready.update))
           : dealtWith
       if (over) return false
@@ -473,7 +540,13 @@ export const make = Effect.gen(function* () {
       yield* SubscriptionRef.update(state, (current) => ({ ...current, on: next }))
       yield* Effect.logInfo(next ? "Turned on" : "Turned off")
       // Their hooks are let go of as they stop.
-      if (!next) yield* FiberMap.clear(preparing).pipe(events.withPermits(1))
+      if (!next) yield* Effect.gen(function* () {
+        for (const channel of followed.values()) {
+          channel.queued.length = 0
+          if (channel.current === undefined) yield* release(channel.hook)
+        }
+        yield* FiberMap.clear(preparing)
+      }).pipe(events.withPermits(1))
       // The hook of one the user heard, cut off by a dictation, waits on for a reply to it heard again.
       const { heard } = yield* SubscriptionRef.get(state)
       for (const entry of dropped) {
@@ -507,7 +580,7 @@ export const make = Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* voice.render(found.update.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { ...found.update, audio }
-      // So a reply to it is only sent if the session hasn't moved on since the update itself.
+      // Replays keep both the hook generation and the original chain of voice replies.
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)
       const arrivedAt = yield* Clock.currentTimeMillis

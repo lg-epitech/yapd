@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import { Audio } from "./Audio.ts"
-import { Waiting } from "./ClaudeCode.ts"
+import { Waiting, WaitingLive } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
 import * as Daemon from "./Daemon.ts"
 import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
+import { key } from "./Payload.ts"
 import { Responder } from "./Responder.ts"
 import type { Handle } from "./Server.ts"
 import { Transcriber } from "./Transcriber.ts"
@@ -21,6 +22,10 @@ import { Voice } from "./Voice.ts"
 const make = (says?: string, options: {
   /** How long rendering takes, which is at once unless said. */
   readonly renderSeconds?: number
+  readonly transcripts?: ReadonlyArray<string>
+  readonly waitingHooks?: boolean
+  readonly onHookOpen?: () => Effect.Effect<void>
+  readonly trivialMessages?: ReadonlyArray<string>
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -39,13 +44,15 @@ const make = (says?: string, options: {
     }
   })
   const microphone = yield* Queue.unbounded<Float32Array>()
+  const transcripts = [...options.transcripts ?? []]
+  const waiting = options.waitingHooks ? yield* Waiting.pipe(Effect.provide(WaitingLive)) : undefined
   let handle: Handle
   let rests = 0
   const layer = Layer.mergeAll(
     Layer.succeed(Condenser, {
       condense: (_, turn) => Effect.sync(() => {
         condensed.push(turn)
-        return { priority: "done" as const, spoken: turn.message }
+        return { priority: options.trivialMessages?.includes(turn.message) ? "trivial" as const : "done" as const, spoken: turn.message }
       }),
     }),
     Layer.succeed(Voice, {
@@ -75,25 +82,27 @@ const make = (says?: string, options: {
       microphone: Effect.succeed(says === undefined ? Option.none() : Option.some(microphone)),
       rest: Effect.sync(() => void rests++),
     }),
-    Layer.succeed(Waiting, {
+    Layer.succeed(Waiting, waiting === undefined ? {
       open: (session) => Effect.map(Deferred.make<string | undefined>(), (answer) => ({ session, answer })),
       close: ({ session }) => Effect.sync(() => void followUps.push(`${session} let go`)),
       drop: () => Effect.void,
       deliver: () => Effect.succeed(false),
       reply: () => Effect.succeed(undefined),
-    }),
+    } : { ...waiting, open: (session) => waiting.open(session).pipe(Effect.tap(() => options.onHookOpen?.() ?? Effect.void)) }),
     Layer.succeed(Vad, {
       // Each frame holds the probability that it's speech.
       make: says === undefined ? Effect.fail(new VadError({ cause: "no microphone" })) : Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)),
     }),
-    Layer.succeed(Transcriber, { transcribe: () => Effect.succeed(says ?? "") }),
+    Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? says ?? "") }),
     Layer.succeed(Responder, {
       respond: ({ heard }) =>
         says === undefined ? Effect.die("nothing to respond to") : Effect.succeed({ intent: "send" as const, spoken: "Okay, passed on.", message: heard }),
     }),
     Layer.succeed(Relays, {
       send: (thread, text) =>
-        Effect.suspend(() => options.send?.(thread, text, handle, nextEvent) ?? Effect.sleep("3 seconds")).pipe(
+        Effect.suspend(() => options.send?.(thread, text, handle, nextEvent) ?? (waiting === undefined
+          ? Effect.sleep("3 seconds")
+          : waiting.deliver(key(thread.agent, thread.session), text).pipe(Effect.flatMap((taken) => taken ? Effect.void : Effect.fail(new RelayError({ reason: "No waiting hook." })))))).pipe(
           Effect.zipRight(Effect.sync(() => void followUps.push(`${thread.session} sent: ${text}`))),
         ),
     }),
@@ -118,7 +127,7 @@ const make = (says?: string, options: {
       { hook_event_name: "Stop", session_id: session, cwd: "/tmp", last_assistant_message: message },
       { project: "yapd" },
       waits,
-    ).pipe(Effect.zipRight(flush))
+    ).pipe(Effect.tap(() => flush))
   /** Says what the user `says`, over whatever is being read. */
   const speak = Queue.offerAll(microphone, [
     ...Array.from({ length: 10 }, () => new Float32Array([0.9])),
@@ -642,30 +651,136 @@ describe("Daemon", () => {
     expect(result).toEqual(["claude:b let go"])
   })
 
-  test("sends no second reply to an update heard again while the first is still on its way", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { finish, speak, wait, dictate, nextPlayback, followUps, heard, replay } = yield* make("Merge it.")
-        yield* finish("a", "The PR is ready.")
-        yield* nextPlayback
-        yield* speak
-        // On its way to the agent, which takes three seconds, when a dictation cuts the update off.
-        yield* wait(1)
-        const dictation = yield* dictate
-        yield* Scope.close(dictation, Exit.void)
-        const [id] = yield* heard
-        yield* replay(id!)
-        // Past the pause after what the dictation cut off.
-        yield* wait(1)
-        yield* nextPlayback
-        yield* speak
-        const answer = yield* nextPlayback
-        yield* wait(3)
-        return { answer, followUps: [...followUps] }
-      }),
-    )
-    expect(result.answer).toBe("It's still on what I sent it, so I didn't send that.")
-    expect(result.followUps).toEqual(["a sent: Merge it."])
+  test.each([false, true])("queues replies in order and keeps the original update usable, with a queued failure: %s", async (fails) => {
+    const result = await run(Effect.gen(function* () {
+      const targets: Array<string> = []
+      const { handle, finish, speak, wait, dictate, nextPlayback, nextEvent, followUps, heard, replay } = yield* make("Merge it.", {
+        transcripts: ["Merge it.", "Run the checks.", "Deploy it.", "Clean up."],
+        send: (thread) => Effect.gen(function* () {
+          const dispatch = targets.length
+          targets.push(thread.message)
+          yield* Effect.sleep("3 seconds")
+          if (fails && dispatch === 1) return yield* new RelayError({ reason: "T3 Code isn't answering." })
+        }),
+      })
+      yield* finish("a", "The PR is ready.")
+      yield* nextPlayback
+      yield* speak
+      yield* wait(1)
+      const dictation = yield* dictate
+      yield* Scope.close(dictation, Exit.void)
+      const [id] = yield* heard
+      yield* replay(id!)
+      yield* wait(1)
+      yield* nextPlayback
+      yield* speak
+      const second = yield* nextPlayback
+      yield* speak
+      const third = yield* nextPlayback
+      yield* wait(3)
+      const beforeCompletion = [...followUps]
+      yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Merge it." }, { project: "yapd" }, false)
+      yield* finish("a", "Merged it.")
+      yield* wait(3)
+      const afterFirstCompletion = [...followUps]
+      const failure = fails ? yield* nextEvent("Ready: yapd. Couldn't send the queued message") : undefined
+      if (!fails) {
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Run the checks." }, { project: "yapd" }, false)
+        yield* finish("a", "The checks pass.")
+      }
+      yield* wait(3)
+      yield* finish("a", "Deployed it.")
+      // Another reply to the same original update, after its queued work completed.
+      yield* speak
+      yield* wait(3)
+      return { second, third, beforeCompletion, afterFirstCompletion, sent: [...followUps], targets, failure }
+    }))
+    expect(result.second).toBe("Queued. I'll send it after the current turn finishes.")
+    expect(result.third).toBe(result.second)
+    expect(result.beforeCompletion).toEqual(["a sent: Merge it."])
+    expect(result.afterFirstCompletion).toEqual(fails ? ["a sent: Merge it."] : ["a sent: Merge it.", "a sent: Run the checks."])
+    expect(result.sent).toEqual(["a sent: Merge it.", ...fails ? [] : ["a sent: Run the checks."], "a sent: Deploy it.", "a sent: Clean up."])
+    expect(result.targets).toEqual(["The PR is ready.", "Merged it.", fails ? "Merged it." : "The checks pass.", "Deployed it."])
+    if (fails) expect(result.failure).toBe('Ready: yapd. Couldn\'t send the queued message "Run the checks.". T3 Code isn\'t answering.')
+  })
+
+  test.each(["failure", "takeover", "off", "empty"] as const)("settles queued replies when the preceding delivery ends with %s", async (ending) => {
+    const result = await run(Effect.gen(function* () {
+      const delivered = yield* Deferred.make<void, RelayError>()
+      let dispatches = 0
+      const { handle, finish, speak, wait, dictate, nextPlayback, nextEvent, followUps, heard, replay, power } = yield* make("Merge it.", {
+        transcripts: ["Merge it.", "Deploy it."],
+        send: () => Effect.suspend(() => ++dispatches === 1 ? Deferred.await(delivered) : Effect.void),
+      })
+      yield* finish("a", "The PR is ready.")
+      yield* nextPlayback
+      yield* speak
+      const dictation = yield* dictate
+      yield* Scope.close(dictation, Exit.void)
+      const [id] = yield* heard
+      yield* replay(id!)
+      yield* wait(1)
+      yield* nextPlayback
+      yield* speak
+      const queued = yield* nextPlayback
+      let retry: string | undefined
+      if (ending === "failure") {
+        yield* Deferred.fail(delivered, new RelayError({ reason: "The agent couldn't accept that." }))
+        yield* nextEvent("Delivered: Deploy it.")
+      } else {
+        if (ending === "takeover") {
+          yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Instead of 'Merge it.', start unrelated work." }, { project: "yapd" }, false)
+          yield* nextEvent("Ready: yapd. The session moved on")
+        }
+        if (ending === "off") {
+          yield* power(false)
+          yield* power(true)
+        }
+        yield* Deferred.succeed(delivered, undefined)
+        yield* wait(0)
+        yield* finish("a", ending === "empty" ? "" : "Merged it.")
+        yield* wait(0)
+        if (ending === "empty") {
+          yield* speak
+          retry = yield* nextPlayback
+        }
+      }
+      return { queued, dispatches, sent: [...followUps], retry }
+    }))
+    expect(result.queued).toBe("Queued. I'll send it after the current turn finishes.")
+    expect(result.dispatches).toBe(ending === "failure" ? 2 : 1)
+    expect(result.sent).toEqual(ending === "failure" ? ["a sent: Deploy it."] : ["a sent: Merge it."])
+    if (ending === "empty") expect(result.retry).toBe("That session has moved on since, so I didn't send it.")
+  })
+
+  test.each([false, true])("settles the queued Claude hook after a trivial update, turned off before dispatch: %s", async (off) => {
+    const result = await run(Effect.gen(function* () {
+      const scope = yield* Effect.scope
+      let opens = 0
+      let turningOff = Effect.void
+      const { finish, speak, wait, nextPlayback, nextEvent, followUps, power } = yield* make("Merge it.", {
+        transcripts: ["Merge it.", "Deploy it."],
+        waitingHooks: true,
+        trivialMessages: ["Understood."],
+        onHookOpen: () => off && ++opens === 2 ? turningOff : Effect.void,
+      })
+      turningOff = Effect.forkIn(power(false), scope).pipe(Effect.zipRight(nextEvent("Turned off")), Effect.asVoid)
+      const firstHook = yield* Effect.forkScoped(finish("a", "The PR is ready.", true))
+      yield* nextPlayback
+      yield* speak
+      yield* nextPlayback
+      const first = yield* Fiber.join(firstHook)
+      yield* speak
+      const queued = yield* nextPlayback
+      const secondHook = yield* Effect.forkScoped(finish("a", "Understood.", true))
+      yield* wait(0)
+      const second = yield* Fiber.join(secondHook)
+      return { first, second, queued, sent: [...followUps] }
+    }))
+    expect(result.first).toBe("Merge it.")
+    expect(result.second).toBe(off ? undefined : "Deploy it.")
+    expect(result.queued).toBe("Queued. I'll send it after the current turn finishes.")
+    expect(result.sent).toEqual(off ? ["a sent: Merge it."] : ["a sent: Merge it.", "a sent: Deploy it."])
   })
 
   test("says an update asked for again once it's back on, even if it was being rendered for when turned off", async () => {

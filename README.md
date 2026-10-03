@@ -84,6 +84,8 @@ You can also reply just after it finishes, so "yes, merge it" works when an upda
 
 Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it says back each step it sent, so you'd hear if one went missing.
 
+You can send several follow-ups to the same update, including one you hear again. If the session is still on an earlier voice reply, yapd says it queued the next one. It sends queued replies in order as each turn finishes, and tells you when each goes through or fails. Typing unrelated work into the session cancels its queued replies and makes the old update stale. The queue is kept by the running daemon: turning yapd off or restarting it drops replies that haven't started delivery.
+
 The microphone is only on while yapd has something to say and for a few seconds after, and while you [dictate](#dictating). It uses FaceTime's echo cancellation, so speakers are fine. That starts over each time the microphone comes on and needs the first three seconds yapd says to learn its voice, so yapd doesn't hear you over those. [Whisper](https://huggingface.co/onnx-community/whisper-base) transcribes you on your Mac and only the words go to the provider. It downloads on first start.
 
 Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. `YAPD_WHISPER` picks another model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` never opens the microphone.
@@ -104,7 +106,7 @@ yapd hands a follow-up to the session the update came from, through whatever tha
 
   Put it in `.env` as `YAPD_T3CODE_TOKEN=...` and run `bun src/main.ts install` again. If yapd says T3 Code turned down its token, issue a new one.
 
-A session another app drives, like T3 Code, only gets follow-ups through that app, so its own view stays in step. yapd won't send anything to a session that has moved on since the update, like when you've already typed something else, and says so when it can't reach one.
+A session another app drives, like T3 Code, only gets follow-ups through that app, so its own view stays in step. Queued follow-ups use the session's latest reply to find its thread. yapd won't send anything from an old update after you've started unrelated work, and says so when it can't reach a session.
 
 ## Dictating
 
