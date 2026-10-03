@@ -64,6 +64,8 @@ const drafts = (
     readonly written?: Written
     readonly refuse?: string
     readonly rigDown?: boolean
+    /** How long starting takes, which is at once unless said. */
+    readonly startSeconds?: number
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -80,6 +82,7 @@ const drafts = (
       start: (request: Request) =>
         Effect.gen(function* () {
           started.push({ machine, request })
+          if (options.startSeconds !== undefined) yield* Effect.sleep(`${options.startSeconds} seconds`)
           if (options.refuse !== undefined) return yield* new LaunchError({ reason: options.refuse })
           return {
             thread: "thread-1",
@@ -279,6 +282,20 @@ describe("Drafts", () => {
     expect(result.started.map(({ request }) => request.project)).toEqual(["/code/std"])
     expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?", "Started in std, on Fable, in a worktree."])
     expect(result.earlier).toEqual([])
+  })
+
+  test("still starts what was being started when dropped, without a word", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, wait, drop, started, spoken } = yield* drafts(() => decision({}), { startSeconds: 5 })
+        yield* dictate("Fix the loader.")
+        yield* drop
+        yield* wait(5)
+        return { started, spoken: spoken() }
+      }),
+    )
+    expect(result.started.map(({ request }) => request.project)).toEqual(["/code/yapd"])
+    expect(result.spoken).toEqual([])
   })
 
   test("drops it when the user calls it off, and keeps asking when what they said wasn't an answer", async () => {

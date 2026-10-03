@@ -173,7 +173,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush, toggle, heard, replay: made.replay }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, flush, toggle, power: made.turn, heard, replay: made.replay }
 })
 
 const daemon = make()
@@ -535,6 +535,22 @@ describe("Daemon", () => {
     )
     expect(deliveries).toBe(0)
     expect(result).toBe("That session has moved on since, so I didn't send it.")
+  })
+
+  test("stops what it's reading when turned off, even if it's on again before the reading hears of it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, power, played, stopped } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        yield* wait(1)
+        yield* power(false)
+        yield* power(true)
+        yield* wait(30)
+        return { played: [...played], stopped: [...stopped] }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready."])
+    expect(result.stopped).toEqual(["yapd. The PR is ready."])
   })
 
   test("says nothing that was being prepared when it was turned off, even once it's on again", async () => {

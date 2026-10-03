@@ -49,7 +49,7 @@ interface Draft {
   /** Whether it's being started right now, which can't be taken back. */
   starting: boolean
   open: boolean
-  /** Dropped before it started, like when yapd was turned off: whatever was under way for it says nothing and starts nothing. */
+  /** Dropped, like when yapd was turned off: it says nothing, and starts nothing unless it already was. */
   dropped: boolean
 }
 
@@ -430,18 +430,21 @@ export const make = (options: {
       })
 
     return {
-      /** Drops every request that isn't being started already, without a word, like when yapd is turned off. */
+      /**
+       * Drops every request, without a word, like when yapd is turned off. One
+       * being started can't be taken back, so it still starts, but says nothing.
+       */
       drop: Effect.suspend(() => {
         // All at once, so none starts halfway through.
-        const dropping = [...drafts.values()].filter(({ starting }) => !starting)
+        const dropping = [...drafts.values()]
         for (const draft of dropping) draft.dropped = true
         return Effect.forEach(
           dropping,
           (draft) =>
-            close(draft).pipe(
-              Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)),
-              Effect.annotateLogs({ draft: draft.id }),
-            ),
+            (draft.starting
+              ? Effect.logInfo(`Starting without a word, since yapd was turned off: ${draft.heard}`)
+              : close(draft).pipe(Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)))
+            ).pipe(Effect.annotateLogs({ draft: draft.id })),
           { discard: true },
         )
       }),

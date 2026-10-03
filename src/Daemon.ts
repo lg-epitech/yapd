@@ -292,15 +292,16 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((hook) => (hook === undefined ? Effect.succeed(undefined) : waiting.reply(hook))),
     )
 
-  /** Nothing is read while the user dictates, or while yapd is off. */
+  /** Nothing is read while the user dictates, or while yapd is off. Taken with when yapd was last turned on. */
   const takeNext = STM.gen(function* () {
-    if (!(yield* TRef.get(power)).on || (yield* Floor.dictating(floor))) return yield* STM.retry
+    const { on, turns } = yield* TRef.get(power)
+    if (!on || (yield* Floor.dictating(floor))) return yield* STM.retry
     const current = yield* TRef.get(inbox)
     const ready = Inbox.next(current)
     if (ready === undefined) return yield* STM.retry
     yield* TRef.set(inbox, Inbox.remove(current, ready.session))
     yield* TRef.set(floor.reading, true)
-    return ready
+    return { ready, turns }
   })
 
   /**
@@ -349,7 +350,9 @@ export const make = Effect.gen(function* () {
     STM.flatMap(Floor.dictating(floor), (dictating) => (dictating ? STM.void : STM.retry)),
   )
 
-  const turnedOff = STM.commit(STM.flatMap(TRef.get(power), ({ on }) => (on ? STM.retry : STM.void)))
+  /** Once yapd is turned off, even if it's turned on again before this hears of it. */
+  const turnedOff = (since: number) =>
+    STM.commit(STM.flatMap(TRef.get(power), ({ turns }) => (turns === since ? STM.retry : STM.void)))
 
   /** Keeps an update the user is hearing, unless they're hearing it again. */
   const hear = (update: Conversation.Update) =>
@@ -366,7 +369,7 @@ export const make = Effect.gen(function* () {
         STM.orElse(() => STM.succeed(Option.none())),
       ),
     )
-    const ready = yield* Option.match(queued, {
+    const { ready, turns } = yield* Option.match(queued, {
       // Nothing left to say, so the microphone goes off until there is, once no dictation is using it.
       onNone: () => Floor.use(floor, audio)(Effect.void).pipe(Effect.zipRight(STM.commit(takeNext))),
       onSome: Effect.succeed,
@@ -400,7 +403,7 @@ export const make = Effect.gen(function* () {
         ),
       ),
       // Stopped at once, and not kept for later.
-      Effect.raceFirst(turnedOff),
+      Effect.raceFirst(turnedOff(turns)),
       Effect.ensuring(Effect.suspend(() => (kept ? Effect.void : Effect.zipRight(removeFile(Inbox.audio(ready)), letGo(ready))))),
       Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
     )

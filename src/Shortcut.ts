@@ -112,13 +112,15 @@ export const none: Shortcut["Type"] = { events: Stream.never, cancel: Effect.voi
 export const make = (keys: Keys, send: (message: object) => void) =>
   Effect.gen(function* () {
     const events = yield* PubSub.unbounded<Event>()
+    let on = true
     let dictating = false
     let registered: boolean | undefined
-    let on = true
     /** The shortcut, or no keys at all. */
     const hold = () => send(on ? { type: "shortcut", key: keys.key, modifiers: keys.modifiers } : { type: "shortcut" })
     const pressed = (key: Key) =>
       Effect.suspend(() => {
+        // A press already on its way as the keys were let go of starts nothing.
+        if (!on && key === "shortcut") return Effect.void
         const next = press(dictating, key)
         if (next.dictating !== dictating) send({ type: "escape", on: next.dictating })
         dictating = next.dictating

@@ -84,6 +84,8 @@ describe("Shortcut", () => {
         yield* shortcut.pressed("shortcut")
         yield* shortcut.service.toggle(false)
         yield* shortcut.service.toggle(false)
+        // On its way from the helper as the keys were let go of.
+        yield* shortcut.pressed("shortcut")
         yield* shortcut.greeted
         yield* shortcut.service.toggle(true)
         const events = yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))
