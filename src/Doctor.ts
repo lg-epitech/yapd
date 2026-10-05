@@ -1,6 +1,7 @@
 import { Console, Effect, Option, Schema } from "effect"
 import { existsSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
+import * as CodexServer from "./CodexServer.ts"
 import * as Config from "./Config.ts"
 import * as Helper from "./Helper.ts"
 import * as Home from "./Home.ts"
@@ -43,6 +44,28 @@ const settings = (folder: string): Array<Finding> => [
 /** The paths a hook's command runs, unquoted ones only, which is how setup writes them unless they have spaces. */
 const paths = (command: string) => command.split(/\s+/).filter((word) => word.startsWith("/"))
 
+const CodexHooks = Schema.Struct({
+  data: Schema.Array(Schema.Struct({
+    hooks: Schema.Array(Schema.Struct({
+      command: Schema.NullOr(Schema.String),
+      enabled: Schema.Boolean,
+      trustStatus: Schema.String,
+    })),
+  })),
+})
+
+/** Registration alone isn't enough: Codex skips hooks that aren't trusted. */
+export const codexTrust = (listed: typeof CodexHooks.Type, main?: string): Array<Finding> => {
+  const hooks = listed.data.flatMap(({ hooks }) => hooks.filter((hook) => Setup.ours(hook, main)))
+  if (hooks.length === 0) return [warn("Codex didn't list yapd's hooks. Run codex and open /hooks on this machine to inspect them.")]
+  const findings: Array<Finding> = []
+  if (hooks.some(({ enabled }) => !enabled)) findings.push(fail("Codex has disabled hooks for yapd. Run codex and enable them in /hooks on this machine."))
+  if (hooks.some(({ trustStatus }) => trustStatus === "untrusted")) findings.push(fail("Codex hasn't trusted yapd's hooks, so they won't run. Run codex and trust them in /hooks on this machine."))
+  if (hooks.some(({ trustStatus }) => trustStatus === "modified")) findings.push(fail("Codex's hooks for yapd changed since they were trusted, so they won't run. Run codex and review and trust them again in /hooks on this machine."))
+  if (hooks.some(({ trustStatus }) => !["trusted", "untrusted", "modified"].includes(trustStatus))) findings.push(warn("Codex reported an unknown hook trust status. Run codex and inspect /hooks on this machine."))
+  return findings.length === 0 ? [ok("Codex trusts yapd's hooks. Trust survives restarts; changed hook definitions need approval again.")] : findings
+}
+
 /** yapd's hooks for the agent, if it's here, and whether they run this copy of yapd. */
 export const hooks = (agent: Setup.Agent, command: ReturnType<typeof Setup.command>, main?: string) =>
   Effect.gen(function* () {
@@ -62,6 +85,13 @@ export const hooks = (agent: Setup.Agent, command: ReturnType<typeof Setup.comma
     if (missing.length > 0) findings.push(fail(`${name} has no ${missing.join(" or ")} hook for yapd. yapd setup adds them.`))
     if (gone !== undefined) findings.push(fail(`${name}'s hooks run ${gone}, which isn't there any more. yapd setup points them here.`))
     else if (other !== undefined) findings.push(warn(`${name}'s hooks run ${other}, not this yapd. yapd setup points them here.`))
+    if (agent === "codex" && Object.values(found).some((hooks) => hooks.length > 0)) {
+      findings.push(...yield* CodexServer.hooks(process.cwd()).pipe(
+        Effect.flatMap(Schema.decodeUnknown(CodexHooks)),
+        Effect.map((listed) => codexTrust(listed, main)),
+        Effect.orElseSucceed(() => [warn("Couldn't check whether Codex trusts yapd's hooks. Make sure codex is on the PATH, then run codex and inspect /hooks on this machine.")]),
+      ))
+    }
     return findings.length === 0 ? [ok(`${name}'s hooks, in ${file}`)] : findings
   }).pipe(Effect.catchAll((error) => Effect.succeed([fail(error.message)])))
 

@@ -75,6 +75,8 @@ const fakeCodex = async () => {
     record({ method, params })
     if (method === "initialize") {
       if (mode !== "hang-init") send({ id, result: {} })
+    } else if (method === "hooks/list") {
+      send({ id, result: { data: [{ cwd: params.cwds[0], hooks: [{ command: "yapd hook codex", enabled: true, trustStatus: "modified" }] }] } })
     } else if (method === "thread/start") {
       if (mode === "hang-thread") continue
       const thread = { id, result: { thread: { id: `thread-${++threads}` } } }
@@ -179,6 +181,15 @@ const gone = async (pids: ReadonlyArray<number | undefined>) => {
   for (let tries = 0; tries < 100 && pids.some((pid) => pid !== undefined && alive(pid)); tries++) await Bun.sleep(10)
   return pids.filter((pid) => pid !== undefined && alive(pid))
 }
+
+test("reads hook trust without starting a thread and closes the server", async () => {
+  const log = join(dir, "hooks.log")
+  const result = await Effect.runPromise(CodexServer.hooks("/code", [process.execPath, script, log, "hooks"]))
+  expect(result).toEqual({ data: [{ cwd: "/code", hooks: [{ command: "yapd hook codex", enabled: true, trustStatus: "modified" }] }] })
+  const recorded = await Effect.runPromise(entries(log))
+  expect(recorded.filter(({ method }) => method !== undefined).map(({ method }) => method)).toEqual(["initialize", "hooks/list"])
+  expect(await gone(launches(recorded).map(({ pid }) => pid))).toEqual([])
+})
 
 let runs = 0
 const withServer = <A>(
