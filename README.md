@@ -23,6 +23,8 @@ Then it runs yapd in the background with launchd, starts it at login and restart
 
 Last, it runs `yapd doctor`, which checks all of that and says how to fix what's missing. Run it whenever yapd seems off.
 
+Doctor also checks whether Codex trusts yapd's hooks. If they're untrusted or have changed, run `codex` and review them in `/hooks` on the machine running the agent. Trust survives logins and restarts, but changing a hook definition, including its command, requires approval again.
+
 Your settings go in `~/.yapd/.env`, where yapd also keeps what it downloads and remembers.
 
 On first start yapd asks for the microphone, so you can interrupt it.

@@ -259,6 +259,14 @@ const connect = (
     )
   })
 
+/** Reads hook trust without starting a thread or changing Codex's configuration. */
+export const hooks = (cwd: string, codex: ReadonlyArray<string> = ["codex"]) =>
+  connect(codex, features, () => {}).pipe(
+    Effect.flatMap((server) => server.call("hooks/list", { cwds: [cwd] })),
+    Effect.timeout("10 seconds"),
+    Effect.scoped,
+  )
+
 /** A thread started ahead of time, waiting for a turn. */
 interface Spare {
   readonly thread: string
