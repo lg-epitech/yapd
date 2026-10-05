@@ -2,9 +2,10 @@ import { Data, Effect, Option, Schedule, Stream } from "effect"
 import { closeSync, openSync } from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { hostname } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import * as Cli from "./Cli.ts"
 import * as Config from "./Config.ts"
+import { home } from "./Home.ts"
 import { launched, type Origin } from "./Origin.ts"
 import { detached, ProcessError, stop } from "./Process.ts"
 import * as Project from "./Project.ts"
@@ -179,7 +180,8 @@ const patience = "20 seconds"
 
 /** Starts the minder with its own group, so it outlives the launching command and SSH session. */
 const spawnMinder = (launch: string, output: number) => Bun.spawn([process.execPath, join(import.meta.dir, "main.ts"), "mind", launch], {
-  cwd: dirname(import.meta.dir),
+  // Where it reads the user's settings, as every command but hooks does.
+  cwd: home,
   detached: true,
   stdin: "ignore",
   stdout: output,

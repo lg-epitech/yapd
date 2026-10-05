@@ -2,8 +2,15 @@ import { env } from "@huggingface/transformers"
 import { Data, Effect, Runtime, Schedule } from "effect"
 import { mkdir, rename, rm, stat } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { models } from "./Home.ts"
 
 export class LoadError extends Data.TaggedError("LoadError")<{ readonly repo: string; readonly cause: unknown }> {}
+
+/** Apart from the package, which an update of yapd replaces along with anything inside it. */
+env.cacheDir = models
+
+/** The cache, wherever tests have moved it. */
+const root = () => env.cacheDir ?? models
 
 /**
  * In a cache where nothing is part of a file. It's named for what it said at
@@ -16,14 +23,14 @@ export class LoadError extends Data.TaggedError("LoadError")<{ readonly repo: st
  * only so when all of a model is downloaded here, so whoever loads one that is
  * keeps transformers.js from downloading any of it.
  */
-const marker = (repo: string) => join(env.cacheDir, repo, ".yapd-loaded")
+const marker = (repo: string) => join(root(), repo, ".yapd-loaded")
 
 /** Caches being cleared, by folder, so that one isn't cleared again with what has downloaded into it since. */
 const clearing = new Map<string, Promise<void>>()
 
 /** Empties a cache that isn't marked. `whole` when all that will be in it is downloaded here. */
 const clear = (repo: string, whole: boolean) => {
-  const cache = join(env.cacheDir, repo)
+  const cache = join(root(), repo)
   const started =
     clearing.get(cache) ??
     Bun.file(marker(repo))
@@ -104,7 +111,7 @@ const fetched = async (url: string, path: string, optional: boolean) => {
  * would be, then, if the repo hasn't got it.
  */
 export const download = async (repo: string, file: string, optional = false) => {
-  const path = join(env.cacheDir, repo, file)
+  const path = join(root(), repo, file)
   if ((await Bun.file(path).exists()) || (optional && (await Bun.file(absent(path)).exists()))) return path
   const running = downloads.get(path)
   if (running !== undefined) return running

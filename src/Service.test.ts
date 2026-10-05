@@ -20,5 +20,12 @@ describe("Service", () => {
     const plist = Service.plist(options)
     expect(plist).toContain("<string>serve</string>")
     expect(plist).toContain("<key>PATH</key><string>/opt/homebrew/bin:/usr/bin</string>")
+    expect(plist).not.toContain("YAPD_HOME")
+  })
+
+  test("keeps the settings the hooks carry, like where YAPD_HOME moved yapd's home", () => {
+    const plist = Service.plist({ ...options, environment: { YAPD_PORT: "4848", YAPD_HOME: "/Volumes/Data/yapd" } })
+    expect(plist).toContain("<key>YAPD_PORT</key><string>4848</string>")
+    expect(plist).toContain("<key>YAPD_HOME</key><string>/Volumes/Data/yapd</string>")
   })
 })
