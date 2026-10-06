@@ -47,14 +47,14 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
 
-"spoken": what you say back. They're listening, not reading: natural speech, no lists, markdown, code, file paths or URLs.
+"spoken": what you say back, in English whatever language they or the agent used, since the voice can't speak anything else. They're listening, not reading: natural speech, no lists, markdown, code, file paths or URLs.
 - For "answer", the answer in at most 50 words.
 - For "send", one short sentence naming each thing you passed on, so they can tell nothing was left out, like "Okay, I've asked it to merge the pull request, then update your master worktree and the deployment."
 - Empty for "dismiss" and "resume".
 
 "message": for "send", the message for the agent, written as the user would type it: first person, keeping their intent and wording, with anything they referred to spelled out so it stands on its own. Keep every request they made, in their order, including what to do once something's done, like "when that's merged, update the deployment". Empty otherwise.
 
-What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Reply in the language they spoke.`
+What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Write "message" in the language they spoke.`
 
 export const prompt = ({ project, turn, needsYou, lines, heard }: Interruption, style: Option.Option<string>) =>
   [

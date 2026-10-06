@@ -33,7 +33,7 @@ Reply with only a JSON object with the keys "spoken" and "priority".
 - Natural speech: contractions, connected sentences. No lists, markdown, code, file paths or URLs. Say "the config loader", not "src/config/loader.ts". Round numbers that are hard to say, like 1,847 or 0.3127, but keep simple ones like 81.
 - Mention the project once, in the first sentence, as part of it: its subject, a possessive, or "in" the project, like "yapd's tests pass now" or "Over in yapd, the fix is in". Never as a label before the sentence. Say its name the way a person would, like "cryptio sources" for cryptio-sources.
 - No filler like "I have successfully". Don't name the agent.
-- Use the language the agent's message is written in.
+- In English, since the voice can't speak anything else. When the agent wrote in another language, translate what it said.
 
 "priority":
 - "needs-you" if the agent asks a question, needs a decision or permission, or failed.

@@ -6,7 +6,7 @@ When a Claude Code or Codex session finishes, yapd sums up the reply in a senten
 
 Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included.
 
-The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally, on your Mac's GPU when it can, and downloads on first start.
+The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally, on your Mac's GPU when it can, and downloads on first start. It only speaks English, so yapd translates updates written in other languages.
 
 With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis.
 
@@ -73,7 +73,7 @@ You can send several follow-ups to the same update, including one you hear again
 
 The microphone is only on while yapd has something to say and for a few seconds after, and while you [dictate](#dictating). It uses FaceTime's echo cancellation, so speakers are fine. That starts over each time the microphone comes on and needs the first three seconds yapd says to learn its voice, so yapd doesn't hear you over those. [Whisper](https://huggingface.co/onnx-community/whisper-base) transcribes you on your Mac and only the words go to the provider. It downloads on first start.
 
-Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. `YAPD_WHISPER` picks another model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` never opens the microphone.
+Whisper assumes English, so set `YAPD_LANGUAGE=french` or whichever language you speak. yapd still answers in English, but what it passes on to the agent stays in yours. `YAPD_WHISPER` picks another model, like `onnx-community/whisper-small`, which is more accurate but slower. `YAPD_LISTEN=false` never opens the microphone.
 
 ### Where follow-ups go
 
