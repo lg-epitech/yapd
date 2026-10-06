@@ -139,7 +139,7 @@ const prompting = `"prompt": what the agent is given. You're its author, and you
 
 const speaking = (actions: ReadonlyArray<Action>) =>
   [
-    `"spoken": what you say aloud. They're listening, not reading: short, natural speech, no lists, markdown, code, file paths or URLs. Say names the way a person would, like "Fable" for claude-fable-5-1 or "cryptio sources" for cryptio-sources.`,
+    `"spoken": what you say aloud, in English whatever language they spoke, since the voice can't speak anything else. They're listening, not reading: short, natural speech, no lists, markdown, code, file paths or URLs. Say names the way a person would, like "Fable" for claude-fable-5-1 or "cryptio sources" for cryptio-sources.`,
     `- For "start", what you say once the session has started: the project, the model, and whether it's in a worktree, like "Started in yapd, on Fable, in a worktree." or "Started in yapd, on Fable, without a worktree." Always say which, in those words, since it's how they catch you having misheard. Most times that's all of it. The machine is only named when it isn't this one, and the effort only when they asked for one. If you filled in or corrected something that changes what the agent will do, add it in a few words, like "I took the std thing to mean the Redis investigation." Never how you decided, and don't repeat the request back.`,
     `- For "ask", the question, in one sentence. They may have dictated other things since, so it says which request it's about, and offers the candidates when two or three projects really fit, like "For the retry fix, is that cryptio saas or integration connectors?" When they named a project you don't know, say so rather than offer ones they didn't name, like "I don't know a project called billing. Which one is the retry fix for?"`,
     ...(actions.includes("research") ? [`- For "research", only that you're reading the project first, in a few words, like "Looking through yapd first."`] : []),
@@ -171,7 +171,7 @@ const deciding = (research: boolean, answering: boolean) =>
           ]
         : []),
     ].join("\n"),
-    `"about": the request in a few words, for you to refer to it aloud later, like "the retry fix". Always filled in.`,
+    `"about": the request in a few words, in English, for you to refer to it aloud later, like "the retry fix". Always filled in.`,
     [
       `Where it goes. Each of the project, machine, model, effort and worktree is settled by the first of these that says anything about it:`,
       `1. What they said, like "in yapd", "with Fable on low", "in a worktree", "no worktree", "on rig" or "off the release branch".`,
