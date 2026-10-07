@@ -695,7 +695,7 @@ describe("Daemon", () => {
       yield* wait(3)
       return { second, third, beforeCompletion, afterFirstCompletion, sent: [...followUps], targets, failure }
     }))
-    expect(result.second).toBe("Queued. I'll send it after the current turn finishes.")
+    expect(result.second).toBe("Noted. I'll get to it once the current task is done.")
     expect(result.third).toBe(result.second)
     expect(result.beforeCompletion).toEqual(["a sent: Merge it."])
     expect(result.afterFirstCompletion).toEqual(fails ? ["a sent: Merge it."] : ["a sent: Merge it.", "a sent: Run the checks."])
@@ -747,7 +747,7 @@ describe("Daemon", () => {
       }
       return { queued, dispatches, sent: [...followUps], retry }
     }))
-    expect(result.queued).toBe("Queued. I'll send it after the current turn finishes.")
+    expect(result.queued).toBe("Noted. I'll get to it once the current task is done.")
     expect(result.dispatches).toBe(ending === "failure" ? 2 : 1)
     expect(result.sent).toEqual(ending === "failure" ? ["a sent: Deploy it."] : ["a sent: Merge it."])
     if (ending === "empty") expect(result.retry).toBe("That session has moved on since, so I didn't send it.")
@@ -779,7 +779,7 @@ describe("Daemon", () => {
     }))
     expect(result.first).toBe("Merge it.")
     expect(result.second).toBe(off ? undefined : "Deploy it.")
-    expect(result.queued).toBe("Queued. I'll send it after the current turn finishes.")
+    expect(result.queued).toBe("Noted. I'll get to it once the current task is done.")
     expect(result.sent).toEqual(off ? ["a sent: Merge it."] : ["a sent: Merge it.", "a sent: Deploy it."])
   })
 

@@ -6,7 +6,7 @@ When a Claude Code or Codex session finishes, yapd sums up the reply in a senten
 
 Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included.
 
-The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally, on your Mac's GPU when it can, and downloads on first start. It only speaks English, so yapd translates updates written in other languages.
+The voice is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), which runs locally, on your Mac's GPU when it can, and downloads on first start. It only speaks English, so yapd translates updates written in other languages, and has any other words that slip through translated before it says them. It also keeps to what can be said aloud: it says "the wallet address" or "its ID" rather than reading one out.
 
 With [ffmpeg](https://ffmpeg.org) installed it sounds a bit like Jarvis.
 
@@ -67,7 +67,7 @@ Say anything while yapd is talking and it stops. The model that writes the summa
 
 You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. yapd takes about as long to work out what you meant as it does to write a summary, around two seconds with Codex.
 
-Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it says back each step it sent, so you'd hear if one went missing.
+Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it just says it's on it, without repeating what you asked.
 
 You can send several follow-ups to the same update, including one you hear again. If the session is still on an earlier voice reply, yapd says it queued the next one. It sends queued replies in order as each turn finishes, and tells you when each goes through or fails. Typing unrelated work into the session cancels its queued replies and makes the old update stale. The queue is kept by the running daemon: turning yapd off or restarting it drops replies that haven't started delivery.
 

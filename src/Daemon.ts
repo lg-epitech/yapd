@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Audio } from "./Audio.ts"
 import { type Ticket, Waiting, wake } from "./ClaudeCode.ts"
-import { Condenser, introduce, type Summary, type Turn } from "./Condenser.ts"
+import { Condenser, introduce, speakable, type Summary, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Floor from "./Floor.ts"
@@ -233,7 +233,7 @@ export const make = Effect.gen(function* () {
 
   const fallback = (project: string): Summary => ({
     priority: "done",
-    spoken: `${project} finished a turn, but I couldn't summarize it.`,
+    spoken: `${speakable(project) ? project : "One of your threads"} finished a turn, but I couldn't summarize it.`,
   })
 
   const prepare = (

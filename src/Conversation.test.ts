@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Fiber, Layer, Option, Queue, type Scope, TestClock, TestContext } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Option, Queue, Schema, type Scope, TestClock, TestContext } from "effect"
 import { Audio } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
@@ -7,6 +7,7 @@ import { cut, together, unfinished } from "./Conversation.ts"
 import { defaults } from "./Endpointer.ts"
 import { Relays } from "./Relay.ts"
 import * as Helper from "./Helper.ts"
+import { Model, ModelError } from "./Model.ts"
 import * as Responder from "./Responder.ts"
 import { clean, Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -383,7 +384,7 @@ describe("Responder", () => {
     expect(prompt).toContain(`Agreeing with what the agent already said it would do changes nothing, so that's "dismiss".`)
   })
 
-  test("passes on every step and says each one back", () => {
+  test("passes on every step without saying it back", () => {
     const prompt = Responder.prompt(
       {
         project: "yapd",
@@ -395,7 +396,7 @@ describe("Responder", () => {
       Option.none(),
     )
     expect(prompt).toContain("Keep every request they made, in their order")
-    expect(prompt).toContain("one short sentence naming each thing you passed on")
+    expect(prompt).toContain(`a few words that it's in hand, like "On it." or "Consider it done." Don't repeat back what they asked for`)
   })
 
   test("doesn't send a reply that tells the agent to do nothing", () => {
@@ -451,6 +452,89 @@ describe("Condenser", () => {
   test("names the project up front when the summary leaves it out", () => {
     expect(Condenser.introduce("yapd", "The tests pass now.")).toBe("yapd. The tests pass now.")
     expect(Condenser.introduce("api", "It's rapid now.")).toBe("api. It's rapid now.")
+  })
+
+  test("finds the project in the summary with its accents and spacing", () => {
+    expect(Condenser.introduce("A26-ift-2007-Equipe9", "For A26 IFT 2007 Équipe 9, the pseudocode is ready.")).toBe(
+      "For A26 IFT 2007 Équipe 9, the pseudocode is ready.",
+    )
+  })
+
+  test("never reads out a generated name", () => {
+    expect(Condenser.speakable("cryptio-sources")).toBe(true)
+    expect(Condenser.speakable("2026-10-06-ocr-this-picture-and-provide-5c529e6b")).toBe(false)
+    expect(Condenser.speakable("notes-3d31aa2d")).toBe(false)
+    expect(Condenser.introduce("2026-10-06-ocr-this-picture-and-provide-5c529e6b", "Both tables are in.")).toBe("Both tables are in.")
+  })
+
+  test("has everything yapd says spoken as the assistant, in English, and only what can be said", () => {
+    const interruption = { project: "yapd", turn: { prompt: Option.none(), message: "Done." }, needsYou: false, lines: [], heard: "Merge it." }
+    expect(Condenser.prompt("yapd", interruption.turn, Option.none())).toContain(Condenser.aloud)
+    expect(Responder.prompt(interruption, Option.none())).toContain(Condenser.aloud)
+    expect(Condenser.aloud).toContain("never about an agent or a session, or what you asked one to do")
+    expect(Condenser.aloud).toContain("Translate titles, headings and quotes too")
+    expect(Condenser.aloud).toContain("a wallet, email or street address")
+  })
+
+  test("tells English from what slipped through in another language", () => {
+    expect(Condenser.english("In right price, the examples come from Trois-Rivières, sir.")).toBe(true)
+    expect(Condenser.english("Hélène’s invoice for €2,880 is sent.")).toBe(true)
+    expect(Condenser.english("I've added the table before “Données traitées,” sir.")).toBe(false)
+    expect(Condenser.english("Dans laurent, le fanion marque le début de chaque trame.")).toBe(false)
+    expect(Condenser.english("Москва is done.")).toBe(false)
+    expect(Condenser.english("テストは通りました。")).toBe(false)
+  })
+})
+
+/** A model that gives the answers in order, and keeps what it was asked. */
+const scripted = (answers: ReadonlyArray<unknown>) => {
+  const asked: Array<string> = []
+  const layer = Layer.succeed(Model, {
+    ask: (schema, prompt) =>
+      Effect.suspend(() => {
+        asked.push(prompt)
+        return Schema.decodeUnknown(schema)(answers[asked.length - 1])
+      }).pipe(Effect.mapError((cause) => new ModelError({ cause }))),
+  })
+  return { asked, layer }
+}
+
+describe("Language check", () => {
+  test("translates a summary that let another language through", async () => {
+    const { asked, layer } = scripted([
+      { priority: "done", spoken: "In right price, I've added the table before “Données traitées,” sir." },
+      { spoken: "In right price, I've added the table before the processed data section, sir." },
+    ])
+    const summary = await Effect.runPromise(
+      Effect.flatMap(Condenser.Condenser, ({ condense }) =>
+        condense("right-price", { prompt: Option.none(), message: "J'ai ajouté le tableau avant « Données traitées »." }),
+      ).pipe(Effect.provide(Condenser.ProviderCondenser.pipe(Layer.provide(layer)))),
+    )
+    expect(summary).toEqual({ priority: "done", spoken: "In right price, I've added the table before the processed data section, sir." })
+    expect(asked[1]).toContain("What's about to be said:\nIn right price, I've added the table before “Données traitées,” sir.")
+  })
+
+  test("asks nothing more when it's all in English", async () => {
+    const { asked, layer } = scripted([{ priority: "done", spoken: "yapd's tests pass now." }])
+    await Effect.runPromise(
+      Effect.flatMap(Condenser.Condenser, ({ condense }) => condense("yapd", { prompt: Option.none(), message: "Les tests passent." })).pipe(
+        Effect.provide(Condenser.ProviderCondenser.pipe(Layer.provide(layer))),
+      ),
+    )
+    expect(asked).toHaveLength(1)
+  })
+
+  test("translates what's said back, but leaves the message in the user's language", async () => {
+    const { layer } = scripted([
+      { intent: "send", spoken: "C'est noté, monsieur.", message: "Fusionne la branche." },
+      { spoken: "Noted, sir." },
+    ])
+    const reply = await Effect.runPromise(
+      Effect.flatMap(Responder.Responder, ({ respond }) =>
+        respond({ project: "yapd", turn: { prompt: Option.none(), message: "C'est prêt." }, needsYou: false, lines: [], heard: "Fusionne la branche." }),
+      ).pipe(Effect.provide(Responder.ProviderResponder.pipe(Layer.provide(layer)))),
+    )
+    expect(reply).toEqual({ intent: "send", spoken: "Noted, sir.", message: "Fusionne la branche." })
   })
 })
 

@@ -354,7 +354,7 @@ export const make = (options: {
         const mark = {}
         sending.set(update, mark)
         const fiber = yield* follow(update, reply.message).pipe(
-          Effect.map((result) => result === "queued" ? "Queued. I'll send it after the current turn finishes." : reply.spoken || "Sent."),
+          Effect.map((result) => result === "queued" ? "Noted. I'll get to it once the current task is done." : reply.spoken || "On it."),
           Effect.catchAll((error) =>
             Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
               Effect.tap(() => {
@@ -440,7 +440,7 @@ export const make = (options: {
                 })
                 .pipe(Effect.catchAll((error) => Effect.logWarning("Could not reply", error).pipe(Effect.as(misheard)))),
             )
-            yield* Effect.logInfo(`Reply: ${reply.intent}`)
+            yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
 
             if (reply.intent === "dismiss") return
             if (reply.intent === "resume") {
