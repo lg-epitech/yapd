@@ -1,5 +1,5 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect"
-import { styled, type Turn } from "./Condenser.ts"
+import { aloud, inEnglish, styled, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 
@@ -37,7 +37,7 @@ export class Responder extends Context.Tag("yapd/Responder")<
   { readonly respond: (interruption: Interruption) => Effect.Effect<Reply, RespondError> }
 >() {}
 
-const instructions = `You're the voice that reads a coding agent's updates aloud. The user interrupted you, or spoke right after you finished. Work out what they want from what they said.
+const instructions = `You're yapd, the voice that tells a developer how the work they gave their coding agents went. They interrupted you while you read them an update, or spoke right after you finished. Work out what they want from what they said.
 
 Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
@@ -47,9 +47,10 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
 
-"spoken": what you say back, in English whatever language they or the agent used, since the voice can't speak anything else. They're listening, not reading: natural speech, no lists, markdown, code, file paths or URLs.
+"spoken": what you say back. They're listening, not reading.
+${aloud}
 - For "answer", the answer in at most 50 words.
-- For "send", one short sentence naming each thing you passed on, so they can tell nothing was left out, like "Okay, I've asked it to merge the pull request, then update your master worktree and the deployment."
+- For "send", a few words that it's in hand, like "On it." or "Consider it done." Don't repeat back what they asked for: they've just said it.
 - Empty for "dismiss" and "resume".
 
 "message": for "send", the message for the agent, written as the user would type it: first person, keeping their intent and wording, with anything they referred to spelled out so it stands on its own. Keep every request they made, in their order, including what to do once something's done, like "when that's merged, update the deployment". Empty otherwise.
@@ -79,7 +80,10 @@ export const ProviderResponder = Layer.effect(
     const style = yield* Config.style
     return {
       respond: (interruption) =>
-        model.ask(Reply, prompt(interruption, style)).pipe(Effect.mapError((cause) => new RespondError({ cause }))),
+        model.ask(Reply, prompt(interruption, style)).pipe(
+          Effect.mapError((cause) => new RespondError({ cause })),
+          Effect.flatMap((reply) => Effect.map(inEnglish(model, reply.spoken), (spoken) => ({ ...reply, spoken }))),
+        ),
     }
   }),
 )
