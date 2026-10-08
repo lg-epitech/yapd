@@ -970,6 +970,50 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["The loader fix is ready, sir.", "The loader fix is ready, sir."])
   })
 
+  test("a cough taken for \"Thank you.\" doesn't count as him speaking, so it hides nothing from what he missed", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { heard, dictate, seen, journal } = yield* assistant((situation) =>
+          Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
+        )
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* heard({ heard: "Thank you.", via: "shortcut", at: now, voiced: 0.2, turns: 1 })
+        yield* dictate("What did I miss?")
+        return seen.at(-1)!.unheard.map(({ said }) => said)
+      }),
+    )
+    expect(result).toEqual(["yapd. The loader fix is ready."])
+  })
+
+  test("a request waiting its turn behind another when yapd is turned off and on is neither worked out nor noted", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { heard, toggle, wait, seen, journal } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "Fix the loader in yapd."
+              ? Brain.decision({ act: "start", text: situation.utterance.heard })
+              : Brain.decision({ act: "answer", spoken: "Four on the go, sir." }),
+          undefined,
+          { writing: 10 },
+        )
+        // Starting work takes a while to write up, and the next request waits for it.
+        yield* Effect.fork(heard({ heard: "Fix the loader in yapd.", via: "typed", at: now, voiced: 0, turns: 1 }))
+        yield* wait(1)
+        const waiting = yield* Effect.fork(heard({ heard: "What's going on?", via: "typed", at: now, voiced: 0, turns: 1 }))
+        yield* wait(1)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* wait(12)
+        const taken = yield* Fiber.join(waiting)
+        const noted = yield* journal.since(0, { kinds: ["dictation"] })
+        return { taken, asked: seen.map(({ utterance }) => utterance.heard), noted: noted.map(({ text }) => text) }
+      }),
+    )
+    expect(result.taken).toEqual(Option.none())
+    expect(result.asked).not.toContain("What's going on?")
+    expect(result.noted).not.toContain("What's going on?")
+  })
+
   test("a catch-up told on a second look is one too: cut off, what it told him is told again, and heard once it's heard to the end", async () => {
     const result = await run(
       Effect.gen(function* () {

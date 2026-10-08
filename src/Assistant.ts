@@ -182,6 +182,10 @@ const catchUp = (kept: Kept) => {
   return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again"
 }
 
+/** Whether what was heard was taken for noise rather than anything he said to yapd. */
+const noise = (kept: Kept) =>
+  typeof kept.detail === "object" && kept.detail !== null && (kept.detail as { readonly decision?: Partial<Brain.Decision> }).decision?.act === "resume"
+
 /** What yapd knows as it works something out, and what that comes to without the model, when it's enough. */
 interface Glance {
   readonly version: number
@@ -319,8 +323,9 @@ export const make = (options: {
           threads.usage,
           askedLately,
         ])
-        // What he hasn't heard since he last said something, other than catching up: he may never have heard that answer.
-        const missed = yield* journal.unheard(spoke.findLast((kept) => !catchUp(kept))?.at ?? now - day, unheard)
+        // What he hasn't heard since he last said something, other than catching up, which he may never have heard the
+        // answer to, or something only heard as noise, like a cough taken for "Thank you.".
+        const missed = yield* journal.unheard(spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day, unheard)
         return {
           utterance,
           subject: about,
@@ -949,6 +954,11 @@ export const make = (options: {
     /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
     const respond = (utterance: Utterance, pressed: Subject | undefined) =>
       Effect.gen(function* () {
+        // Checked again once it's its turn: yapd may have been turned off and on while it waited behind another.
+        if (yield* outdated(utterance.turns)) {
+          yield* Effect.logInfo(`Not worked out, since yapd was turned off after it was said: ${utterance.heard}`)
+          return Option.none<string>()
+        }
         yield* Effect.logInfo(`Heard: ${utterance.heard}`)
         // Whatever comes of it is said, so the speaker gets ready while it's worked out.
         yield* options.coming
@@ -990,7 +1000,7 @@ export const make = (options: {
         )
         yield* note(thought, outcome, began)
         yield* deliver(outcome, utterance)
-        return utterance.id
+        return Option.some(utterance.id)
       }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
 
     /** The dictation a press began has ended, however long it took: what was kept for it, let go of. */
@@ -1010,7 +1020,7 @@ export const make = (options: {
         // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
         if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
         const arrived = kept?.arrived ?? (yield* options.awaiting)
-        return Option.some(yield* Effect.zipRight(hold, respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived)))
+        return yield* Effect.zipRight(hold, respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived))
       })
 
     return {
