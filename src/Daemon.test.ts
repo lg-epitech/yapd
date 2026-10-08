@@ -302,12 +302,15 @@ const handing = Effect.gen(function* () {
   }
   const dispatched: Array<Record<string, unknown>> = []
   let current = tezos()
+  /** Whether what it's sent is lost on the way, after it may have got there, and never shows in the thread. */
+  let losing = false
   const reach: Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> = Effect.succeed({
     api: (<A, I>(_: string, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
     call: (<A, I>(method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
       method === "orchestration.dispatchCommand"
         ? Effect.gen(function* () {
             dispatched.push(payload)
+            if (losing) return yield* new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })
             if (payload.type === "message.dispatch") {
               const at = new Date(yield* Clock.currentTimeMillis).toISOString()
               const messageId = String(payload.messageId)
@@ -339,6 +342,11 @@ const handing = Effect.gen(function* () {
     becomes: (overrides: Record<string, unknown>) =>
       Effect.sync(() => {
         current = tezos({ ...current, ...overrides })
+      }),
+    /** What it's sent from now on is lost on the way, or isn't. */
+    loses: (lost: boolean) =>
+      Effect.sync(() => {
+        losing = lost
       }),
   }
 })
@@ -917,6 +925,35 @@ describe("Daemon", () => {
     expect(result.sent).toEqual([])
     expect(result.told).toBe("You've given it something else since, so I held that back.")
     expect(result.noted).toEqual([["t-tezos", Hands.given]])
+  })
+
+  test("the same reply over a linked update, after one that may not have got there, is never said to have gone, nor sent under new ids", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, speak, wait, nextEvent, nextPlayback, journal } = yield* make("Use the fee table.", {
+          hands: t3.hands,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          transcripts: ["Use the fee table.", "Use the fee table."],
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        // T3 Code takes too long to say it got it, and it isn't in the thread when looked for.
+        yield* t3.loses(true)
+        yield* speak
+        const first = yield* nextPlayback
+        yield* t3.loses(false)
+        yield* wait(1)
+        yield* speak
+        const second = yield* nextPlayback
+        const noted = yield* journal.since(0, { kinds: ["action"] })
+        return { told: [first, second], sent: t3.sent(), states: noted.map(({ detail }) => (detail as { state?: string }).state ?? (detail as { outcome?: string }).outcome) }
+      }),
+    )
+    expect(result.told).toEqual(["I couldn't confirm it got there.", "I couldn't confirm that got there before, so I haven't sent it again."])
+    expect(result.sent).toEqual(["t-tezos: Use the fee table."])
+    expect(result.states).toEqual(["Unknown", "unknown"])
   })
 
   test("a turn no hook told of is said like a hook's update, once under its key, and never once yapd was turned off since", async () => {

@@ -1157,6 +1157,9 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
 export const sentBefore = (sent: number, now: number, lines: Lines, called: Option.Option<string>) =>
   `I sent that${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} ${ago(now - sent)}${addressed(lines)}.`
 
+/** That the same words may not have got to the same thread when they went lately, said instead of offering to send them again. */
+export const unconfirmedBefore = (lines: Lines) => `I couldn't confirm that got there before${addressed(lines)}, so I haven't sent it again.`
+
 /** Asked when the same words went to the same thread lately, and it hasn't said anything since. */
 export const twice = (sent: number, now: number, lines: Lines, called: Option.Option<string>) => `${sentBefore(sent, now, lines, called)} Again?`
 

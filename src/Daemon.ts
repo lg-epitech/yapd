@@ -331,14 +331,16 @@ export const make = (
         return outcome.how === "queued" ? ("queued" as const) : ("sent" as const)
       }
       yield* unregister(pending)
-      // The same words went to it lately: said, never asked about, until replies go through the brain.
+      // The same words went to it lately, or may have: said, never asked about, until replies go through the brain.
       const reason =
         outcome._tag === "Twin"
-          ? Hands.sentBefore(outcome.row.at, at, lines, Option.none())
+          ? outcome.row.state === "sent"
+            ? Hands.sentBefore(outcome.row.at, at, lines, Option.none())
+            : Hands.unconfirmedBefore(lines)
           : "reason" in outcome
             ? Hands.failed(act, "again" in outcome ? { ...outcome, again: Option.none<string>() } : outcome, lines, Option.none())
             : `That didn't go through${lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`}.`
-      yield* noted("reason" in outcome ? { reason: outcome.reason } : outcome._tag === "Twin" ? { twin: outcome.row.commandId } : {})
+      yield* noted("reason" in outcome ? { reason: outcome.reason } : outcome._tag === "Twin" ? { twin: outcome.row.commandId, state: outcome.row.state } : {})
       return yield* new RelayError({ reason })
     })
 
