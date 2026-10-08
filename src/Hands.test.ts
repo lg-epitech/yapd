@@ -1531,6 +1531,63 @@ describe("Hands", () => {
     expect(result.dispatched).toEqual(["Start with mainnet."])
   })
 
+  test("an answer that may not have got there isn't taken for one that did while the request still waits behind a newer one, then or after a restart", async () => {
+    // It asked something else alongside, which T3 Code's summary of the thread shows in its place, while r1 still waits.
+    const both = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-08T21:59:30.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: both, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        made.bounded.turnItems.push(
+          { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" },
+          { type: "approval_request", status: "waiting", requestId: "r2", requestKind: "command", prompt: "Bash: npm install right-pad" },
+        )
+        made.answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        const outcome = yield* made.run({ utterance: "u1", step: 0 }, { _tag: "Decide", to: tezos, requestId: "r1", decision: "accept" })
+        const state = Option.map(yield* made.ledger.get("yapd:u1:0"), ({ state }) => state)
+        const { undelivered, unconfirmed } = yield* made.restarted(now + 60_000).reconcile
+        return {
+          outcome: outcome._tag,
+          state,
+          restarted: Option.map(yield* made.ledger.get("yapd:u1:0"), ({ state }) => state),
+          unconfirmed: unconfirmed.map(({ commandId }) => commandId),
+          undelivered: undelivered.length,
+        }
+      }),
+    )
+    expect(result.outcome).toBe("Unknown")
+    expect(result.state).toEqual(Option.some("unknown"))
+    // Never taken for given after a restart either: it's said it couldn't be confirmed, and never sent again.
+    expect(result.restarted).toEqual(Option.some("abandoned"))
+    expect(result.unconfirmed).toEqual(["yapd:u1:0"])
+    expect(result.undelivered).toBe(0)
+  })
+
+  test("an answer to a question that asks him to type in a secret, or to a secret it asks for, is never sent", async () => {
+    const asking = (id: string) => thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id, kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: asking("q1"), runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        made.bounded.turnItems.push(
+          { type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question: "Please provide OPENAI_API_KEY so I can run the evals." }] },
+          { type: "secret_request", id: "turn-item:secret-request:t-tezos:stripe", status: "waiting", label: "Stripe API key" },
+        )
+        const typed = yield* made.run({ utterance: "u1", step: 0 }, { _tag: "Reply", to: tezos, requestId: "q1", answers: { key: "sk proj one two three" }, said: Option.none() })
+        // A secret behind the question it shows, answered by its id.
+        const secret = yield* made.run(
+          { utterance: "u2", step: 0 },
+          { _tag: "Reply", to: tezos, requestId: "turn-item:secret-request:t-tezos:stripe", answers: { key: "sk test four two" }, said: Option.none() },
+        )
+        const why = (outcome: Hands.Outcome) => ("reason" in outcome ? outcome.reason : outcome._tag)
+        return { outcomes: [why(typed), why(secret)], dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.outcomes).toEqual([
+      "It's waiting on a secret, which I never give by voice: it needs T3 Code.",
+      "It's waiting on a secret, which I never give by voice: it needs T3 Code.",
+    ])
+    expect(result.dispatched).toBe(0)
+  })
+
   test("a different answer to a request goes as he said it last once the earlier never left, is left to T3 Code once it may have got there, and the same one goes once more under its ids", async () => {
     const waiting = thread(tezos.id, {
       activeRunId: "run-1",
