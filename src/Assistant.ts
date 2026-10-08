@@ -175,6 +175,9 @@ const comingUp = (count: number, said: Lines) =>
 /** Something said back that isn't about a thread. */
 const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _tag: "Answer", said: say, about: Option.none() }, kind: say === "" ? "none" : "answer" })
 
+/** What's said of something left rather than asked about, since a question is open already. */
+const unasked = (about: string, said: Lines) => `I left ${about || "that"} for now, since I'd have to ask you something about it${addressed(said)}.`
+
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
 
@@ -325,6 +328,9 @@ export const make = (options: {
     const current = (now: number) =>
       asking !== undefined && now - asking.open.at < fresh ? Option.some(asking.open) : Option.none<Open>()
 
+    /** The open question, if it was asked by the time this was said: one asked after can't be what it's about, so it never answers, dismisses or closes it. */
+    const before = (utterance: Pick<Utterance, "at">) => (asking !== undefined && asking.open.at <= utterance.at ? asking : undefined)
+
     /** What "it" means now: what's playing, or the latest heard lately, an update or an answer. */
     const subject = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
@@ -353,8 +359,8 @@ export const make = (options: {
     const situate = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        // One he hasn't heard yet can't be what he's answering.
-        const open = Option.filter(current(now), () => asking?.said === true)
+        // One he hasn't heard yet can't be what he's answering, nor one asked after he said this.
+        const open = Option.filter(current(now), () => before(utterance)?.said === true)
         const focus =
           about._tag === "Thread" ? Option.some(about.ref) : about._tag === "Answer" ? about.about : Option.none<Threads.Ref>()
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
@@ -454,11 +460,20 @@ export const make = (options: {
         })
       })
 
-    /** Opens a question in place of any other, unless yapd was turned off since what it's about was said. */
+    /**
+     * Opens a question in place of any other, unless yapd was turned off
+     * since what it's about was said, or another was asked since, which stays
+     * open: only one ever is, so this one is left with a word instead.
+     */
     const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Utterance) =>
       Effect.gen(function* () {
         const power = yield* options.power
         if (!power.on || power.turns !== utterance.turns) return quiet({ _tag: "Nothing" })
+        if (asking !== undefined && before(utterance) === undefined) {
+          yield* Effect.logInfo(`Leaving it, rather than ask in place of a question asked since: ${open.asked}`)
+          const said = yield* persona.lines
+          return reply(open.kind === "which" ? said.cantTell : unasked(open.about, said), { _tag: "Nothing" })
+        }
         if (asking !== undefined) yield* close(asking.open, "replaced")
         const at = yield* Clock.currentTimeMillis
         version++
@@ -696,7 +711,7 @@ export const make = (options: {
             const about = outcome.about || "that"
             if (asked || asking !== undefined) {
               yield* Effect.logInfo(`Leaving it, rather than ask: ${outcome.question}`)
-              return reply(`I left ${about} for now, since I'd have to ask you something about it${addressed(said)}.`, { _tag: "Nothing" })
+              return reply(unasked(outcome.about, said), { _tag: "Nothing" })
             }
             const words = Brain.unrepeated({ kind: "project", asked: outcome.question, about: outcome.about }, yield* askedLately, said)
             if (words === undefined) return reply(`I still can't tell which project ${about} goes in, so I left it${addressed(said)}.`, { _tag: "Nothing" })
@@ -868,12 +883,14 @@ export const make = (options: {
         const said = yield* persona.lines
         // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
         if (decided.source === "failed") {
-          if (asking?.said === true) yield* close(asking.open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
+          const heard = before(utterance)
+          if (heard?.said === true) yield* close(heard.open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
           return reply(decision.spoken, decided.subject)
         }
         const now = yield* Clock.currentTimeMillis
         if (asking !== undefined && Option.isNone(current(now))) yield* close(asking.open, "dropped: unanswered")
-        const open = asking?.open
+        // One asked since he said this stays open, to be asked as usual, as if it weren't there.
+        const open = before(utterance)?.open
         if (open === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it.
         if (asking?.said === false) {
