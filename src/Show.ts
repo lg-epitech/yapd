@@ -53,7 +53,7 @@ const browser: Opener = (address) => Process.run(["open", address])
 export class Show extends Context.Tag("yapd/Show")<
   Show,
   {
-    /** Puts a card up in place of the one there, as `line` is said with it. */
+    /** Puts a card up in place of the one there, as it's talked about: saying `line` again puts it back up. */
     readonly put: (draft: Draft, line?: string) => Effect.Effect<Card>
     /** Takes the card down, and says whether one was up. */
     readonly hide: Effect.Effect<boolean>

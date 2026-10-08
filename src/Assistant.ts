@@ -1517,6 +1517,8 @@ export const make = (options: {
         const { subject, missed, card } = outcome
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
         let unsaid: Effect.Effect<void> = Effect.void
+        // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
+        const line = subject._tag === "Nothing" ? outcome.say : subject.said
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -1538,7 +1540,7 @@ export const make = (options: {
                   if (open !== undefined && asking?.open.id === open.id) asking.said = heard
                 })
               }),
-            ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(options.show.put(card, outcome.say)))),
+            ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(options.show.put(card, line)))),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
