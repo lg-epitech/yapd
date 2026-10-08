@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { type Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
+import { type Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
@@ -2035,40 +2035,29 @@ describe("Assistant", () => {
   })
 
   test("a message T3 Code takes and never answers for holds up nothing for good: given up on fifteen seconds on, it's offered again, and what he says next is answered", async () => {
-    // T3 Code takes the request on its socket and never answers, as it can when it stops answering on one without saying why.
-    const received: Array<unknown> = []
-    const server = Bun.serve({
-      port: 0,
-      fetch: (request, server) => (server.upgrade(request) ? undefined : new Response("no", { status: 400 })),
-      websocket: { message: (_, message) => void received.push(message) },
-    })
-    const call = T3CodeServer.call({ origin: `http://127.0.0.1:${server.port}` }, Redacted.make("test-token"))
-    try {
-      const result = await run(
-        Effect.gen(function* () {
-          const { heard, wait, flush, spoken } = yield* assistant(
-            (situation) => (situation.utterance.heard.startsWith("What") ? minaStatus(situation) : tezosMessage("high")(situation)),
-            undefined,
-            { answer: () => (payload) => call("orchestration.dispatchCommand", payload, Schema.Unknown) },
-          )
-          const dictated = (words: string) => heard({ heard: words, via: "shortcut", at: now, voiced: 3, turns: 1 })
-          // On their own, so a request that never ends can't hold up the test's own end.
-          yield* Effect.forkDaemon(dictated("Tell the Tesla's migration to use the fee table from the Mina work."))
-          while (received.length === 0) yield* Effect.promise(() => Bun.sleep(5))
-          yield* Effect.forkDaemon(dictated("What's the Mina one doing?"))
-          yield* flush
-          yield* wait(15)
-          for (let tries = 0; tries < 50 && spoken().length < 2; tries++) yield* flush
-          return spoken()
-        }),
-      )
-      expect(result).toEqual([
-        "I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?",
-        "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
-      ])
-    } finally {
-      await server.stop(true)
-    }
+    const result = await run(
+      Effect.gen(function* () {
+        const { heard, wait, flush, until, spoken, dispatched } = yield* assistant(
+          (situation) => (situation.utterance.heard.startsWith("What") ? minaStatus(situation) : tezosMessage("high")(situation)),
+          undefined,
+          // T3 Code takes it and never answers, as it can stop answering on a socket without saying why, given up on as yapd's own requests are.
+          { answer: () => () => T3CodeServer.patiently(Effect.never, "15 seconds", () => new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) },
+        )
+        const dictated = (words: string) => heard({ heard: words, via: "shortcut", at: now, voiced: 3, turns: 1 })
+        // On their own, so a request that never ends can't hold up the test's own end.
+        yield* Effect.forkDaemon(dictated("Tell the Tesla's migration to use the fee table from the Mina work."))
+        yield* until(() => dispatched.length > 0)
+        yield* Effect.forkDaemon(dictated("What's the Mina one doing?"))
+        yield* flush
+        yield* wait(15)
+        for (let tries = 0; tries < 50 && spoken().length < 2; tries++) yield* flush
+        return spoken()
+      }),
+    )
+    expect(result).toEqual([
+      "I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?",
+      "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+    ])
   })
 
   test("a message for now to a thread waiting on him goes behind its turn, and a yes to sending it again sends it as it went", async () => {

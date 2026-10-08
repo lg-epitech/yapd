@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Effect, Fiber, Option, Redacted, Schema, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Effect, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
 import * as Hands from "./Hands.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
@@ -255,38 +255,28 @@ describe("Hands", () => {
   })
 
   test("a message T3 Code takes and never answers for is given up on fifteen seconds on, though the step can't be cut short, and offered again", async () => {
-    // T3 Code takes the request on its socket and never answers, as it can when it stops answering on one without saying why.
-    const received: Array<unknown> = []
-    const server = Bun.serve({
-      port: 0,
-      fetch: (request, server) => (server.upgrade(request) ? undefined : new Response("no", { status: 400 })),
-      websocket: { message: (_, message) => void received.push(message) },
-    })
-    const call = Server.call({ origin: `http://127.0.0.1:${server.port}` }, Redacted.make("test-token"))
-    try {
-      const result = await run(
-        Effect.gen(function* () {
-          const { send, answering, ledger } = yield* hands()
-          answering((payload) => call("orchestration.dispatchCommand", payload, Schema.Unknown))
-          // On its own, so a step that never ends can't hold up the test's own end.
-          const sending = yield* Effect.forkDaemon(send("u1", "Use the Mina fee table."))
-          while (received.length === 0) yield* Effect.promise(() => Bun.sleep(5))
-          yield* TestClock.adjust("15 seconds")
-          for (let tries = 0; tries < 100 && Option.isNone(yield* Fiber.poll(sending)); tries++) yield* Effect.promise(() => Bun.sleep(5))
-          const ended = yield* Fiber.poll(sending)
-          if (Option.isNone(ended)) return "still waiting"
-          const outcome = yield* ended.value
-          const row = yield* ledger.get("yapd:u1:0")
-          return {
-            told: outcome._tag === "Unknown" ? Hands.failed({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome, lines, Option.none()) : outcome._tag,
-            state: Option.map(row, ({ state }) => state),
-          }
-        }),
-      )
-      expect(result).toEqual({ told: "I couldn't confirm it got there, sir. Send it again?", state: Option.some("unknown") })
-    } finally {
-      await server.stop(true)
-    }
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, answering, ledger, dispatched } = yield* hands()
+        // T3 Code takes it and never answers, as it can stop answering on a socket without saying why, given up on as yapd's own requests are.
+        answering(() => Server.patiently(Effect.never, "15 seconds", () => new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        // On its own, so a step that never ends can't hold up the test's own end.
+        const sending = yield* Effect.forkDaemon(send("u1", "Use the Mina fee table."))
+        while (dispatched.length === 0) yield* Effect.promise(() => Bun.sleep(5))
+        yield* Effect.promise(() => Bun.sleep(5))
+        yield* TestClock.adjust("15 seconds")
+        for (let tries = 0; tries < 100 && Option.isNone(yield* Fiber.poll(sending)); tries++) yield* Effect.promise(() => Bun.sleep(5))
+        const ended = yield* Fiber.poll(sending)
+        if (Option.isNone(ended)) return "still waiting"
+        const outcome = yield* ended.value
+        const row = yield* ledger.get("yapd:u1:0")
+        return {
+          told: outcome._tag === "Unknown" ? Hands.failed({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome, lines, Option.none()) : outcome._tag,
+          state: Option.map(row, ({ state }) => state),
+        }
+      }),
+    )
+    expect(result).toEqual({ told: "I couldn't confirm it got there, sir. Send it again?", state: Option.some("unknown") })
   })
 
   test("an unknown outcome whose offer wasn't taken up is asked about again, under its own ids, when the same words are said", async () => {

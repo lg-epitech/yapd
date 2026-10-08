@@ -122,8 +122,8 @@ describe("T3CodeServer WebSocket", () => {
     })
     const call = Server.call({ origin: `http://127.0.0.1:${server.port}` }, Redacted.make("test-token"))
     try {
-      const late = Effect.runPromise(Effect.flip(Effect.uninterruptible(call("orchestration.dispatchCommand", {}, Schema.Unknown, "200 millis"))))
-      expect(await Promise.race([late, Bun.sleep(3000).then(() => "still waiting")])).toMatchObject({ _tag: "Trouble", reason: "T3 Code is taking too long.", sent: true })
+      const late = Effect.runPromise(Effect.flip(Effect.uninterruptible(call("orchestration.dispatchCommand", {}, Schema.Unknown, "1 second"))))
+      expect(await Promise.race([late, Bun.sleep(4000).then(() => "still waiting")])).toMatchObject({ _tag: "Trouble", reason: "T3 Code is taking too long.", sent: true })
     } finally {
       await server.stop(true)
     }

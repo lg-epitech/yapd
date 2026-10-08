@@ -39,7 +39,7 @@ const misunderstood = (cause: unknown) => new Trouble({ reason: "T3 Code answere
  * cuts its request short would wait there for good. Given up on, or stopped
  * itself, it stops the request on the way out, as ever.
  */
-const patiently = <A, E, E2>(request: Effect.Effect<A, E>, patience: Duration.DurationInput, late: () => E2): Effect.Effect<A, E | E2> =>
+export const patiently = <A, E, E2>(request: Effect.Effect<A, E>, patience: Duration.DurationInput, late: () => E2): Effect.Effect<A, E | E2> =>
   Effect.uninterruptibleMask((restore) =>
     Effect.gen(function* () {
       const answer = yield* Deferred.make<A, E | E2>()
