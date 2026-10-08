@@ -1266,6 +1266,62 @@ describe("Assistant", () => {
     expect(result.restart).toEqual([])
   })
 
+  test("scratch that once a message was read offers to have it ignored: yes tells the thread to, once, and no sends nothing", async () => {
+    const original = "Use the fee table from the Mina work."
+    const scratched = (reply: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, answer, spoken, dispatched } = yield* assistant(tezosMessage("high"))
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          yield* dictate("Scratch that.")
+          const offered = spoken().at(-1)
+          yield* answer(reply)
+          return { offered, sent: dispatched.map(({ threadId, text }) => [threadId, text]) }
+        }),
+      )
+    const yes = await scratched("Yes.")
+    expect(yes.offered).toBe("It's already read it, sir. Shall I tell it to ignore that?")
+    expect(yes.sent).toEqual([
+      [tezos.id, original],
+      [tezos.id, Hands.ignore(original)],
+    ])
+    expect((await scratched("No.")).sent).toEqual([[tezos.id, original]])
+  })
+
+  test("guards: cancel that with a question open sends nothing, and a request that never runs out of rest stops after four steps", async () => {
+    const cancelled = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, spoken, dispatched } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing fee tables, sir." })
+            : situation.utterance.heard.startsWith("Cancel")
+              ? Brain.decision({ act: "dismiss", pending: "answers" })
+              : situation.utterance.heard.startsWith("Stop")
+                ? Brain.decision({ act: "stop", target: handle(situation, tezos), sure: "medium" })
+                : tezosMessage("high")(situation),
+        )
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* dictate("What's the Tezos one doing?")
+        yield* dictate("Stop it.")
+        yield* answer("Cancel that.")
+        return { said: spoken().at(-1), dispatched: dispatched.length }
+      }),
+    )
+    // A no to stopping it, not taking back the message before.
+    expect(cancelled).toEqual({ said: "I'll leave that one, sir.", dispatched: 1 })
+    let told = 0
+    const endless = await run(
+      Effect.gen(function* () {
+        const { dictate, dispatched } = yield* assistant((situation) =>
+          Brain.decision({ act: "send", target: handle(situation, tezos), text: `Step ${++told}.`, how: "now", rest: "and tell it once more" }),
+        )
+        yield* dictate("Tell the Tesla's migration to keep going, and tell it once more.")
+        return dispatched.length
+      }),
+    )
+    expect(endless).toBe(4)
+  })
+
   test("scratch that right after starting new work leaves the message sent before it alone, and says why", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -1294,19 +1350,22 @@ describe("Assistant", () => {
     let lost = true
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, answer, spoken, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
+        const { dictate, answer, spoken, dispatched, ledger } = yield* assistant(tezosMessage("high"), undefined, {
           answer: () => (payload, bounded) =>
             lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes(payload, bounded),
         })
         yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
         yield* answer("No.")
+        // Nor is it offered again after a restart.
+        const restart = yield* ledger.open(0)
         lost = false
         yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
         const before = dispatched.length
         yield* answer("Yes.")
-        return { spoken: spoken(), before, ids: dispatched.map(({ commandId, messageId }) => [commandId, messageId]) }
+        return { spoken: spoken(), restart, before, ids: dispatched.map(({ commandId, messageId }) => [commandId, messageId]) }
       }),
     )
+    expect(result.restart).toEqual([])
     expect(result.spoken).toEqual([
       "I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?",
       "I'll leave that one, sir.",

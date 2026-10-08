@@ -710,5 +710,56 @@ describe("Hands", () => {
       }),
     )
     expect(read).toEqual({ scratched: "Read", dispatched: ["message.dispatch"] })
+    const subagent = await run(
+      Effect.gen(function* () {
+        const { send, dispatched } = yield* hands({ thread: thread(tezos.id, { lineage: { parentThreadId: "t-parent", relationshipToParent: "subagent" } }) })
+        const outcome = yield* send("u1", "Use the fee table.")
+        return { outcome: outcome._tag, dispatched: dispatched.length }
+      }),
+    )
+    expect(subagent).toEqual({ outcome: "Refused", dispatched: 0 })
+    const late = await run(
+      Effect.gen(function* () {
+        const { send, run: act, becomes, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        // A stop worked out again under the same step is the one stop.
+        const stops = [yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos }), yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })]
+        bounded.runs[0]!.status = "interrupted"
+        becomes(thread(tezos.id, { status: "interrupted" }))
+        yield* TestClock.adjust("11 minutes")
+        const carried = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true })
+        becomes(busy)
+        bounded.runs.push({ id: "run-2", status: "running", ordinal: 2 })
+        yield* send("u3", "When it's done, open a PR.", "after")
+        yield* TestClock.adjust("3 minutes")
+        const scratched = yield* act({ utterance: "u4", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+        return { stops: stops.map(({ _tag }) => _tag), carried: carried._tag, scratched: scratched._tag, dispatched: dispatched.map(({ type }) => type) }
+      }),
+    )
+    // Carrying on and taking back are only for what was just done.
+    expect(late).toEqual({ stops: ["Done", "Done"], carried: "Refused", scratched: "Refused", dispatched: ["run.interrupt", "message.dispatch"] })
+  })
+
+  test("the same words go straight through once the thread asked something new, after ten minutes, or after they were turned down", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, becomes, answering, dispatched } = yield* hands()
+        yield* send("u1", "Yes.")
+        // It asked something new in the turn the first started, which hasn't ended.
+        yield* TestClock.adjust("40 seconds")
+        becomes(thread(tezos.id, { pendingRuntimeRequest: { id: "r2", kind: "user_input", createdAt: new Date(now + 30_000).toISOString() } }))
+        const asked = yield* send("u2", "Yes.")
+        becomes(thread(tezos.id))
+        yield* send("u3", "Use the fee table.")
+        yield* TestClock.adjust("11 minutes")
+        const later = yield* send("u4", "Use the fee table.")
+        answering(() => Effect.fail(refusal))
+        yield* send("u5", "Open a PR.")
+        answering(takes())
+        const refused = yield* send("u6", "Open a PR.")
+        return { outcomes: [asked._tag, later._tag, refused._tag], dispatched: dispatched.map(({ commandId }) => commandId) }
+      }),
+    )
+    expect(result.outcomes).toEqual(["Done", "Done", "Done"])
+    expect(result.dispatched).toEqual(["yapd:u1:0", "yapd:u2:0", "yapd:u3:0", "yapd:u4:0", "yapd:u5:0", "yapd:u6:0"])
   })
 })
