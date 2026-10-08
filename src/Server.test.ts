@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Exit, Scope, Stream, SubscriptionRef } from "effect"
+import { Deferred, Effect, Exit, Option, Scope, Stream, SubscriptionRef } from "effect"
 import * as Server from "./Server.ts"
 
 const payload = { hook_event_name: "Stop", session_id: "test", cwd: "/tmp", last_assistant_message: "Done." }
@@ -12,6 +12,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   state: Stream.succeed<Server.State>({ on: true, activity: "idle", updates: [] }),
   turn: () => Effect.void,
   replay: () => Effect.succeed("unknown"),
+  utter: () => Effect.succeed(Option.none()),
 })
 
 /** An API whose state is turned on and off for real, with one update to hear again. */
@@ -25,6 +26,7 @@ const stateful = Effect.gen(function* () {
       turn: (on) => SubscriptionRef.update(ref, (state) => ({ ...state, on })),
       replay: (id) =>
         Effect.map(SubscriptionRef.get(ref), (state) => (id !== update.id ? "unknown" : state.on ? "queued" : "off")),
+      utter: (text) => Effect.map(SubscriptionRef.get(ref), (state) => (state.on ? Option.some(`u-${text.length}`) : Option.none())),
     } satisfies Server.Api,
   }
 })
@@ -72,24 +74,30 @@ describe("Server", () => {
     })
   }
 
-  test("serves the state, turns yapd off and on, and replays an update only while it's on", async () => {
+  test("serves the state, turns yapd off and on, and replays an update or takes typed words only while it's on", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const { api } = yield* stateful
       const server = yield* Server.serve(0, api)
       const url = `http://127.0.0.1:${server.port}`
       const call = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init))
       const turn = (body: string) => call("/state", { method: "PUT", headers: { "content-type": "application/json" }, body })
+      const utter = (body: string) => call("/utterances", { method: "POST", headers: { "content-type": "application/json" }, body })
 
       expect(yield* Effect.promise(() => fetch(`${url}/state`).then((response) => response.json()))).toEqual({
         on: true, activity: "idle", updates: [update],
       })
       expect((yield* call("/updates/a1/replay", { method: "POST" })).status).toBe(202)
       expect((yield* call("/updates/zz/replay", { method: "POST" })).status).toBe(404)
+      const typed = yield* utter('{"text": "who needs me?"}')
+      expect(typed.status).toBe(202)
+      expect(yield* Effect.promise(() => typed.json())).toEqual({ id: "u-13" })
+      expect((yield* utter('{"text": "  "}')).status).toBe(400)
 
       const off = yield* turn('{"on": false}')
       expect(off.status).toBe(200)
       expect(yield* Effect.promise(() => off.json())).toMatchObject({ on: false })
       expect((yield* call("/updates/a1/replay", { method: "POST" })).status).toBe(409)
+      expect((yield* utter('{"text": "who needs me?"}')).status).toBe(409)
       expect((yield* turn('{"on": "no"}')).status).toBe(400)
       expect((yield* turn("{")).status).toBe(400)
       expect((yield* call("/nothing")).status).toBe(404)

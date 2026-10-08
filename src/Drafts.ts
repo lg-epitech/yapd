@@ -1,18 +1,14 @@
-import { Cause, Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
-import type { Notice } from "./Inbox.ts"
+import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
 import { type Decision, type Destination, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
-// What the user dictated becomes a draft: written in the background, however
-// many there are, while updates keep being read. What a draft has to say, a
-// question, that it's reading the project, that it started or why it didn't,
-// waits for its turn like updates do, and an answer goes back to the draft that
-// asked. Drafts only live in memory: what the user said is in the log from
-// the start, so one that's lost can be dictated again, and none starts later
-// than the user would expect it to.
+// New work, from what the user said to where it starts: the writer decides
+// where it goes and writes the prompt, which is checked against what's there
+// and started. Whether what they said is new work at all, and what to ask
+// them, is for whoever heard it; this only says what came of it.
 
 /** A machine work can start on. */
 export interface Machine {
@@ -29,31 +25,8 @@ export interface Machine {
 const patience: Duration.DurationInput = "8 seconds"
 /** Catalogs older than this are fetched again, like when a dictation is sent long after the shortcut was pressed. */
 const fresh = 5 * 60_000
-/** How long after a question went unanswered it's asked again. */
-const again: Duration.DurationInput = "1 minute"
-/** How many times a question is asked before the request is dropped. */
-const asks = 2
 /** Prompts being written at once. */
 const writers = 3
-
-interface Draft {
-  readonly id: string
-  readonly heard: string
-  /** When the user sent it. */
-  readonly at: number
-  readonly lines: Array<Line>
-  /** The request in a few words, once the writer has named it. */
-  about: string
-  /** How many times the question it's waiting on went unanswered. */
-  unanswered: number
-  /** Whether it's being started right now, which can't be taken back. */
-  starting: boolean
-  open: boolean
-  /** Dropped, like when yapd was turned off: it says nothing, and starts nothing unless it already was. */
-  dropped: boolean
-  /** What's being done for it in the background, to stop when it's dropped. */
-  readonly jobs: Set<Fiber.RuntimeFiber<unknown, unknown>>
-}
 
 interface Resolved {
   /** Whether what they said about a worktree could be heard either way. */
@@ -138,15 +111,45 @@ export const confirmation = (spoken: string, { unsure, machine, project, catalog
   ].join(" ")
 }
 
+/** What the writer made of a request, with what it went by, ready to act on. */
+export interface Written {
+  readonly decision: Decision
+  readonly material: Material
+}
+
+/** What became of new work. */
+export type Outcome =
+  | {
+      readonly _tag: "Started"
+      readonly spoken: string
+      readonly started: Started
+      readonly machine: Machine
+      readonly request: Request
+      /** The request in a few words. */
+      readonly about: string
+    }
+  /** Which project it's for has to be asked, and the material kept for the answer. */
+  | { readonly _tag: "Asked"; readonly question: string; readonly about: string; readonly material: Material }
+  /** The project is being read through first, which takes a while: `then` is what comes of it. */
+  | { readonly _tag: "Looking"; readonly spoken: string; readonly about: string; readonly then: Effect.Effect<Outcome> }
+  /** It was asked for, and T3 Code is getting it ready, which takes minutes for a worktree: `then` is what comes of it. */
+  | { readonly _tag: "Launching"; readonly about: string; readonly project: string; readonly machine: Machine; readonly then: Effect.Effect<Outcome> }
+  /** Nothing started, and this says why, or that there was nothing to start. */
+  | { readonly _tag: "Said"; readonly spoken: string; readonly failed: boolean }
+
+/** Notes work as it starts, in the same breath, so nothing can come between the two. */
+export type Noted = (started: Extract<Outcome, { readonly _tag: "Started" }>) => Effect.Effect<void>
+
+/** What's said when the prompt couldn't be written. */
+export const unwritten = "I couldn't write that up, so nothing started. What you said is in my log."
+
+/** Starts new work on the machines there are, with the user's rules and what they heard lately to go by. */
 export const make = (options: {
   readonly machines: ReadonlyArray<Machine>
   /** The user's rules, read as they are now. */
   readonly rules: Effect.Effect<Option.Option<string>>
   /** What the user was told lately, newest first. */
   readonly recent: Effect.Effect<ReadonlyArray<Heard>>
-  readonly note: (heard: Heard) => Effect.Effect<void>
-  /** Queues something to say. */
-  readonly tell: (notice: Notice) => Effect.Effect<void>
   /** Says which names there are, for what transcribes the dictation that's under way. */
   readonly expect?: (terms: ReadonlyArray<string>) => Effect.Effect<void>
 }) =>
@@ -154,36 +157,7 @@ export const make = (options: {
     const writer = yield* Writer
     const scope = yield* Effect.scope
     const writing = yield* Effect.makeSemaphore(writers)
-    const drafts = new Map<string, Draft>()
     const research = options.machines.some(({ researcher }) => researcher.available)
-
-    yield* Effect.addFinalizer(() =>
-      Effect.forEach(
-        [...drafts.values()].filter(({ open }) => open),
-        (draft) =>
-          Effect.logWarning(
-            draft.starting
-              ? `yapd stopped as this was being started, so check whether it did before dictating it again: ${draft.heard}`
-              : `Dropped as yapd stopped, so dictate it again: ${draft.heard}`,
-          ).pipe(Effect.annotateLogs({ draft: draft.id })),
-        { discard: true },
-      ),
-    )
-
-    /** Nothing more is done for a draft once it's dropped. */
-    const background = <A, E>(effect: Effect.Effect<A, E>, draft: Draft) =>
-      Effect.withFiberRuntime<A | void, E>((fiber) => {
-        if (draft.dropped) return Effect.void
-        draft.jobs.add(fiber)
-        return Effect.ensuring(effect, Effect.sync(() => draft.jobs.delete(fiber)))
-      }).pipe(
-        Effect.catchAllCause((cause) =>
-          Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not write the prompt", cause),
-        ),
-        Effect.annotateLogs({ draft: draft.id }),
-        Effect.forkIn(scope),
-        Effect.asVoid,
-      )
 
     const listing = (machine: Machine) =>
       machine.launcher.catalog.pipe(
@@ -195,149 +169,75 @@ export const make = (options: {
       )
 
     let fetched: { readonly at: number; readonly fiber: Fiber.RuntimeFiber<Array<Listing>> } | undefined
-    /** Asks every machine at once what it can start. */
-    const fetch = Effect.gen(function* () {
-      const at = yield* Clock.currentTimeMillis
-      const fiber = yield* Effect.forEach(options.machines, listing, { concurrency: "unbounded" }).pipe(
-        Effect.tap((listings) => options.expect?.(vocabulary(listings)) ?? Effect.void),
-        Effect.forkIn(scope),
-      )
-      fetched = { at, fiber }
-      return fiber
-    })
+    /** Asks every machine at once what it can start, telling what transcribes the dictation which names there are. */
+    const fetch = (titles: ReadonlyArray<string>) =>
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis
+        const fiber = yield* Effect.forEach(options.machines, listing, { concurrency: "unbounded" }).pipe(
+          Effect.tap((listings) => options.expect?.(vocabulary(listings, titles)) ?? Effect.void),
+          Effect.forkIn(scope),
+        )
+        fetched = { at, fiber }
+        return fiber
+      })
     /** What was asked for when the shortcut was pressed, which is usually there by now. */
     const listings = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
-      return yield* Fiber.join(fetched !== undefined && now - fetched.at < fresh ? fetched.fiber : yield* fetch)
+      return yield* Fiber.join(fetched !== undefined && now - fetched.at < fresh ? fetched.fiber : yield* fetch([]))
     })
-
-    const close = (draft: Draft) =>
-      Effect.sync(() => {
-        draft.open = false
-        drafts.delete(draft.id)
-      })
-
-    const say = (draft: Draft, spoken: string, priority: Notice["priority"], extra: Partial<Notice> = {}) =>
-      Effect.suspend(() =>
-        draft.dropped
-          ? Effect.void
-          : options.tell({
-              id: `draft:${draft.id}:${crypto.randomUUID()}`,
-              priority,
-              spoken,
-              at: draft.at,
-              stale: Effect.succeed(false),
-              ...extra,
-            }),
-      )
-
-    /** Nothing started, and the user hears why. */
-    const fail = (draft: Draft, reason: string) =>
-      Effect.gen(function* () {
-        yield* close(draft)
-        yield* Effect.logWarning(`Nothing started: ${reason}`)
-        yield* say(draft, draft.about === "" ? reason : `About ${draft.about}: ${reason}`, "needs-you")
-      })
 
     /** Once more if it fails, as with summaries. */
     const decide = (material: Material) => writer.decide(material).pipe(Effect.retry({ times: 1 }), writing.withPermits(1))
 
-    const start = (draft: Draft, resolved: Resolved, spoken: string, why: string, warning?: string) =>
+    /**
+     * Starts it, and says what started, or why nothing did. Once it's asked
+     * for, it's started and noted whatever happens meanwhile, like yapd being
+     * turned off: cut off halfway, a launch could leave a thread half made. So
+     * it goes on by itself, and whoever asked for it waits for what comes of
+     * it in its own time. It's never made uninterruptible, since then its own
+     * time limits couldn't end it, and a launch that never answered would go
+     * on for good.
+     */
+    const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string) =>
       Effect.gen(function* () {
         const { machine, project, request } = resolved
-        if (request.prompt === "") return yield* fail(draft, "I couldn't write that up, so nothing started.")
+        if (request.prompt === "") return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
         yield* Effect.logInfo(
           `Decided: ${project.name} on ${machine.name}, ${[request.model ?? "its usual model", request.effort].filter(Boolean).join(" ")}, ${
             request.worktree === true ? "in a worktree" : "without a worktree"
           }${request.baseBranch === undefined ? "" : ` from ${request.baseBranch}`}. ${why}`,
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
-        if (draft.dropped) return
-        draft.starting = true
-        const outcome = yield* Effect.either(machine.launcher.start(request))
-        if (Either.isLeft(outcome)) {
-          yield* Effect.logWarning("Could not start", outcome.left)
-          return yield* fail(draft, outcome.left.reason)
-        }
-        const started = outcome.right
-        const now = yield* Clock.currentTimeMillis
-        yield* close(draft)
-        yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}, ${((now - draft.at) / 1000).toFixed(1)} s after it was dictated`)
-        const said = [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" ")
-        yield* options.note({
-          project: project.name,
-          ...(machine.hosts[0] === undefined ? {} : { host: machine.hosts[0] }),
-          directory: started.directory,
-          spoken: said,
-          message: request.prompt,
-          started: true,
-          at: now,
-        })
-        yield* say(draft, said, "done")
+        const launching = yield* Effect.gen(function* () {
+          const outcome = yield* Effect.either(machine.launcher.start(request))
+          if (Either.isLeft(outcome)) {
+            yield* Effect.logWarning("Could not start", outcome.left)
+            return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
+          }
+          const started = outcome.right
+          yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
+          const begun = {
+            _tag: "Started",
+            spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
+            started,
+            machine,
+            request,
+            about,
+          } satisfies Outcome
+          yield* noted(begun)
+          return begun
+        }).pipe(Effect.interruptible, Effect.forkIn(scope))
+        return { _tag: "Launching", about, project: project.name, machine, then: Fiber.join(launching) } satisfies Outcome
       })
 
-    const offer = (draft: Draft, material: Material, question: string): Effect.Effect<void> =>
-      say(draft, question, "needs-you", {
-        stale: Effect.sync(() => !draft.open),
-        question: {
-          answer: (heard) => answer(draft, material, heard),
-          unanswered: Effect.suspend(() => {
-            draft.unanswered++
-            if (draft.unanswered < asks) {
-              return background(Effect.zipRight(Effect.sleep(again), offer(draft, material, question)), draft)
-            }
-            draft.open = false
-            return background(
-              Effect.gen(function* () {
-                yield* close(draft)
-                yield* Effect.logWarning(`Dropped, since "${question}" went unanswered: ${draft.heard}`)
-                yield* say(draft, `I didn't hear back about ${draft.about || "what you dictated"}, so I dropped it.`, "done")
-              }),
-              draft,
-            )
-          }),
-        },
-      })
-
-    const ask = (draft: Draft, material: Material, question: string) =>
-      Effect.gen(function* () {
-        draft.lines.push({ speaker: "yapd", text: question })
-        draft.unanswered = 0
-        yield* Effect.logInfo(`Asked: ${question}`)
-        yield* offer(draft, material, question)
-      })
-
-    /** What they said after a question, worked out but not acted on, since they may still be talking. */
-    const answer = (draft: Draft, material: Material, heard: string) =>
-      decide({ ...material, lines: [...draft.lines, { speaker: "user", text: heard }] }).pipe(
-        Effect.map((decision) =>
-          decision.action === "wait"
-            ? Option.none()
-            : Option.some(
-                Effect.suspend(() => {
-                  draft.lines.push({ speaker: "user", text: heard })
-                  return background(
-                    Effect.zipRight(Effect.logInfo(`Answered: ${heard}`), act(draft, { ...material, lines: [...draft.lines] }, decision)),
-                    draft,
-                  )
-                }),
-              ),
-        ),
-        Effect.catchAll((error) => Effect.logWarning("Could not work out the answer", error).pipe(Effect.as(Option.none()))),
-        Effect.annotateLogs({ draft: draft.id }),
-      )
-
-    const look = (draft: Draft, material: Material, resolved: Resolved, decision: Decision) =>
+    /** Reads through the project before writing the prompt, for a request that leans on something in it. */
+    const look = (material: Material, resolved: Resolved, decision: Decision, noted: Noted): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { machine, project, request } = resolved
-        let looking = true
+        const about = decision.about.trim()
         yield* Effect.logInfo(`Reading through ${project.name} on ${machine.name} first: ${decision.prompt}. ${decision.why}`)
-        // Said before anything is read, and not at all once there's something better to say.
-        yield* say(draft, decision.spoken.trim() || `Looking through ${project.name} first.`, "needs-you", {
-          stale: Effect.sync(() => !looking),
-        })
         const destination: Destination = {
-          about: draft.about,
+          about,
           project: project.name,
           machine: machine.here ? "" : machine.name,
           directory: project.path,
@@ -346,32 +246,29 @@ export const make = (options: {
           worktree: request.worktree === true,
           lookFor: decision.prompt,
         }
-        const written = yield* writer.research(material, destination, machine.researcher).pipe(
-          writing.withPermits(1),
-          Effect.either,
-          Effect.ensuring(
-            Effect.sync(() => {
-              looking = false
-            }),
-          ),
-        )
+        const written = yield* writer.research(material, destination, machine.researcher).pipe(writing.withPermits(1), Effect.either)
         if (Either.isRight(written)) {
-          if (written.right.action === "ask") return yield* ask(draft, material, written.right.spoken)
+          if (written.right.action === "ask") return { _tag: "Asked", question: written.right.spoken, about, material } satisfies Outcome
           const prompt = written.right.prompt
-          return yield* start(draft, { ...resolved, request: { ...request, prompt } }, written.right.spoken, written.right.why)
+          return yield* launch({ ...resolved, request: { ...request, prompt } }, written.right.spoken, written.right.why, about, noted)
         }
         // Written from what they said after all, which leaves what was to be looked up to the agent.
         yield* Effect.logWarning(`Could not read through ${project.name}, so it's written without`, written.left)
-        const blind = yield* decide({ ...material, research: false })
-        return yield* act(draft, { ...material, research: false }, blind, "I couldn't read through it first.")
+        const plain = { ...material, research: false }
+        const blind = yield* decide(plain).pipe(Effect.either)
+        if (Either.isLeft(blind)) return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
+        return yield* start({ decision: blind.right, material: plain }, noted, "I couldn't read through it first.")
       })
 
-    const act = (draft: Draft, material: Material, decision: Decision, warning?: string): Effect.Effect<void> =>
+    /** Carries out what the writer decided: starts it, or says what has to be asked, or why nothing started. */
+    const start = (written: Written, noted: Noted = () => Effect.void, warning?: string): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
-        if (decision.about.trim() !== "") draft.about = decision.about.trim()
+        const { decision, material } = written
+        const about = decision.about.trim()
+        const asking = (question: string): Outcome => ({ _tag: "Asked", question, about, material })
         switch (decision.action) {
           case "ask":
-            return yield* ask(draft, material, decision.spoken.trim() || `Which project is ${draft.about || "that"} for?`)
+            return asking(decision.spoken.trim() || `Which project is ${about || "that"} for?`)
           case "start":
           case "research": {
             // Whatever the writer went on to decide, a project it couldn't say why it chose is a guess.
@@ -379,104 +276,64 @@ export const make = (options: {
               yield* Effect.logInfo(
                 `Asking, since "${decision.project}" was ${decision.settled === "unclear" ? "unclear" : `${decision.settled} by "${decision.evidence}", which they didn't say`}. ${decision.why}`,
               )
-              return yield* ask(draft, material, `Which project is ${draft.about || "that"} for?`)
+              return asking(`Which project is ${about || "that"} for?`)
             }
             const resolved = resolve(options.machines, material.listings, decision)
             if (Either.isLeft(resolved)) {
               yield* Effect.logInfo(`Decided on "${decision.project}", which isn't a project anywhere. ${decision.why}`)
-              return yield* ask(draft, material, resolved.left)
+              return asking(resolved.left)
             }
-            return decision.action === "start"
-              ? yield* start(draft, resolved.right, decision.spoken, decision.why, warning)
-              : yield* look(draft, material, resolved.right, decision)
+            if (decision.action === "start") return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, warning)
+            const spoken = decision.spoken.trim() || `Looking through ${resolved.right.project.name} first.`
+            return { _tag: "Looking", spoken, about, then: look(material, resolved.right, decision, noted) } satisfies Outcome
           }
           case "none":
           case "drop":
-          // Not an answer to anything, when there was no question.
           case "wait": {
-            yield* close(draft)
             yield* Effect.logInfo(`${decision.action === "drop" ? "Dropped" : "Nothing to start"}. ${decision.why}`)
             const spoken = decision.spoken.trim() || (decision.action === "drop" ? "Dropped." : "That didn't sound like work to start, so I left it.")
-            return yield* say(draft, spoken, "done")
+            return { _tag: "Said", spoken, failed: false } satisfies Outcome
           }
         }
-      }).pipe(
-        Effect.catchAll((error) =>
-          Effect.logWarning("Could not write the prompt", error).pipe(
-            Effect.zipRight(fail(draft, "I couldn't write that up, so nothing started. What you said is in my log.")),
-          ),
-        ),
-      )
-
-    const write = (draft: Draft) =>
-      Effect.gen(function* () {
-        yield* Effect.logInfo(`Dictated: ${draft.heard}`)
-        const found = yield* listings
-        const usable = found.filter(({ catalog }) => Option.isSome(catalog))
-        if (usable.length === 0) {
-          return yield* fail(draft, (found.find(({ here }) => here) ?? found[0])?.reason ?? "There's nowhere to start new work.")
-        }
-        const material: Material = {
-          listings: found,
-          rules: yield* options.rules,
-          recent: yield* options.recent,
-          earlier: [...drafts.values()].filter((other) => other.open && other.at <= draft.at && other !== draft).map(({ heard }) => heard),
-          lines: [...draft.lines],
-          research,
-          now: yield* Clock.currentTimeMillis,
-        }
-        const decision = yield* decide(material).pipe(
-          Effect.catchAll((error) =>
-            Effect.logWarning("Could not write the prompt", error).pipe(
-              Effect.zipRight(fail(draft, "I couldn't write that up, so nothing started. What you said is in my log.")),
-              Effect.as(undefined),
-            ),
-          ),
-        )
-        if (decision !== undefined) yield* act(draft, material, decision)
       })
 
     return {
-      /**
-       * Drops every request, without a word, like when yapd is turned off. One
-       * being started can't be taken back, so it still starts, but says nothing.
-       */
-      drop: Effect.suspend(() => {
-        // All at once, so none starts halfway through.
-        const dropping = [...drafts.values()]
-        for (const draft of dropping) draft.dropped = true
-        return Effect.forEach(
-          dropping,
-          (draft) =>
-            (draft.starting
-              ? Effect.logInfo(`Starting without a word, since yapd was turned off: ${draft.heard}`)
-              : Effect.forEach([...draft.jobs], Fiber.interruptFork).pipe(
-                  Effect.zipRight(close(draft)),
-                  Effect.zipRight(Effect.logInfo(`Dropped, since yapd was turned off: ${draft.heard}`)),
-                )
-            ).pipe(Effect.annotateLogs({ draft: draft.id })),
-          { discard: true },
-        )
-      }),
       /** The user started dictating: what's ready by the time they've finished doesn't hold the prompt up. */
-      prepare: Effect.zipRight(fetch, writer.prepare).pipe(Effect.asVoid),
-      /** Takes what the user dictated, and returns at once. */
-      dictated: (heard: string) =>
+      prepare: (titles: ReadonlyArray<string>) => Effect.zipRight(fetch(titles), writer.prepare).pipe(Effect.asVoid),
+      /**
+       * Writes the prompt for what was said, which may turn out not to be new
+       * work: it starts before that's known, so new work doesn't wait. With
+       * `answering`, the lines are an answer to the question asked about it.
+       */
+      begin: (lines: ReadonlyArray<Line>, answering?: Material) =>
         Effect.gen(function* () {
-          const draft: Draft = {
-            id: crypto.randomUUID().slice(0, 8),
-            heard,
-            at: yield* Clock.currentTimeMillis,
-            lines: [{ speaker: "user", text: heard }],
-            about: "",
-            unanswered: 0,
-            starting: false,
-            open: true,
-            dropped: false,
-            jobs: new Set(),
+          const material: Material =
+            answering === undefined
+              ? {
+                  listings: yield* listings,
+                  rules: yield* options.rules,
+                  recent: yield* options.recent,
+                  earlier: [],
+                  lines,
+                  research,
+                  now: yield* Clock.currentTimeMillis,
+                }
+              : { ...answering, lines: [...answering.lines, ...lines], now: yield* Clock.currentTimeMillis }
+          if (!material.listings.some(({ catalog }) => Option.isSome(catalog))) {
+            const found = material.listings
+            return Either.left((found.find(({ here }) => here) ?? found[0])?.reason ?? "There's nowhere to start new work.")
           }
-          drafts.set(draft.id, draft)
-          yield* background(write(draft), draft)
+          return yield* decide(material).pipe(
+            Effect.map((decision): Written => ({ decision, material })),
+            Effect.tapError((error) => Effect.logWarning("Could not write the prompt", error)),
+            Effect.mapError(() => unwritten),
+            Effect.either,
+          )
         }),
+      start,
+      look,
     }
   })
+
+/** What starts new work. */
+export type Drafts = Effect.Effect.Success<ReturnType<typeof make>>

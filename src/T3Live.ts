@@ -53,6 +53,8 @@ export const Thread = Schema.Struct({
   /** How its latest run ended, or that it's still going. Not to be trusted for whether it's busy. */
   status: Schema.String,
   latestRunId: nullable(Schema.String),
+  /** When its latest run got going, for how long it's been at it. */
+  latestRunStartedAt: nullable(Schema.String),
   latestRunCompletedAt: nullable(Schema.String),
   lastError: nullable(Schema.String),
   lastErrorClass: nullable(Schema.String),

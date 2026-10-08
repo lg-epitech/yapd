@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite"
 import { Context, Effect, Layer, Option } from "effect"
+import { hostname } from "node:os"
+import * as Config from "./Config.ts"
 import * as Store from "./Store.ts"
 
 // Everything yapd heard, said and did, kept in its database so it outlives a
@@ -14,22 +16,26 @@ export type Kind =
   | "reply"
   /** A message went to an agent on the user's behalf, or failed to. */
   | "sent"
-  /** The user dictated something. */
+  /** The user dictated something, or typed it to yapd. */
   | "dictation"
   /** yapd started work. */
   | "started"
-  /** yapd did something else for the user, like stopping a thread. */
+  /** yapd did something else for the user, like stopping a thread or dropping a question. */
   | "action"
   /** yapd brought something up itself, like a thread waiting on the user. */
   | "notice"
+  /** yapd answered something the user asked it. */
+  | "answer"
 
 export interface Entry {
   readonly at: number
   readonly kind: Kind
-  /** The machine it happened on, by the hostname its hooks report. */
+  /** What the user calls the machine it happened on, like "Rosie" or "rig". */
   readonly machine?: string | undefined
+  /** The hostname its hooks report, when that's all there is: it's kept in `detail`, and the machine named from it. */
+  readonly host?: string | undefined
   readonly project?: string | undefined
-  /** The thread or session it's about. */
+  /** The thread or session it's about: T3 Code's id when known. */
   readonly thread?: string | undefined
   readonly directory?: string | undefined
   /** What yapd said about it. */
@@ -46,17 +52,32 @@ export interface Entry {
   readonly detail?: unknown
 }
 
-export interface Kept extends Entry {
+export interface Kept extends Omit<Entry, "host"> {
   readonly id: number
 }
 
 export class Journal extends Context.Tag("yapd/Journal")<
   Journal,
   {
-    /** Keeps an entry. Never fails: what can't be kept is only logged. */
-    readonly write: (entry: Entry) => Effect.Effect<void>
+    /** Keeps an entry and gives back its id. Never fails: what can't be kept is only logged, and has none. */
+    readonly write: (entry: Entry) => Effect.Effect<Option.Option<number>>
+    /**
+     * Keeps an entry under its key unless one was ever kept under it, and says
+     * whether this one was: what's said once is said once across restarts.
+     */
+    readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<boolean>
+    /** Notes that the user heard these through, answered them or was briefed on them, unless they had already. */
+    readonly markHeard: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<void>
     /** Entries since `at`, oldest first, the latest `most` of them when there are more. */
     readonly since: (at: number, options?: { readonly most?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
+    /** The latest entries about a thread, newest first. */
+    readonly byThread: (machine: string, thread: string, most: number) => Effect.Effect<ReadonlyArray<Kept>>
+    /** Updates and notices since `at` the user hasn't heard, oldest first, the latest `most` of them. */
+    readonly unheard: (at: number, most: number) => Effect.Effect<ReadonlyArray<Kept>>
+    /** The latest thing the user heard. */
+    readonly lastHeard: Effect.Effect<Option.Option<Kept>>
+    /** Forgets what's older than `before`. */
+    readonly prune: (before: number) => Effect.Effect<void>
   }
 >() {}
 
@@ -106,46 +127,132 @@ const longest = 4000
 
 const clip = (text: string | undefined) => (text === undefined ? null : text.length <= longest ? text : `${text.slice(0, longest - 1)}…`)
 
-export const fromStore = (store: Store.Store["Type"]): Journal["Type"] => ({
+/** A machine reported only by its hostname, named the way the user calls it. */
+export type Naming = (host: string) => string
+
+/** What the user calls each machine: this one by `YAPD_NAME`, others as `YAPD_REMOTES` names them, else the hostname without its domain. */
+export const naming = Effect.gen(function* () {
+  const own = Option.getOrUndefined(yield* Config.name)
+  const remotes = yield* Config.remotes
+  return (host: string): string => {
+    const short = host.split(".")[0] ?? host
+    // Read each time, since a Mac's hostname changes with the network.
+    if (host.toLowerCase() === hostname().toLowerCase()) return own ?? short
+    return remotes.has(host.toLowerCase()) ? host.toLowerCase() : short
+  }
+})
+
+const values = (entry: Entry, called: Naming) => {
+  const machine = entry.machine ?? (entry.host === undefined ? undefined : called(entry.host))
+  const detail =
+    entry.host === undefined
+      ? entry.detail
+      : { ...(typeof entry.detail === "object" && entry.detail !== null ? entry.detail : {}), host: entry.host }
+  return [
+    entry.at,
+    entry.kind,
+    machine ?? null,
+    entry.project ?? null,
+    entry.thread ?? null,
+    entry.directory ?? null,
+    clip(entry.said),
+    clip(entry.text),
+    entry.utterance ?? null,
+    entry.key ?? null,
+    entry.heardAt ?? null,
+    detail === undefined ? null : JSON.stringify(detail),
+  ] as const
+}
+
+const columns = "(at, kind, machine, project, thread, directory, said, text, utterance, key, heard_at, detail) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+/** What's read back, as an empty list when it can't be, since nothing that reads it should stop for that. */
+const reading = <A>(effect: Effect.Effect<ReadonlyArray<A>, Store.StoreError>) =>
+  effect.pipe(Effect.catchAll((error) => Effect.logWarning("Could not read my journal", error).pipe(Effect.as<ReadonlyArray<A>>([]))))
+
+export const fromStore = (store: Store.Store["Type"], called: Naming = (host) => host.split(".")[0] ?? host): Journal["Type"] => ({
   write: (entry) =>
     store
-      .transaction((database: Database) => {
-        database
-          .query(
-            "insert into journal (at, kind, machine, project, thread, directory, said, text, utterance, key, heard_at, detail) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          )
-          .run(
-            entry.at,
-            entry.kind,
-            entry.machine ?? null,
-            entry.project ?? null,
-            entry.thread ?? null,
-            entry.directory ?? null,
-            clip(entry.said),
-            clip(entry.text),
-            entry.utterance ?? null,
-            entry.key ?? null,
-            entry.heardAt ?? null,
-            entry.detail === undefined ? null : JSON.stringify(entry.detail),
-          )
-      })
-      .pipe(Effect.catchAll((error) => Effect.logWarning("Could not keep this in my journal", error))),
-  since: (at, options = {}) =>
+      .transaction((database: Database) =>
+        Number(database.query(`insert into journal ${columns}`).run(...values(entry, called)).lastInsertRowid),
+      )
+      .pipe(
+        Effect.map(Option.some),
+        Effect.catchAll((error) => Effect.logWarning("Could not keep this in my journal", error).pipe(Effect.as(Option.none<number>()))),
+      ),
+  claim: (entry) =>
     store
-      .transaction((database: Database) => {
+      .transaction((database: Database) => database.query(`insert or ignore into journal ${columns}`).run(...values(entry, called)).changes > 0)
+      .pipe(
+        // Said twice is better than never said, when the journal can't tell.
+        Effect.catchAll((error) => Effect.logWarning("Could not check my journal for what I've said", error).pipe(Effect.as(true))),
+      ),
+  markHeard: (ids, at) =>
+    ids.length === 0
+      ? Effect.void
+      : store
+          .transaction((database: Database) => {
+            database
+              .query<never, Array<number>>(`update journal set heard_at = ? where heard_at is null and id in (${ids.map(() => "?").join(", ")})`)
+              .run(at, ...ids)
+          })
+          .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what you heard in my journal", error))),
+  since: (at, options = {}) =>
+    reading(
+      store.transaction((database: Database) => {
         const kinds = options.kinds ?? []
         const filter = kinds.length === 0 ? "" : ` and kind in (${kinds.map(() => "?").join(", ")})`
         const rows = database
           .query<Row, Array<string | number>>(`select * from journal where at >= ?${filter} order by at desc, id desc limit ?`)
           .all(at, ...kinds, options.most ?? 200)
         return rows.reverse().map(kept)
-      })
-      .pipe(
-        Effect.catchAll((error) => Effect.logWarning("Could not read my journal", error).pipe(Effect.as<ReadonlyArray<Kept>>([]))),
+      }),
+    ),
+  byThread: (machine, thread, most) =>
+    reading(
+      store.transaction((database: Database) =>
+        database
+          .query<Row, [string, string, number]>("select * from journal where machine = ? and thread = ? order by at desc, id desc limit ?")
+          .all(machine, thread, most)
+          .map(kept),
       ),
+    ),
+  unheard: (at, most) =>
+    reading(
+      store.transaction((database: Database) =>
+        database
+          .query<Row, [number, number]>(
+            "select * from journal where heard_at is null and kind in ('update', 'notice') and at >= ? order by at desc, id desc limit ?",
+          )
+          .all(at, most)
+          .reverse()
+          .map(kept),
+      ),
+    ),
+  lastHeard: store
+    .transaction((database: Database) =>
+      Option.map(
+        Option.fromNullable(
+          database.query<Row, []>("select * from journal where heard_at is not null order by heard_at desc, id desc limit 1").get(),
+        ),
+        kept,
+      ),
+    )
+    .pipe(Effect.catchAll((error) => Effect.logWarning("Could not read my journal", error).pipe(Effect.as(Option.none<Kept>())))),
+  prune: (before) =>
+    store
+      .transaction((database: Database) => {
+        database.query("delete from journal where at < ?").run(before)
+      })
+      .pipe(Effect.catchAll((error) => Effect.logWarning("Could not prune my journal", error))),
 })
 
-export const layer = Layer.effect(Journal, Effect.map(Store.Store, fromStore))
+export const layer = Layer.effect(
+  Journal,
+  Effect.gen(function* () {
+    return fromStore(yield* Store.Store, yield* naming)
+  }),
+)
 
 /** A journal of its own in memory, for tests. */
-export const memory = Layer.scoped(Journal, Effect.map(Store.make(":memory:"), fromStore)).pipe(Layer.orDie)
+export const memory = Layer.scoped(Journal, Effect.map(Store.make(":memory:"), (store) => fromStore(store))).pipe(Layer.orDie)

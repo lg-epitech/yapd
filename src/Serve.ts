@@ -1,6 +1,8 @@
-import { Effect, Layer, Logger, Stream } from "effect"
+import { Clock, Effect, Layer, Logger, Option, Stream } from "effect"
 import { hostname } from "node:os"
+import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
+import { ProviderBrain } from "./Brain.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
@@ -22,7 +24,11 @@ import * as Server from "./Server.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
 import { Shortcut } from "./Shortcut.ts"
+import * as T3Actions from "./T3Actions.ts"
 import * as T3Code from "./T3Code.ts"
+import * as T3CodeServer from "./T3CodeServer.ts"
+import * as T3Live from "./T3Live.ts"
+import * as Threads from "./Threads.ts"
 import { Vocabulary, WhisperTranscriber } from "./Transcriber.ts"
 import { SileroVad } from "./Vad.ts"
 import { KokoroVoice } from "./Voice.ts"
@@ -53,18 +59,43 @@ const Relays = Layer.effect(
   }),
 )
 
+/** How long the journal is kept: a year of it is about forty thousand entries. */
+const remembered = 365 * 24 * 60 * 60_000
+
 export const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make
   const preferences = yield* Preferences.path
+  const everywhere = yield* machines
+  const journal = yield* Journal.Journal
+  yield* Effect.forkScoped(Effect.flatMap(Clock.currentTimeMillis, (now) => journal.prune(now - remembered)))
   const drafts = yield* Drafts.make({
-    machines: yield* machines,
+    machines: everywhere,
     rules: Preferences.load(preferences),
     recent: daemon.recent,
-    note: daemon.note,
-    tell: daemon.tell,
     expect: (yield* Vocabulary).expect,
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
+  const token = yield* Config.t3codeToken
+  const threads = yield* Threads.make({
+    // As the machine is called when yapd starts, which is what its threads are known by while it runs.
+    machine: everywhere.find(({ here }) => here)?.name ?? hostname(),
+    live: yield* T3Live.T3Live,
+    actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
+    others: everywhere.filter(({ here }) => !here).map(({ name }) => name),
+    journal,
+    store: yield* Store.Store,
+  })
+  const assistant = yield* Assistant.make({
+    threads,
+    journal,
+    drafts,
+    tell: daemon.tell,
+    power: daemon.power,
+    lastHeard: daemon.lastHeard,
+    coming: daemon.coming,
+    awaiting: daemon.awaiting,
+    queued: daemon.queued,
+  })
   const shortcut = yield* Shortcut
   const dictation = yield* Dictation
   const settings = yield* Settings.Settings
@@ -77,7 +108,7 @@ export const serve = Effect.gen(function* () {
   const turn = (on: boolean) =>
     on
       ? Effect.zipRight(daemon.turn(true), shortcut.toggle(true))
-      : Effect.all([shortcut.toggle(false), dictation.drop, drafts.drop, daemon.turn(false)], { discard: true })
+      : Effect.all([shortcut.toggle(false), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
   if (yield* settings.on) yield* turn(true)
@@ -85,6 +116,15 @@ export const serve = Effect.gen(function* () {
     yield* turn(false)
     yield* Effect.logInfo("yapd is off, until it's turned on from the menu bar or the API")
   }
+
+  /** What the user said to yapd, as heard now, while it's on. */
+  const heard = (text: string, via: Assistant.Utterance["via"], voiced: number) =>
+    Effect.gen(function* () {
+      const power = yield* daemon.power
+      if (!power.on) return Option.none<string>()
+      const at = yield* Clock.currentTimeMillis
+      return Option.some(yield* assistant.heard({ heard: text, via, at, voiced, turns: power.turns }))
+    })
 
   const state = Stream.zipLatestWith(daemon.state, (yield* Activity).changes, (state, activity): Server.State => ({
     on: state.on,
@@ -100,18 +140,28 @@ export const serve = Effect.gen(function* () {
     handle: daemon.handle,
     state,
     // One at a time, so what's remembered is what's in effect.
-    turn: (on) => Effect.zipRight(settings.remember(on), turn(on)).pipe(switching.withPermits(1)),
+    turn: (on) =>
+      Effect.zipRight(settings.remember(on), turn(on)).pipe(
+        Effect.zipRight(Effect.flatMap(Clock.currentTimeMillis, (at) => journal.write({ at, kind: "action", detail: { on } }))),
+        switching.withPermits(1),
+      ),
     replay: daemon.replay,
+    // Typed words were never faint, so nothing typed is taken for Whisper hearing words in silence.
+    utter: (text) => heard(text, "typed", Number.POSITIVE_INFINITY),
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(shortcut.events, (event) => (event._tag === "Started" ? drafts.prepare : Effect.void)))
-  yield* Effect.forkScoped(Stream.runForEach(dictation.transcripts, drafts.dictated))
+  yield* Effect.forkScoped(Stream.runForEach(shortcut.events, (event) => (event._tag === "Started" ? assistant.prepare : Effect.void)))
+  yield* Effect.forkScoped(
+    Stream.runForEach(dictation.transcripts, ({ heard: text, voiced }) => (text === "" ? assistant.nothing : heard(text, "shortcut", voiced))),
+  )
+  // Whatever he says over an update takes the place of a question yapd asked before.
+  yield* Effect.forkScoped(Stream.runForEach(daemon.replies, () => assistant.replied))
   return yield* daemon.speak
 }).pipe(
   Effect.scoped,
   Effect.provide(
     Layer.mergeAll(
-      Layer.mergeAll(ProviderCondenser, ProviderResponder, ProviderWriter).pipe(
+      Layer.mergeAll(ProviderCondenser, ProviderResponder, ProviderWriter, ProviderBrain).pipe(
         Layer.provideMerge(Persona.layer),
         Layer.provide(ProviderModel),
       ),
@@ -119,7 +169,7 @@ export const serve = Effect.gen(function* () {
       Relays,
     ).pipe(
       Layer.provideMerge(
-        Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer),
+        Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer, T3Live.layer),
       ),
       Layer.provideMerge(Layer.mergeAll(ClaudeCode.WaitingLive, Store.layer)),
     ),

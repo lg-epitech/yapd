@@ -38,9 +38,12 @@ export interface Api {
   readonly state: Stream.Stream<State>
   readonly turn: (on: boolean) => Effect.Effect<void, unknown>
   readonly replay: (id: string) => Effect.Effect<"queued" | "off" | "unknown", unknown>
+  /** Takes what the user typed as if they'd said it, and gives its id once it's worked out. None while yapd is off. */
+  readonly utter: (text: string) => Effect.Effect<Option.Option<string>, unknown>
 }
 
 const decodeTurn = Schema.decodeUnknown(Schema.Struct({ on: Schema.Boolean }))
+const decodeUtterance = Schema.decodeUnknown(Schema.Struct({ text: Schema.String }))
 
 /** Names for this machine, so a web page can't reach the API through a DNS name of its own that points here. */
 const local = new Set(["127.0.0.1", "localhost", "[::1]"])
@@ -84,6 +87,25 @@ export const serve = (port: number, api: Api) =>
             Effect.zipRight(current),
             Effect.map((state) => Response.json(state)),
             Effect.catchAll(failed("turn yapd on or off")),
+          )
+        }
+        if (route === "POST /utterances") {
+          // Worked out before it's answered, which can take the model a few seconds.
+          server.timeout(request, 0)
+          const body = yield* Effect.tryPromise(() => request.json()).pipe(
+            Effect.flatMap(decodeUtterance),
+            Effect.option,
+            Effect.map(Option.filter(({ text }) => text.trim() !== "")),
+          )
+          if (Option.isNone(body)) return new Response('Send {"text": "what you would say"}.', { status: 400 })
+          return yield* api.utter(body.value.text.trim()).pipe(
+            Effect.map(
+              Option.match({
+                onNone: () => new Response("yapd is off.", { status: 409 }),
+                onSome: (id) => Response.json({ id }, { status: 202 }),
+              }),
+            ),
+            Effect.catchAll(failed("take what you typed")),
           )
         }
         const replay = request.method === "POST" ? /^\/updates\/([^/]+)\/replay$/.exec(url.pathname) : null

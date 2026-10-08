@@ -62,8 +62,11 @@ export const muted = (servers: typeof McpServers.Type) => {
     : { mcp_servers: Object.fromEntries(enabled.map(({ name }) => [name, { enabled: false }])) }
 }
 
-/** Threads kept ready, so a summary and a reply at the same moment both find one. */
-const spares = 2
+/**
+ * Threads kept ready, so calls at the same moment each find one: what the
+ * user dictated is worked out while its prompt is written and an update is summed up.
+ */
+const kept = 3
 
 /**
  * Older ready threads are let go rather than trusted. One that waited 25 minutes
@@ -295,7 +298,7 @@ interface Spare {
 }
 
 /** One server for the daemon, started right away and again whenever it stops. */
-export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"]) =>
+export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"], spares = kept) =>
   Effect.gen(function* () {
     const scope = yield* Effect.scope
     let current: Connection | undefined

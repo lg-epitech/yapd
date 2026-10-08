@@ -218,18 +218,26 @@ const researching = (destination: Destination) =>
 
 /**
  * The names a dictation may hold, for what transcribes it to listen for:
- * machines, then projects, then what the models in use are called, since the
- * list is cut from the end when it's too long.
+ * machines, then projects, then what the models in use are called, then the
+ * words of the titles of the threads most likely talked about, since the list
+ * is cut from the end when it's too long.
  */
-export const vocabulary = (listings: ReadonlyArray<Listing>) => {
+export const vocabulary = (listings: ReadonlyArray<Listing>, titles: ReadonlyArray<string> = []) => {
   const catalogs = listings.flatMap(({ catalog }) => Option.toArray(catalog))
   const called = catalogs.flatMap(({ projects, models }) => {
     const used = new Set(projects.flatMap(({ model }) => (model === undefined ? [] : [model.name])))
     // "Claude Fable 5.1" is said "Fable", and the version is heard well enough.
     return models.filter(({ name }) => used.has(name)).flatMap(({ title }) => title.split(/[\s-]+/).filter((word) => /^\p{L}{3,}$/u.test(word)))
   })
+  // Names like Tezos are what Whisper mishears; everyday words it gets anyway.
+  const named = titles.flatMap((title) => title.split(/[^\p{L}\p{N}]+/u).filter((word) => /^\p{Lu}[\p{L}\p{N}]{2,}$/u.test(word)))
   return [
-    ...new Set([...listings.map(({ machine }) => machine), ...catalogs.flatMap(({ projects }) => projects.map(({ name }) => name)), ...called]),
+    ...new Set([
+      ...listings.map(({ machine }) => machine),
+      ...catalogs.flatMap(({ projects }) => projects.map(({ name }) => name)),
+      ...called,
+      ...named,
+    ]),
   ]
 }
 

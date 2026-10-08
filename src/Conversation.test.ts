@@ -27,8 +27,8 @@ const update: Conversation.Update = {
 }
 
 /**
- * Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply
- * and the relay `sending` seconds to send.
+ * Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply,
+ * taking what's said to Sam for talk with someone else, and the relay `sending` seconds to send.
  */
 const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: ReadonlyArray<Effect.Effect<void>> = []) =>
   Effect.gen(function* () {
@@ -38,6 +38,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
     const late: Array<string> = []
     const transcripts = [...said]
     let dispatches = 0
+    let replies = 0
     const layer = Layer.mergeAll(
       Persona.Plain,
       Journal.memory,
@@ -60,7 +61,11 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
         respond: ({ heard: text }) =>
           Effect.sync(() => heard.push(text)).pipe(
             Effect.zipRight(Effect.sleep("5 seconds")),
-            Effect.as({ intent: "send" as const, spoken: "Okay.", message: text }),
+            Effect.as(
+              text.startsWith("Sam,")
+                ? { intent: "resume" as const, spoken: "", message: "" }
+                : { intent: "send" as const, spoken: "Okay.", message: text },
+            ),
           ),
       }),
       Layer.succeed(Relays, {
@@ -76,6 +81,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       moved: () => Effect.succeed(false),
       send: (update, message) => Context.get(context, Relays).send(update.thread, message).pipe(Effect.as("sent" as const)),
       late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
+      replied: Effect.sync(() => void replies++),
     }).pipe(Effect.provide(context))
     const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -98,7 +104,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
         ),
         Effect.fork,
       )
-    return { ...made, fiber, heard, sent, late, speak, wait, ask, frames, disconnect: Queue.shutdown(microphone) }
+    return { ...made, fiber, heard, sent, late, speak, wait, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
   })
 
 /** Talks, then waits for the reply to be sent and read out. */
@@ -226,6 +232,23 @@ describe("Follow-ups", () => {
       yield* wait(5)
     }))
     expect(result.sent).toEqual(["Please merge it.", "Then deploy it."])
+  })
+
+  test("tells yapd of each reply taken in over an update, so it takes the place of a question, but not of talk with someone else", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { fiber, sent, speak, wait, replies } = yield* conversation(["Sam, can you grab the coffee?", "Please merge it."])
+        yield* speak
+        yield* wait(5)
+        const aside = replies()
+        yield* speak
+        yield* wait(5)
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { aside, replies: replies(), sent }
+      }),
+    )
+    expect(result).toEqual({ aside: 0, replies: 1, sent: ["Please merge it."] })
   })
 
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {

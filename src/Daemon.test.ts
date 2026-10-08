@@ -153,11 +153,17 @@ const make = (says?: string, options: {
       )
       yield* flush
     })
-  /** Something yapd has to say for itself, which as a question records how it went. */
-  const notice = (id: string, spoken: string, options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean } = {}) =>
+  /** Something yapd has to say for itself, which as a question, the one open, records how it went. */
+  const notice = (
+    id: string,
+    spoken: string,
+    options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean; readonly answer?: boolean; readonly done?: boolean } = {},
+  ) =>
     tell({
       id,
-      priority: options.question !== undefined || options.needsYou === true ? "needs-you" : "done",
+      kind: options.question !== undefined ? "question" : options.answer === true ? "answer" : options.done === true ? "done" : "notice",
+      ...(options.question === undefined ? {} : { open: `open-${id}` }),
+      priority: options.question !== undefined || options.needsYou === true || options.answer === true || options.done === true ? "needs-you" : "done",
       spoken,
       at: 0,
       stale: Effect.succeed(options.stale === true),
@@ -188,7 +194,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -245,6 +251,65 @@ describe("Daemon", () => {
     // Nothing was read while the user dictated.
     expect(result.playedDuring).toEqual(["yapd. The PR is ready."])
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "yapd. The tests pass."])
+  })
+
+  test("says the answer to a dictation before the update it cut off, however long he talks and it takes to work out", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, notice, awaiting, played } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        // He presses the shortcut, which awaits what he'll ask, and asks it, taking as long as most dictations do.
+        const arrived = yield* awaiting
+        const dictation = yield* dictate
+        yield* wait(27)
+        yield* Scope.close(dictation, Exit.void)
+        // The model takes a few seconds, while nothing else is said.
+        yield* wait(4)
+        const meanwhile = [...played]
+        yield* notice("answer", "Four on the go, sir.", { answer: true })
+        yield* arrived
+        yield* wait(11)
+        yield* wait(11)
+        return { meanwhile, played: [...played] }
+      }),
+    )
+    expect(result.meanwhile).toEqual(["yapd. The PR is ready."])
+    expect(result.played).toEqual(["yapd. The PR is ready.", "Four on the go, sir.", "yapd. The PR is ready."])
+  })
+
+  test("an answer cut off by a follow-up isn't said again, and work that started is said after the new answer", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { wait, dictate, notice, awaiting, played } = yield* daemon
+        /** He cuts in on what's being said by dictating for a while, and it takes a few seconds to answer. */
+        const follow = (spoken: string) =>
+          Effect.gen(function* () {
+            const arrived = yield* awaiting
+            const dictation = yield* dictate
+            yield* wait(30)
+            yield* Scope.close(dictation, Exit.void)
+            yield* wait(4)
+            yield* notice(spoken, spoken, { answer: true })
+            yield* arrived
+            yield* wait(11)
+            yield* wait(11)
+          })
+        yield* notice("status", "Four threads are on the go, sir, and the Tezos migration is the busiest.", { answer: true })
+        yield* wait(2)
+        yield* follow("The Tezos migration is running its tests, sir.")
+        yield* notice("started", "Started in yapd, on Fable, in a worktree.", { done: true })
+        yield* wait(2)
+        yield* follow("Nothing needs you right now, sir.")
+        return [...played]
+      }),
+    )
+    expect(result).toEqual([
+      "Four threads are on the go, sir, and the Tezos migration is the busiest.",
+      "The Tezos migration is running its tests, sir.",
+      "Started in yapd, on Fable, in a worktree.",
+      "Nothing needs you right now, sir.",
+      "Started in yapd, on Fable, in a worktree.",
+    ])
   })
 
   test("turns the microphone off once a dictation lets go of it, never while it records", async () => {
@@ -442,7 +507,7 @@ describe("Daemon", () => {
       }),
     )
     expect(deliveries).toBe(0)
-    expect(result).toBe("That session has moved on since, so I didn't send it.")
+    expect(result).toBe("You've moved on from that since, so I held it back.")
   })
 
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {
@@ -491,25 +556,26 @@ describe("Daemon", () => {
     expect(result.asked).toEqual(["question unanswered"])
   })
 
-  test("asks a question again after the dictation that cut it off, without counting it unanswered", async () => {
+  test("a clarification cut off by a dictation is not put back", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { notice, wait, dictate, played } = yield* daemon
         const asked: Array<string> = []
-        yield* notice("question", "Which project is the loader fix for?", { question: asked })
+        yield* notice("question", "The Tezos migration or the Mina tickets, sir?", { question: asked })
+        yield* notice("started", "Started in yapd, on Fable, in a worktree.")
         yield* wait(2)
         const dictation = yield* dictate
         yield* wait(30)
-        const during = { played: [...played], asked: [...asked] }
         yield* Scope.close(dictation, Exit.void)
         yield* wait(0)
         yield* wait(11)
-        return { during, played: [...played], asked }
+        yield* wait(11)
+        return { played: [...played], asked }
       }),
     )
-    expect(result.during).toEqual({ played: ["Which project is the loader fix for?"], asked: [] })
-    expect(result.played).toEqual(["Which project is the loader fix for?", "Which project is the loader fix for?"])
-    expect(result.asked).toEqual(["question unanswered"])
+    // What was dictated answers it or takes its place, so it's never asked again, nor counted unanswered.
+    expect(result.played).toEqual(["The Tezos migration or the Mina tickets, sir?", "Started in yapd, on Fable, in a worktree."])
+    expect(result.asked).toEqual([])
   })
 
   test("turned off, stops at once, drops what waits and lets its hooks go, and never says what finishes meanwhile", async () => {
@@ -538,9 +604,12 @@ describe("Daemon", () => {
   test("says an update again as it was said, only one it said and only while on", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { finish, wait, toggle, played, condensed, heard, replay } = yield* daemon
+        const { finish, wait, toggle, played, condensed, heard, replay, journal } = yield* daemon
         yield* finish("a", "The PR is ready.")
+        // What he missed is what he hasn't heard through yet.
+        const playing = (yield* journal.unheard(0, 12)).length
         yield* wait(11)
+        const through = (yield* journal.unheard(0, 12)).length
         const [id] = yield* heard
         const unknown = yield* replay("nope")
         const queued = yield* replay(id!)
@@ -549,10 +618,10 @@ describe("Daemon", () => {
         const after = yield* heard
         yield* toggle(false)
         const off = yield* replay(id!)
-        return { unknown, queued, off, after, id, played: [...played], condensed: condensed.length }
+        return { unknown, queued, off, after, id, played: [...played], condensed: condensed.length, playing, through }
       }),
     )
-    expect(result).toMatchObject({ unknown: "unknown", queued: "queued", off: "off", after: [result.id], condensed: 1 })
+    expect(result).toMatchObject({ unknown: "unknown", queued: "queued", off: "off", after: [result.id], condensed: 1, playing: 1, through: 0 })
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
   })
 
@@ -576,7 +645,7 @@ describe("Daemon", () => {
       }),
     )
     expect(deliveries).toBe(0)
-    expect(result).toBe("That session has moved on since, so I didn't send it.")
+    expect(result).toBe("You've moved on from that since, so I held it back.")
   })
 
   test("stops what it's reading when turned off, even if it's on again before the reading hears of it", async () => {
@@ -762,7 +831,7 @@ describe("Daemon", () => {
       } else {
         if (ending === "takeover") {
           yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Instead of 'Merge it.', start unrelated work." }, { project: "yapd" }, false)
-          yield* nextEvent("Ready: yapd. The session moved on")
+          yield* nextEvent("Ready: yapd. That work moved on")
         }
         if (ending === "off") {
           yield* power(false)
@@ -782,7 +851,7 @@ describe("Daemon", () => {
     expect(result.queued).toBe("Noted. I'll get to it once the current task is done.")
     expect(result.dispatches).toBe(ending === "failure" ? 2 : 1)
     expect(result.sent).toEqual(ending === "failure" ? ["a sent: Deploy it."] : ["a sent: Merge it."])
-    if (ending === "empty") expect(result.retry).toBe("That session has moved on since, so I didn't send it.")
+    if (ending === "empty") expect(result.retry).toBe("You've moved on from that since, so I held it back.")
   })
 
   test.each([false, true])("settles the queued Claude hook after a trivial update, turned off before dispatch: %s", async (off) => {

@@ -84,6 +84,17 @@ export const unfinished = (heard: string) => /(\.\.\.|…|,)$/.test(heard) || da
 export const together = (before: string, after: string) =>
   after === "" ? before : `${before.replace(/\s*(\.\.\.|…)$/, "")} ${after}`
 
+/** What's said of a reply held back because the work it answers has been given something else since. */
+export const movedOn = "You've moved on from that since, so I held it back."
+
+/** Seconds of speech in what the user said, less the quiet the endpointer keeps either side of it. */
+export const voiced = (audio: Float32Array) =>
+  Math.max(0, (audio.length - (Endpointer.defaults.lead + Endpointer.defaults.tail) * frame) / rate)
+
+/** Samples a second from the microphone, and in each frame of it. */
+const rate = 16000
+const frame = 512
+
 /** The part of `text` heard in `fraction` of its audio, marked when it's cut short. */
 export const cut = (text: string, fraction: number) => {
   if (fraction >= 1) return text
@@ -96,11 +107,11 @@ export const cut = (text: string, fraction: number) => {
 export interface Question {
   readonly audio: string
   /**
-   * Works out what the user meant by what they said, which may be called again
-   * if they carry on. What it returns is run once they've stopped, and none
-   * means it wasn't an answer.
+   * Works out what the user meant by what they said, and how many seconds of
+   * it were speech, which may be called again if they carry on. What it
+   * returns is run once they've stopped, and none means it wasn't an answer.
    */
-  readonly answer: (heard: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
+  readonly answer: (heard: string, voiced: number) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
 
 /**
@@ -116,6 +127,8 @@ export const make = (options: {
   readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued", RelayError>
   /** Says how a follow-up went when the update it answers was cut off before yapd could. */
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
+  /** Something was said over an update and taken in, which takes the place of whatever yapd asked before. */
+  readonly replied: Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -388,9 +401,7 @@ export const make = (options: {
     const follow = (update: Update, message: string) =>
       Effect.gen(function* () {
         // Typing into a session that started something else would steer it, or answer one of its prompts.
-        if (yield* options.moved(update)) {
-          return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
-        }
+        if (yield* options.moved(update)) return yield* new RelayError({ reason: movedOn })
         const text = plain(message)
         const result = yield* options.send(update, text)
         yield* Effect.logInfo(`${result === "queued" ? "Queued" : "Sent"}: ${text}`)
@@ -456,7 +467,7 @@ export const make = (options: {
               yield* journal.write({
                 at: yield* Clock.currentTimeMillis,
                 kind: "reply",
-                machine: update.thread.origin.host,
+                host: update.thread.origin.host,
                 project: update.project,
                 thread: update.session,
                 directory: update.thread.cwd,
@@ -464,6 +475,7 @@ export const make = (options: {
                 text: heard,
                 detail: { intent: reply.intent, ...(reply.message === "" ? {} : { message: reply.message }) },
               })
+              yield* options.replied
             }
 
             if (reply.intent === "dismiss") return
@@ -505,8 +517,9 @@ export const make = (options: {
           const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), pondering)
           if (outcome._tag === "Finished") return false
           const first = yield* transcribe(outcome.audio)
+          const speech = voiced(outcome.audio)
           const answer =
-            first === "" ? Option.none() : (yield* settle(outcome.ear, first, transcribe, question.answer)).reply
+            first === "" ? Option.none() : (yield* settle(outcome.ear, first, transcribe, (heard) => question.answer(heard, speech))).reply
           if (Option.isSome(answer)) {
             // They've answered, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(answer.value)

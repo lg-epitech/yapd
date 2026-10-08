@@ -96,7 +96,7 @@ const dictation = (
     )
     const context = yield* Layer.build(layer)
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).transcripts, (text) => Effect.sync(() => void transcripts.push(text))),
+      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ heard }) => Effect.sync(() => void transcripts.push(heard))),
     )
     const floor = Context.get(context, Floor.Floor)
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -310,7 +310,8 @@ describe("Dictation", () => {
     expect(result.said).toEqual(["I didn't catch anything."])
     expect(result.during).toBe(false)
     expect(result.after).toBe(false)
-    expect(result.transcripts).toEqual(["First."])
+    // The second came to nothing, which is handed on too, after the first.
+    expect(result.transcripts).toEqual(["First.", ""])
   })
 
   test("drops the recording when the user cancels", async () => {
@@ -325,7 +326,8 @@ describe("Dictation", () => {
     )
     expect(result.cues).toEqual(["started", "cancelled"])
     expect(result.heard).toEqual([])
-    expect(result.transcripts).toEqual([])
+    // Handed on as nothing, so whoever waited on it knows it's over.
+    expect(result.transcripts).toEqual([""])
   })
 
   test("drops a dictation left running, and says so", async () => {
@@ -342,7 +344,7 @@ describe("Dictation", () => {
     expect(result.cancelled).toBe(1)
     expect(result.cues).toEqual(["started", "cancelled"])
     expect(result.said).toEqual(["I stopped listening after five minutes, and dropped that."])
-    expect(result.transcripts).toEqual([])
+    expect(result.transcripts).toEqual([""])
     expect(result.after).toBe(0)
   })
 
