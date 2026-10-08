@@ -113,6 +113,8 @@ export interface Question {
   readonly audio: string
   /** Run once it starts playing the first time, which is when the user hears of it: never when it can't be played. */
   readonly saying?: Effect.Effect<void>
+  /** Run each time it plays to the end, before the wait for an answer: the user has heard all of it, whatever they say next. */
+  readonly through?: Effect.Effect<void>
   /**
    * Works out what the user meant by what they said, and how many seconds of
    * it were speech, which may be called again with all of it if they carry
@@ -131,8 +133,12 @@ export const make = (options: {
   readonly dir: string
   /** Whether unrelated activity has made the update stale. */
   readonly moved: (update: Update) => Effect.Effect<boolean>
-  /** Delivers the follow-up, or queues it until the session can receive it, using its latest thread. */
-  readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued", RelayError>
+  /**
+   * Delivers the follow-up, or queues it until the session can receive it,
+   * using its latest thread; or says what came of it when that's more than
+   * sent or queued, like held behind a turn waiting on the user.
+   */
+  readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued" | { readonly said: string }, RelayError>
   /** Says how a follow-up went when the update it answers was cut off before yapd could. */
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
   /** Something was said over an update and taken in, which takes the place of whatever yapd asked before. */
@@ -436,7 +442,7 @@ export const make = (options: {
         sending.set(update, mark)
         const lines = yield* persona.lines
         const fiber = yield* follow(update, reply.message).pipe(
-          Effect.map((result) => (result === "queued" ? lines.queued : reply.spoken || lines.onIt)),
+          Effect.map((result) => (typeof result === "object" ? result.said : result === "queued" ? lines.queued : reply.spoken || lines.onIt)),
           Effect.catchAll((error) =>
             Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
               Effect.tap(() => {
@@ -469,7 +475,7 @@ export const make = (options: {
         if (yield* options.moved(update)) return yield* new RelayError({ reason: movedOn })
         const text = plain(message)
         const result = yield* options.send(update, text)
-        yield* Effect.logInfo(`${result === "queued" ? "Queued" : "Sent"}: ${text}`)
+        yield* Effect.logInfo(`${result === "queued" ? "Queued" : typeof result === "object" ? "Held" : "Sent"}: ${text}`)
         return result
       })
 
@@ -590,7 +596,11 @@ export const make = (options: {
         let missed = 0
         let begun = question.saying ?? Effect.void
         while (true) {
-          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), { wait: pondering, begun })
+          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), {
+            wait: pondering,
+            begun,
+            through: question.through ?? Effect.void,
+          })
           begun = Effect.void
           if (outcome._tag === "Finished") return false
           const first = yield* transcribe(outcome.audio)

@@ -9,9 +9,12 @@ import * as Config from "./Config.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Floor from "./Floor.ts"
 import * as Inbox from "./Inbox.ts"
+import * as Hands from "./Hands.ts"
 import { type Entry, Journal } from "./Journal.ts"
+import * as Ledger from "./Ledger.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
+import { Persona } from "./Persona.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
@@ -58,9 +61,15 @@ const lookup = "3 seconds"
  * Updates are condensed and rendered in parallel, then spoken one at a time,
  * along with what yapd has to say for itself. `link` finds the T3 Code thread
  * a hook on this machine came from, if any, so what's said of it is kept
- * with the thread.
+ * with the thread, and `hands` send what the user says over it to that
+ * thread, as T3 Code takes it: into the turn under way, or in its queue.
  */
-export const make = (options: { readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>> } = {}) => Effect.gen(function* () {
+export const make = (
+  options: {
+    readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
+    readonly hands?: Hands.Hands["Type"]
+  } = {},
+) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
   const condenser = yield* Condenser
   const voice = yield* Voice
@@ -69,6 +78,7 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
   const relays = yield* Relays
   const floor = yield* Floor.Floor
   const journal = yield* Journal
+  const persona = yield* Persona
   const minMillis = (yield* Config.minSeconds) * 1000
 
   const dir = yield* Effect.acquireRelease(
@@ -87,6 +97,8 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
   const readSince = new WeakMap<Conversation.Update, number>()
   /** Each update's entry in the journal, to note there once the user has heard it. */
   const rows = new WeakMap<Conversation.Update, number>()
+  /** Updates whose Stop hook waits for a reply, like a terminal session resumed from a T3 Code thread, which go back through it. */
+  const hooked = new WeakSet<Conversation.Update>()
   /**
    * The update being read, or the last one that was, what of it was said
    * last, like an answer over it, and when, which is what "it" means to the user.
@@ -197,7 +209,19 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
       ),
     )
 
-  const moved = (update: Conversation.Update) => activity.get(update.session)?.chain !== generations.get(update)?.chain
+  /**
+   * Whether what the user says over an update goes to its T3 Code thread by
+   * yapd's own hand, rather than the way hooks have always been answered:
+   * only when the update is tied to the thread, and its hook isn't waiting.
+   */
+  const steered = (update: Conversation.Update) => update.about !== undefined && options.hands !== undefined && !hooked.has(update)
+
+  /**
+   * Whether the work an update is about moved on since, by its hooks. Not for
+   * one sent to its thread by yapd's hand, which T3 Code is asked as it's
+   * sent, since yapd's own message makes a hook of its own.
+   */
+  const moved = (update: Conversation.Update) => !steered(update) && activity.get(update.session)?.chain !== generations.get(update)?.chain
 
   /** Called with the event lock held, before dispatch, since its reply can arrive immediately. */
   const register = (followUp: FollowUp, channel: Replies) => Effect.gen(function* () {
@@ -209,25 +233,42 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
     return { followUp, thread: channel.thread, previousPrompt, prompt, generation: activity.get(session) }
   })
 
+  /** A follow-up that didn't go is no longer the session's, unless hooks or another follow-up have consumed or replaced it already. */
+  const unregister = (pending: Effect.Effect.Success<ReturnType<typeof register>>) =>
+    Effect.sync(() => {
+      const { followUp } = pending
+      const session = followUp.update.session
+      if (activity.get(session) !== pending.generation) return
+      const channel = followed.get(session)
+      if (channel?.current === followUp) delete channel.current
+      if (prompts.get(session) === pending.prompt) {
+        if (pending.previousPrompt === undefined) prompts.delete(session)
+        else prompts.set(session, pending.previousPrompt)
+      }
+    }).pipe(events.withPermits(1))
+
+  /** Put back by a dictation that started just as a follow-up to it was sent, an update is answered now, so it isn't read again. */
+  const answeredNow = (update: Conversation.Update) =>
+    Effect.gen(function* () {
+      const answered = yield* STM.commit(
+        TRef.modify(inbox, (current) => {
+          const queued = current.get(update.session)
+          return queued !== undefined && "update" in queued && queued.update === update
+            ? [queued, Inbox.remove(current, update.session)] as const
+            : [undefined, current] as const
+        }),
+      )
+      if (answered === undefined) return
+      yield* removeFile(Inbox.audio(answered))
+      yield* release(answered.hook)
+    })
+
   const deliver = (pending: Effect.Effect.Success<ReturnType<typeof register>>) =>
     Effect.gen(function* () {
       const { followUp } = pending
       const { update, message } = followUp
       const session = update.session
-      yield* relays.send(pending.thread, message).pipe(
-        Effect.onError(() =>
-          Effect.sync(() => {
-            // Hooks or another follow-up may already have consumed or replaced this context.
-            if (activity.get(session) !== pending.generation) return
-            const channel = followed.get(session)
-            if (channel?.current === followUp) delete channel.current
-            if (prompts.get(session) === pending.prompt) {
-              if (pending.previousPrompt === undefined) prompts.delete(session)
-              else prompts.set(session, pending.previousPrompt)
-            }
-          }).pipe(events.withPermits(1)),
-        ),
-      )
+      yield* relays.send(pending.thread, message).pipe(Effect.onError(() => unregister(pending)))
       yield* Effect.logInfo(`Delivered: ${message}`)
       yield* journal.write({
         at: yield* Clock.currentTimeMillis,
@@ -238,19 +279,68 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
         directory: pending.thread.cwd,
         text: message,
       })
-      // Put back by a dictation that started just as this was sent, and answered now.
-      const answered = yield* STM.commit(
-        TRef.modify(inbox, (current) => {
-          const queued = current.get(session)
-          return queued !== undefined && "update" in queued && queued.update === update
-            ? [queued, Inbox.remove(current, session)] as const
-            : [undefined, current] as const
-        }),
-      )
-      if (answered === undefined) return
-      yield* removeFile(Inbox.audio(answered))
-      yield* release(answered.hook)
+      yield* answeredNow(update)
     }).pipe(Effect.tapError(() => Effect.forkIn(sendNext(pending.followUp.update.session), lifetime)))
+
+  /**
+   * Sends a follow-up to an update's T3 Code thread by yapd's own hand, once,
+   * under ids of its own: T3 Code steers it into the turn under way, or
+   * queues it behind one that's waiting. Never once yapd was turned off
+   * since, nor once the thread was given something else since the update,
+   * which is said, as is anything else that keeps it from going. It's the
+   * session's follow-up meanwhile, so the turn it starts is heard however short.
+   */
+  const steer = (update: Conversation.Update, about: Threads.Ref, hands: Hands.Hands["Type"], message: string) =>
+    Effect.gen(function* () {
+      const { on, turns } = yield* switched
+      if (!on) return yield* new RelayError({ reason: "yapd is off, so I didn't send it." })
+      const pending = yield* Effect.gen(function* () {
+        let channel = followed.get(update.session)
+        if (channel === undefined) {
+          channel = { thread: update.thread, queued: [] }
+          followed.set(update.session, channel)
+        }
+        return yield* register({ update, message }, channel)
+      }).pipe(events.withPermits(1))
+      const at = yield* Clock.currentTimeMillis
+      const utterance = `u${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
+      const act: Hands.Act = { _tag: "Message", to: about, text: message, how: "now" }
+      const outcome = yield* hands.run({ utterance, step: 0 }, act, {
+        wanted: Effect.map(switched, (power) => power.on && power.turns === turns),
+        since: update.at,
+      })
+      const lines = yield* persona.lines
+      const settled = yield* Clock.currentTimeMillis
+      const noted = (detail: Record<string, unknown>) =>
+        journal.write({
+          at: settled,
+          kind: outcome._tag === "Done" ? "sent" : "action",
+          machine: about.machine,
+          thread: about.id,
+          project: update.project,
+          directory: update.thread.cwd,
+          text: message,
+          utterance,
+          detail: { commandId: Ledger.ids(utterance, 0, false).commandId, outcome: outcome._tag, ...detail },
+        })
+      if (outcome._tag === "Done") {
+        yield* noted({ how: outcome.how, ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }) })
+        yield* Effect.logInfo(`Delivered through T3 Code (${outcome.how}): ${message}`)
+        yield* answeredNow(update)
+        if (outcome.waiting !== undefined || Hands.held(outcome)) return { said: Hands.done(act, outcome.how, lines, Option.none(), outcome) }
+        return outcome.how === "queued" ? ("queued" as const) : ("sent" as const)
+      }
+      yield* unregister(pending)
+      // The same words went to it lately: said, never asked about, until replies go through the brain.
+      const reason =
+        outcome._tag === "Twin"
+          ? Hands.sentBefore(outcome.row.at, at, lines, Option.none())
+          : "reason" in outcome
+            ? Hands.failed(act, "again" in outcome ? { ...outcome, again: Option.none<string>() } : outcome, lines, Option.none())
+            : `That didn't go through${lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`}.`
+      yield* noted("reason" in outcome ? { reason: outcome.reason } : outcome._tag === "Twin" ? { twin: outcome.row.commandId } : {})
+      return yield* new RelayError({ reason })
+    })
 
   /** Dispatches queued replies in order, without holding up incoming hooks or other sessions. */
   const sendNext = (session: string): Effect.Effect<void> => Effect.gen(function* () {
@@ -286,7 +376,7 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
   const conversation = yield* Conversation.make({
     dir,
     moved: (update) => Effect.sync(() => moved(update)),
-    send: (update, message) => Effect.gen(function* () {
+    send: (update, message) => update.about !== undefined && options.hands !== undefined && steered(update) ? steer(update, update.about, options.hands, message) : Effect.gen(function* () {
       const pending = yield* Effect.gen(function* () {
         if (moved(update)) return yield* new RelayError({ reason: Conversation.movedOn })
         const { on } = yield* switched
@@ -332,6 +422,8 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
     readonly arrivedAt: number
     readonly generation: { readonly chain: object }
     readonly hook: Ticket | undefined
+    /** Whether its Stop hook waits for a reply, which then goes back through it, even once a queued follow-up holds it. */
+    readonly hooked: boolean
     readonly needsYou: boolean
     readonly turns: number
     /** The T3 Code thread it's from, worked out alongside the summary, when there's one. */
@@ -378,6 +470,7 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
         ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
       }
       generations.set(update, generation)
+      if (finished.hooked) hooked.add(update)
       // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread.
       const entry: Entry = {
         at: arrivedAt,
@@ -503,6 +596,7 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
           arrivedAt: input.at,
           generation,
           hook: undefined,
+          hooked: false,
           needsYou: false,
           turns: input.turns,
           about: Effect.succeedSome(input.about),
@@ -581,6 +675,7 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
               arrivedAt,
               generation: currentGeneration,
               hook: summaryHook,
+              hooked: hook !== undefined,
               needsYou,
               turns,
               about: linking(payload.session_id, payload.cwd, origin),
@@ -679,7 +774,7 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, saying, answer }).pipe(
+      const answered = yield* conversation.ask({ audio: said.audio, saying, answer, ...(question.through === undefined ? {} : { through: question.through }) }).pipe(
         Effect.onError((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
         ),
@@ -908,6 +1003,7 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
       // Replays keep both the hook generation and the original chain of voice replies.
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)
+      if (hooked.has(found.update)) hooked.add(update)
       // And its entry in the journal, so heard to the end this time, it's noted as heard.
       const row = rows.get(found.update)
       if (row !== undefined) rows.set(update, row)

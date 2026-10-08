@@ -21,6 +21,8 @@ import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
+import * as T3Actions from "./T3Actions.ts"
+import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 import { Voice } from "./Voice.ts"
@@ -51,6 +53,10 @@ const make = (says?: string, options: {
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
   /** Finds the T3 Code thread a hook on this machine came from. */
   readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
+  /** Sends what the user says over an update tied to its T3 Code thread. */
+  readonly hands?: Hands.Hands["Type"]
+  /** How long working out what to do with what the user says takes, in seconds, so they can carry on meanwhile. */
+  readonly thinking?: number
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -59,6 +65,8 @@ const make = (says?: string, options: {
   /** What happened to follow-ups and the hooks that wait for them, in order. */
   const followUps: Array<string> = []
   const condensed: Array<Turn> = []
+  /** What the user said over an update, each time yapd worked out what to do with it. */
+  const responded: Array<string> = []
   const logs = yield* Queue.unbounded<string>()
   /** What was logged as a warning, in order. */
   const warnings: Array<string> = []
@@ -135,10 +143,13 @@ const make = (says?: string, options: {
       respond: ({ heard }) =>
         says === undefined
           ? Effect.die("nothing to respond to")
-          : Effect.succeed(
-              options.answer === undefined
-                ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
-                : { intent: "answer" as const, spoken: options.answer, message: "" },
+          : Effect.sync(() => void responded.push(heard)).pipe(
+              Effect.zipRight(Effect.sleep(`${options.thinking ?? 0} seconds`)),
+              Effect.as(
+                options.answer === undefined
+                  ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
+                  : { intent: "answer" as const, spoken: options.answer, message: "" },
+              ),
             ),
     }),
     Layer.succeed(Relays, {
@@ -159,7 +170,10 @@ const make = (says?: string, options: {
     })),
   )
   const context = yield* Layer.build(layer)
-  const made = yield* Daemon.make(options.link === undefined ? {} : { link: options.link }).pipe(Effect.provide(context))
+  const made = yield* Daemon.make({
+    ...(options.link === undefined ? {} : { link: options.link }),
+    ...(options.hands === undefined ? {} : { hands: options.hands }),
+  }).pipe(Effect.provide(context))
   handle = made.handle
   const { speak: read, tell } = made
   yield* Effect.forkScoped(read)
@@ -250,13 +264,84 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { responded, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
   Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
+
+/** The Tezos migration, as T3 Code's live view has it once the turn its hook told of ended. */
+const tezos = (overrides: Record<string, unknown> = {}) =>
+  Schema.decodeUnknownSync(T3Live.Thread)({
+    id: "t-tezos",
+    projectId: "yapd",
+    title: "Migrate Tezos Integration",
+    modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+    activeRunId: null,
+    status: "completed",
+    pendingRuntimeRequest: null,
+    createdAt: "1970-01-01T00:00:00.000Z",
+    updatedAt: "1970-01-01T00:00:00.000Z",
+    ...overrides,
+  })
+
+/**
+ * Hands over a ledger of their own and a T3 Code with the Tezos thread in
+ * it, which takes a message as a turn of its own on an idle thread, or into
+ * the turn under way, keeping what it was sent. A turn it starts shows in
+ * the thread at once.
+ */
+const handing = Effect.gen(function* () {
+  const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
+  const bounded = {
+    runs: [] as Array<{ id: string; status: string; ordinal: number; userMessageId?: string }>,
+    messages: [] as Array<{ id: string; role: string; text: string; createdAt: string }>,
+    turnItems: [] as Array<Record<string, unknown>>,
+  }
+  const dispatched: Array<Record<string, unknown>> = []
+  let current = tezos()
+  const reach: Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> = Effect.succeed({
+    api: (<A, I>(_: string, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
+    call: (<A, I>(method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
+      method === "orchestration.dispatchCommand"
+        ? Effect.gen(function* () {
+            dispatched.push(payload)
+            if (payload.type === "message.dispatch") {
+              const at = new Date(yield* Clock.currentTimeMillis).toISOString()
+              const messageId = String(payload.messageId)
+              const busy = current.activeRunId !== null
+              bounded.messages.push({ id: messageId, role: "user", text: String(payload.text), createdAt: at })
+              bounded.turnItems.push({ type: "user_message", messageId, inputIntent: busy ? "steer" : "turn_start" })
+              if (!busy) bounded.runs.push({ id: `run-${bounded.runs.length + 2}`, status: "running", ordinal: bounded.runs.length + 2, userMessageId: messageId })
+              current = tezos({ ...current, activeRunId: current.activeRunId ?? "run-2", activityRunStatus: "running", latestUserMessageAt: at, latestRunStartedAt: current.latestRunStartedAt ?? at })
+            }
+            return yield* Schema.decodeUnknown(schema)({ sequence: 1 }).pipe(Effect.orDie)
+          })
+        : Effect.die(`not expected: ${method}`)) as T3CodeServer.Transport["call"],
+  })
+  const actions = T3Actions.make(reach)
+  const hands = Hands.make({
+    threads: {
+      find: (ref) => Effect.sync(() => (ref.id === current.id ? Option.some(current) : Option.none())),
+      actions: (machine) => (machine === "Rosie" ? Option.some(actions) : Option.none()),
+    },
+    ledger,
+  })
+  return {
+    hands,
+    /** The messages T3 Code was sent, by thread. */
+    sent: () => dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => `${threadId}: ${text}`),
+    /** How each went in, as the thread says. */
+    intents: () => bounded.turnItems.map(({ inputIntent }) => inputIntent),
+    /** The thread as T3 Code has it from now on, like once he's typed something into it. */
+    becomes: (overrides: Record<string, unknown>) =>
+      Effect.sync(() => {
+        current = tezos({ ...current, ...overrides })
+      }),
+  }
+})
 
 /** A thread T3 Code runs, idle in the yapd project. */
 const thread = (id: string, title: string) =>
@@ -744,6 +829,93 @@ describe("Daemon", () => {
     expect(result.asked).toEqual(["terminal", "slow", "tezos"])
     expect(result.followUps).toEqual(["terminal sent: Use the fee table.", "slow sent: Use the fee table."])
     expect(result.threads).toEqual(["claude:terminal", "claude:slow", "claude:elsewhere", "Rosie t-tezos"])
+  })
+
+  test("tell it to … after a linked update reaches that thread once, even when settle asks three times", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, speak, wait, nextEvent, nextPlayback, followUps, responded, journal } = yield* make("Tell it", {
+          hands: t3.hands,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          // He says it in three goes, each before yapd has worked out the last.
+          transcripts: ["Tell it to use", "the fee table", "from the Mina work."],
+          thinking: 2,
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(1)
+        yield* speak
+        yield* wait(1)
+        yield* speak
+        yield* wait(2)
+        const told = yield* nextPlayback
+        const sent = yield* journal.since(0, { kinds: ["sent"] })
+        return { responded: [...responded], sent: t3.sent(), told, relayed: [...followUps], kept: sent.map(({ machine, thread, text }) => [machine, thread, text]) }
+      }),
+    )
+    expect(result.responded).toEqual(["Tell it to use", "Tell it to use the fee table", "Tell it to use the fee table from the Mina work."])
+    expect(result.sent).toEqual(["t-tezos: Tell it to use the fee table from the Mina work."])
+    expect(result.told).toBe("Okay, passed on.")
+    // Never the old way as well.
+    expect(result.relayed).toEqual([])
+    expect(result.kept).toEqual([["Rosie", "t-tezos", "Tell it to use the fee table from the Mina work."]])
+  })
+
+  test("a second follow-up to the same update is steered, not refused", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, speak, wait, nextEvent, nextPlayback, played } = yield* make("Tell it", {
+          hands: t3.hands,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          transcripts: ["Use the fee table.", "And add a test for it."],
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        // He hears some of it first, so what he sends comes well after the update.
+        yield* wait(5)
+        yield* speak
+        yield* nextPlayback
+        // The turn his message started, as its hook tells of it, while he says more over what yapd said back.
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt: "Use the fee table." }, { project: "yapd", host: hostname() }, false)
+        yield* wait(1)
+        yield* speak
+        yield* nextPlayback
+        return { sent: t3.sent(), intents: t3.intents(), played: [...played] }
+      }),
+    )
+    expect(result.sent).toEqual(["t-tezos: Use the fee table.", "t-tezos: And add a test for it."])
+    expect(result.intents).toEqual(["turn_start", "steer"])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "Okay, passed on."])
+  })
+
+  test("a reply after the thread was given something else since is held back with a spoken reason", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, speak, wait, nextEvent, nextPlayback, journal } = yield* make("Use the fee table.", {
+          hands: t3.hands,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        // He typed something else into it in T3 Code meanwhile.
+        yield* wait(5)
+        yield* t3.becomes({ latestUserMessageAt: new Date(yield* Clock.currentTimeMillis).toISOString() })
+        yield* speak
+        const told = yield* nextPlayback
+        const noted = yield* journal.since(0, { kinds: ["sent", "action"] })
+        return { sent: t3.sent(), told, noted: noted.map(({ thread, detail }) => [thread, (detail as { reason?: string }).reason]) }
+      }),
+    )
+    expect(result.sent).toEqual([])
+    expect(result.told).toBe("You've given it something else since, so I held that back.")
+    expect(result.noted).toEqual([["t-tezos", Hands.given]])
   })
 
   test("a turn no hook told of is said like a hook's update, once under its key, and never once yapd was turned off since", async () => {
