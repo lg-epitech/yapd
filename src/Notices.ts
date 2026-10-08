@@ -134,10 +134,10 @@ export const lines = {
 const unworded = (kind: string) => (kind === "user_input" ? "has a question for you" : "wants your go-ahead on something")
 
 /**
- * Says what T3 Code's threads need the user for, what failed and what
- * finished with no hook to tell of it, as `tell` queues it, unless yapd was
- * turned off since it was heard of. `stopped` is when a session's last Stop
- * hook came, `finished` says a finished turn as a hook's update, and
+ * Says what T3 Code's threads need the user for, whenever yapd is on, and
+ * what failed and what finished with no hook to tell of it, unless yapd was
+ * turned off since, as `tell` queues it. `stopped` is when a session's last
+ * Stop hook came, `finished` says a finished turn as a hook's update, and
  * `mention` makes "it" the thread a notice is about as it starts being said.
  */
 export const make = (options: {
@@ -217,14 +217,14 @@ export const make = (options: {
     }
 
     /** Says what a thread waits on him for: once, ever, as news, since it's answered in T3 Code. */
-    const asked = (ref: Threads.Ref, requestId: string, turns: number, at: number) =>
+    const asked = (ref: Threads.Ref, requestId: string, at: number) =>
       Effect.suspend(() => {
         if (wording.has(requestId)) return Effect.void
         wording.add(requestId)
-        return ask(ref, requestId, turns, at).pipe(Effect.ensuring(Effect.sync(() => wording.delete(requestId))))
+        return ask(ref, requestId, at).pipe(Effect.ensuring(Effect.sync(() => wording.delete(requestId))))
       })
 
-    const ask = (ref: Threads.Ref, requestId: string, turns: number, at: number) =>
+    const ask = (ref: Threads.Ref, requestId: string, at: number) =>
       Effect.gen(function* () {
         const thread = yield* threads.find(ref)
         const shown = yield* listed(ref)
@@ -258,7 +258,9 @@ export const make = (options: {
           key: key.asked(ref.machine, requestId),
           detail: { request: Option.match(request, { onNone: () => thread.value.pendingRuntimeRequest?.kind, onSome: ({ _tag }) => _tag }) },
         }
-        yield* notify(ref, spoken, entry, still, at, turns)
+        // What waits on him is there to say whenever yapd is on, even turned off and on while it was worded: off, it's said once it's on.
+        const { on, turns } = yield* options.power
+        if (on) yield* notify(ref, spoken, entry, still, at, turns)
       })
 
     /**
@@ -331,7 +333,7 @@ export const make = (options: {
         if (!on) return
         const at = yield* Clock.currentTimeMillis
         const ref = { machine, id: news.value.thread.id }
-        const looking = news.value._tag === "Asked" ? asked(ref, news.value.requestId, turns, at) : ran(ref, news.value.runId, turns, at)
+        const looking = news.value._tag === "Asked" ? asked(ref, news.value.requestId, at) : ran(ref, news.value.runId, turns, at)
         yield* FiberSet.run(running, looking.pipe(trouble, Effect.annotateLogs({ thread: news.value.thread.title })))
       })
 
@@ -344,7 +346,7 @@ export const make = (options: {
        * it's off.
        */
       reconcile: Effect.gen(function* () {
-        const { on, turns } = yield* options.power
+        const { on } = yield* options.power
         if (!on) return
         const now = yield* Clock.currentTimeMillis
         const said = new Set((yield* journal.since(now - pending, { kinds: ["notice"], most: 1000 })).flatMap(({ key }) => (key === undefined ? [] : [key])))
@@ -353,7 +355,7 @@ export const make = (options: {
           const request = thread.pendingRuntimeRequest
           const created = request === null ? Number.NaN : Date.parse(request.createdAt)
           if (request === null || Number.isNaN(created) || now - created > pending || said.has(key.asked(ref.machine, request.id))) continue
-          yield* FiberSet.run(running, asked(ref, request.id, turns, now).pipe(trouble, Effect.annotateLogs({ thread: thread.title })))
+          yield* FiberSet.run(running, asked(ref, request.id, now).pipe(trouble, Effect.annotateLogs({ thread: thread.title })))
         }
       }),
     }
