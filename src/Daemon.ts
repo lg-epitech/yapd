@@ -123,8 +123,8 @@ export const make = (
    * A turn T3 Code said finished that no hook had told of, said in its hook's
    * place, under the session `finished:<machine>:<thread>`: what tells a Stop
    * of its own from another's, which is what decides the turn is its, and
-   * whether it's begun being said, after which a Stop of its own coming late
-   * isn't said too; until then, one gives way to it.
+   * whether it's begun being said, after which a Stop of its own coming late,
+   * while nothing started since, isn't said too; until then, one gives way to it.
    */
   interface Fallback {
     readonly about: Threads.Ref
@@ -615,24 +615,36 @@ export const make = (
 
   /**
    * A Stop came for a turn T3 Code's word may have been said of in its hook's
-   * place, by the session its run had: one whose run's last words it has, or
-   * whose it can't be told, takes the place of one still to be said, which is
-   * then dealt with, as the Stop's own update is said in its stead. One begun
-   * being said, whose run's words it has, was said already, so it's given back
-   * for the Stop's update not to be. Called with the event lock held.
+   * place, by the session its run had, `prompted` last through the hooks. One
+   * still to be said gives way to a Stop of its own, or to one whose words
+   * can't be told, which is then dealt with, as the Stop's own update is said
+   * in its stead. One begun being said was the turn's, so such a Stop is
+   * given back for its update not to be, as long as nothing started since:
+   * the thread is still on that run, and no prompt came through the hooks
+   * since it was taken on. After that, the Stop is a newer turn's, however
+   * alike their words, and it's said. Called with the event lock held.
    */
-  const giveWay = (session: string, stop: Notices.Stop) =>
+  const giveWay = (session: string, stop: Notices.Stop, prompted: number | undefined) =>
     Effect.gen(function* () {
-      const theirs = [...fallbacks.values()].filter((fallback) => fallback.run.natives.includes(session))
-      const own = theirs.find((fallback) => Notices.whose(stop, fallback.run) === "own")
-      for (const fallback of theirs) {
-        if (fallback.begun || (fallback !== own && Notices.whose(stop, fallback.run) !== "unknown")) continue
+      let through: Fallback | undefined
+      for (const fallback of [...fallbacks.values()].filter((fallback) => fallback.run.natives.includes(session))) {
+        const whose = Notices.whose(stop, fallback.run)
+        if (whose === "another") continue
+        if (fallback.begun) {
+          // A newer turn started since, which a Stop now is: this one stands for nothing more.
+          if (!(yield* fallback.current) || (prompted !== undefined && prompted > fallback.at)) {
+            fallbacks.delete(fallback.key)
+            continue
+          }
+          if (through === undefined || whose === "own") through = fallback
+          continue
+        }
         fallbacks.delete(fallback.key)
         yield* discard(fallback.session)
         yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came after all")
         if (fallback.row !== undefined) yield* journal.markHeard([fallback.row], stop.at)
       }
-      return own?.begun === true ? own : undefined
+      return through
     })
 
   /**
@@ -776,7 +788,7 @@ export const make = (
             return hook
           }
           // Said already in its place from T3 Code's word, it isn't said again; still to be said that way, it's said this way instead.
-          const through = yield* giveWay(payload.session_id, stop)
+          const through = yield* giveWay(payload.session_id, stop, prompt?.at)
           const needsYou = payload.needs_you === true
           // Nobody watches a session yapd started, so it's heard from however quick its turn, as is one that needs the user.
           const watched = !needsYou && origin.launched !== true

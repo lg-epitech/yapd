@@ -1209,6 +1209,54 @@ describe("Daemon", () => {
     expect(late).toEqual(["yapd. The loader is fixed."])
   })
 
+  test("a turn no hook told of, once said, is its run's even when its Stop's words can't be told, but never a newer turn's, however alike their words", async () => {
+    const origin = { project: "yapd", host: hostname() }
+    const stop = (handle: Handle, message: string) =>
+      handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: message }, origin, false)
+    /** Says the loader's turn, `said` last, in its hook's place, while `current` holds, then hears `then` happen before a Stop saying `stopped`. */
+    const told = (said: string, stopped: string, then: (made: Effect.Effect.Success<ReturnType<typeof make>>, moved: () => void) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          const harness = yield* make(undefined, { link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }) })
+          const { made, wait, played, handle, journal, nextEvent } = harness
+          let current = true
+          yield* made.finished(unhooked(said, "run-1", (yield* made.power).turns, Effect.sync(() => current)))
+          yield* nextEvent("Ready:")
+          yield* wait(11)
+          yield* then(harness, () => (current = false))
+          yield* stop(handle, stopped)
+          yield* wait(11)
+          yield* wait(11)
+          const kept = yield* journal.since(0, { kinds: ["action"] })
+          return { played: [...played], through: kept.map(({ detail }) => (detail as { through?: string }).through) }
+        }),
+      )
+    // The same run's Stop, come late with words T3 Code kept otherwise: the thread is still on that run, so the turn was said already.
+    expect(await told("The loader is fixed.", "Fixed the loader; the tests pass.", () => Effect.void)).toEqual({
+      played: ["yapd. The loader is fixed."],
+      through: ["done:Rosie:run-1"],
+    })
+    // The thread started again in T3 Code, and its next run said the same short thing: that's a new turn, said in its own right.
+    expect(
+      await told("Done.", "Done.", ({ made, wait }, moved) =>
+        Effect.gen(function* () {
+          moved()
+          yield* made.overtaken({ machine: "Rosie", id: "t-loader" })
+          yield* wait(60)
+        }),
+      ),
+    ).toEqual({ played: ["yapd. Done.", "yapd. Done."], through: [] })
+    // A prompt came through the hooks since, as when the session is taken up outside T3 Code: what it then said is a new turn too.
+    expect(
+      await told("The loader is fixed.", "The tests pass now.", ({ handle, wait }) =>
+        Effect.gen(function* () {
+          yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "native-loader", cwd: "/tmp", prompt: "Now run the tests." }, origin, false)
+          yield* wait(60)
+        }),
+      ),
+    ).toEqual({ played: ["yapd. The loader is fixed.", "yapd. The tests pass now."], through: [] })
+  })
+
   test("a turn no hook told of isn't said once its thread is no longer on that run, whether it's found as it's queued or as its turn to be said comes", async () => {
     const result = await run(
       Effect.gen(function* () {
