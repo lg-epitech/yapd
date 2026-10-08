@@ -21,15 +21,22 @@ There's no authentication: anything that can reach the port can use it, as hooks
       "text": "yapd. The tests pass and the PR is up.",
       "at": "2026-10-02T14:03:11.000Z"
     }
-  ]
+  ],
+  "showing": {
+    "id": "cmgi3k2xa4f1",
+    "kind": "pr",
+    "title": "Migrate the Tezos integration",
+    "at": "2026-10-02T14:05:40.000Z"
+  }
 }
 ```
 
 - `on`: whether yapd is on. While it's off, it says nothing, never opens the microphone and lets go of the dictation shortcut. Updates that finish meanwhile are never said, not even later.
 - `activity`: `speaking` while yapd plays something, `listening` while the microphone is open without it, for a reply after an update or while you dictate, and `idle` otherwise.
 - `updates`: the last five updates yapd said, newest first, to [hear again](#hearing-an-update-again). `text` is what it said and `at` when the agent's turn ended. They're forgotten when yapd restarts.
+- `showing`: the [card](#cards) yapd is showing, or `null`. `kind` and `title` are the card's, and `at` is when yapd put it up. Fetch the card itself from `/cards/{id}`. A yapd from before cards doesn't send it at all.
 
-The menu bar app's icon shows "not running" when it can't reach the API, "off" when `on` is false, and `activity` otherwise.
+The menu bar app's icon shows "not running" when it can't reach the API, "off" when `on` is false, and `activity` otherwise. A card that's showing opens in a panel under the icon.
 
 ## Following changes
 
@@ -75,7 +82,97 @@ curl -X POST -H 'Content-Type: application/json' -d '{"text": "what is going on?
 | `400` | There's no text. |
 | `409` | yapd is off. |
 
-It can tell you what your threads are doing, who needs you, how much of your usage is left, what you missed, and say again what it just said, and it can start new work. Anything that would change a thread, like sending it a message or stopping it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant, is answered by speaking over it or right after, or by asking again here.
+It can tell you what your threads are doing, who needs you, how much of your usage is left, what you missed, and say again what it just said, it can start new work, and it can [show you things](#cards). Anything that would change a thread, like sending it a message or stopping it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant, is answered by speaking over it or right after, or by asking again here.
+
+## Cards
+
+Ask yapd to show you something, like "show me that PR", "show me what's running", "show me my usage" or "show me what I missed", and it puts a card up and says what's on it in a line, adding "it's on your screen" only while something follows [`/state/stream`](#following-changes), like the menu bar app. "Hide that" takes the card down. "Show me that PR" also opens the pull request in your browser. yapd only ever opens an `https` address that came from T3 Code, never one a model wrote.
+
+When you ask about a thread that waits on something that can't be read aloud, like a command it wants to run, yapd puts that thread's card up with its answer. "Say that again" also puts up what it said and what it heard you say last, while something follows the state.
+
+`GET /cards/{id}` returns one of the last twenty cards, by the `id` in `showing`:
+
+```json
+{
+  "id": "cmgi3k2xa4f1",
+  "kind": "pr",
+  "title": "Migrate the Tezos integration",
+  "markdown": "**#412** in lg-epitech/integration, open\n\n- Checks: passing\n- Review: waiting for a review\n- Mergeable: yes",
+  "url": "https://github.com/lg-epitech/integration/pull/412",
+  "caption": "Checks pass, and it's waiting for a review.",
+  "at": "2026-10-02T14:05:40.000Z"
+}
+```
+
+- `kind`: `threads` for what's going on across your threads, grouped by what they're doing, `thread` for one thread, `pr` for a pull request, `usage` for your limits and when they reset, `list` for what you missed, and `said` for the last line yapd said and the last thing it heard you say.
+- `markdown`: the card, in Markdown. What a thread waits on is always in a code block, as text, never as a link. Links in a thread's own messages are kept only when they're `https`.
+- `url`: the address the card is about, only ever `https` and from T3 Code, like the pull request's. Missing when there's none.
+- `caption`: what yapd said with it, without "it's on your screen". Missing when it said nothing.
+
+| Status | |
+| --- | --- |
+| `200` | The card. |
+| `404` | No such card, or yapd restarted since. |
+
+`DELETE /cards/current` takes the card down, so `showing` becomes `null`. It answers `204`, whether or not one was up.
+
+## Threads
+
+`GET /threads` lists the threads yapd can see, by machine, those that need you first:
+
+```json
+[
+  {
+    "machine": "Rosie",
+    "threads": [
+      {
+        "id": "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+        "project": "integration",
+        "title": "Migrate the Tezos integration",
+        "state": "running",
+        "since": "2026-10-02T13:40:00.000Z",
+        "pr": { "number": 412, "url": "https://github.com/lg-epitech/integration/pull/412", "state": "open", "checks": "passing" }
+      }
+    ]
+  },
+  { "machine": "rig", "reason": "I can't see rig's threads yet.", "threads": [] }
+]
+```
+
+- `reason`: why a machine's threads can't be seen right now, like T3 Code not running. Its `threads` are empty then.
+- `state`: `approval` or `question` when the thread waits on you, `running`, `finishing`, `queued`, `failed`, `limited` when it hit a usage limit, or `idle`. `since` is when it got there.
+- `pr`: its latest pull request, when it has one. `state`, `checks`, `review` and `mergeability` are there when T3 Code knows them.
+
+Archived threads and the ones a thread runs for itself aren't listed. Nothing here changes a thread: ask yapd through [`/utterances`](#asking-yapd-something), so the same rules apply as when you speak.
+
+## Journal
+
+`GET /journal` returns what yapd heard, said and did, newest first, as it keeps it for a year:
+
+```json
+[
+  {
+    "id": 1872,
+    "at": "2026-10-02T14:03:11.000Z",
+    "kind": "update",
+    "machine": "Rosie",
+    "project": "yapd",
+    "said": "yapd. The tests pass and the PR is up.",
+    "heard": "2026-10-02T14:03:20.000Z"
+  }
+]
+```
+
+- `kind`: `update` for an agent's turn yapd summed up, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, and `action` for anything else it did, like turning off.
+- `said` is what yapd said, `text` the words it was about, like what you said or an agent's message, and `heard` when you heard it through. Each is there only when there's one.
+
+| Query | |
+| --- | --- |
+| `limit` | How many, 50 unless you say, 200 at most. |
+| `before` | Only entries older than the one with this `id`: pass the last `id` you got for the next page. |
+| `kind` | Only these kinds, comma-separated, like `update,answer`. |
+
+It answers `400` when a query can't be read.
 
 ## Errors
 
