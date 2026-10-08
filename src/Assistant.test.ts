@@ -196,10 +196,14 @@ const assistant = (
       threads,
       journal,
       drafts,
-      tell: (notice) => Effect.sync(() => void said.push(notice)),
+      // Said at once, as when nothing else is.
+      tell: (notice) => Effect.zipRight(Effect.sync(() => void said.push(notice)), notice.saying ?? Effect.void),
       power: Effect.sync(() => power),
       lastHeard: Effect.succeed(Option.none()),
       coming: Effect.void,
+      awaiting: Effect.void,
+      arrived: Effect.void,
+      rereading: () => Effect.succeed(false),
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

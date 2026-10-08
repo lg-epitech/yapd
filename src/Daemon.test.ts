@@ -154,12 +154,16 @@ const make = (says?: string, options: {
       yield* flush
     })
   /** Something yapd has to say for itself, which as a question, the one open, records how it went. */
-  const notice = (id: string, spoken: string, options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean } = {}) =>
+  const notice = (
+    id: string,
+    spoken: string,
+    options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean; readonly answer?: boolean } = {},
+  ) =>
     tell({
       id,
-      kind: options.question === undefined ? "notice" : "question",
+      kind: options.question !== undefined ? "question" : options.answer === true ? "answer" : "notice",
       ...(options.question === undefined ? {} : { open: `open-${id}` }),
-      priority: options.question !== undefined || options.needsYou === true ? "needs-you" : "done",
+      priority: options.question !== undefined || options.needsYou === true || options.answer === true ? "needs-you" : "done",
       spoken,
       at: 0,
       stale: Effect.succeed(options.stale === true),
@@ -190,7 +194,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting, arrived: made.arrived.pipe(Effect.zipRight(flush)), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -247,6 +251,29 @@ describe("Daemon", () => {
     // Nothing was read while the user dictated.
     expect(result.playedDuring).toEqual(["yapd. The PR is ready."])
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "yapd. The tests pass."])
+  })
+
+  test("says the answer to a dictation before the update it cut off, however long it takes to work out", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, notice, awaiting, arrived, played } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        // He presses the shortcut, which awaits what he'll ask, and asks it.
+        yield* awaiting
+        const dictation = yield* dictate
+        yield* Scope.close(dictation, Exit.void)
+        // The model takes a few seconds, while nothing else is said.
+        yield* wait(4)
+        const meanwhile = [...played]
+        yield* notice("answer", "Four on the go, sir.", { answer: true })
+        yield* arrived
+        yield* wait(11)
+        yield* wait(11)
+        return { meanwhile, played: [...played] }
+      }),
+    )
+    expect(result.meanwhile).toEqual(["yapd. The PR is ready."])
+    expect(result.played).toEqual(["yapd. The PR is ready.", "Four on the go, sir.", "yapd. The PR is ready."])
   })
 
   test("turns the microphone off once a dictation lets go of it, never while it records", async () => {

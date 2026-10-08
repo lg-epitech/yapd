@@ -93,6 +93,9 @@ export const serve = Effect.gen(function* () {
     power: daemon.power,
     lastHeard: daemon.lastHeard,
     coming: daemon.coming,
+    awaiting: daemon.awaiting,
+    arrived: daemon.arrived,
+    rereading: daemon.rereading,
   })
   const shortcut = yield* Shortcut
   const dictation = yield* Dictation

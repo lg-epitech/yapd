@@ -40,6 +40,8 @@ export interface Notice {
   readonly at: number
   /** Whether it's no longer worth saying, asked as its turn comes. */
   readonly stale: Effect.Effect<boolean>
+  /** Run as it starts being said, which is when the user hears of it. */
+  readonly saying?: Effect.Effect<void>
   /** For a question: what to do with the answer, and when there's none. */
   readonly question?: Pick<Question, "answer"> & { readonly unanswered: Effect.Effect<void> }
 }
@@ -77,10 +79,15 @@ export const remove = (inbox: Inbox, session: string): Inbox => {
 const rank = (entry: Entry) =>
   "notice" in entry && entry.notice.kind !== "notice" ? 0 : entry.priority === "needs-you" ? 1 : 2
 
-/** What to say next: what the user asked for, then anything that needs them, then oldest first. */
-export const next = (inbox: Inbox): Entry | undefined => {
+/**
+ * What to say next: what the user asked for, then anything that needs them,
+ * then oldest first. While an answer is on its way, only what they asked for,
+ * so nothing else comes between them and it.
+ */
+export const next = (inbox: Inbox, answering = false): Entry | undefined => {
   let best: Entry | undefined
   for (const ready of inbox.values()) {
+    if (answering && rank(ready) > 0) continue
     if (best === undefined || rank(ready) < rank(best) || (rank(ready) === rank(best) && ready.arrivedAt < best.arrivedAt)) {
       best = ready
     }

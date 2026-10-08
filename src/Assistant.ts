@@ -187,6 +187,12 @@ export const make = (options: {
   readonly lastHeard: Effect.Effect<Option.Option<{ readonly update: Conversation.Update; readonly at: number; readonly playing: boolean }>>
   /** Something is about to be said, so the speaker can get ready while it's worked out. */
   readonly coming: Effect.Effect<void>
+  /** An answer is on its way, so nothing but answers is said until it `arrived`, or for a while at most. */
+  readonly awaiting: Effect.Effect<void>
+  /** The answer longest on its way was queued, or won't come. */
+  readonly arrived: Effect.Effect<void>
+  /** Whether an update is waiting to be read again, like one a dictation cut off. */
+  readonly rereading: (update: Conversation.Update) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -204,7 +210,7 @@ export const make = (options: {
     let asking: { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: boolean } | undefined
     /** Changes whenever the open question does, so what was worked out against another can tell. */
     let version = 0
-    /** What yapd said last of its own accord, which "it" may mean. */
+    /** What yapd said last of its own accord, which "it" may mean, and when it started saying it. */
     let answered: { readonly subject: Subject; readonly at: number } | undefined
     /** What "it" meant when the shortcut was pressed, before the dictation stopped what was playing. */
     let pressed: Subject | undefined
@@ -676,10 +682,17 @@ export const make = (options: {
           return Option.match(target, { onNone: () => Effect.succeed(reply(said.cantTell, thought.subject)), onSome: (target) => look(target, thought, said) })
         case "find":
           return find(thought, said)
-        case "again": {
-          const last = thought.subject._tag === "Nothing" ? Brain.nothingSaid(said) : thought.subject.said
-          return Effect.succeed({ say: decision.spoken.trim() || last, subject: thought.subject, kind: "answer" })
-        }
+        case "again":
+          return Effect.gen(function* () {
+            const { subject } = thought
+            // A dictation cut it off, so it's about to be read again from the start, and only then.
+            if (subject._tag === "Session" && (yield* options.rereading(subject.update))) {
+              yield* Effect.logInfo("Not saying it again, since it's about to be read again from the start")
+              return quiet(subject)
+            }
+            const last = subject._tag === "Nothing" ? Brain.nothingSaid(said) : subject.said
+            return { say: decision.spoken.trim() || last, subject, kind: "answer" } satisfies Outcome
+          })
         case "start":
           return start(thought, said)
         case "dismiss":
@@ -768,15 +781,18 @@ export const make = (options: {
         const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: Option.none() }, [{ speaker: "yapd", text: open.asked }])
         if (thought.source === "fast" && thought.decision.act === "resume") return Option.none()
         return Option.some(
-          background(
-            turn.withPermits(1)(
-              Effect.gen(function* () {
-                yield* Effect.logInfo(`Heard: ${heard}`)
-                const outcome = yield* acting(thought)
-                yield* note(thought, outcome, at)
-                yield* deliver(outcome, utterance)
-              }),
-            ).pipe(Effect.annotateLogs({ utterance: utterance.id })),
+          Effect.zipRight(
+            options.awaiting,
+            background(
+              turn.withPermits(1)(
+                Effect.gen(function* () {
+                  yield* Effect.logInfo(`Heard: ${heard}`)
+                  const outcome = yield* acting(thought)
+                  yield* note(thought, outcome, at)
+                  yield* deliver(outcome, utterance)
+                }),
+              ).pipe(Effect.ensuring(options.arrived), Effect.annotateLogs({ utterance: utterance.id })),
+            ),
           ),
         )
       })
@@ -802,8 +818,8 @@ export const make = (options: {
             ...(open === undefined ? {} : { detail: { question: true, open: open.id } }),
           })
         }
-        answered = { subject: outcome.subject, at }
         yield* Effect.logInfo(`Said: ${outcome.say}`)
+        const { subject } = outcome
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -811,6 +827,12 @@ export const make = (options: {
             priority: "needs-you",
             spoken: outcome.say,
             at,
+            // "It" means this once he's heard it, not while it waits behind something else he's hearing.
+            saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
+              Effect.sync(() => {
+                answered = { subject, at: now }
+              }),
+            ),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {
@@ -845,8 +867,9 @@ export const make = (options: {
 
     const heard = (input: Omit<Utterance, "id">) => {
       const utterance: Utterance = { ...input, id: mint(input.at, "u") }
+      // A dictation's answer was awaited from when the shortcut was pressed.
       return Effect.zipRight(
-        hold,
+        Effect.zipRight(input.via === "shortcut" ? Effect.void : options.awaiting, hold),
         Effect.gen(function* () {
           yield* Effect.logInfo(`Heard: ${utterance.heard}`)
           // Whatever comes of it is said, so the speaker gets ready while it's worked out.
@@ -892,7 +915,7 @@ export const make = (options: {
           yield* deliver(outcome, utterance)
           return utterance.id
         }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id })),
-      )
+      ).pipe(Effect.ensuring(options.arrived))
     }
 
     return {
@@ -900,13 +923,15 @@ export const make = (options: {
       act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought.utterance), outcome))),
       heard,
       prepare: Effect.gen(function* () {
+        // What's dictated is answered before anything else is said.
+        yield* options.awaiting
         yield* hold
         pressed = yield* subject
         const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
         yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
         yield* Effect.forkIn(threads.refreshUsage, scope)
       }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
-      nothing: release,
+      nothing: Effect.zipRight(release, options.arrived),
       replied: Effect.suspend(() => (asking === undefined ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),
       drop: Effect.gen(function* () {

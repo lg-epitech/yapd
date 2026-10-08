@@ -43,6 +43,9 @@ const replayable = 5
 /** How long the speaker stays ready for something that was about to be said, before it rests again. */
 const patience = "15 seconds"
 
+/** How long an answer on its way holds everything else back at most, in case it never comes. */
+const holding = "20 seconds"
+
 /**
  * Updates are condensed and rendered in parallel, then spoken one at a time,
  * along with what yapd has to say for itself.
@@ -102,6 +105,21 @@ export const make = Effect.gen(function* () {
   const state = yield* SubscriptionRef.make<State>({ on: true, heard: [] })
   /** Each time something said over an update is taken in. */
   const replied = yield* PubSub.unbounded<void>()
+  /**
+   * Answers on their way, oldest first, from when the user asked until
+   * they're queued: meanwhile nothing but answers and questions is said, so
+   * what they asked for isn't kept waiting behind an update, nor an update put
+   * between them and it. Each lapses on its own, in case it never comes.
+   */
+  const awaited = yield* STM.commit(TRef.make<ReadonlyArray<object>>([]))
+  const awaiting = Effect.gen(function* () {
+    const answer = {}
+    yield* STM.commit(TRef.update(awaited, (all) => [...all, answer]))
+    yield* Effect.sleep(holding).pipe(
+      Effect.zipRight(STM.commit(TRef.update(awaited, (all) => all.filter((other) => other !== answer)))),
+      Effect.forkIn(lifetime),
+    )
+  })
 
   /** Queues something to say, unless yapd is off or was turned off and on since `turns`, and returns whether it did. */
   const enqueue = (entry: Inbox.Entry, turns: number) =>
@@ -412,12 +430,15 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((hook) => (hook === undefined ? Effect.succeed(undefined) : waiting.reply(hook))),
     )
 
-  /** Nothing is read while the user dictates, or while yapd is off. Taken with when yapd was last turned on. */
+  /**
+   * Nothing is read while the user dictates, or while yapd is off, and only
+   * answers while one is on its way. Taken with when yapd was last turned on.
+   */
   const takeNext = STM.gen(function* () {
     const { on, turns } = yield* TRef.get(power)
     if (!on || (yield* Floor.dictating(floor))) return yield* STM.retry
     const current = yield* TRef.get(inbox)
-    const ready = Inbox.next(current)
+    const ready = Inbox.next(current, (yield* TRef.get(awaited)).length > 0)
     if (ready === undefined) return yield* STM.retry
     yield* TRef.set(inbox, Inbox.remove(current, ready.session))
     yield* TRef.set(floor.reading, true)
@@ -465,6 +486,7 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const { question } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
+      yield* said.notice.saying ?? Effect.void
       if (question === undefined) {
         const playback = yield* audio.play(said.audio)
         yield* playback.finished
@@ -616,6 +638,8 @@ export const make = Effect.gen(function* () {
           if (on === next) return undefined
           yield* TRef.set(power, { on: next, turns: turns + 1 })
           yield* TRef.set(coming, false)
+          // Off, no answer is on its way any more.
+          if (!next) yield* TRef.set(awaited, [])
           return next ? [] : yield* TRef.modify(inbox, (queued) => [[...queued.values()], Inbox.empty] as const)
         }),
       )
@@ -692,6 +716,13 @@ export const make = Effect.gen(function* () {
     lastHeard: Effect.sync(() => Option.fromNullable(latest)),
     /** Something is about to be said, like an answer being worked out, so the speaker gets ready meanwhile. */
     coming: soon,
+    /** An answer is on its way: nothing but answers is said until it `arrived`, or for twenty seconds at most. */
+    awaiting,
+    /** The answer longest on its way was queued, or won't come. */
+    arrived: STM.commit(TRef.update(awaited, (all) => all.slice(1))),
+    /** Whether an update is waiting to be read again, like one a dictation cut off. */
+    rereading: (update: Conversation.Update) =>
+      STM.commit(STM.map(TRef.get(inbox), (queued) => [...queued.values()].some((entry) => "update" in entry && entry.update === update))),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
   }
