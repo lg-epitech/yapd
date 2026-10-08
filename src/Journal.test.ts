@@ -36,7 +36,7 @@ describe("Journal", () => {
         return { claims, rows: yield* journal.since(0) }
       }).pipe(Effect.provide(Journal.memory)),
     )
-    expect(kept.claims).toEqual([true, false, false])
+    expect(kept.claims.map(Option.isSome)).toEqual([true, false, false])
     expect(kept.rows.map(({ at }) => at)).toEqual([1])
   })
 

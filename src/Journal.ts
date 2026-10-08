@@ -62,10 +62,11 @@ export class Journal extends Context.Tag("yapd/Journal")<
     /** Keeps an entry and gives back its id. Never fails: what can't be kept is only logged, and has none. */
     readonly write: (entry: Entry) => Effect.Effect<Option.Option<number>>
     /**
-     * Keeps an entry under its key unless one was ever kept under it, and says
-     * whether this one was: what's said once is said once across restarts.
+     * Keeps an entry under its key unless one was ever kept under it, so what's
+     * said once is said once across restarts: none when one was, otherwise the
+     * new entry's id, when the journal could keep it, to note when it's heard.
      */
-    readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<boolean>
+    readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<Option.Option<Option.Option<number>>>
     /** Notes that the user heard these through, answered them or was briefed on them, unless they had already. */
     readonly markHeard: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<void>
     /** Entries since `at`, oldest first, the latest `most` of them when there are more. */
@@ -182,10 +183,15 @@ export const fromStore = (store: Store.Store["Type"], called: Naming = (host) =>
       ),
   claim: (entry) =>
     store
-      .transaction((database: Database) => database.query(`insert or ignore into journal ${columns}`).run(...values(entry, called)).changes > 0)
+      .transaction((database: Database) => {
+        const kept = database.query(`insert or ignore into journal ${columns}`).run(...values(entry, called))
+        return kept.changes > 0 ? Option.some(Option.some(Number(kept.lastInsertRowid))) : Option.none()
+      })
       .pipe(
         // Said twice is better than never said, when the journal can't tell.
-        Effect.catchAll((error) => Effect.logWarning("Could not check my journal for what I've said", error).pipe(Effect.as(true))),
+        Effect.catchAll((error) =>
+          Effect.logWarning("Could not check my journal for what I've said", error).pipe(Effect.as(Option.some(Option.none<number>()))),
+        ),
       ),
   markHeard: (ids, at) =>
     ids.length === 0
