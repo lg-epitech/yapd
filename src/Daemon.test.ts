@@ -656,6 +656,26 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
   })
 
+  test("an update cut off by turning yapd off is heard once it's said again to the end", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, played, heard, replay, journal } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        const [id] = yield* heard
+        // Off and on again before it's said to the end, then asked for again.
+        yield* toggle(false)
+        yield* toggle(true)
+        const cutOff = (yield* journal.unheard(0, 12)).length
+        const queued = yield* replay(id!)
+        yield* wait(0)
+        yield* wait(11)
+        return { cutOff, queued, played: [...played], after: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result).toMatchObject({ cutOff: 1, queued: "queued", after: 0 })
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
+  })
+
   test("sends no reply to an update heard again once its session has moved on", async () => {
     let deliveries = 0
     const result = await run(
