@@ -6,13 +6,20 @@ import * as Server from "./T3CodeServer.ts"
 // Each is a command T3 Code's own app sends, so its view stays in step.
 
 const Message = Schema.Struct({
+  id: Schema.optional(Schema.String),
   role: Schema.String,
   text: Schema.String,
   createdAt: Schema.String,
   streaming: Schema.optionalWith(Schema.Boolean, { default: () => false }),
 })
 
-const Run = Schema.Struct({ id: Schema.String, status: Schema.String, ordinal: Schema.Number })
+const Run = Schema.Struct({
+  id: Schema.String,
+  status: Schema.String,
+  ordinal: Schema.Number,
+  /** The message that started it, or waits in the queue to. */
+  userMessageId: Schema.optional(Schema.NullOr(Schema.String)),
+})
 
 const Option_ = Schema.Struct({ decision: Schema.String, label: Schema.String })
 
@@ -38,6 +45,9 @@ const Question = Schema.Struct({
 /** What a thread waits on, as its turn items describe it. Anything else in them is left alone. */
 const Item = Schema.Struct({
   type: Schema.String,
+  /** A user message's own id, and how it went in. */
+  messageId: Schema.optional(Schema.String),
+  inputIntent: Schema.optional(Schema.String),
   status: Schema.optional(Schema.String),
   requestId: Schema.optional(Schema.String),
   requestKind: Schema.optional(Schema.String),
@@ -137,9 +147,26 @@ export const plan = (plans: ReadonlyArray<unknown>): Option.Option<string> => {
 /** How many of a thread's messages are read back. */
 const recent = 6
 
+/**
+ * When a message goes in: `now`, into the turn under way when there is one,
+ * as the app sends it; `after` the turn under way, in T3 Code's own queue;
+ * or `restart`, stopping the turn under way to start over with it.
+ */
+export type When = "now" | "after" | "restart"
+
 export type Command =
-  | { readonly _tag: "Send"; readonly text: string; /** Into the turn under way, rather than after it. */ readonly steer: boolean }
+  | {
+      readonly _tag: "Send"
+      readonly text: string
+      /** Chosen by yapd, so the message can be found in the thread. */
+      readonly messageId: string
+      readonly how: When
+    }
   | { readonly _tag: "Stop" }
+  /** Lets go of the queue a stop held. */
+  | { readonly _tag: "Resume" }
+  /** Drops a message still waiting in the queue, by the run it would start. */
+  | { readonly _tag: "Cancel"; readonly runId: string }
   | { readonly _tag: "Decide"; readonly requestId: string; readonly decision: string }
   | { readonly _tag: "Answer"; readonly requestId: string; readonly answers: Readonly<Record<string, string | ReadonlyArray<string>>> }
   | { readonly _tag: "Dismiss"; readonly requestId: string }
@@ -160,15 +187,20 @@ export const command = (threadId: string, what: Command, runId: string | undefin
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
-        messageId: crypto.randomUUID(),
+        messageId: what.messageId,
         text: what.text,
         attachments: [],
-        dispatchMode: { type: "start_immediately" },
-        // As the app does: into the turn under way when the agent can take it, and after it when it can't.
-        ...(what.steer ? { deliveryIntent: "auto" } : {}),
+        // As the app does: into the turn under way when the agent can take it, and after it when it can't; or in the queue, with no intent.
+        ...(what.how === "after"
+          ? { dispatchMode: { type: "queue_after_active" } }
+          : { dispatchMode: { type: "start_immediately" }, deliveryIntent: what.how === "restart" ? "restart" : "auto" }),
       }
     case "Stop":
       return { ...base, type: "run.interrupt", runId, holdQueue: true }
+    case "Resume":
+      return { ...base, type: "queue.resume" }
+    case "Cancel":
+      return { ...base, type: "queued-run.cancel", runId: what.runId }
     case "Decide":
       return { ...base, type: "runtime-request.respond", requestId: what.requestId, decision: what.decision }
     case "Answer":
@@ -191,7 +223,44 @@ export const command = (threadId: string, what: Command, runId: string | undefin
 }
 
 /** Runs that are still going, and can be stopped. */
-const going = ["preparing", "starting", "running", "waiting"]
+const going: ReadonlyArray<string> = ["preparing", "starting", "running", "waiting"]
+
+/** How a message went into a thread, as T3 Code says: starting a turn, into the turn under way, or in the queue behind it. */
+export type Intent = "turn_start" | "queued_turn" | "steer" | "promoted_queued_to_steer"
+
+const intents: ReadonlyArray<string> = ["turn_start", "queued_turn", "steer", "promoted_queued_to_steer"]
+
+/** Where a message yapd sent got to in a thread. */
+export interface Found {
+  /** How it went in, when the thread says. */
+  readonly intent: Option.Option<Intent>
+  /** The run it started, or waits in the queue to start, if there's one. */
+  readonly run: Option.Option<{ readonly id: string; readonly status: string }>
+  /** When T3 Code took it in, in ms by its own clock, when the thread shows the message itself. */
+  readonly at: Option.Option<number>
+}
+
+/** Finds a message yapd sent in a thread's bounded read: among its messages, the runs they started, or its turn items. */
+export const found = (projection: (typeof Bounded.Type)["projection"], messageId: string): Option.Option<Found> => {
+  const run = projection.runs.find(({ userMessageId }) => userMessageId === messageId)
+  const item = projection.turnItems
+    .flatMap((item) => Option.toArray(decodeItem(item)))
+    .find((item) => item.type === "user_message" && item.messageId === messageId)
+  const message = projection.messages.find(({ id }) => id === messageId)
+  if (run === undefined && item === undefined && message === undefined) return Option.none()
+  const intent = item?.inputIntent
+  return Option.some({
+    // One with no turn item yet still has its run to say: one it started is a turn of its own, unless it waits in the queue or was taken out of it.
+    intent:
+      intent !== undefined && intents.includes(intent)
+        ? Option.some(intent as Intent)
+        : run === undefined || run.status === "cancelled"
+          ? Option.none()
+          : Option.some(run.status === "queued" ? ("queued_turn" as const) : ("turn_start" as const)),
+    run: Option.map(Option.fromNullable(run), ({ id, status }) => ({ id, status })),
+    at: Option.filter(Option.map(Option.fromNullable(message), ({ createdAt }) => Date.parse(createdAt)), (at) => !Number.isNaN(at)),
+  })
+}
 
 const Dispatched = Schema.Struct({ sequence: Schema.Number })
 
@@ -256,71 +325,94 @@ export const reason = (error: Server.Trouble | Server.Refusal) =>
       ? "My T3 Code token isn't allowed to do that."
       : error.message
 
-export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => ({
-  /** Where it got to. `pending` is the request the shell says it waits on, when it knows. */
-  detail: (threadId: string, pending?: string) =>
-    Effect.gen(function* () {
-      const { api } = yield* reach
-      const { projection } = yield* api(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`, Bounded)
-      // Otherwise the newest that's still waiting.
-      const waiting =
-        pending ??
-        projection.turnItems
-          .flatMap((item) => Option.toArray(decodeItem(item)))
-          .filter(({ type, status }) => (type === "approval_request" || type === "user_input_request") && (status === "waiting" || status === "pending"))
-          .at(-1)?.requestId
-      return {
-        messages: projection.messages.filter(({ role }) => role !== "system").slice(-recent),
-        runs: projection.runs,
-        request: Option.flatMap(Option.fromNullable(waiting), (id) => request(projection.turnItems, id)),
-        plan: plan(projection.plans),
-      } satisfies Detail
-    }),
+export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => {
+  /** The thread's last turns, as T3 Code bounds them. */
+  const bounded = (threadId: string) =>
+    Effect.flatMap(reach, ({ api }) => api(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`, Bounded))
 
-  /** Does it to the thread. Stopping goes for the run under way, and fails when there's none. */
-  run: (threadId: string, what: Command, commandId: string = `yapd:${crypto.randomUUID()}`) =>
-    Effect.gen(function* () {
-      const { api, call } = yield* reach
-      let runId: string | undefined
-      if (what._tag === "Stop") {
-        const { projection } = yield* api(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`, Bounded)
-        runId = projection.runs.toSorted((a, b) => b.ordinal - a.ordinal).find(({ status }) => going.includes(status))?.id
-        if (runId === undefined) return yield* new Server.Refusal({ tag: "NotRunning", message: "It isn't doing anything right now." })
-      }
-      return yield* call("orchestration.dispatchCommand", command(threadId, what, runId, commandId), Dispatched)
-    }),
+  /** Where a message yapd sent got to in the thread, if it's there at all. */
+  const message = (threadId: string, messageId: string) => Effect.map(bounded(threadId), ({ projection }) => found(projection, messageId))
 
-  search: (query: string) =>
-    Effect.gen(function* () {
+  return {
+    /** Where it got to. `pending` is the request the shell says it waits on, when it knows. */
+    detail: (threadId: string, pending?: string) =>
+      Effect.gen(function* () {
+        const { projection } = yield* bounded(threadId)
+        // Otherwise the newest that's still waiting.
+        const waiting =
+          pending ??
+          projection.turnItems
+            .flatMap((item) => Option.toArray(decodeItem(item)))
+            .filter(({ type, status }) => (type === "approval_request" || type === "user_input_request") && (status === "waiting" || status === "pending"))
+            .at(-1)?.requestId
+        return {
+          messages: projection.messages.filter(({ role }) => role !== "system").slice(-recent),
+          runs: projection.runs,
+          request: Option.flatMap(Option.fromNullable(waiting), (id) => request(projection.turnItems, id)),
+          plan: plan(projection.plans),
+        } satisfies Detail
+      }),
+
+    /**
+     * Does it to the thread under the id its step was given: sent again under
+     * the same id, T3 Code does it once. Stopping goes for the run under way,
+     * and fails when there's none.
+     */
+    run: (threadId: string, what: Command, commandId: string) =>
+      Effect.gen(function* () {
+        const { call } = yield* reach
+        let runId: string | undefined
+        if (what._tag === "Stop") {
+          const { projection } = yield* bounded(threadId)
+          runId = projection.runs.toSorted((a, b) => b.ordinal - a.ordinal).find(({ status }) => going.includes(status))?.id
+          if (runId === undefined) return yield* new Server.Refusal({ tag: "NotRunning", message: "It isn't doing anything right now." })
+        }
+        return yield* call("orchestration.dispatchCommand", command(threadId, what, runId, commandId), Dispatched)
+      }),
+
+    message,
+
+    /** Whether a message yapd sent is in the thread. */
+    has: (threadId: string, messageId: string) => Effect.map(message(threadId, messageId), Option.isSome),
+
+    /** How a message yapd sent went into the thread, when it says. */
+    inputIntent: (threadId: string, messageId: string) => Effect.map(message(threadId, messageId), Option.flatMap(({ intent }) => intent)),
+
+    /** Whether a run is still going in the thread, which a stop ends. */
+    running: (threadId: string) => Effect.map(bounded(threadId), ({ projection }) => projection.runs.some(({ status }) => going.includes(status))),
+
+    search: (query: string) =>
+      Effect.gen(function* () {
+        const { call } = yield* reach
+        const trimmed = query.trim().slice(0, 200)
+        if (trimmed.length < 2) return []
+        const { matches } = yield* call("orchestration.searchThreads", { query: trimmed, limit: 20 }, Search)
+        return matches
+      }),
+
+    usage: Effect.gen(function* () {
       const { call } = yield* reach
-      const trimmed = query.trim().slice(0, 200)
-      if (trimmed.length < 2) return []
-      const { matches } = yield* call("orchestration.searchThreads", { query: trimmed, limit: 20 }, Search)
-      return matches
+      const { providers } = yield* call("server.getConfig", {}, Limits)
+      return providers
+        .filter(({ enabled, status }) => enabled && status !== "disabled")
+        .flatMap(({ instanceId, displayName, usageLimits }) =>
+          usageLimits === undefined || usageLimits === null || usageLimits.windows.length === 0
+            ? []
+            : [
+                {
+                  provider: displayName ?? instanceId,
+                  windows: usageLimits.windows.map(({ kind, label, windowDurationMins, usedPercent, resetsAt }) => ({
+                    kind,
+                    label,
+                    minutes: windowDurationMins ?? undefined,
+                    usedPercent,
+                    resetsAt: resetsAt ?? undefined,
+                  })),
+                },
+              ],
+        ) satisfies Usage
     }),
-
-  usage: Effect.gen(function* () {
-    const { call } = yield* reach
-    const { providers } = yield* call("server.getConfig", {}, Limits)
-    return providers
-      .filter(({ enabled, status }) => enabled && status !== "disabled")
-      .flatMap(({ instanceId, displayName, usageLimits }) =>
-        usageLimits === undefined || usageLimits === null || usageLimits.windows.length === 0
-          ? []
-          : [
-              {
-                provider: displayName ?? instanceId,
-                windows: usageLimits.windows.map(({ kind, label, windowDurationMins, usedPercent, resetsAt }) => ({
-                  kind,
-                  label,
-                  minutes: windowDurationMins ?? undefined,
-                  usedPercent,
-                  resetsAt: resetsAt ?? undefined,
-                })),
-              },
-            ],
-      ) satisfies Usage
-  }),
-})
+  }
+}
 
 export type Actions = ReturnType<typeof make>

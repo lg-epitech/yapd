@@ -3,6 +3,7 @@ import type * as Assistant from "./Assistant.ts"
 import { aloud, inEnglish, styled } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import type { Kept } from "./Journal.ts"
+import type * as Ledger from "./Ledger.ts"
 import { Model } from "./Model.ts"
 import { addressed, type Lines } from "./Persona.ts"
 import { agreed, enough, gist, type Line } from "./Responder.ts"
@@ -28,10 +29,20 @@ export const Act = Schema.Literal(
 export type Act = typeof Act.Type
 
 /** What it can do so far. The rest are understood, and answered with "not yet". */
-export const enabled: ReadonlySet<Act> = new Set<Act>(["dismiss", "resume", "answer", "look", "find", "again", "clarify", "start"])
+export const enabled: ReadonlySet<Act> = new Set<Act>(["dismiss", "resume", "answer", "look", "find", "again", "clarify", "start", "send", "stop", "undo"])
 
 /** Acts that only read, which go ahead on a fair guess and say which thread they took. */
 const reads: ReadonlySet<Act> = new Set<Act>(["answer", "look", "find", "show"])
+
+/** Less speech than this said over something, a write is taken for talk or noise nearby, never acted on. */
+const faintest = 0.35
+
+/** Acts that change a thread. */
+const writes: ReadonlySet<Act> = new Set<Act>(["send", "stop", "undo", "decide", "reply", "tidy"])
+
+/** Whether it's a write said over something with too little speech to be his: talk or noise nearby, never acted on, nor taken as an answer. */
+export const murmured = (decided: Pick<Decision, "act">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
+  utterance.via === "reply" && utterance.voiced < faintest && writes.has(decided.act)
 
 /** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
@@ -99,6 +110,8 @@ export interface Situation {
   readonly second: Option.Option<{ readonly ref: Threads.Ref; readonly detail: T3Actions.Detail } | { readonly found: ReadonlyArray<string> }>
   /** Questions yapd asked in the last ten minutes, so none is asked in the same words again. */
   readonly asked: ReadonlyArray<string>
+  /** What yapd last did for him in the last two minutes, whatever it was, which "scratch that" means. */
+  readonly acted: Option.Option<Ledger.Row>
   readonly now: number
 }
 
@@ -196,10 +209,42 @@ export const which = (candidates: ReadonlyArray<Threads.Listed>, lines: Lines, a
   return repeated(second, asked) ? undefined : second
 }
 
+/** Whether it's yes or no to doing something, like "Stop the Tezos migration?", whose `about` says what, as "stop the Tezos migration". */
+export const yesNo = (kind: Assistant.Open["kind"]) => kind === "confirm" || kind === "offer" || kind === "resend"
+
+/** When a message goes in, as `how` says it: an empty one is at once. */
+const when = (how: string) => (how === "after" || how === "restart" ? how : "now")
+
+/**
+ * Whether a decision is what a yes or no question asked about, however it was
+ * put: the same act on the same thread, and for a message the same words and
+ * timing, or none given, which leaves them as asked. Anything else, like
+ * another thread or other words, is something else he wants instead.
+ */
+export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, decided: Decision, desk: Threads.Desk) => {
+  const asked = open.decision
+  if (decided.act !== asked.act) return false
+  if (decided.target !== "") {
+    const named = desk.threads.find(({ handle }) => handle === decided.target)
+    if (named === undefined || !open.candidates.some((ref) => Threads.same(ref, named.ref))) return false
+  }
+  switch (asked.act) {
+    case "send":
+      return (decided.text.trim() === "" || words(decided.text) === words(asked.text)) && (decided.how.trim() === "" || when(decided.how) === when(asked.how))
+    case "undo":
+      return decided.how.trim() === "" || (decided.how === "carry") === (asked.how === "carry")
+    default:
+      return true
+  }
+}
+
+/** A yes or no question about doing something: "Stop the Tezos migration, sir?", or in other words when that was asked lately, or none. */
+export const confirming = (doing: string, lines: Lines, asked: ReadonlyArray<string>) =>
+  [`${capital(doing)}${addressed(lines)}?`, `Shall I ${doing}${addressed(lines)}?`].find((wording) => !repeated(wording, asked))
+
 /**
  * A question asked once more, in other words than it was, and than any asked
- * in the last ten minutes. None once every wording has been used, and none
- * for an offer, which is never asked again.
+ * in the last ten minutes. None once every wording has been used.
  */
 export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about">, before: ReadonlyArray<string>, lines: Lines) => {
   const wordings =
@@ -207,7 +252,7 @@ export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about">,
       ? [`Which one${addressed(lines)}: ${open.about}?`, `I still need to know which you meant${addressed(lines)}: ${open.about}?`]
       : open.kind === "project"
         ? [`Which project should ${open.about || "that"} go in${addressed(lines)}?`, `I still need a project for ${open.about || "that"}${addressed(lines)}.`]
-        : []
+        : [`Shall I still ${open.about}${addressed(lines)}?`, `Do you still want me to ${open.about}${addressed(lines)}?`]
   return wordings.find((wording) => !repeated(wording, [open.asked, ...before]))
 }
 
@@ -217,13 +262,17 @@ export const unrepeated = (open: Pick<Assistant.Open, "kind" | "asked" | "about"
 
 /** What's said when a question went unanswered twice, and is let go. */
 export const dropped = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines) =>
-  `I didn't hear back about ${open.kind === "which" ? `whether you meant ${open.about}` : open.about || "what you dictated"}, so I dropped it${addressed(lines)}.`
+  yesNo(open.kind)
+    ? `I didn't hear back about whether to ${open.about}, so I left it${addressed(lines)}.`
+    : `I didn't hear back about ${open.kind === "which" ? `whether you meant ${open.about}` : open.about || "what you dictated"}, so I dropped it${addressed(lines)}.`
 
 /** What's said of a question he never got to hear, since he'd moved on to something else first. */
 export const left = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines) =>
   open.kind === "which"
     ? `I didn't ask whether you meant ${open.about}, since you'd moved on${addressed(lines)}.`
-    : `I left ${open.about || "what you dictated"}, since you'd moved on${addressed(lines)}.`
+    : yesNo(open.kind)
+      ? `I didn't ask whether to ${open.about}, since you'd moved on${addressed(lines)}.`
+      : `I left ${open.about || "what you dictated"}, since you'd moved on${addressed(lines)}.`
 
 /** An act the brain understood, but yapd can't do yet. */
 export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.`
@@ -415,8 +464,26 @@ const ordinals: ReadonlyArray<readonly [RegExp, (count: number) => number]> = [
 /** Words in an answer that only point, around the one that names. */
 const pointing: ReadonlySet<string> = new Set(["the", "one", "that", "thread", "with", "about", "on"])
 
+/** Stopping the work itself, never yapd talking, which a bare "stop" is. */
+const stopping: ReadonlySet<string> = new Set([
+  "stop working", "stop the run", "interrupt it", "cancel the run", "stop the work", "interrupt the run", "stop it working",
+])
+
+/** Taking back what yapd just did. */
+const scratching: ReadonlySet<string> = new Set(["scratch that", "cancel that", "undo that", "take that back"])
+
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
+
+/** The thread he's on about: what he heard about last, when it's on the desk. */
+export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
+  const { subject, desk } = situation
+  const ref = subject._tag === "Thread" ? Option.some(subject.ref) : subject._tag === "Answer" ? subject.about : Option.none<Threads.Ref>()
+  return Option.flatMap(ref, (ref) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, ref))))
+}
+
+/** Whether there's a run to stop: one going, finishing, or waiting on him. */
+const stoppable = (listed: Threads.Listed) => ["running", "finishing", "approval", "question"].includes(listed.state)
 
 /**
  * What needs no model to work out, from what he said as a whole, never a
@@ -445,9 +512,21 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   if (usage.has(said) || askingUsage(said, situation.usage)) {
     return decision({ act: "answer", spoken: used(situation.usage, said, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   }
+  // Said of the work he's hearing about while it's at it, it can only mean stopping that.
+  const on = focused(situation)
+  if (stopping.has(said) && Option.isSome(on) && stoppable(on.value)) {
+    return decision({ act: "stop", target: on.value.handle, pending: Option.isSome(open) ? "replaces" : "" })
+  }
+  // With a question open, "cancel that" is a no to it.
+  if (scratching.has(said) && Option.isNone(open) && Option.isSome(situation.acted)) {
+    const acted = situation.acted.value
+    const listed = desk.threads.find(({ ref }) => ref.machine === acted.machine && ref.id === acted.thread)
+    return decision({ act: "undo", target: listed?.handle ?? "", how: acted.kind === "stop" ? "carry" : "" })
+  }
   if (Option.isSome(open)) {
     const question = open.value
-    if (refused.has(said)) return decision({ act: "dismiss", pending: "answers" })
+    // Said over a question, "stop" or "enough" is to stop talking, which lets it go: never a yes to what it asks, like stopping a thread.
+    if (refused.has(said) || enough.has(said)) return decision({ act: "dismiss", pending: "answers" })
     const candidates = question.candidates.flatMap((ref) => desk.threads.filter((listed) => Threads.same(listed.ref, ref)))
     const pick = (listed: Threads.Listed | undefined) =>
       listed === undefined
@@ -472,6 +551,10 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
       }
     }
     if (agreed.has(said) && question.kind === "which" && candidates.length === 1) return pick(candidates[0])
+    // Yes to doing it: what was asked about, on the thread it was about as it's known now.
+    if (agreed.has(said) && yesNo(question.kind)) {
+      return decision({ ...question.decision, target: candidates[0]?.handle ?? "", sure: "high", others: "", pending: "answers" })
+    }
     return undefined
   }
   // On its own, only ever yapd talking: a thread is stopped by saying so.
@@ -555,9 +638,61 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       }
       if (choice.sure === "low" && candidates.length >= 2) return ask(candidates)
       return doing({ decision: choice, target })
+    case "send":
+    case "stop":
+    case "undo":
+      return writing(choice, target, candidates, situation, lines, ask)
     default:
       return { _tag: "Say", spoken: notYet(lines) }
   }
+}
+
+/**
+ * Whether a write goes ahead: on a thread he plainly meant, or fairly surely
+ * the one he's on about, which the confirmation names when it isn't. A stop
+ * that's only fairly sure is confirmed first, since it can't be taken back
+ * mid-thought. Otherwise he's asked which, naming them, or told it couldn't
+ * be told with nothing to choose between, as the confidence policy says.
+ */
+const writing = (
+  choice: Decision,
+  target: Option.Option<Threads.Listed>,
+  candidates: ReadonlyArray<Threads.Listed>,
+  situation: Situation,
+  lines: Lines,
+  ask: (among: ReadonlyArray<Threads.Listed>) => Checked,
+): Checked => {
+  const { utterance, desk } = situation
+  // Said over something, too little speech is talk or noise nearby, never something to do.
+  if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
+  // Taking back what was just done needs no thread named: it's what was just done.
+  if (choice.act === "undo" && Option.isNone(target)) return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target } }
+  if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
+  const listed = target.value
+  if (choice.act === "stop" && !stoppable(listed)) return { _tag: "Say", spoken: `${capital(listed.called)} isn't doing anything right now${addressed(lines)}.` }
+  const on = Option.exists(focused(situation), (focus) => focus.handle === listed.handle)
+  const confirm = (): Checked => {
+    const doing = `stop ${named(listed, desk.threads)}`
+    const asked = confirming(doing, lines, situation.asked)
+    if (asked === undefined) return { _tag: "Say", spoken: lines.cantTell }
+    return {
+      _tag: "Ask",
+      open: {
+        kind: "confirm",
+        utterance: utterance.id,
+        heard: utterance.heard,
+        decision: choice,
+        candidates: [listed.ref],
+        asked,
+        about: doing,
+        material: Option.none(),
+        resend: Option.none(),
+      },
+    }
+  }
+  if (choice.sure === "high") return { _tag: "Do", plan: { decision: choice, target } }
+  if (choice.sure === "medium" && on) return choice.act === "stop" ? confirm() : { _tag: "Do", plan: { decision: choice, target } }
+  return ask(candidates)
 }
 
 // ---------------------------------------------------------------- speaking
@@ -600,6 +735,9 @@ const coding = "(?:claude code|t3 code|claude|codex|coding|ai|opencode) "
 
 /** The work put down to an agent or a session, and what's said instead. */
 const agents: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bno active (?:agent |provider )?session\b/gi, "nothing running"],
+  [/\b(the|that|this|its|your|my|our) (?:agent|provider) session\b/gi, "$1 work"],
+  [/\b(?:agent|provider) sessions?\b/gi, "the work"],
   [new RegExp(`\\b(the|that|this|its|your|my|our) (?:${coding})?(agent|session)\\b`, "gi"), "$1 work"],
   [new RegExp(`\\b(an?|one) (?:${coding})?(agent|session)\\b`, "gi"), "a thread"],
   [new RegExp(`\\b(the|these|those|its|your|my|our|their|all|both|some|other|several|many|two|three|four|five|\\d+) (?:${coding})?(agents|sessions)\\b`, "gi"), "$1 threads"],
@@ -631,9 +769,12 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
 - "clarify": it's about one thread but you'd be guessing between two or three: "target" is the likeliest and "others" the rest. yapd asks him which.
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
+- "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead.
+- "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
+- "undo": take back what you just did for him, as LATELY shows it. "how" is "carry" when he wants a thread you stopped to carry on, "" to withdraw the message you just sent, like "scratch that". "target" is the thread, when he names one.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
-- These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "send" a thread a message, like an instruction, a correction or an answer to what it asked ("text": the message as he'd type it); "stop" a thread's run; "undo" what you just did; "decide" on what a thread waits for him to allow; "reply" to a thread's question; "mode" to change when you talk; "remember" or "forget" something; "remind" him later; "tidy" a thread away, like archiving or renaming it; "show" something on his screen.`
+- These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "decide" on what a thread waits for him to allow; "reply" to a thread's question; "mode" to change when you talk; "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it; "show" something on his screen.`
 
 const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
 
@@ -644,9 +785,10 @@ const choosing = `Choosing a thread:
 - Fill "machine" only when he says where the thread runs, like "on rig". A machine the work is about, like a thread fixing rig's tunnel, doesn't count.
 - If nothing in THREADS fits but he named something specific, use "find".
 - New work that refers to an existing thread, like "look at what I did for the billing export and start another thread doing the same for invoices", is "start", not "send".
-- If THREADS or LATELY shows you started the same work in the last 30 minutes, don't start it again: "answer" that it's already under way, naming it.`
+- If THREADS or LATELY shows you started the same work in the last 30 minutes, or may have, as when T3 Code didn't say whether it started, don't start it again: "answer" that it's already under way, or may be, naming it.`
 
-const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".`
+const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".
+When OPEN asks yes or no to doing something, it says what a yes does. A plain yes is that act on that thread, with "text" empty. A no is "dismiss". A no with something else instead, like "no, the Mina one" or "no, tell it to use the other table", is that something else, decided in full, with "pending" "answers": yapd does that and not what it asked.`
 
 const answering = `Answers:
 - Answer from THREADS, WAITING ON YOU, LATELY, UNHEARD and USAGE. Never make up a state: say what you don't know.
@@ -655,7 +797,9 @@ const answering = `Answers:
 - When you picked the thread from several, or weren't sure, start by naming it by what it's about, so he can put you right.
 - At most 40 words, the headline first.`
 
-const messages = `A message for a thread, in "text": first person, as he'd type it. Keep his intent, his wording and every request in his order, including "when that's merged, do X". Spell out what he referred to, and repair words that were clearly misheard. Agreeing with what a thread already said, or telling it to leave something as it is, changes nothing: that's "dismiss". "how" is "after" only when he says after, once it's done or when it finishes.`
+const messages = `A message for a thread, in "text": first person, as he'd type it. Keep his intent, his wording and every request in his order, including "when that's merged, do X". Spell out what he referred to, and repair words that were clearly misheard. Agreeing with what a thread already said, or telling it to leave something as it is, changes nothing: that's "dismiss". "how" is "after" only when he says after, once it's done or when it finishes. "Stop and tell it X instead" is one "send" with "how" "restart".
+
+Several things to do in one breath, like "stop the Tezos one and tell the Mina one to use its fee table": decide the first, and put the rest in "rest", in his words, as he'd say them. You'll be asked about the rest once the first is done.`
 
 const safety = `Safety:
 - "stop", "quiet" or "enough" on their own mean stop talking: "dismiss". Stopping a thread needs him to say to stop the thread, the run or the work.
@@ -665,7 +809,7 @@ const safety = `Safety:
 
 const speaking = `"spoken", for answer, look, find and again only. He's listening, not reading.
 ${aloud}
-- Empty for clarify, dismiss, resume, start and every act you can't do yet.
+- Empty for clarify, dismiss, resume, start, send, stop, undo and every act you can't do yet: yapd says what came of those itself.
 - Never ask him anything or offer to do something, like "Shall I…?" or "Want me to…?": yapd asks its own questions.
 - Never a handle like t4: say what the thread is about.`
 
@@ -771,9 +915,9 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
         return `he asked you: ${text}`
       case "started":
         return `you started work${where}: ${said}`
-      // What he had passed on to a thread, in the words it was sent, which yapd never said aloud.
+      // What he had passed on to a thread, in the words it was sent, and what yapd told him of it, if it said anything.
       case "sent":
-        return `you sent his message to the thread${where}: ${text}`
+        return `you sent his message to the thread${where}: ${text}${said === "" ? "" : `, and told him ${said}`}`
       default:
         return `you said${where}: ${said}`
     }
@@ -912,6 +1056,10 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
           open.candidates.length === 0
             ? ""
             : `\nIts choices, in the order you said them: ${open.candidates.map((ref) => handleOf(desk, ref.machine, ref.id) ?? "a thread that's gone").join(", ")}`
+        }${
+          yesNo(open.kind)
+            ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act === "send" ? ` with the message ${fenced(open.decision.text, 400)}` : ""}`
+            : ""
         }`,
       ],
     }),

@@ -4,6 +4,7 @@ import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
+import * as Hands from "./Hands.ts"
 import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
@@ -68,6 +69,7 @@ const situation = (heard: string, overrides: Partial<Brain.Situation> = {}): Bra
   usage: Option.none(),
   second: Option.none(),
   asked: [],
+  acted: Option.none(),
   now,
   ...overrides,
 })
@@ -132,10 +134,51 @@ describe("Brain", () => {
   })
 
   test("a bare stop never stops a thread", () => {
-    for (const heard of ["Stop.", "Stop", "Quiet!", "Shut up.", "Enough."]) expect(Brain.fast(situation(heard), lines)?.act).toBe("dismiss")
-    // Even when the model takes it to mean the thread, stopping one isn't something yapd does yet.
-    const stopped = Brain.check(Brain.decision({ act: "stop", target: "t1" }), situation("Stop the Mina one."), lines)
-    expect(stopped).toEqual({ _tag: "Say", spoken: "I can't do that yet, sir." })
+    const busy: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
+    // Not even while he's hearing about one that's running.
+    for (const heard of ["Stop.", "Stop", "Quiet!", "Shut up.", "Enough."]) {
+      expect(Brain.fast(situation(heard), lines)?.act).toBe("dismiss")
+      expect(Brain.fast(situation(heard, { subject: busy }), lines)?.act).toBe("dismiss")
+    }
+    // Nor with a question open whose yes would stop one, or send something again: it lets the question go.
+    const confirming: Assistant.Open = {
+      ...which([ref(tezos)]),
+      kind: "confirm",
+      decision: Brain.decision({ act: "stop", target: "t1", sure: "medium" }),
+      asked: "Stop Migrate Tezos Integration, sir?",
+      about: "stop Migrate Tezos Integration",
+    }
+    const resending: Assistant.Open = { ...confirming, kind: "resend", decision: Brain.decision({ act: "send", text: "Use the fee table." }), resend: Option.some("yapd:u0:0") }
+    for (const open of [confirming, resending]) {
+      for (const heard of ["Stop.", "Quiet!", "Enough."]) {
+        expect(Brain.fast(situation(heard, { subject: busy, open: Option.some(open) }), lines)).toMatchObject({ act: "dismiss", pending: "answers" })
+      }
+    }
+    // Saying to stop the work does, at once, for the one he's hearing about.
+    const working = Brain.fast(situation("Stop working.", { subject: busy }), lines)
+    expect(working === undefined ? undefined : desk().threads.find(({ handle }) => handle === working.target)?.thread.title).toBe("Migrate Tezos Integration")
+    expect(working?.act).toBe("stop")
+    const idle = desk().threads.find(({ thread }) => thread.id === mina.id)!
+    expect(Brain.check(Brain.decision({ act: "stop", target: idle.handle }), situation("Stop the Mina one."), lines)).toEqual({
+      _tag: "Say",
+      spoken: "Open Mina SSV2 Bug Tickets isn't doing anything right now, sir.",
+    })
+  })
+
+  test("a write only fairly sure of its thread is confirmed on the focus thread when it's a stop, and asked about or left elsewhere", () => {
+    const listed = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!
+    const on: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
+    const checked = (decided: Brain.Decision, subject: Assistant.Subject = { _tag: "Nothing" }) => Brain.check(decided, situation("Stop the migration.", { subject }), lines)
+    const stop = checked(Brain.decision({ act: "stop", target: listed(tezos).handle, sure: "medium" }), on)
+    expect(stop._tag === "Ask" ? { kind: stop.open.kind, asked: stop.open.asked } : stop).toEqual({ kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?" })
+    // Sure of it, a stop goes ahead.
+    expect(checked(Brain.decision({ act: "stop", target: listed(tezos).handle, sure: "high" }), on)._tag).toBe("Do")
+    // A message to the focus thread goes ahead; to one that isn't, with nothing else it could be, it isn't guessed at.
+    const message = (sure: Brain.Sure, others = "") => Brain.decision({ act: "send", target: listed(tezos).handle, sure, others, text: "Use the fee table." })
+    expect(checked(message("medium"), on)._tag).toBe("Do")
+    expect(checked(message("medium"))).toEqual({ _tag: "Say", spoken: "I couldn't tell which one you meant, sir." })
+    const between = checked(message("medium", listed(mina).handle))
+    expect(between._tag === "Ask" ? between.open.kind : between).toBe("which")
   })
 
   test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {
@@ -252,6 +295,32 @@ describe("Brain", () => {
       Brain.used(usage, "how much claude have i got left", lines, now),
       Brain.used(usage, "usage", lines, now),
       Brain.used(Option.none(), "usage", lines, now),
+      Brain.confirming("stop Migrate Tezos Integration", lines, []),
+      Brain.reworded({ kind: "resend", asked: "Send it again?", about: "send that to Migrate Tezos Integration again" }, [], lines),
+      Brain.dropped({ kind: "confirm", about: "stop Migrate Tezos Integration" }, lines),
+      Brain.left({ kind: "offer", about: "tell Migrate Tezos Integration to ignore that" }, lines),
+      Hands.done({ _tag: "Stop", to: ref(tezos) }, "now", lines, Option.some("Migrate Tezos Integration")),
+      Hands.failed(
+        { _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" },
+        { _tag: "Refused", reason: Hands.plainly(`Thread ${tezos.id} is a subagent thread and can't take messages; command yapd:u1:0 was refused`) },
+        lines,
+        Option.none(),
+      ),
+      Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }, lines, Option.some("Migrate Tezos Integration")),
+      // As T3 Code words its reasons, with ids of any shape in them, quoted or not.
+      ...[
+        "Command yapd:u1:0 was previously rejected: Thread 'thr_01J9ABC' is archived.",
+        "No active provider session for thread abc123.",
+        "The agent session has ended.",
+        `Thread not found: ${tezos.id}`,
+        "Session 01J9ABCDEF2345 expired",
+      ].map((reason) => Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Refused", reason: Hands.plainly(reason) }, lines, Option.none())),
+      Hands.twice(now - 54_000, now, lines, Option.none()),
+      Hands.read(lines, Option.some("Migrate Tezos Integration")),
+      Hands.lost(lines, Option.none()),
+      Hands.unoffered(lines, Option.some("Migrate Tezos Integration"), "Its thread is archived now."),
+      Hands.unsure({ kind: "stop", body: { _tag: "Stop" } }, lines, Option.none()),
+      Hands.unsure({ kind: "undo", body: { _tag: "Cancel", runId: "run_7f3a9c2b" } }, lines, Option.some("Migrate Tezos Integration")),
       ...Persona.sayable(Persona.plain),
       Conversation.movedOn,
       Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
@@ -273,6 +342,8 @@ describe("Brain", () => {
       expect(line).not.toMatch(/\bthe ((claude code|t3 code|claude|codex|coding|ai|opencode) )?(agent|session)s?\b/i)
       expect(line).not.toMatch(/0x[\da-f]{6,}/i)
       expect(line).not.toMatch(/\w\.(ts|js|json|md)\b/)
+      expect(line).not.toMatch(/\w_\w*\d|\d{4}|\byapd:|['"]\w*\d/)
+      expect(line).not.toMatch(/\b(agent|provider) session/i)
     }
     expect(said.at(-1)).toBe("Migrate Tezos Integration is still at it: it rewrote a file at a commit, and the work says the work ends soon, see a link.")
     expect(said.at(-2)).toBe("It flagged an address as unmatched, and/or skipped it.")

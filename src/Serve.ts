@@ -1,4 +1,4 @@
-import { Clock, Context, Effect, Layer, Logger, Option, Stream } from "effect"
+import { Clock, Context, Effect, Layer, Logger, Option, Schedule, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
@@ -12,7 +12,9 @@ import * as Daemon from "./Daemon.ts"
 import { Dictation, Turns, WhisperDictation } from "./Dictation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
+import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
+import * as Ledger from "./Ledger.ts"
 import { machines } from "./Machines.ts"
 import { ProviderModel } from "./Model.ts"
 import * as Persona from "./Persona.ts"
@@ -61,34 +63,48 @@ const Relays = Layer.effect(
 
 /** How long the journal is kept: a year of it is about forty thousand entries. */
 const remembered = 365 * 24 * 60 * 60_000
+/** How long what yapd did to threads is kept. */
+const done = 90 * 24 * 60 * 60_000
+/** How long a restart waits for T3 Code to catch up to look at what never said what came of it, which the next restart looks at otherwise. */
+const catchingUp = "15 minutes"
 
 export const serve = Effect.gen(function* () {
+  const started = yield* Clock.currentTimeMillis
   const daemon = yield* Daemon.make
   const preferences = yield* Preferences.path
   const everywhere = yield* machines
   const journal = yield* Journal.Journal
-  yield* Effect.forkScoped(Effect.flatMap(Clock.currentTimeMillis, (now) => journal.prune(now - remembered)))
-  const drafts = yield* Drafts.make({
-    machines: everywhere,
-    rules: Preferences.load(preferences),
-    recent: daemon.recent,
-    expect: (yield* Vocabulary).expect,
-  })
-  yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
+  const ledger = yield* Ledger.Ledger
+  yield* Effect.forkScoped(
+    Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.zipRight(journal.prune(now - remembered), ledger.prune(now - done))),
+  )
   const token = yield* Config.t3codeToken
+  const live = yield* T3Live.T3Live
   const threads = yield* Threads.make({
     // As the machine is called when yapd starts, which is what its threads are known by while it runs.
     machine: everywhere.find(({ here }) => here)?.name ?? hostname(),
-    live: yield* T3Live.T3Live,
+    live,
     actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
     others: everywhere.filter(({ here }) => !here).map(({ name }) => name),
     journal,
     store: yield* Store.Store,
   })
+  const drafts = yield* Drafts.make({
+    machines: everywhere,
+    rules: Preferences.load(preferences),
+    recent: daemon.recent,
+    expect: (yield* Vocabulary).expect,
+    ledger,
+    find: (machine, id) => threads.find({ machine, id }),
+  })
+  yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
+  const hands = Hands.make({ threads, ledger, started })
   const assistant = yield* Assistant.make({
     threads,
     journal,
     drafts,
+    hands,
+    ledger,
     tell: daemon.tell,
     power: daemon.power,
     lastHeard: daemon.lastHeard,
@@ -98,6 +114,16 @@ export const serve = Effect.gen(function* () {
     skip: daemon.skip,
     upcoming: daemon.upcoming,
   })
+  // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
+  yield* Effect.forkScoped(
+    live.view.pipe(
+      Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
+      Effect.timeoutFail({ duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }),
+      Effect.zipRight(hands.reconcile),
+      Effect.flatMap(({ undelivered, unconfirmed }) => Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered))),
+      Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent before restarting: ${reason}`)),
+    ),
+  )
   const shortcut = yield* Shortcut
   // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed on.
   const dictation = Context.get(
@@ -109,11 +135,12 @@ export const serve = Effect.gen(function* () {
   /**
    * Off, whatever hasn't started yet is dropped, from a dictation to what was
    * waiting to be said. The keys go before the dictations, so none starts in
-   * between, and all of it before the daemon waits on anything.
+   * between, and all of it before the daemon waits on anything. On, what a
+   * restart found while it was off is said.
    */
   const turn = (on: boolean) =>
     on
-      ? Effect.zipRight(daemon.turn(true), shortcut.toggle(true))
+      ? Effect.all([daemon.turn(true), shortcut.toggle(true), assistant.back], { discard: true })
       : Effect.all([shortcut.toggle(false), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
@@ -172,7 +199,7 @@ export const serve = Effect.gen(function* () {
       Relays,
     ).pipe(
       Layer.provideMerge(
-        Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer, T3Live.layer),
+        Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer, T3Live.layer, Ledger.layer),
       ),
       Layer.provideMerge(Layer.mergeAll(ClaudeCode.WaitingLive, Store.layer)),
     ),

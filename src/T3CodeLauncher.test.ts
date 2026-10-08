@@ -215,6 +215,17 @@ describe("T3CodeLauncher's start", () => {
     ])
   })
 
+  test("launches under the ids yapd wrote down before asking, when it has them", async () => {
+    const calls: Array<{ method: string; payload: unknown }> = []
+    const ids = { thread: "thread-u1", message: "yapd:u1:0:m", command: "yapd:u1:0" }
+    await start(reached(thread(null, "starting"), [], calls), { ...request, worktree: false, ids })
+    expect(calls.find(({ method }) => method === "orchestration.launchThread")?.payload).toMatchObject({
+      commandId: "yapd:u1:0",
+      threadId: "thread-u1",
+      initialMessage: { messageId: "yapd:u1:0:m" },
+    })
+  })
+
   test("doesn't wait on a checkout that's ready at once", async () => {
     const started = Either.getOrThrow(await start(reached(thread(null, "starting"), []), { ...request, worktree: false }))
     expect(started).toMatchObject({ directory: "/code/free-sound", branch: "main", worktree: false })

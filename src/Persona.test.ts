@@ -15,6 +15,9 @@ const jarvis: Persona.Lines = {
   checking: "One moment, sir.",
   leaving: "I'll leave that there, sir.",
   cantTell: "I couldn't make out which one you meant, sir.",
+  stopped: "Stopped, sir.",
+  again: "Shall I send it again?",
+  carrying: "Carrying on, sir.",
   address: "sir",
 }
 

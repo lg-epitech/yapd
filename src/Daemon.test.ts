@@ -15,7 +15,9 @@ import { Responder } from "./Responder.ts"
 import type { Handle } from "./Server.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad, VadError } from "./Vad.ts"
+import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
+import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import * as T3Live from "./T3Live.ts"
@@ -283,14 +285,16 @@ const assisted = (
       sequence: 1,
       synced: true,
     }
+    const store = yield* Store.make(":memory:")
     const threads = yield* Threads.make({
       machine: "Rosie",
       live: { view: Effect.succeed(desk.length === 0 ? Option.none() : Option.some(view)), changes: Stream.never },
       actions: Option.none(),
       others: [],
       journal,
-      store: yield* Store.make(":memory:"),
+      store,
     })
+    const ledger = Ledger.fromStore(store)
     const drafts = yield* Drafts.make({ machines: [], rules: Effect.succeed(Option.none()), recent: Effect.succeed([]) }).pipe(
       Effect.provideService(Writer, { decide: () => Effect.never, research: () => Effect.never, prepare: Effect.void }),
     )
@@ -299,6 +303,8 @@ const assisted = (
       threads,
       journal,
       drafts,
+      hands: Hands.make({ threads, ledger }),
+      ledger,
       tell: made.tell,
       power: made.power,
       lastHeard: made.lastHeard,

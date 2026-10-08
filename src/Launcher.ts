@@ -15,6 +15,12 @@ export const Request = Schema.Struct({
   worktree: Schema.optional(Schema.Boolean),
   /** The branch a new worktree starts from. */
   baseBranch: Schema.optional(Schema.String),
+  /**
+   * The ids yapd wrote down before asking, so asking again under them starts
+   * it once. What has no ids of its own, like an agent's command line, goes
+   * without, and a machine whose yapd is older ignores them.
+   */
+  ids: Schema.optional(Schema.Struct({ thread: Schema.String, message: Schema.String, command: Schema.String })),
 })
 export type Request = typeof Request.Type
 
@@ -68,7 +74,12 @@ export const Catalog = Schema.Struct({
 export type Catalog = typeof Catalog.Type
 
 /** Nothing was started, unless the reason says otherwise. The reason is read out. */
-export class LaunchError extends Data.TaggedError("LaunchError")<{ readonly reason: string; readonly cause?: unknown }> {}
+export class LaunchError extends Data.TaggedError("LaunchError")<{
+  readonly reason: string
+  readonly cause?: unknown
+  /** It was asked for before it went wrong, so it may have started all the same. */
+  readonly sent?: boolean
+}> {}
 
 /** One way of starting agents, like T3 Code's threads. Which one is used comes from configuration, and nothing falls through to another. */
 export interface Launcher {
