@@ -21,19 +21,22 @@ import * as Threads from "../src/Threads.ts"
 // ~/.yapd/eval/, since it's the user's own work and isn't to be committed.
 //
 //   bun scripts/brain-eval.ts fixture
-//     Copies T3 Code's threads, archived ones too, to view.json, reading only,
-//     and writes phrases.json to edit if there's none: what was said, a piece
-//     of the title or project of the thread it was about ("" for none), what
-//     it should come to when that's what matters, like "start" for new work
-//     that names a thread, and, for an answer to a question yapd asked, the
-//     request it was about and a piece of each thread it offered.
+//     Copies T3 Code's threads to view.json, reading only, the ones it's
+//     working on as the daemon follows them, and writes phrases.json to edit
+//     if there's none: what was said, a piece of the title or project of the
+//     thread it was about ("" for none), what it should come to when that's
+//     what matters, like "start" for new work that names a thread, and, for an
+//     answer to a question yapd asked, the request it was about, a piece of
+//     each thread it offered, and whether it was said over the question
+//     rather than dictated.
 //   bun scripts/brain-eval.ts run [--runs 5] [--effort low,minimal]
 //     Searches the threads for each phrase as the daemon does, reading only,
 //     then asks the model about it, the runs times over, at each effort, and
-//     says whether the gate passes: the right thread every time, as its pick
-//     even when it asks, an answer taken as one, no question in at least four
-//     runs in five of each phrase, and a median under 3.6 s. Each answer goes
-//     to results-<time>.jsonl.
+//     says whether the gate passes at the first effort, the others being only
+//     to compare: the right thread every time, as its pick even when it asks,
+//     an answer to its question taken as one and settling it, no question in
+//     at least four runs in five of each phrase, and a median under 3.6 s.
+//     Each answer goes to results-<time>.jsonl.
 //   bun scripts/brain-eval.ts probe [--runs 20]
 //     Times orchestration.searchThreads, which only reads, to tell whether
 //     its hits are quick enough to add to every request.
@@ -54,11 +57,12 @@ const logged = [
   { heard: "Dazzles migration", thread: "Tezos" },
   { heard: "migrate stasos", thread: "Tezos" },
   { heard: "My grades tezos.", thread: "Tezos" },
-  { heard: "The recent one with mean migrations.", thread: "Mina SSV2", open: mina },
-  { heard: "The most recent one with Mina.", thread: "Mina SSV2", open: mina },
+  // Said over the question, then over it asked again; "Migrate Tezos." was dictated while it was open.
+  { heard: "The recent one with mean migrations.", thread: "Mina SSV2", open: mina, via: "reply" },
+  { heard: "The most recent one with Mina.", thread: "Mina SSV2", open: mina, via: "reply" },
   { heard: "Migrate Tezos.", thread: "Tezos", open: tezos },
-  { heard: "What's going on?", thread: "" },
-  { heard: "What did I miss?", thread: "" },
+  { heard: "What's going on?", thread: "", act: "answer" },
+  { heard: "What did I miss?", thread: "", act: "answer" },
   { heard: "How's the yapd review going?", thread: "yapd" },
   // 21:39: new work that names an existing thread, which is to be started, not sent to it.
   {
@@ -75,12 +79,13 @@ const Phrases = Schema.Array(
     thread: Schema.String,
     act: Schema.optional(Brain.Act),
     open: Schema.optional(Schema.Struct({ request: Schema.String, choices: Schema.Array(Schema.String) })),
+    /** Said over the question rather than dictated by the shortcut. */
+    via: Schema.optional(Schema.Literal("shortcut", "reply")),
   }),
 )
 const Shell = Schema.Struct({
   projects: Schema.Array(Schema.Unknown),
   threads: Schema.Array(Schema.Unknown),
-  archivedThreads: Schema.optionalWith(Schema.Array(Schema.Unknown), { default: () => [] }),
 })
 
 /** yapd's own settings, as the daemon reads them from its .env: what's given here first, then the environment. */
@@ -111,20 +116,18 @@ const fixture = Effect.gen(function* () {
   const shell = yield* transport.api("/api/orchestration/shell", Shell)
   yield* Effect.promise(() => mkdir(folder, { recursive: true }))
   yield* Effect.promise(() => Bun.write(viewFile, JSON.stringify({ at: Date.now(), ...shell }, null, 2)))
-  yield* Console.log(`Kept ${shell.threads.length} threads and ${shell.archivedThreads.length} archived ones in ${viewFile}.`)
+  yield* Console.log(`Kept ${shell.threads.length} threads in ${viewFile}.`)
   if (!(yield* Effect.promise(() => Bun.file(phrasesFile).exists()))) {
     yield* Effect.promise(() => Bun.write(phrasesFile, JSON.stringify(logged, null, 2)))
     yield* Console.log(`Wrote ${phrasesFile}: make each "thread" a piece of the title or project of one of your threads.`)
   }
 })
 
-/** The view as T3Live keeps it, archived threads included so phrases about them can still be asked. */
+/** The view as T3Live keeps it. */
 const viewed = Effect.gen(function* () {
   const saved = yield* Effect.promise(() => Bun.file(viewFile).json() as Promise<unknown>)
   const shell = yield* Schema.decodeUnknown(Schema.extend(Shell, Schema.Struct({ at: Schema.Number })))(saved)
-  const threads = [...shell.threads, ...shell.archivedThreads].flatMap((thread) =>
-    Option.toArray(Option.map(Schema.decodeUnknownOption(T3Live.Thread)(thread), (decoded) => ({ ...decoded, archivedAt: null }))),
-  )
+  const threads = shell.threads.flatMap((thread) => Option.toArray(Schema.decodeUnknownOption(T3Live.Thread)(thread)))
   const projects = shell.projects.flatMap((project) => Option.toArray(Schema.decodeUnknownOption(T3Live.Project)(project)))
   return {
     at: shell.at,
@@ -212,7 +215,7 @@ const run = Effect.gen(function* () {
   const writer = Bun.file(results).writer()
   yield* Console.log(`${phrases.length} phrases, ${runs} runs each, against the threads as of ${new Date(at).toLocaleString()}.`)
   let passed = true
-  for (const effort of efforts) {
+  for (const [index, effort] of efforts.entries()) {
     const provider = yield* settled({ YAPD_EFFORT: effort })
     const outcome = yield* Effect.scoped(
       Effect.gen(function* () {
@@ -227,14 +230,16 @@ const run = Effect.gen(function* () {
           listed !== undefined && `${listed.thread.title} ${listed.project} ${listed.called}`.toLowerCase().includes(piece.toLowerCase())
         for (const phrase of phrases) {
           let asked = 0
+          // Over the question, it's taken as a reply is: about the question, on a smaller desk, with no search.
+          const reply = phrase.via === "reply" && phrase.open !== undefined
           for (let run = 0; run < runs; run++) {
             const now = Date.now()
-            const shortlist = (pending: ReadonlyArray<Threads.Ref>) =>
-              Threads.shortlist({ machine, view, focus: Option.none(), pending, found: found.get(phrase.heard) ?? [], most: 30, started, said: new Map(), now })
+            const shortlist = (pending: ReadonlyArray<Threads.Ref>, most: number) =>
+              Threads.shortlist({ machine, view, focus: Option.none(), pending, found: reply ? [] : (found.get(phrase.heard) ?? []), most, started, said: new Map(), now })
             // The threads it offered, first in the order it offered them, as when it asked.
-            const first = shortlist([])
-            const offered = (phrase.open?.choices ?? []).flatMap((piece) => Option.toArray(Option.fromNullable(first.find((listed) => fits(listed, piece)))))
-            const desk: Threads.Desk = { threads: shortlist(offered.map(({ ref }) => ref)), away }
+            const every = shortlist([], view.threads.size)
+            const offered = (phrase.open?.choices ?? []).flatMap((piece) => Option.toArray(Option.fromNullable(every.find((listed) => fits(listed, piece)))))
+            const desk: Threads.Desk = { threads: shortlist(offered.map(({ ref }) => ref), reply ? 12 : 30), away }
             const choices = desk.threads.slice(0, offered.length)
             const open = Option.map(Option.fromNullable(phrase.open), ({ request }): Assistant.Open => ({
               id: "eval-open",
@@ -250,10 +255,11 @@ const run = Effect.gen(function* () {
               material: Option.none(),
               resend: Option.none(),
             }))
+            const question = Option.match(open, { onNone: () => "", onSome: ({ asked }) => asked })
             const situation: Brain.Situation = {
-              utterance: { id: `eval-${run}`, heard: phrase.heard, via: "shortcut", at: now, voiced: 3, turns: 0 },
-              subject: { _tag: "Nothing" },
-              lines: [],
+              utterance: { id: `eval-${run}`, heard: phrase.heard, via: reply ? "reply" : "shortcut", at: now, voiced: 3, turns: 0 },
+              subject: reply ? { _tag: "Answer", said: question, about: Option.none() } : { _tag: "Nothing" },
+              lines: reply ? [{ speaker: "yapd", text: question }] : [],
               open,
               desk,
               lately: [],
@@ -279,8 +285,8 @@ const run = Effect.gen(function* () {
             const checked = Brain.check(decision, situation, Persona.plain)
             // Its likeliest thread counts even when it asks, which is held to the four in five instead.
             const asking = checked._tag === "Ask" || decision.act === "clarify"
-            // An answer to the question has to be taken as one, never as new work.
-            const answering = Option.isNone(open) || (decision.pending === "answers" && decision.act !== "start")
+            // An answer to the question has to be taken as one, never as new work, and settle it: yapd leaves a request it would have to ask about twice.
+            const answering = Option.isNone(open) || (decision.pending === "answers" && decision.act !== "start" && !asking)
             const right =
               answering &&
               (phrase.act !== undefined
@@ -301,12 +307,13 @@ const run = Effect.gen(function* () {
     ).pipe(Effect.withConfigProvider(provider))
     const median = percentile(outcome.times, 0.5)
     const gate = outcome.right === outcome.total && outcome.quiet.every(({ asked }) => asked * 5 <= runs) && median <= 3600
-    passed &&= gate
+    // Only the first effort is gated: the others are there to compare it with.
+    if (index === 0) passed = gate
     yield* Console.log(
       [
         `Effort ${effort}: the right thread ${outcome.right}/${outcome.total}, median ${seconds(median)}, p90 ${seconds(percentile(outcome.times, 0.9))}.`,
         ...outcome.quiet.filter(({ asked }) => asked * 5 > runs).map(({ heard, asked }) => `  Asked or failed ${asked}/${runs} times: ${heard}`),
-        `  The gate ${gate ? "passes" : "doesn't pass"}.`,
+        `  The gate ${gate ? "passes" : "doesn't pass"}${index === 0 ? "" : ", which is only for comparison"}.`,
       ].join("\n"),
     )
   }
