@@ -109,6 +109,27 @@ describe("remembering", () => {
       }),
     ))
 
+  test("forgets a render that failed at once, even when it made room for it", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        let calls = 0
+        const voice = yield* remembering(
+          {
+            render: (text, path) =>
+              text === "Hello." && ++calls === 1
+                ? Effect.fail(new ProcessError({ command: "say", code: 1, stderr: "" }))
+                : Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid),
+          },
+          dir,
+          1,
+        )
+        yield* voice.render("On it.", `${dir}/a.wav`)
+        expect((yield* Effect.either(voice.render("Hello.", `${dir}/b.wav`)))._tag).toBe("Left")
+        yield* voice.render("Hello.", `${dir}/c.wav`)
+        expect(calls).toBe(2)
+      }),
+    ))
+
   test("tries again after a render that failed", () =>
     run((dir) =>
       Effect.gen(function* () {

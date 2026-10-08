@@ -350,6 +350,8 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
         if (entry === undefined) {
           const made = yield* Deferred.make<string, ProcessError>()
           entry = made
+          // Kept before it renders, so a render that fails at once finds it to forget.
+          kept.set(text, made)
           const file = `${dir}/${crypto.randomUUID()}${extension}`
           yield* voice.render(text, file).pipe(
             Effect.as(file),
@@ -357,11 +359,12 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
             Effect.intoDeferred(made),
             Effect.forkIn(scope),
           )
-          const oldest = kept.size >= most ? kept.entries().next().value : undefined
-          if (oldest !== undefined) yield* forget(...oldest)
-        } else kept.delete(text)
-        // Last, as the most recently used.
-        kept.set(text, entry)
+          while (kept.size > most) yield* forget(...kept.entries().next().value!)
+        } else {
+          // Last, as the most recently used.
+          kept.delete(text)
+          kept.set(text, entry)
+        }
         const file = yield* Deferred.await(entry)
         yield* Effect.tryPromise(() => Bun.write(path, Bun.file(file))).pipe(
           Effect.catchAll(() => voice.render(text, path)),
