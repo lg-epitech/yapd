@@ -1,4 +1,4 @@
-import { Deferred, Duration, Effect, Either, Option, Redacted, Schedule, Schema } from "effect"
+import { Deferred, Duration, Effect, Either, Fiber, Option, Redacted, Schedule, Schema } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import * as Home from "./Home.ts"
@@ -231,16 +231,17 @@ export const forward = (
      * there and its process isn't known, keeping its socket for SSH to find it
      * by again.
      */
-    const close = Effect.gen(function* () {
+    const teardown = Effect.gen(function* () {
       // Whatever comes of it, it isn't used again: what it forwards is in doubt.
       open = false
+      // Its own, since what's known of the connection can be forgotten meanwhile, while this one may still be there.
+      const leaving = pid
       const exited = yield* Effect.either(control("-O", "exit"))
       if (Either.isLeft(exited) && !missing(exited.left)) {
-        if (pid === undefined) return yield* exited.left
-        yield* end(pid)
-      } else if (Either.isRight(exited) && pid !== undefined) {
+        if (leaving === undefined) return yield* exited.left
+        yield* end(leaving)
+      } else if (Either.isRight(exited) && leaving !== undefined) {
         // SSH answers before it's gone, and removes the socket as it goes, which would take the next connection's.
-        const leaving = pid
         const gone = yield* alive(leaving).pipe(
           Effect.repeat({ until: (still) => !still, schedule: Schedule.spaced("50 millis") }),
           Effect.timeoutOption("2 seconds"),
@@ -251,6 +252,22 @@ export const forward = (
       forget()
       yield* Effect.ignore(Effect.tryPromise(() => rm(socket, { force: true })))
     })
+
+    /**
+     * The close under way. It runs to its end on its own, whoever stops
+     * waiting on it, so the connection it retires is never lost track of while
+     * it may still be there, and the next connection waits for it. Each of its
+     * steps is bounded, so that's never long.
+     */
+    let closing: Fiber.RuntimeFiber<void, Server.Trouble> | undefined
+
+    const close = Effect.gen(function* () {
+      if (closing === undefined || Option.isSome(yield* Fiber.poll(closing))) closing = yield* Effect.forkDaemon(teardown)
+      return yield* Fiber.join(closing)
+    })
+
+    /** Waits for a close under way, however it ends, before anything is opened in its place. */
+    const closed = Effect.suspend(() => (closing === undefined ? Effect.void : Effect.ignore(Fiber.join(closing))))
 
     /**
      * Fails, with the reason to say, once SSH says the connection is gone, or
@@ -271,6 +288,7 @@ export const forward = (
      * finishes.
      */
     const connect = Effect.gen(function* () {
+      yield* closed
       // When SSH can't say whether one is there, it's asked again on the next try, rather than one opened beside it.
       if ((yield* check) === "open") yield* close
       forget()

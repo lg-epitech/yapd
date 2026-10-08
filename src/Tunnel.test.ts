@@ -123,6 +123,8 @@ const machine = (
     kill: (pid: number) =>
       Effect.sync(() => {
         killed.push(pid)
+        // Killed outright, SSH leaves its socket's path behind rather than take another's.
+        lingering.delete(pid)
         end(pid)
       }),
     calls,
@@ -274,6 +276,36 @@ describe("Tunnel", () => {
         expect((yield* Fiber.join(refreshing)).server.origin).toBe("http://127.0.0.1:50002")
         // Still reachable through the new one's socket, and only its forward listens.
         expect(yield* tunnel.master).toEqual(Option.some(`${folder}/ssh-rig.sock`))
+        expect(rig.listening()).toEqual(["127.0.0.1:50002:127.0.0.1:3775"])
+        expect((yield* tunnel.refresh).server.origin).toBe("http://127.0.0.1:50002")
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("never opens a connection beside one still going, even when what asked for it to close stopped waiting", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine()
+        const tunnel = yield* open(rig)
+        yield* tunnel.locate
+        // Just before the loop next looks: T3 Code there moved, the connection it had takes a while to go, and the
+        // refresh is given up on while it does.
+        yield* TestClock.adjust("4900 millis")
+        yield* flush
+        rig.linger(3000)
+        const moved = JSON.stringify({ origin: "http://127.0.0.1:3775", token: "token-2" })
+        rig.answers.push(moved, moved, moved, moved)
+        const refreshing = yield* Effect.fork(tunnel.refresh)
+        yield* flush
+        yield* TestClock.adjust("50 millis")
+        yield* flush
+        yield* Fiber.interrupt(refreshing)
+        // The loop finds the connection's not to be used and connects again, but only once the old one is gone.
+        for (let tick = 0; tick < 90; tick++) {
+          yield* TestClock.adjust("100 millis")
+          yield* flush
+        }
+        expect(rig.tries).toHaveLength(2)
+        expect(rig.killed).toEqual([101])
         expect(rig.listening()).toEqual(["127.0.0.1:50002:127.0.0.1:3775"])
         expect((yield* tunnel.refresh).server.origin).toBe("http://127.0.0.1:50002")
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
