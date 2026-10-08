@@ -546,31 +546,43 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
 /**
  * Something only meant to be read, a link, a path, a branch, an id, an
  * address or a hash, and what's said for it, so the sentence still holds. A
- * branch is told from "and/or" by the digit or dash every generated one has.
+ * branch is told from pairs like "and/or", "SSv1/SSv2" or "x86/arm64" by
+ * being called one, by a prefix branches have, or by the dash every
+ * generated one has after its slash.
  */
 const unreadable: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bhttps?:\/\/\S*[^\s.,;:!?)]/gi, "a link"],
   [/\b[\w-]+(?:\.[\w-]+)+\/\S*[^\s.,;:!?)]/gi, "a link"],
   [/(?<![\w.])(?:~|\.{1,2})?(?:\/[\w.@-]+){2,}\/?/g, "a file"],
   [/\b[\w.-]+(?:\/[\w.@-]+)+\.[a-z]\w*\b/gi, "a file"],
-  [/\b(?:the\s+)?[a-z][\w.]*\/(?=[\w./-]*[\d-])[\w./-]*\w(?:\s+branch\b)?/gi, "a branch"],
+  [/\b(?:the\s+)?[\w.-]+\/[\w./-]*\w\s+branch\b/gi, "a branch"],
+  [/\b(?:the\s+)?(?:t3|feat|feature|fix|bugfix|hotfix|release|origin|upstream|chore|claude|codex|cursor|dependabot|renovate)\/[\w./-]*\w/gi, "a branch"],
+  [/\b(?:the\s+)?[a-z][\w.-]{2,}\/(?=[\w.]*-)[\w./-]{2,}\w/gi, "a branch"],
   [/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi, ""],
   [/\b(?:the\s+)?(?:wallet\s+|address\s+)?0x[\da-f]{6,}\b/gi, "an address"],
   [/\b(?:the\s+)?(?:commit\s+)?(?=[\da-f]*\d)(?=[\da-f]*[a-f])[\da-f]{7,}\b/gi, "a commit"],
 ]
 
+/** What names a coding agent: an SSH, browser or tmux session is what it says, never the work. */
+const coding = "(?:claude code|t3 code|claude|codex|coding|ai|opencode) "
+
+/** The work put down to an agent or a session, and what's said instead. */
+const agents: ReadonlyArray<readonly [RegExp, string]> = [
+  [new RegExp(`\\b(the|that|this|its|your|my|our) (?:${coding})?(agent|session)\\b`, "gi"), "$1 work"],
+  [new RegExp(`\\b(an?|one) (?:${coding})?(agent|session)\\b`, "gi"), "a thread"],
+  [new RegExp(`\\b(the|these|those|its|your|my|our|their|all|both|some|other|several|many|two|three|four|five|\\d+) (?:${coding})?(agents|sessions)\\b`, "gi"), "$1 threads"],
+  [new RegExp(`\\b${coding}(agents|sessions)\\b`, "gi"), "threads"],
+]
+
 /**
- * What the model wrote, made fit to say: a handle that slipped in becomes the
- * thread's name, what can't be read aloud is said in a word, and the work is
- * never put down to an agent or a session.
+ * What the model wrote, made fit to say: what can't be read aloud is said in
+ * a word, the work is never put down to an agent or a session, and a handle
+ * that slipped in becomes the thread's name, which is left as it is.
  */
 export const speakable = (text: string, desk: Threads.Desk) =>
-  unreadable
+  [...unreadable, ...agents]
     .reduce((said, [pattern, instead]) => said.replace(pattern, instead), text)
     .replace(/(?<![\w/])t\d+(?![\w/])/g, (handle) => desk.threads.find((listed) => listed.handle === handle)?.called ?? "that one")
-    .replace(/\b(the|that|this|its|your|my|our) (?:[\w-]+ ){0,2}(agent|session)\b/gi, "$1 work")
-    .replace(/\b(an?|one) (?:[\w-]+ ){0,2}(agent|session)\b/gi, "a thread")
-    .replace(/\b(?:(?:claude code|coding|codex|claude) )?(agents|sessions)\b/gi, "threads")
     .replace(/\s+([,.;:!?])/g, "$1")
     .replace(/\(\s*\)/g, "")
     .replace(/\s{2,}/g, " ")

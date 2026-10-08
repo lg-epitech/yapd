@@ -211,7 +211,7 @@ describe("Brain", () => {
       expect(line).not.toMatch(/\b(?=[\da-f]*\d)(?=[\da-f]*[a-f])[\da-f]{7,}\b/)
       expect(line).not.toMatch(/(^|\s)~?\/[\w.-]+\//)
       expect(line).not.toMatch(/https?:/)
-      expect(line).not.toMatch(/\bthe (\w+ ){0,2}(agent|session)\b/i)
+      expect(line).not.toMatch(/\bthe ((claude code|t3 code|claude|codex|coding|ai|opencode) )?(agent|session)s?\b/i)
       expect(line).not.toMatch(/0x[\da-f]{6,}/i)
       expect(line).not.toMatch(/\w\.(ts|js|json|md)\b/)
     }
@@ -226,6 +226,13 @@ describe("Brain", () => {
     expect(everything).toContain("Claude is at 60 percent of its five-hour window")
     expect(everything).toContain("Fable's weekly window is at 40 percent.")
     expect(everything).not.toMatch(/session/i)
+    // Pairs that aren't branches, and sessions that aren't the work, are said as they are.
+    for (const line of [
+      "The tunnel fix now waits for the old SSH session to exit before opening the next one.",
+      "It splits the SSv1/SSv2 connectors by source, and the x86/arm64 builds pass.",
+    ]) {
+      expect(Brain.speakable(line, desk())).toBe(line)
+    }
     expect(said[0]).toBe("Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?")
     expect(said[1]).toBe("Which one, sir: Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?")
   })
