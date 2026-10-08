@@ -1,4 +1,4 @@
-import { Data, type Duration, Effect, Either, Redacted, Schema } from "effect"
+import { Data, Deferred, type Duration, Effect, Either, Fiber, Redacted, Schema } from "effect"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -32,41 +32,60 @@ export const locate = Effect.tryPromise(() => Bun.file(runtimeState).text()).pip
 
 const misunderstood = (cause: unknown) => new Trouble({ reason: "T3 Code answered in a way I don't understand.", cause })
 
+/**
+ * Gives up on a request once `patience` is up, by a clock of its own rather
+ * than by cutting the request short: yapd waits on some where nothing can be
+ * cut short, like a step of its own once it's written, and a time limit that
+ * cuts its request short would wait there for good. Given up on, or stopped
+ * itself, it stops the request on the way out, as ever.
+ */
+const patiently = <A, E, E2>(request: Effect.Effect<A, E>, patience: Duration.DurationInput, late: () => E2): Effect.Effect<A, E | E2> =>
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const answer = yield* Deferred.make<A, E | E2>()
+      // Each on its own, out of reach of whatever can't be cut short around them, so the first to end is what comes of it.
+      const asking = yield* Effect.forkDaemon(Effect.interruptible(Deferred.complete(answer, request)))
+      const waiting = yield* Effect.forkDaemon(Effect.interruptible(Effect.zipRight(Effect.sleep(patience), Deferred.failSync(answer, late))))
+      return yield* restore(Deferred.await(answer)).pipe(Effect.ensuring(Effect.zipRight(Fiber.interrupt(waiting), Fiber.interrupt(asking))))
+    }),
+  )
+
 export const api =
   (server: Server, token: Redacted.Redacted) =>
   <A, I>(path: string, schema: Schema.Schema<A, I>, init: RequestInit = {}) =>
-    Effect.tryPromise({
-      try: async (signal) => {
-        let response: Response
-        try {
-          response = await fetch(`${server.origin}${path}`, {
-            ...init,
-            headers: {
-              authorization: `Bearer ${Redacted.value(token)}`,
-              "content-type": "application/json",
-              "x-t3-orchestration-protocol": protocol,
-            },
-            signal,
-          })
-        } catch (cause) {
-          throw new Trouble({ reason: "T3 Code isn't answering.", cause })
-        }
-        if (!response.ok) {
-          await response.body?.cancel().catch(() => {})
-          throw response.status === 401 || response.status === 403
-            ? new Trouble({ reason: "T3 Code turned down my token. It may have expired." })
-            : new Trouble({ reason: "T3 Code wouldn't take it.", cause: `${response.status} from ${path}` })
-        }
-        try {
-          return await response.json()
-        } catch (cause) {
-          throw misunderstood(cause)
-        }
-      },
-      catch: (cause) => cause instanceof Trouble ? cause : misunderstood(cause),
-    }).pipe(
-      Effect.flatMap((body) => Effect.mapError(Schema.decodeUnknown(schema)(body), misunderstood)),
-      Effect.timeoutFail({ duration: "5 seconds", onTimeout: () => new Trouble({ reason: "T3 Code isn't answering." }) }),
+    patiently(
+      Effect.tryPromise({
+        try: async (signal) => {
+          let response: Response
+          try {
+            response = await fetch(`${server.origin}${path}`, {
+              ...init,
+              headers: {
+                authorization: `Bearer ${Redacted.value(token)}`,
+                "content-type": "application/json",
+                "x-t3-orchestration-protocol": protocol,
+              },
+              signal,
+            })
+          } catch (cause) {
+            throw new Trouble({ reason: "T3 Code isn't answering.", cause })
+          }
+          if (!response.ok) {
+            await response.body?.cancel().catch(() => {})
+            throw response.status === 401 || response.status === 403
+              ? new Trouble({ reason: "T3 Code turned down my token. It may have expired." })
+              : new Trouble({ reason: "T3 Code wouldn't take it.", cause: `${response.status} from ${path}` })
+          }
+          try {
+            return await response.json()
+          } catch (cause) {
+            throw misunderstood(cause)
+          }
+        },
+        catch: (cause) => cause instanceof Trouble ? cause : misunderstood(cause),
+      }).pipe(Effect.flatMap((body) => Effect.mapError(Schema.decodeUnknown(schema)(body), misunderstood))),
+      "5 seconds",
+      () => new Trouble({ reason: "T3 Code isn't answering." }),
     )
 
 const Failure = Schema.Struct({ _tag: Schema.String, message: Schema.String })
@@ -182,7 +201,7 @@ const asked = <A, I>(
         socket.close()
       }),
   ).pipe(
-    Effect.timeoutFail({ duration: patience, onTimeout: () => new Trouble({ reason: "T3 Code is taking too long." }) }),
+    (request) => patiently(request, patience, () => new Trouble({ reason: "T3 Code is taking too long." })),
     Effect.flatMap((value) => Effect.mapError(Schema.decodeUnknown(schema)(value), misunderstood)),
   )
 

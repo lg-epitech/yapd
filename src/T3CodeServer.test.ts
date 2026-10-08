@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test"
-import { Effect, Fiber, Redacted, Schema, TestClock, TestContext } from "effect"
+import { Effect, Fiber, Option, Redacted, Schema, TestClock, TestContext } from "effect"
 import * as Server from "./T3CodeServer.ts"
 
 const api = Server.api({ origin: "http://t3.invalid" }, Redacted.make("test-token"))
@@ -20,6 +20,33 @@ describe("T3CodeServer HTTP", () => {
         const pending = yield* Effect.fork(api("/api/test", Schema.Unknown))
         while (!reading) yield* Effect.promise(() => Bun.sleep(5))
         yield* TestClock.adjust("5 seconds")
+        expect(yield* Effect.flip(Fiber.join(pending))).toMatchObject({ _tag: "Trouble", reason: "T3 Code isn't answering." })
+        expect(signal?.aborted).toBe(true)
+      }).pipe(Effect.provide(TestContext.TestContext)))
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  test("gives up after five seconds even where nothing can cut it short, like a step once it's written, and aborts the request", async () => {
+    let reading = false
+    let signal: AbortSignal | undefined
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (_input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]) => {
+      signal = init?.signal ?? undefined
+      return new Response(new ReadableStream({
+        start: (controller) => signal?.addEventListener("abort", () => controller.error(signal?.reason), { once: true }),
+        pull: () => { reading = true },
+      }))
+    }, { preconnect: globalThis.fetch.preconnect }))
+    try {
+      await Effect.runPromise(Effect.gen(function* () {
+        // On its own, so a request that never ends can't hold up the test's own end.
+        const pending = yield* Effect.forkDaemon(Effect.uninterruptible(api("/api/test", Schema.Unknown)))
+        while (!reading) yield* Effect.promise(() => Bun.sleep(5))
+        yield* TestClock.adjust("5 seconds")
+        // A moment for it to end, rather than waiting on it for good.
+        for (let tries = 0; tries < 100 && Option.isNone(yield* Fiber.poll(pending)); tries++) yield* Effect.promise(() => Bun.sleep(5))
+        expect(Option.isSome(yield* Fiber.poll(pending))).toBe(true)
         expect(yield* Effect.flip(Fiber.join(pending))).toMatchObject({ _tag: "Trouble", reason: "T3 Code isn't answering." })
         expect(signal?.aborted).toBe(true)
       }).pipe(Effect.provide(TestContext.TestContext)))
@@ -85,5 +112,20 @@ describe("T3CodeServer WebSocket", () => {
     const unsent = await Effect.runPromise(Effect.flip(call("orchestration.dispatchCommand", {}, Schema.Unknown, "2 seconds")))
     expect(unsent).toMatchObject({ _tag: "Trouble", reason: "T3 Code isn't answering." })
     expect(unsent._tag === "Trouble" && unsent.sent === true).toBe(false)
+  })
+
+  test("a request T3 Code took and never answered is given up on in its time even where nothing can cut it short, like a step once it's written", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request, server) => (server.upgrade(request) ? undefined : new Response("no", { status: 400 })),
+      websocket: { message: () => {} },
+    })
+    const call = Server.call({ origin: `http://127.0.0.1:${server.port}` }, Redacted.make("test-token"))
+    try {
+      const late = Effect.runPromise(Effect.flip(Effect.uninterruptible(call("orchestration.dispatchCommand", {}, Schema.Unknown, "200 millis"))))
+      expect(await Promise.race([late, Bun.sleep(3000).then(() => "still waiting")])).toMatchObject({ _tag: "Trouble", reason: "T3 Code is taking too long.", sent: true })
+    } finally {
+      await server.stop(true)
+    }
   })
 })
