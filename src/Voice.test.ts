@@ -192,6 +192,25 @@ describe("speaking", () => {
         }
       }),
     ))
+
+  test("keeps the whole processed as its first part is, or not at all, when ffmpeg fails on one of them", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const effect = yield* defaultEffect
+        const broken = new ProcessError({ command: "ffmpeg", code: 1, stderr: "Broken" })
+        const failing = (on: "first" | "whole") => (raw: string, path: string, samples?: number) =>
+          (samples === undefined ? "whole" : "first") === on ? Effect.fail(broken) : ffmpeg(effect, rate)(raw, path, samples)
+        // With the effect on the first part, the whole can't carry on from it without.
+        const processed = yield* render(dir, effect, failing("whole"))
+        expect(processed.told).toHaveLength(1)
+        expect(yield* Effect.flip(processed.exit)).toBe(broken)
+        // With the first part as it is, so is the whole.
+        const plain = yield* render(dir, effect, failing("first"))
+        expect(Exit.isSuccess(plain.exit)).toBe(true)
+        expect(plain.told).toHaveLength(1)
+        expect(carriesOn(plain.told[0]!, plain.path)).toBe(true)
+      }),
+    ))
 })
 
 describe("early", () => {

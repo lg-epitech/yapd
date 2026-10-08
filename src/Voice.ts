@@ -344,23 +344,33 @@ export const keepsItsStart = (effect: string) =>
 export const speaking = <E>(speaker: Speaker<E>, effect: string) => {
   const { rate, fits } = speaker
 
-  /** Applies the effect to `raw`, keeping only its first `samples` when given. */
-  const applyEffect = (raw: string, path: string, samples?: number) =>
-    speaker.filter(raw, path, samples).pipe(
-      Effect.catchAll((error) =>
-        Effect.sync(() => speaker.warn(`Could not apply the effect, playing it unprocessed: ${error.stderr}`)).pipe(
-          Effect.zipRight(Effect.promise(() => rename(raw, path))),
-        ),
-      ),
-      Effect.ensuring(Effect.promise(() => rm(raw, { force: true }))),
-    )
-
-  /** Writes the audio with the effect. A first part keeps exactly its length, so the whole goes on from where it stops. */
-  const save = (audio: Float32Array, path: string, exact = false) =>
+  /**
+   * Writes the audio with the effect, unless it's "none", and says whether it
+   * has it. Should ffmpeg fail, it's written as it is. A first part keeps
+   * exactly its length, so the whole goes on from where it stops, and the whole
+   * keeps to how that part was written, `like`: as it is, or else failing
+   * rather than change how it sounds midway.
+   */
+  const save = (audio: Float32Array, path: string, { exact = false, like }: { readonly exact?: boolean; readonly like?: boolean } = {}) =>
     Effect.gen(function* () {
-      const raw = effect === "none" ? path : `${path}.raw.wav`
+      if (effect === "none" || like === false) {
+        yield* speaker.write(audio, path)
+        return false
+      }
+      const raw = `${path}.raw.wav`
       yield* speaker.write(audio, raw)
-      if (raw !== path) yield* applyEffect(raw, path, exact ? audio.length : undefined)
+      return yield* speaker.filter(raw, path, exact ? audio.length : undefined).pipe(
+        Effect.as(true),
+        Effect.catchAll((error) =>
+          like === true
+            ? Effect.fail(error)
+            : Effect.sync(() => speaker.warn(`Could not apply the effect, playing it unprocessed: ${error.stderr}`)).pipe(
+                Effect.zipRight(Effect.promise(() => rename(raw, path))),
+                Effect.as(false),
+              ),
+        ),
+        Effect.ensuring(Effect.promise(() => rm(raw, { force: true }))),
+      )
     })
 
   const speakAll = (parts: ReadonlyArray<string>) => Effect.forEach(parts, speaker.speak)
@@ -368,13 +378,16 @@ export const speaking = <E>(speaker: Speaker<E>, effect: string) => {
   return ({ text, path, first }: Extract<Request, { type: "render" }>, part: (path: string) => void, cancelled: () => boolean) =>
     Effect.gen(function* () {
       const opened = first === undefined || !keepsItsStart(effect) ? undefined : yield* opening(text, fits)
-      if (first === undefined || opened === undefined) return yield* save(join(yield* speakAll(yield* split(text, fits)), rate), path)
+      if (first === undefined || opened === undefined) {
+        yield* save(join(yield* speakAll(yield* split(text, fits)), rate), path)
+        return
+      }
       const lead = yield* speaker.speak(opened.first)
-      yield* save(head(lead, rate), first, true)
+      const processed = yield* save(head(lead, rate), first, { exact: true })
       part(first)
       // Given up on while its first part rendered, so the rest isn't worth the wait.
       if (cancelled()) return
-      yield* save(join([lead, ...(yield* speakAll(yield* split(opened.rest, fits)))], rate), path)
+      yield* save(join([lead, ...(yield* speakAll(yield* split(opened.rest, fits)))], rate), path, { like: processed })
     })
 }
 
