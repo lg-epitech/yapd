@@ -119,7 +119,7 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly prepare: Effect.Effect<void>
     /** A dictation came to nothing, like one cancelled or with no words in it: the open question is waited on again. */
     readonly nothing: Effect.Effect<void>
-    /** Something was said over an update, which takes the place of whatever yapd asked before. */
+    /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
     readonly replied: Effect.Effect<void>
     readonly open: Effect.Effect<Option.Option<Open>>
     /** yapd was turned off: the open question is closed, and what was being written up stops. */
@@ -204,10 +204,11 @@ export const make = (options: {
 
     /**
      * The open question, how many times it's been asked, its asking again
-     * later, and whether something being said now may answer it, while which
-     * it's neither said nor asked again.
+     * later, whether something being said now may answer it, while which it's
+     * neither said nor asked again, and whether he's heard it yet: until he
+     * has, nothing he says can be about it.
      */
-    let asking: { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: boolean } | undefined
+    let asking: { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: boolean; said: boolean } | undefined
     /** Changes whenever the open question does, so what was worked out against another can tell. */
     let version = 0
     /** What yapd said last of its own accord, which "it" may mean, and when it started saying it. */
@@ -295,7 +296,8 @@ export const make = (options: {
     const situate = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        const open = current(now)
+        // One he hasn't heard yet can't be what he's answering.
+        const open = Option.filter(current(now), () => asking?.said === true)
         const focus =
           about._tag === "Thread" ? Option.some(about.ref) : about._tag === "Answer" ? about.about : Option.none<Threads.Ref>()
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
@@ -398,7 +400,7 @@ export const make = (options: {
         if (asking !== undefined) yield* close(asking.open, "replaced")
         const at = yield* Clock.currentTimeMillis
         version++
-        asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: false }
+        asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: false, said: false }
         yield* Effect.logInfo(`Asked: ${open.asked}`)
         return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: Option.none() }, kind: "question" } satisfies Outcome
       })
@@ -744,6 +746,13 @@ export const make = (options: {
         if (asking !== undefined && Option.isNone(current(now))) yield* close(asking.open, "dropped: unanswered")
         const open = asking?.open
         if (open === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+        // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it.
+        if (asking?.said === false) {
+          if (decision.act === "resume") return quiet(decided.subject)
+          yield* close(open, "replaced", utterance.id)
+          yield* deliver(reply(Brain.left(open, said), decided.subject), utterance)
+          return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+        }
         // He didn't catch the question, so it's asked again in other words, now rather than later.
         if (decision.act === "again" && decision.pending === "answers") return yield* reask(said)
         const answers = decision.pending === "answers" && decision.act !== "resume"
@@ -835,6 +844,7 @@ export const make = (options: {
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
               Effect.sync(() => {
                 answered = { subject, at: now }
+                if (open !== undefined && asking?.open.id === open.id) asking.said = true
               }),
             ),
             ...(open === undefined
@@ -936,7 +946,8 @@ export const make = (options: {
         yield* Effect.forkIn(threads.refreshUsage, scope)
       }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
       nothing: Effect.zipRight(release, options.arrived),
-      replied: Effect.suspend(() => (asking === undefined ? Effect.void : close(asking.open, "replaced"))),
+      // Not one he hasn't heard yet, which what he said can't have been about.
+      replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),
       drop: Effect.gen(function* () {
         if (asking !== undefined) yield* close(asking.open, "dropped: off")

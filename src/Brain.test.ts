@@ -160,6 +160,8 @@ describe("Brain", () => {
       Brain.reworded(project, [], lines),
       Brain.dropped({ kind: "which", about: Brain.choices(candidates) }, lines),
       Brain.dropped(project, lines),
+      Brain.left({ kind: "which", about: Brain.choices(candidates) }, lines),
+      Brain.left(project, lines),
       Brain.notYet(lines),
       Brain.nothingSaid(lines),
       Brain.needing(desk(), lines, now),

@@ -219,6 +219,12 @@ export const unrepeated = (open: Pick<Assistant.Open, "kind" | "asked" | "about"
 export const dropped = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines) =>
   `I didn't hear back about ${open.kind === "which" ? `whether you meant ${open.about}` : open.about || "what you dictated"}, so I dropped it${addressed(lines)}.`
 
+/** What's said of a question he never got to hear, since he'd moved on to something else first. */
+export const left = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines) =>
+  open.kind === "which"
+    ? `I didn't ask whether you meant ${open.about}, since you'd moved on${addressed(lines)}.`
+    : `I left ${open.about || "what you dictated"}, since you'd moved on${addressed(lines)}.`
+
 /** An act the brain understood, but yapd can't do yet. */
 export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.`
 

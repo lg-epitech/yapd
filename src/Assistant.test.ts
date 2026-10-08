@@ -127,12 +127,13 @@ const handle = (situation: Brain.Situation, of: T3Live.Thread) => situation.desk
  * The assistant over that view, with a model that picks what the test says,
  * as the real one did in the log, or can't be asked when it says nothing, a
  * writer and a launcher for new work, which take as long as the test says or
- * never answer, and what it says kept in order rather than spoken.
+ * never answer, and what it says kept in order rather than spoken, each heard
+ * at once unless it waits for the test to `play` it.
  */
 const assistant = (
   model: (situation: Brain.Situation) => Brain.Decision | undefined,
   write: (material: Material) => Written = () => written({}),
-  slow: { readonly writing?: number; readonly launching?: number; readonly hanging?: boolean } = {},
+  given: { readonly writing?: number; readonly launching?: number; readonly hanging?: boolean; readonly waiting?: boolean } = {},
 ) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
@@ -169,7 +170,7 @@ const assistant = (
             catalog: Effect.succeed(catalog),
             start: (request) =>
               // Like T3 Code preparing a worktree that never gets ready, which its launcher gives up on after six minutes.
-              (slow.hanging === true ? Effect.never : Effect.sleep(`${slow.launching ?? 0} seconds`)).pipe(
+              (given.hanging === true ? Effect.never : Effect.sleep(`${given.launching ?? 0} seconds`)).pipe(
                 Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started." }) }),
                 Effect.zipRight(
                   Effect.sync(() => {
@@ -186,7 +187,7 @@ const assistant = (
       recent: Effect.succeed([]),
     }).pipe(
       Effect.provideService(Writer, {
-        decide: (material) => Effect.sleep(`${slow.writing ?? 0} seconds`).pipe(Effect.zipRight(Effect.sync(() => write(material)))),
+        decide: (material) => Effect.sleep(`${given.writing ?? 0} seconds`).pipe(Effect.zipRight(Effect.sync(() => write(material)))),
         research: () => Effect.die("no research"),
         prepare: Effect.void,
       }),
@@ -196,8 +197,8 @@ const assistant = (
       threads,
       journal,
       drafts,
-      // Said at once, as when nothing else is.
-      tell: (notice) => Effect.zipRight(Effect.sync(() => void said.push(notice)), notice.saying ?? Effect.void),
+      // Said at once, as when nothing else is being said.
+      tell: (notice) => Effect.zipRight(Effect.sync(() => void said.push(notice)), given.waiting === true ? Effect.void : (notice.saying ?? Effect.void)),
       power: Effect.sync(() => power),
       lastHeard: Effect.succeed(Option.none()),
       coming: Effect.void,
@@ -230,6 +231,8 @@ const assistant = (
       spoken: () => said.map(({ spoken }) => spoken),
       questions,
       flush,
+      /** Its turn came, after whatever was being said. */
+      play: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       /** Turned on or off from the menu bar, which drops what's under way when it's off. */
       toggle: (on: boolean) =>
@@ -569,6 +572,44 @@ describe("Assistant", () => {
     expect(result.during).toBe(1)
     expect(result.cancelled).toEqual([asked, "Which one, sir: Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?"])
     expect(result.spoken).toEqual([...result.cancelled, asked])
+    expect(result.open).toEqual(Option.none())
+  })
+
+  test("a question he hasn't heard yet is left by talk over an update, and named when something new takes its place", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, replied, play, spoken, questions, open, seen } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.includes("loader")
+              ? Brain.decision({ act: "start", text: situation.utterance.heard })
+              : { ...minaStatus(situation), pending: Option.isNone(situation.open) ? "" : "replaces" },
+          () => written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" }),
+          { waiting: true },
+        )
+        // Asked while an update is still being read, so it waits its turn...
+        yield* dictate("Fix the loader.")
+        // ...while he answers the update, which isn't about it.
+        yield* replied
+        const kept = { open: Option.isSome(yield* open), stale: yield* questions()[0]!.stale }
+        // Its turn comes, and he dictates something else instead of answering.
+        yield* play(questions()[0])
+        yield* replied
+        const heard = Option.isSome(yield* open)
+        // Asked again, then cut off by a dictation before he heard it.
+        yield* dictate("Fix the loader.")
+        yield* dictate("Can you please tell me what's the status on MiNAS SV2?")
+        return { kept, heard, shown: seen.at(-1)!.open, spoken: spoken(), open: yield* open }
+      }),
+    )
+    expect(result.kept).toEqual({ open: true, stale: false })
+    expect(result.heard).toBe(false)
+    expect(result.shown).toEqual(Option.none())
+    expect(result.spoken).toEqual([
+      "For the loader fix, is that yapd or std?",
+      "Which project should the loader fix go in, sir?",
+      "I left the loader fix, since you'd moved on, sir.",
+      "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+    ])
     expect(result.open).toEqual(Option.none())
   })
 
