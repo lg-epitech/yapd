@@ -84,6 +84,9 @@ describe("T3Actions", () => {
     expect(Option.map(T3Actions.request([approval], "r1"), (found) => (found._tag === "Approval" ? [found.command, found.whole] : []))).toEqual(
       Option.some([undefined, undefined]),
     )
+    // One too long to look through, like a tool given a whole file, is said as it starts, and taken for unread.
+    const huge = T3Actions.request([{ ...command, input: `echo '${"a".repeat(30_000)}'` }, { ...approval, nativeItemRef: { nativeId: "toolu_1" } }], "r1")
+    expect(Option.map(huge, (found) => (found._tag === "Approval" ? [found.command?.length, found.whole] : []))).toEqual(Option.some([600, undefined]))
     // A secret goes by its own item's id, which is what the thread says it waits on.
     const secret = { type: "secret_request", id: "turn-item:secret-request:t1:deploy", status: "waiting", label: "Deploy key", reason: "To deploy", secretStatus: "pending" }
     expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(

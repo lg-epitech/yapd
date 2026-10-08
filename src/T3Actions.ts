@@ -122,9 +122,10 @@ export type Request =
       /** The command it would run, the file it would change or the tool it would call, when the thread shows it, cut short to be said. */
       readonly command?: string
       /**
-       * All of what it would run, change or call, when the thread shows it,
-       * which is what tells whether it's risky: what's said of it, or T3
-       * Code's own words for it, may be cut short before the risky part.
+       * All of what it would run, change or call, when the thread shows it and
+       * it isn't too long to look through, which is what tells whether it's
+       * risky: what's said of it, or T3 Code's own words for it, may be cut
+       * short before the risky part.
        */
       readonly whole?: string
     }
@@ -187,6 +188,8 @@ export const waitingOn = (projection: Pick<(typeof Bounded.Type)["projection"], 
 
 /** How much of a command or a tool's input is kept to be said: enough to tell what it does. */
 const commandLength = 600
+/** How much of one is looked through for what's risky, at most: longer, like a tool given a whole file, it's taken for unread. */
+const checkable = 20_000
 
 /** What an approval is for, all of it, from the item it shares the agent's id with: the command, the file it changes, or the tool and what it's given. */
 const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.Type) => {
@@ -311,15 +314,16 @@ export const request = (items: ReadonlyArray<unknown>, id: string): Option.Optio
       return Option.some(named === undefined ? { _tag: "Question", id, questions: found.questions } : { _tag: "Secret", id, label: named })
     }
     if (found.type === "approval_request") {
-      const whole = wouldRun(decoded, found)
-      const command = whole?.slice(0, commandLength)
+      const runs = wouldRun(decoded, found)
+      const command = runs?.slice(0, commandLength)
       return Option.some({
         _tag: "Approval",
         id,
         what: found.prompt ?? found.title ?? command ?? "something it needs your permission for",
         kind: found.requestKind ?? "permission",
         decisions: found.options !== undefined && found.options.length > 0 ? found.options : every,
-        ...(whole === undefined || command === undefined ? {} : { command, whole }),
+        ...(command === undefined ? {} : { command }),
+        ...(runs === undefined || runs.length > checkable ? {} : { whole: runs }),
       })
     }
   }
