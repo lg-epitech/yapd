@@ -374,11 +374,15 @@ export const make = (options: {
           utterance: open.utterance,
           detail: { open: how, asked: open.asked, ...(by === undefined ? {} : { by }) },
         })
-        // Offered once: not taken up, it's never offered or sent again.
-        if (how !== "answered") yield* forgo(open, `Not sent again: the question was ${how}.`)
+        // Offered once: not taken up, it's never offered again on its own.
+        if (how !== "answered") yield* forgo(open, `The question was ${how}.`)
       })
 
-    /** A message offered to be sent again that he didn't take up, which is never offered or sent again. */
+    /**
+     * A message offered to be sent again that he didn't take up, which is
+     * never offered again on its own. It may still have got there, so the
+     * same words said again are asked about, never sent under new ids.
+     */
     const forgo = (open: Open, reason: string) =>
       Option.match(open.resend, { onNone: () => Effect.void, onSome: (commandId) => hands.leave(commandId, reason) })
 
@@ -1122,6 +1126,12 @@ export const make = (options: {
         const sent = typeof row.body === "object" && row.body !== null && "text" in row.body ? String(row.body.text) : ""
         const ref = { machine: row.machine, id: row.thread }
         const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
+        // Sent again or taken back since it was found, or too long ago now, it's nothing to offer.
+        if (Option.isNone(yield* hands.still(row.commandId))) {
+          yield* Effect.logInfo(`Not offering ${row.commandId} again, since something came of it meanwhile or it's too long ago`)
+          yield* hands.leave(row.commandId, "Too long ago to offer, or something came of it meanwhile.")
+          continue
+        }
         if (!power.on || listed === undefined || sent === "") {
           yield* hands.leave(row.commandId, power.on ? "Its thread is gone." : "yapd was off when it could have been offered.")
           continue

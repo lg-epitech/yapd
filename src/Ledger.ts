@@ -56,6 +56,12 @@ export const ids = (utterance: string, step: number, message: boolean) => ({
 /** A message's words as they're compared: case, punctuation and spacing aside. */
 export const digest = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
 
+/** How the reason of a step that's never to be offered again on its own starts. */
+const unoffered = "Not to be offered again"
+
+/** Whether a step may still be offered to go again: it didn't get through, or may not have, and he hasn't been offered it, or taken it back, already. */
+export const offerable = (row: Row) => (row.state === "failed" || row.state === "unknown") && !(row.reason ?? "").startsWith(unoffered)
+
 /** Which rows `latest` looks at. */
 export interface Filter {
   readonly kinds?: ReadonlyArray<Kind>
@@ -80,12 +86,18 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
       readonly message: boolean
       readonly digest?: string
     }) => Effect.Effect<Prepared, Store.StoreError>
-    /** Notes what came of a step. Never fails: what can't be noted is only logged. */
+    /** Notes what came of a step, only while it's in one of `from` when that's given. Never fails: what can't be noted is only logged. */
     readonly settle: (
       commandId: string,
       state: Exclude<State, "prepared">,
-      details?: { readonly reason?: string; readonly how?: How },
+      details?: { readonly reason?: string; readonly how?: How; readonly from?: ReadonlyArray<State> },
     ) => Effect.Effect<void>
+    /**
+     * Leaves a step that didn't get through, or may not have, as it is, but
+     * never to be offered again on its own, noting why: the same words said
+     * again still find it, and it may still go once more on his yes.
+     */
+    readonly leave: (commandId: string, why: string) => Effect.Effect<void>
     /**
      * Takes a step that didn't get through, or may not have, to send once
      * more on the user's yes: none if it isn't waiting for that, or was sent
@@ -93,11 +105,11 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
      * twice, even if yapd stops before it's settled.
      */
     readonly resending: (commandId: string) => Effect.Effect<Option.Option<Row>>
-    /** The latest message with these words to this thread since `at`, unless it was turned down or given up on. */
+    /** The latest message with these words to this thread since `at`, unless it was turned down: one given up on may still have got there. */
     readonly twin: (machine: string, thread: string, digest: string, since: number) => Effect.Effect<Option.Option<Row>>
     /** The latest step within this long, of those the filter lets through. */
     readonly latest: (within: Duration.DurationInput, filter?: Filter) => Effect.Effect<Option.Option<Row>>
-    /** Steps since `at` that never said what came of them, or may not have got through, oldest first: what a restart checks. */
+    /** Steps since `at` that never said what came of them, or may not have got through, and haven't been left be, oldest first: what a restart checks. */
     readonly open: (since: number) => Effect.Effect<ReadonlyArray<Row>>
     readonly get: (commandId: string) => Effect.Effect<Option.Option<Row>>
     /** Forgets what's older than `before`. */
@@ -173,11 +185,24 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
   settle: (commandId, state, details = {}) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
       store.transaction((database: Database) => {
+        const from = details.from ?? []
         database
-          .query("update actions set state = ?, how = coalesce(?, how), reason = ?, settled_at = ? where command_id = ?")
-          .run(state, details.how ?? null, details.reason ?? null, at, commandId)
+          .query(
+            `update actions set state = ?, how = coalesce(?, how), reason = ?, settled_at = ? where command_id = ?${
+              from.length === 0 ? "" : ` and state in (${from.map(() => "?").join(", ")})`
+            }`,
+          )
+          .run(state, details.how ?? null, details.reason ?? null, at, commandId, ...from)
       }),
     ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note what came of ${commandId}`, error))),
+  leave: (commandId, why) =>
+    Effect.flatMap(Clock.currentTimeMillis, (at) =>
+      store.transaction((database: Database) => {
+        database
+          .query("update actions set reason = ?, settled_at = ? where command_id = ? and state in ('failed', 'unknown')")
+          .run(`${unoffered}: ${why.charAt(0).toLowerCase()}${why.slice(1)}`, at, commandId)
+      }),
+    ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note that ${commandId} is left be`, error))),
   resending: (commandId) =>
     reading(
       Effect.flatMap(Clock.currentTimeMillis, (at) =>
@@ -201,7 +226,7 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
             database
               .query<Stored, [string, string, string, number]>(
                 `select * from actions where kind = 'message' and machine = ? and thread = ? and digest = ? and at >= ?
-                 and state in ('prepared', 'sent', 'failed', 'unknown') order by at desc limit 1`,
+                 and state != 'refused' order by at desc limit 1`,
               )
               .get(machine, thread, digest, since),
           ),
@@ -239,8 +264,10 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
     store
       .transaction((database: Database) =>
         database
-          .query<Stored, [number]>("select * from actions where state in ('prepared', 'unknown') and at >= ? order by at")
-          .all(since)
+          .query<Stored, [number, string]>(
+            "select * from actions where state in ('prepared', 'unknown') and at >= ? and coalesce(reason, '') not like ? order by at",
+          )
+          .all(since, `${unoffered}%`)
           .map(row),
       )
       .pipe(Effect.catchAll((error) => Effect.logWarning("Could not read what I did to your threads", error).pipe(Effect.as<ReadonlyArray<Row>>([])))),

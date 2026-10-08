@@ -206,6 +206,86 @@ describe("Hands", () => {
     ])
   })
 
+  test("an unknown outcome whose offer wasn't taken up is asked about again, under its own ids, when the same words are said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, leave, answering, becomes, ids, ledger } = yield* hands()
+        answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        yield* send("u1", "Use the fee table.")
+        // He said no to sending it again.
+        yield* leave("yapd:u1:0", "He said no.")
+        const restart = yield* ledger.open(0)
+        yield* TestClock.adjust("3 minutes")
+        // The thread has finished a turn since, which would let a message that went go again.
+        becomes(thread(tezos.id, { latestRunCompletedAt: new Date(now + 60_000).toISOString() }))
+        answering(takes())
+        const twin = yield* send("u2", "Use the fee table.")
+        const resent = twin._tag === "Twin" ? yield* again(twin.row.commandId) : twin
+        return { restart, twin: twin._tag === "Twin" ? [twin.row.commandId, twin.row.state] : twin._tag, resent: resent._tag, ids: ids() }
+      }),
+    )
+    // Never offered again on its own, after a restart either.
+    expect(result.restart).toEqual([])
+    expect(result.twin).toEqual(["yapd:u1:0", "unknown"])
+    expect(result.resent).toBe("Done")
+    expect(result.ids).toEqual([
+      ["yapd:u1:0", "yapd:u1:0:m"],
+      ["yapd:u1:0", "yapd:u1:0:m"],
+    ])
+  })
+
+  test("a message that may not have got there, found there when the same words are said, is one that went", async () => {
+    const twice = (answeredSince: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { send, answering, becomes, bounded, ledger, dispatched } = yield* hands()
+          answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+          yield* send("u1", "Use the fee table.")
+          // It got there late.
+          bounded.messages.push({ id: "yapd:u1:0:m", role: "user", text: "Use the fee table.", createdAt: "now" })
+          yield* TestClock.adjust("1 minute")
+          if (answeredSince) becomes(thread(tezos.id, { latestRunCompletedAt: new Date(now + 30_000).toISOString() }))
+          answering(takes())
+          const second = yield* send("u2", "Use the fee table.")
+          const first = yield* ledger.get("yapd:u1:0")
+          return { second: second._tag === "Twin" ? [second._tag, second.row.state] : [second._tag], first: Option.map(first, ({ state }) => state), dispatched: dispatched.length }
+        }),
+      )
+    expect(await twice(false)).toEqual({ second: ["Twin", "sent"], first: Option.some("sent"), dispatched: 1 })
+    // A thread that's said something since takes it again.
+    expect(await twice(true)).toEqual({ second: ["Done"], first: Option.some("sent"), dispatched: 2 })
+  })
+
+  test("a message sent once more that still can't be confirmed is never sent a third time", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, answering, dispatched, ledger } = yield* hands()
+        answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        yield* send("u1", "Use the fee table.")
+        const resent = yield* again("yapd:u1:0")
+        answering(takes())
+        const third = yield* again("yapd:u1:0")
+        const restart = yield* ledger.open(0)
+        yield* TestClock.adjust("2 minutes")
+        // Said again in the same words, it isn't risked either.
+        const said = yield* send("u2", "Use the fee table.")
+        return {
+          resent: resent._tag === "Unknown" ? Option.isSome(resent.again) : resent._tag,
+          third: third._tag,
+          restart,
+          said: said._tag === "Refused" ? said.reason : said._tag,
+          dispatched: dispatched.length,
+        }
+      }),
+    )
+    // The one more time it may go, which offers nothing more.
+    expect(result.resent).toBe(false)
+    expect(result.third).toBe("NotSent")
+    expect(result.restart).toEqual([])
+    expect(result.said).toBe("I couldn't confirm either of the last two got there, so I won't risk sending it a third time.")
+    expect(result.dispatched).toBe(2)
+  })
+
   test("a restart checks open rows and never dispatches", async () => {
     const result = await run(
       Effect.gen(function* () {

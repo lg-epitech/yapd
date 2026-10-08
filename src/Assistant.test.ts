@@ -1076,7 +1076,7 @@ describe("Assistant", () => {
         yield* unanswered()
         yield* wait(600)
         const row = yield* ledger.latest("1 hour", { kinds: ["message"] })
-        return { spoken: spoken(), dispatched: dispatched.length, state: Option.map(row, ({ state }) => state) }
+        return { spoken: spoken(), dispatched: dispatched.length, state: Option.map(row, ({ state }) => state), restart: yield* ledger.open(0) }
       }),
     )
     expect(result.spoken).toEqual([
@@ -1085,7 +1085,74 @@ describe("Assistant", () => {
       "I didn't hear back about whether to send that to Migrate Tezos Integration again, so I left it, sir.",
     ])
     expect(result.dispatched).toBe(1)
-    expect(result.state).toEqual(Option.some("abandoned"))
+    // It may still have got there, so it's kept as it was, though a restart doesn't offer it again.
+    expect(result.state).toEqual(Option.some("unknown"))
+    expect(result.restart).toEqual([])
+  })
+
+  test("a message that may not have got there, turned down for sending again, is asked about again under its own ids when it's said again", async () => {
+    let lost = true
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, spoken, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
+          answer: () => (payload, bounded) =>
+            lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes(payload, bounded),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* answer("No.")
+        lost = false
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const before = dispatched.length
+        yield* answer("Yes.")
+        return { spoken: spoken(), before, ids: dispatched.map(({ commandId, messageId }) => [commandId, messageId]) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?",
+      "I'll leave that one, sir.",
+      "I couldn't confirm that got to Migrate Tezos Integration before, sir. Send it again?",
+      "On it, sir: Migrate Tezos Integration.",
+    ])
+    // Nothing went for the second time he said it, and his yes went under the first's ids.
+    expect(result.before).toBe(1)
+    expect(result.ids).toHaveLength(2)
+    expect(result.ids[1]).toEqual(result.ids[0])
+  })
+
+  test("a message a restart found didn't get there isn't offered once it's been sent again meanwhile", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, undelivered, answer, spoken, dispatched, ledger } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+            : tezosMessage("high")(situation),
+        )
+        const text = "Use the fee table from the Mina work."
+        const row = yield* ledger.prepare({
+          utterance: "u-old",
+          step: 0,
+          kind: "message",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text, messageId, how: "now" }),
+          message: true,
+          digest: Ledger.digest(text),
+        })
+        yield* ledger.settle(row.commandId, "unknown")
+        // A question is open, so the offer waits its turn.
+        yield* dictate("What's the migration one doing?")
+        yield* undelivered([row])
+        // Meanwhile he says it again, and yes to sending it once more.
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* answer("Yes.")
+        const kept = yield* ledger.get(row.commandId)
+        return { spoken: spoken(), ids: dispatched.map(({ commandId }) => commandId), state: Option.map(kept, ({ state }) => state) }
+      }),
+    )
+    expect(result.ids).toEqual(["yapd:u-old:0"])
+    expect(result.spoken.some((line) => line.startsWith("Before I restarted"))).toBe(false)
+    // What went stays sent, whatever's left of the offer.
+    expect(result.state).toEqual(Option.some("sent"))
   })
 
   test("after a restart, each message that didn't get there is offered once, one at a time, and yes sends it under its own ids", async () => {
@@ -1118,7 +1185,7 @@ describe("Assistant", () => {
     expect(result.first).toBe(1)
     expect(result.spoken).toEqual([offered, "I'll leave that one, sir.", offered, "On it, sir: Migrate Tezos Integration."])
     expect(result.sent).toEqual([["yapd:u-old2:0", "Also add a test."]])
-    expect(result.states).toEqual(["abandoned", "sent"])
+    expect(result.states).toEqual(["unknown", "sent"])
   })
 
   test("the rest of a request is done as its next step, once the first is", async () => {

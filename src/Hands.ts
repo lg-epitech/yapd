@@ -50,10 +50,16 @@ export class Hands extends Context.Tag("yapd/Hands")<
     readonly run: (step: Step, act: Act, options?: { readonly twice?: boolean }) => Effect.Effect<Outcome>
     /** His yes to sending it again: the same step once more, under the same ids, and never after that (I2). */
     readonly again: (commandId: string) => Effect.Effect<Outcome>
-    /** He'd rather not send it again: it's never offered or sent again. */
+    /**
+     * He didn't take up sending it again: it's never offered again on its own,
+     * but it stays as it was, so the same words said again find it, and are
+     * offered again under its ids rather than sent under new ones.
+     */
     readonly leave: (commandId: string, reason: string) => Effect.Effect<void>
     /** At startup: looks at what never said what came of it lately, and never sends anything (I6). Gives back the messages found not to have got there. */
     readonly reconcile: Effect.Effect<ReadonlyArray<Ledger.Row>>
+    /** A message a restart found didn't get there, while it's still to be offered: nothing came of it since, and it's recent enough to. */
+    readonly still: (commandId: string) => Effect.Effect<Option.Option<Ledger.Row>>
   }
 >() {}
 
@@ -248,6 +254,36 @@ export const make = (options: {
       return yield* dispatch(prepared.right, reached.actions, busy(reached.thread))
     })
 
+  /**
+   * What's made of the same words going to a thread they went to lately,
+   * when it isn't to go straight through. One that went is asked about,
+   * unless the thread has said something since. One that may not have got
+   * there is looked for once: found, it's one that went; withdrawn before it
+   * was read, what's said now is new; otherwise it's offered again under its
+   * own ids, never sent under new ones, and once it's been sent again
+   * already, it isn't risked a third time.
+   */
+  const twinned = (twin: Ledger.Row, reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread }) =>
+    Effect.gen(function* () {
+      let row = twin
+      if (row.state !== "sent" && row.messageId !== null) {
+        const found = yield* Effect.either(reached.actions.message(row.thread, row.messageId))
+        if (Either.isRight(found) && Option.isSome(found.right)) {
+          if (Option.exists(found.right.value.run, ({ status }) => status === "cancelled")) return Option.none<Outcome>()
+          yield* ledger.settle(row.commandId, "sent", { from: [row.state] })
+          yield* Effect.logInfo(`Found ${row.commandId} in the thread after all`)
+          row = { ...row, state: "sent" }
+        }
+      }
+      if (row.state === "sent" && answered(reached.thread, row.at)) return Option.none<Outcome>()
+      if (row.state === "abandoned") {
+        const reason = "I couldn't confirm either of the last two got there, so I won't risk sending it a third time."
+        return Option.some<Outcome>(yield* failing({ _tag: "Refused", reason } satisfies Outcome, doing.message))
+      }
+      yield* Effect.logInfo(`The same words went to it at ${new Date(row.at).toISOString()} as ${row.commandId}, so asking first`)
+      return Option.some<Outcome>({ _tag: "Twin", row })
+    })
+
   const message = (step: Step, act: Extract<Act, { readonly _tag: "Message" }>, twice: boolean) =>
     Effect.gen(function* () {
       const { to, text, how } = act
@@ -261,11 +297,8 @@ export const make = (options: {
       if (!twice) {
         const now = yield* Clock.currentTimeMillis
         const twin = yield* ledger.twin(to.machine, to.id, digest, now - twins)
-        // One that went, to a thread that hasn't said anything since, or one that may not have got there, is asked about, never dropped.
-        if (Option.isSome(twin) && (twin.value.state !== "sent" || !answered(reached.right.thread, twin.value.at))) {
-          yield* Effect.logInfo(`The same words went to it at ${new Date(twin.value.at).toISOString()} as ${twin.value.commandId}, so asking first`)
-          return { _tag: "Twin", row: twin.value } satisfies Outcome
-        }
+        const made = Option.isSome(twin) ? yield* twinned(twin.value, reached.right) : Option.none<Outcome>()
+        if (Option.isSome(made)) return made.value
       }
       return yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, digest)
     })
@@ -376,20 +409,28 @@ export const make = (options: {
         yield* Effect.logInfo(`Sending ${row.commandId} once more, as you said`)
         return yield* dispatch(row, reached.right.actions, busy(reached.right.thread), true)
       }),
-    leave: (commandId, reason) => ledger.settle(commandId, "abandoned", { reason }),
+    leave: (commandId, reason) =>
+      Effect.zipRight(ledger.leave(commandId, reason), Effect.logInfo(`Not offering ${commandId} again: ${reason}`)),
+    still: (commandId) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        return Option.filter(yield* ledger.get(commandId), (row) => Ledger.offerable(row) && now - row.at <= recent)
+      }),
     reconcile: Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
       const open = yield* ledger.open(0)
       const undelivered: Array<Ledger.Row> = []
       // What this run did is settled, or offered again, as it happens.
       for (const row of open.filter(({ at }) => at < started)) {
+        // Only from where it was, in case something came of it since it was read.
+        const from = [row.state]
         if (now - row.at > recent) {
-          yield* ledger.settle(row.commandId, "abandoned", { reason: row.reason ?? "Too long ago to check after a restart." })
+          yield* ledger.settle(row.commandId, "abandoned", { reason: row.reason ?? "Too long ago to check after a restart.", from })
           continue
         }
         if (row.kind === "start") {
           const thread = yield* threads.find(refOf(row))
-          if (Option.isSome(thread)) yield* ledger.settle(row.commandId, "sent")
+          if (Option.isSome(thread)) yield* ledger.settle(row.commandId, "sent", { from })
           else yield* Effect.logInfo(`Couldn't tell whether ${row.commandId} started, so it's left be`)
           continue
         }
@@ -404,14 +445,14 @@ export const make = (options: {
           continue
         }
         if (found.right) {
-          yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }) })
+          yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }), from })
           yield* Effect.logInfo(`Found ${row.commandId} after restarting: it got there`)
         } else if (row.kind === "message") {
-          yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting." })
+          yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", from })
           yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
           undelivered.push(row)
         } else {
-          yield* ledger.settle(row.commandId, "abandoned", { reason: "I couldn't tell whether it went through before I restarted." })
+          yield* ledger.settle(row.commandId, "abandoned", { reason: "I couldn't tell whether it went through before I restarted.", from })
           yield* Effect.logWarning(`Couldn't tell whether ${row.commandId} went through before restarting, so it's left be`)
         }
       }
