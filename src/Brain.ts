@@ -743,7 +743,12 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       }
       if (choice.sure === "low" && candidates.length >= 2) return ask(candidates)
       return doing({ decision: choice, target })
-    case "send":
+    case "send": {
+      // Nothing he says goes to a thread waiting on a secret, which it could be in other words: only T3 Code takes that.
+      const request = Option.getOrUndefined(target)?.thread.pendingRuntimeRequest
+      if (request !== undefined && request !== null && T3Actions.secret(request.id)) return { _tag: "Say", spoken: secretly(lines) }
+      return writing(choice, target, candidates, situation, lines, ask)
+    }
     case "stop":
     case "undo":
       return writing(choice, target, candidates, situation, lines, ask)

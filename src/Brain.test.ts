@@ -391,6 +391,10 @@ describe("Brain", () => {
       Hands.failed({ _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "accept" }, { _tag: "Refused", reason: Hands.plainly("Runtime request r1 is expired.") }, lines, Option.none()),
       Hands.failed({ _tag: "Reply", to: ref(tezos), requestId: "q1", answers: {}, said: Option.none() }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.none() }, lines, Option.some("Migrate Tezos Integration")),
       Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Refused", reason: Hands.given }, lines, Option.some("Migrate Tezos Integration")),
+      ...[
+        "It's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+        "It's waiting on you for something I couldn't read, so I held that back in case it's a secret.",
+      ].map((reason) => Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Refused", reason }, lines, Option.some("Migrate Tezos Integration"))),
       Hands.unsure({ kind: "decide", body: { _tag: "Decide", requestId: "r1", decision: "accept" } }, lines, Option.some("Migrate Tezos Integration")),
       Hands.failed(
         { _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "decline" },

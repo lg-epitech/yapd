@@ -189,6 +189,10 @@ export const given = "It's been given something else since, so I held that back.
 const answeredElsewhere = "It was answered in T3 Code just before."
 /** Why a secret isn't given by voice. */
 const secretive = "It's waiting on a secret, which I never give by voice: it needs T3 Code."
+/** Why a message isn't sent to a thread waiting on a secret, which it could be in other words. */
+const withheld = "It's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code."
+/** Why a message isn't sent to a thread waiting on a question that couldn't be read, which could be for a secret. */
+const unread = "It's waiting on you for something I couldn't read, so I held that back in case it's a secret."
 /** Why an approval or an answer isn't sent when what the thread waits on isn't what it answers. */
 const mismatched = "It isn't waiting on that kind of answer, so it needs T3 Code."
 /** Why another answer to the same request isn't sent while an earlier, different one may have got there. */
@@ -599,6 +603,22 @@ export const make = (options: {
       return ours === undefined && after(thread.latestRunStartedAt, since + 1000)
     })
 
+  /**
+   * Why nothing may be sent to a thread as it is, if that's so: it waits on a
+   * secret, which T3 Code says, or a question that asks him to type one in,
+   * which only its turn items say, and which unread could be one.
+   */
+  const keeping = (to: Threads.Ref, reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread }) =>
+    Effect.gen(function* () {
+      const pending = reached.thread.pendingRuntimeRequest
+      if (pending === null) return undefined
+      if (T3Actions.secret(pending.id)) return withheld
+      if (pending.kind !== "user_input") return undefined
+      const read = yield* Effect.either(reached.actions.detail(to.id, pending.id))
+      if (Either.isLeft(read)) return unread
+      return Option.exists(read.right.request, ({ _tag }) => _tag === "Secret") ? withheld : undefined
+    })
+
   const message = (step: Step, act: Extract<Act, { readonly _tag: "Message" }>, twice: boolean, wanted: Effect.Effect<boolean>, since?: number) =>
     Effect.gen(function* () {
       const { to, text } = act
@@ -617,6 +637,9 @@ export const make = (options: {
       if (Option.isSome(before)) return settled(before.value)
       const reached = yield* reach(to)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing.message)
+      // Waiting on a secret, it's sent nothing by voice, since what he says could be the secret in other words.
+      const kept = yield* keeping(to, reached.right)
+      if (kept !== undefined) return yield* failing({ _tag: "Refused", reason: kept } satisfies Outcome, doing.message)
       // An answer to what it said then, which it's moved on from: held back, never written down, so the same words later are new.
       if (since !== undefined && (yield* moved(to, reached.right.thread, since))) return yield* failing({ _tag: "Refused", reason: given } satisfies Outcome, doing.message)
       const digest = Ledger.digest(text)

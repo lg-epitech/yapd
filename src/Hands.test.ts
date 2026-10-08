@@ -1500,6 +1500,37 @@ describe("Hands", () => {
     expect(result.dispatched).toEqual(["yapd:u1:0", "yapd:u2:0", "yapd:u3:0", "yapd:u4:0", "yapd:u5:0", "yapd:u6:0"])
   })
 
+  test("a message to a thread waiting on a secret, or on a question asking him to type one in, is never sent, and one to a thread asking anything else goes", async () => {
+    const asking = (id: string) => thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id, kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, becomes, bounded, reads, dispatched } = yield* hands({ thread: asking("turn-item:secret-request:t-tezos:stripe"), runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        bounded.turnItems.push(
+          { type: "secret_request", id: "turn-item:secret-request:t-tezos:stripe", status: "waiting", label: "Stripe API key" },
+          { type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question: "Paste your OpenAI API key." }] },
+          { type: "user_input_request", status: "waiting", requestId: "q2", questions: [{ id: "net", header: "Network", question: "Which network first?", options: [{ label: "Mainnet" }] }] },
+        )
+        const secret = yield* send("u1", "The Stripe key is sk test four two.")
+        becomes(asking("q1"))
+        const typed = yield* send("u2", "The key is sk proj one two three.")
+        reads(false)
+        const unread = yield* send("u3", "The key is sk proj one two three.")
+        reads(true)
+        becomes(asking("q2"))
+        const asked = yield* send("u4", "Start with mainnet.")
+        const why = (outcome: Hands.Outcome) => ("reason" in outcome ? outcome.reason : outcome._tag)
+        return { outcomes: [why(secret), why(typed), why(unread), asked._tag], dispatched: dispatched.map(({ text }) => text) }
+      }),
+    )
+    expect(result.outcomes).toEqual([
+      "It's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+      "It's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+      "It's waiting on you for something I couldn't read, so I held that back in case it's a secret.",
+      "Done",
+    ])
+    expect(result.dispatched).toEqual(["Start with mainnet."])
+  })
+
   test("a different answer to a request goes as he said it last once the earlier never left, is left to T3 Code once it may have got there, and the same one goes once more under its ids", async () => {
     const waiting = thread(tezos.id, {
       activeRunId: "run-1",
