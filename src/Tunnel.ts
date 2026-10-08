@@ -240,17 +240,15 @@ export const forward = (
     })
 
     /**
-     * Opens the connection, unless one is open already, like one yapd left
-     * running when it last stopped. With ControlPersist, SSH goes into the
-     * background once it's connected, so opening it is a command that finishes.
+     * Opens a fresh connection. Whatever answers on the socket first, like one
+     * an earlier yapd left running when it stopped, is closed rather than taken
+     * over: what it forwards can't be known. With ControlPersist, SSH goes into
+     * the background once it's connected, so opening it is a command that
+     * finishes.
      */
     const connect = Effect.gen(function* () {
-      // When SSH can't say, the connection is taken to be as it was, and asked about again on the next try.
-      const state = yield* Effect.catchAll(check, (error) => (open ? Effect.succeed("open" as const) : Effect.fail(error)))
-      if (state === "open") {
-        open = true
-        return
-      }
+      // When SSH can't say whether one is there, it's asked again on the next try, rather than one opened beside it.
+      if ((yield* check) === "open") yield* close
       forget()
       // A socket left by a connection that's gone would keep the new one from listening.
       yield* Effect.ignore(Effect.tryPromise(() => rm(socket, { force: true })))
@@ -360,8 +358,9 @@ export const forward = (
     const loop = Effect.gen(function* () {
       let failures = 0
       while (true) {
-        // Whatever goes wrong with one try, the next is made.
-        const once = Effect.zipRight(connect, look).pipe(Effect.catchAllDefect((defect) => Effect.fail(trouble(unreachable, defect))))
+        // Whatever goes wrong with one try, the next is made. The connection yapd opened is kept while it's there.
+        const kept = Effect.suspend(() => (open ? Effect.orElse(still, () => connect) : connect))
+        const once = Effect.zipRight(kept, look).pipe(Effect.catchAllDefect((defect) => Effect.fail(trouble(unreachable, defect))))
         const tried = yield* Effect.either(settle(once))
         if (Either.isRight(tried)) {
           failures = 0

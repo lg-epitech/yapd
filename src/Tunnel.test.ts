@@ -14,13 +14,13 @@ const folder = join(tmpdir(), "yapd-tunnel-test-nothing-here")
 /**
  * A machine at the other end of SSH that a test talks for. `opens` says how
  * each try to connect goes, and `answers` what `yapd t3` prints there, in turn.
- * `open` is for a connection an earlier yapd left open.
+ * `open` is for a connection an earlier yapd left open, with its forwards.
  */
 const machine = (
   options: {
     readonly opens?: Array<boolean>
     readonly answers?: Array<string | ProcessError>
-    readonly open?: boolean
+    readonly open?: ReadonlyArray<string>
     /** How long connecting takes. */
     readonly opening?: Duration.DurationInput
   } = {},
@@ -38,11 +38,11 @@ const machine = (
   /** The one on the socket, that what's told through it reaches. */
   let current: number | undefined
   let pids = 100
-  const start = () => {
+  const start = (forwards: Iterable<string> = []) => {
     current = ++pids
-    connections.set(current, new Set())
+    connections.set(current, new Set(forwards))
   }
-  if (options.open === true) start()
+  if (options.open !== undefined) start(options.open)
   /** A connection that's gone, and its forwards with it. */
   const end = (pid: number) => {
     connections.delete(pid)
@@ -251,17 +251,18 @@ describe("Tunnel", () => {
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
-  test("never takes the connection for gone when SSH can't say, so it never opens a second one", () =>
+  test("closes a connection an earlier yapd left rather than take it over, and never opens one beside another", () =>
     Effect.runPromise(
       Effect.gen(function* () {
-        // One an earlier yapd left open, that SSH can't check on at first.
-        const rig = machine({ open: true })
+        // Still forwarding a port nothing here knows of, and SSH can't check on it at first.
+        const rig = machine({ open: ["127.0.0.1:49999:127.0.0.1:3774"] })
         rig.unsure.push("failed")
         const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
         yield* flush
         yield* TestClock.adjust("1 second")
         yield* flush
         expect((yield* tunnel.locate).server.origin).toBe("http://127.0.0.1:50001")
+        expect(rig.listening()).toEqual(["127.0.0.1:50001:127.0.0.1:3774"])
 
         // A check that takes too long, while it's up.
         rig.unsure.push("hung")
@@ -270,8 +271,8 @@ describe("Tunnel", () => {
           yield* flush
         }
         expect(yield* tunnel.status).toEqual({ _tag: "Up" })
-        expect(rig.calls.filter((line) => line.includes(" -M "))).toEqual([])
-        expect(rig.calls.filter((line) => line.includes(" -O forward "))).toHaveLength(1)
+        expect(rig.calls.filter((line) => line.includes(" -M "))).toHaveLength(1)
+        expect(rig.listening()).toEqual(["127.0.0.1:50001:127.0.0.1:3774"])
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
