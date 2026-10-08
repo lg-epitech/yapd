@@ -195,7 +195,7 @@ const named = (listed: Threads.Listed, among: ReadonlyArray<Threads.Listed>) => 
 const words = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
 
 /** Whether a question was asked before in the same words. */
-const repeated = (question: string, before: ReadonlyArray<string>) => before.some((asked) => words(asked) === words(question))
+export const repeated = (question: string, before: ReadonlyArray<string>) => before.some((asked) => words(asked) === words(question))
 
 /** The threads a question chooses between, as they're named in it: "A or B". */
 export const choices = (candidates: ReadonlyArray<Threads.Listed>) => either(candidates.slice(0, 3).map((listed) => named(listed, candidates)))

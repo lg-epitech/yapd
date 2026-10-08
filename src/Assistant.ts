@@ -1457,9 +1457,10 @@ export const make = (options: {
             // Said again, what he missed that it told him is heard once he's heard it to the end this time.
             const missed = subject._tag === "Answer" ? subject.missed : undefined
             // The model's words only when there's something to say again that isn't a closed question: with nothing, they can only be from before yapd
-            // was turned off and on, and a question, closed or not, is never said again in the words it was asked in (I4).
+            // was turned off and on, and a question, closed or not, is never said again in the words it was asked in, whatever their case or
+            // punctuation (I4).
             const theirs = decision.spoken.trim()
-            const taken = subject._tag !== "Nothing" && !(subject._tag === "Answer" && subject.asked !== undefined) && !situation.asked.includes(theirs)
+            const taken = subject._tag !== "Nothing" && !(subject._tag === "Answer" && subject.asked !== undefined) && !Brain.repeated(theirs, situation.asked)
             // Whether what was asked to be seen is on his screen is told only as it goes up.
             const say = Show.offScreen((taken ? theirs : "") || last, said)
             // Shown too while an app watches, for what's still not caught the second time.
