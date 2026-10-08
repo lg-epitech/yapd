@@ -2585,6 +2585,33 @@ describe("Assistant", () => {
     expect(result.kept).toEqual([["Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir.", "I couldn't tell whether it went through before I restarted."]])
   })
 
+  test("new work a restart found never started is said once, with why, and journaled as not gone, never as unknown", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { unconfirmed, spoken, dispatched, ledger, journal } = yield* assistant(() => undefined)
+        const row = yield* ledger.prepare({
+          utterance: "u-old",
+          step: 0,
+          kind: "start",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ commandId, messageId }) => ({ project: "/code/yapd", prompt: "Fix the loader.", worktree: true, ids: { thread: tezos.id, message: messageId, command: commandId } }),
+          message: true,
+        })
+        const reason = "T3 Code couldn't make the worktree, so the thread it made didn't start."
+        yield* ledger.settle(row.commandId, "failed", { reason })
+        yield* unconfirmed([{ ...row, state: "failed", reason }])
+        const kept = yield* journal.since(0, { kinds: ["action"] })
+        return { spoken: spoken(), dispatched: dispatched.length, kept: kept.map(({ detail }) => [(detail as { outcome?: string }).outcome, (detail as { reason?: string }).reason]) }
+      }),
+    )
+    expect(result).toEqual({
+      spoken: ["Before I restarted, I asked for new work, sir, but T3 Code couldn't make the worktree, so the thread it made didn't start."],
+      dispatched: 0,
+      kept: [["NotSent", "T3 Code couldn't make the worktree, so the thread it made didn't start."]],
+    })
+  })
+
   test("a turn stopped to be told something in its place that a restart found never was told is said so once, with why, and never told", async () => {
     const result = await run(
       Effect.gen(function* () {

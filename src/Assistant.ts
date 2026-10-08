@@ -1554,7 +1554,7 @@ export const make = (options: {
         const ref = { machine: row.machine, id: row.thread }
         const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
         const said = yield* persona.lines
-        /** Said once, with why, and journaled with it. */
+        /** Said once, with why, and journaled with it: as unknown, unless it's known not to have gone, like new work found not to have started. */
         const telling = (line: string, reason: string) =>
           Effect.gen(function* () {
             yield* journal.write({
@@ -1564,7 +1564,7 @@ export const make = (options: {
               thread: row.thread,
               said: line,
               utterance: row.utterance,
-              detail: { commandId: row.commandId, act: row.kind === "message" ? "Message" : row.kind, outcome: "Unknown", reason },
+              detail: { commandId: row.commandId, act: row.kind === "message" ? "Message" : row.kind, outcome: row.state === "failed" ? "NotSent" : "Unknown", reason },
             })
             yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" }, { id: row.utterance, turns: power.turns })
           })
