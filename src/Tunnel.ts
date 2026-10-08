@@ -158,6 +158,13 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
       forwarded = undefined
     }
 
+    /** Fails, with the reason to say, once SSH says the connection is gone. When it can't say, it's asked again next time. */
+    const still = Effect.gen(function* () {
+      if ((yield* Effect.orElseSucceed(check, () => "open" as const)) === "open") return
+      forget()
+      return yield* trouble(unreachable)
+    })
+
     /**
      * Opens the connection, unless one is open already, like one yapd left
      * running when it last stopped. With ControlPersist, SSH goes into the
@@ -246,11 +253,8 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
     const watch = Effect.gen(function* () {
       while (status?._tag === "Up") {
         yield* Effect.sleep(every)
-        // When SSH can't say, it's asked again next time rather than taken for an outage.
-        if ((yield* lock.withPermits(1)(Effect.orElseSucceed(check, () => "open" as const))) === "gone") {
-          forget()
-          yield* Effect.ignore(settle(Effect.fail(trouble(unreachable))))
-        }
+        const gone = yield* Effect.either(lock.withPermits(1)(still))
+        if (Either.isLeft(gone)) yield* Effect.ignore(settle(Effect.fail(gone.left)))
       }
     })
 
@@ -284,7 +288,8 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
         yield* Deferred.await(first)
         // Connecting again is the loop's to do, with its backoff.
         if (!open) return yield* trouble(reason())
-        return yield* settle(look)
+        // The connection may have gone since it was last checked on, with the forward, while SSH still reaches the machine on its own.
+        return yield* settle(Effect.zipRight(still, look))
       }),
       status: Effect.zipRight(
         Deferred.await(first),

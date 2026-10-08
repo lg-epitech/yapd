@@ -113,6 +113,11 @@ describe("Tunnel", () => {
         const moved = yield* tunnel.refresh
         expect([moved.server.origin, Redacted.value(moved.token)]).toEqual(["http://127.0.0.1:50003", "token-3"])
         expect(rig.calls).toContain(`ssh -S ${folder}/ssh-rig.sock -O cancel -L 127.0.0.1:50002:127.0.0.1:3774 -- me@rig.example.com`)
+
+        // The connection went, and the forward with it, though SSH still reaches rig on its own.
+        rig.drop()
+        rig.answers.push(JSON.stringify({ origin: "http://127.0.0.1:3775", token: "token-3" }))
+        expect((yield* Effect.flip(tunnel.refresh)).reason).toBe("I can't reach rig right now.")
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
