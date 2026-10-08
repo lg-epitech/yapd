@@ -599,7 +599,7 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual([
       "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
       "Shall I still allow Cloud deployment discovery to run git push --force origin main, sir? Only 'approve' will do.",
-      "It needs an \"approve\", so I've left it waiting for you in T3 Code, sir.",
+      "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
     ])
     expect(result.dispatched).toBe(0)
     expect(result.open).toEqual(Option.none())

@@ -288,7 +288,7 @@ export const dealtWith = (lines: Lines) => `That's already been dealt with${addr
 export const secretly = (lines: Lines) => `That one needs T3 Code; I never take a secret by voice${addressed(lines)}.`
 
 /** What's said of a risky approval once a plain yes to it was asked about again, and wasn't "approve" either time. */
-export const unapproved = (lines: Lines) => `It needs an "approve", so I've left it waiting for you in T3 Code${addressed(lines)}.`
+export const unapproved = (lines: Lines) => `It needs an 'approve', so I've left it waiting for you in T3 Code${addressed(lines)}.`
 
 /**
  * What makes what a thread wants to do risky enough to need "approve", in
