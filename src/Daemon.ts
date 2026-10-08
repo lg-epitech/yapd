@@ -517,21 +517,29 @@ export const make = Effect.gen(function* () {
       )
     })
 
-  /** Says a notice. Only a question is listened to: whatever else they'd say to it has nowhere to go. */
+  /**
+   * Says a notice. Only a question is listened to: whatever else they'd say to
+   * it has nowhere to go. What can't be played was never said, so it isn't
+   * what the user heard last; and a question that can't be asked in full goes
+   * unanswered, to be asked again later or let go, rather than left open.
+   */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>) =>
     Effect.gen(function* () {
       const { question } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
-      yield* said.notice.saying ?? Effect.void
+      const saying = said.notice.saying ?? Effect.void
       if (question === undefined) {
         const playback = yield* audio.play(said.audio)
+        yield* saying
         yield* playback.finished
         yield* said.notice.heard ?? Effect.void
         return yield* dealtWith
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, answer })
+      const answered = yield* conversation.ask({ audio: said.audio, saying, answer }).pipe(
+        Effect.onError((cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.zipRight(dealtWith, question.unanswered))),
+      )
       // Answered, or asked in full.
       yield* said.notice.heard ?? Effect.void
       if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))

@@ -108,6 +108,8 @@ export const cut = (text: string, fraction: number) => {
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
 export interface Question {
   readonly audio: string
+  /** Run once it starts playing the first time, which is when the user hears of it: never when it can't be played. */
+  readonly saying?: Effect.Effect<void>
   /**
    * Works out what the user meant by what they said, and how many seconds of
    * it were speech, which may be called again with all of it if they carry
@@ -190,18 +192,20 @@ export const make = (options: {
 
     /**
      * Plays a line from `from` seconds, listening if there's an ear, then
-     * `wait` longer for a reply. `through` runs once it has played to the end,
-     * before that wait: the user has heard it, whatever they say after.
+     * `wait` longer for a reply. `begun` runs once it's playing, never when it
+     * can't be played, and `through` once it has played to the end, before
+     * that wait: the user has heard it, whatever they say after.
      */
     const speak = (
       path: string,
       from: number,
       ear: Effect.Effect<Ear | undefined>,
-      given: { readonly wait?: Duration.DurationInput; readonly through?: Effect.Effect<void> } = {},
+      given: { readonly wait?: Duration.DurationInput; readonly begun?: Effect.Effect<void>; readonly through?: Effect.Effect<void> } = {},
     ) =>
       Effect.gen(function* () {
-        const { wait = linger, through = Effect.void } = given
+        const { wait = linger, begun = Effect.void, through = Effect.void } = given
         const playback = yield* audio.play(path, from)
+        yield* begun
         const listening = yield* ear
         if (listening === undefined || listening.deaf) {
           yield* playback.finished
@@ -547,15 +551,18 @@ export const make = (options: {
 
     /**
      * Asks the user something and listens for what they say over it or right
-     * after, like with an update. Returns whether they answered.
+     * after, like with an update. Returns whether they answered, and fails
+     * when it can't be played or breaks off.
      */
     const ask = (question: Question) =>
       Effect.gen(function* () {
         const ear = hearing(yield* Effect.scope)
         let from = 0
         let missed = 0
+        let begun = question.saying ?? Effect.void
         while (true) {
-          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), { wait: pondering })
+          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), { wait: pondering, begun })
+          begun = Effect.void
           if (outcome._tag === "Finished") return false
           const first = yield* transcribe(outcome.audio)
           const answer = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, transcribe, question.answer)).reply

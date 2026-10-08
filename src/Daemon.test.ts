@@ -40,6 +40,8 @@ const make = (says?: string, options: {
   readonly microphone?: boolean
   /** Lines whose playback breaks off after so many seconds, as when the audio helper quits. */
   readonly breaks?: Readonly<Record<string, number>>
+  /** Lines that can't be played at all, as when the audio helper is down. */
+  readonly unplayable?: ReadonlyArray<string>
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -83,6 +85,7 @@ const make = (says?: string, options: {
       play: (path) =>
         Effect.gen(function* () {
           const text = rendered.get(path) ?? path
+          if (options.unplayable?.includes(text)) return yield* new AudioError({ message: "The audio helper didn't start playing" })
           played.push(text)
           yield* Queue.offer(playbacks, text)
           let done = false
@@ -180,7 +183,10 @@ const make = (says?: string, options: {
       )
       yield* flush
     })
-  /** Something yapd has to say for itself, which as a question, the one open, records how it went, and in `heard` when it was heard to the end. */
+  /**
+   * Something yapd has to say for itself, which as a question, the one open, records how it went, in `saying` when it
+   * started being said, and in `heard` when it was heard to the end.
+   */
   const notice = (
     id: string,
     spoken: string,
@@ -190,6 +196,7 @@ const make = (says?: string, options: {
       readonly needsYou?: boolean
       readonly answer?: boolean
       readonly done?: boolean
+      readonly saying?: Array<string>
       readonly heard?: Array<string>
     } = {},
   ) =>
@@ -201,6 +208,7 @@ const make = (says?: string, options: {
       spoken,
       at: 0,
       stale: Effect.succeed(options.stale === true),
+      ...(options.saying === undefined ? {} : { saying: Effect.sync(() => void options.saying?.push(id)) }),
       ...(options.heard === undefined ? {} : { heard: Effect.sync(() => void options.heard?.push(id)) }),
       ...(options.question === undefined
         ? {}
@@ -1113,6 +1121,42 @@ describe("Daemon", () => {
       }),
     )
     expect(result).toEqual({ played: ["yapd. The PR is ready."], unheard: 1, warnings: ["Could not speak update"] })
+  })
+
+  test.each([false, true])("what can't be played isn't said nor heard, and a question that can't goes unanswered, with a microphone: %s", async (microphone) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, played } = yield* make(undefined, {
+          microphone,
+          unplayable: ["The Tezos migration or the Mina tickets, sir?", "Nothing needs you right now, sir."],
+        })
+        const asked: Array<string> = []
+        const saying: Array<string> = []
+        const heard: Array<string> = []
+        yield* notice("question", "The Tezos migration or the Mina tickets, sir?", { question: asked, saying, heard })
+        yield* notice("answer", "Nothing needs you right now, sir.", { answer: true, saying, heard })
+        yield* wait(11)
+        yield* wait(11)
+        return { played: [...played], asked, saying, heard }
+      }),
+    )
+    expect(result).toEqual({ played: [], asked: ["question unanswered"], saying: [], heard: [] })
+  })
+
+  test.each([false, true])("a question whose playback breaks off goes unanswered, and isn't heard, with a microphone: %s", async (microphone) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait } = yield* make(undefined, { microphone, breaks: { "The Tezos migration or the Mina tickets, sir?": 3 } })
+        const asked: Array<string> = []
+        const saying: Array<string> = []
+        const heard: Array<string> = []
+        yield* notice("question", "The Tezos migration or the Mina tickets, sir?", { question: asked, saying, heard })
+        for (let i = 0; i < 6; i++) yield* wait(3)
+        return { asked, saying, heard }
+      }),
+    )
+    // Begun, so what he says next may be about it, and asked again later.
+    expect(result).toEqual({ asked: ["question unanswered"], saying: ["question"], heard: [] })
   })
 
   test.each(["Stop.", "Skip.", "Enough.", "Next.", "Shut up.", "Stop, stop."])("told \"%s\" by the shortcut over an update, doesn't read it again, and counts it heard", async (said) => {
