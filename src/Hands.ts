@@ -150,6 +150,10 @@ const timing: Readonly<Record<T3Actions.When, string>> = { now: "at once", after
 const mayHave = "It may have got there already"
 /** Why a message that may have got there can't go again at another time than it first went. */
 const unchanged = (how: T3Actions.When) => `${mayHave}, so it can only go again as it first went, ${timing[how]}.`
+/** Why a message sent once more won't be read: it was taken out of the queue it waited in since it first went. */
+const takenOut = "It was taken out of the queue since, so it won't run."
+/** Why a message sent once more may not be read: T3 Code had it from the first time, and it's gone from the thread. */
+const notThere = "It isn't in the thread now, so it may have been taken out of the queue."
 /** What a stopped thread is told when it's let carry on. */
 export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
@@ -359,6 +363,37 @@ export const make = (options: {
     })
 
   /**
+   * What came of a message sent once more after it may have got there the
+   * first time, unless it's in the thread to be read: T3 Code answers for ids
+   * it has already from what it kept, without doing it again, so one taken out
+   * of its queue since only looks sent. Shown cancelled, it was withdrawn, so
+   * the same words said again are new. Otherwise T3 Code has it, as its answer
+   * says, so it went, but not found, or with the thread unread, whether it's
+   * still to be read can't be told, since one that went in is also dropped
+   * from the thread's read once enough happens after it: the same words said
+   * again are asked about.
+   */
+  const missed = (row: Ledger.Row, actions: T3Actions.Actions) =>
+    Effect.gen(function* () {
+      if (row.kind !== "message" || row.messageId === null) return Option.none<Went>()
+      const look = yield* Effect.either(actions.message(row.thread, row.messageId))
+      const found = Either.getOrElse(look, () => Option.none<T3Actions.Found>())
+      // Steered in, even from the queue by his hand in T3 Code's app, which cancels the run it waited in, it's in the turn under way.
+      if (Option.exists(found, ({ intent, run }) => Option.exists(intent, steeredIn) || !Option.exists(run, ({ status }) => status === "cancelled"))) {
+        return Option.none<Went>()
+      }
+      if (Option.isSome(found)) {
+        yield* ledger.settle(row.commandId, "abandoned", { reason: Ledger.withdrawn })
+        return Option.some<Went>(yield* failing({ _tag: "Refused", reason: takenOut } satisfies Outcome, `${doing.message} again`))
+      }
+      const reason = Either.isLeft(look) ? `I couldn't look for it after sending it again: ${after(plainly(look.left.reason))}` : notThere
+      yield* ledger.settle(row.commandId, "sent", { reason })
+      return Option.some<Went>(
+        yield* failing({ _tag: "Unknown", reason, again: Option.none() } satisfies Outcome, `${doing.message} again, and couldn't tell whether it's still to be read`),
+      )
+    })
+
+  /**
    * Sending it once more never left yapd, so it wasn't sent again: the step
    * is put back as it was, never offered again on its own, so the same words
    * said again find it, and his yes can still send it under its ids.
@@ -396,7 +431,9 @@ export const make = (options: {
    * Sends a step written in the ledger and notes what came of it. When it
    * may have got there, it's looked for once. `last` is for the one time
    * it's sent again, after which it's never offered again, unless it never
-   * left yapd, which isn't sending it. `at` is when a message goes in this
+   * left yapd, which isn't sending it; a message that may have got there the
+   * first time is looked for then even once T3 Code says it's done, since it
+   * says so from what it kept. `at` is when a message goes in this
    * time, when T3 Code can't take it as it first went, still under its ids.
    */
   const dispatch = (row: Ledger.Row, actions: T3Actions.Actions, wasBusy: boolean, last = false, at?: T3Actions.When): Effect.Effect<Went> =>
@@ -412,6 +449,9 @@ export const make = (options: {
       const again = row.kind === "message" && !last ? Option.some(row.commandId) : Option.none<string>()
       const result = yield* Effect.either(actions.run(row.thread, sent, row.commandId))
       if (Either.isRight(result)) {
+        // What never left yapd the first time, T3 Code never had the ids of, so this is what it did with it now.
+        const gone = last && row.state !== "failed" ? yield* missed(row, actions) : Option.none<Went>()
+        if (Option.isSome(gone)) return gone.value
         const entry = yield* entered(row, actions, wasBusy, how)
         yield* ledger.settle(row.commandId, "sent", { how: entry })
         yield* Effect.logInfo(`Dispatched ${row.commandId} → sent (${entry})`)
@@ -936,6 +976,8 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
               : `I stopped ${name ?? "it"}${sir}, but the message didn't get there: ${reason}${asking}`
             : `I stopped ${name ?? "it"}${sir}, but couldn't confirm the message got there.${asking}`
       }
+      // Sent once more, T3 Code had it from the first time, so what's said is what became of it since.
+      if (outcome.reason === takenOut || outcome.reason === notThere) return `That got ${name === undefined ? "there" : `to ${name}`} the first time${sir}, but ${reason}`
       // Not sent again at another time, it's left, which isn't something that went wrong.
       if (outcome._tag === "Refused" && outcome.reason.startsWith(mayHave)) return `I left ${name === undefined ? "it" : `your message to ${name}`}${sir}: ${reason}`
       return outcome._tag === "Refused"

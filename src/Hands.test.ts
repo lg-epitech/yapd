@@ -435,6 +435,54 @@ describe("Hands", () => {
     }
   })
 
+  test("a yes to sending again a message taken out of the queue since, which T3 Code answers for from what it kept, is never said as sent", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    const message = { _tag: "Message", to: tezos, text: "", how: "after" } as const
+    const withdrawn = (forgotten: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, dispatched, ledger } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          // T3 Code queues it, but its answer is lost, and the thread can't be read to look for it.
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "When it's done, open a PR.", "after")
+          reads(true)
+          // He takes it out of the queue in T3 Code's app, which drops it from the thread, or shows it cancelled.
+          if (forgotten) {
+            bounded.runs.splice(1)
+            bounded.messages.splice(0)
+          } else bounded.runs[1]!.status = "cancelled"
+          // Sent again under the same ids, T3 Code answers as it did the first time, without doing anything.
+          answering(() => Effect.succeed({ sequence: 7 }))
+          const resent = yield* again("yapd:u1:0")
+          const state = Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state)
+          yield* TestClock.adjust("1 minute")
+          answering(takes())
+          const said = yield* send("u2", "When it's done, open a PR.", "after")
+          return {
+            resent: resent._tag === "Refused" || resent._tag === "Unknown" ? Hands.failed(message, resent, lines, Option.none()) : resent._tag,
+            state,
+            said: said._tag === "Refused" ? said.reason : said._tag,
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    // Shown cancelled, it was withdrawn, so the same words go as new.
+    expect(await withdrawn(false)).toEqual({
+      resent: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
+      state: Option.some("abandoned"),
+      said: "Done",
+      dispatched: 3,
+    })
+    // Gone from the thread, it may only be further back than the thread's read reaches: it went, so the same words are asked about.
+    expect(await withdrawn(true)).toEqual({
+      resent: "That got there the first time, sir, but it isn't in the thread now, so it may have been taken out of the queue.",
+      state: Option.some("sent"),
+      said: "Twin",
+      dispatched: 2,
+    })
+  })
+
   test("asking to send again says sir once, however the line to ask it was written", () => {
     const unknown: Hands.Outcome = { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }
     for (const again of ["Shall I send it again, sir?", "Sir, shall I send it again?"]) {
