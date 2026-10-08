@@ -100,6 +100,8 @@ describe("Brain", () => {
     // A name only one of them has.
     expect(pick("The Tezos one.")).toEqual({ act: "look", pending: "answers", thread: "Migrate Tezos Integration" })
     expect(pick("Neither.")).toEqual({ act: "dismiss", pending: "answers", thread: undefined })
+    // Said over and over, as people do, it's still no, never Whisper looping on noise.
+    expect(pick("No, no, no.")).toEqual({ act: "dismiss", pending: "answers", thread: undefined })
   })
 
   test("a bare stop never stops a thread", () => {
@@ -113,7 +115,7 @@ describe("Brain", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")
     expect(faint("you.", 0.1)).toBe("resume")
-    expect(faint("Yeah, yeah, yeah, yeah.", 3)).toBe("resume")
+    expect(faint("Thank you. Thank you. Thank you. Thank you.", 3)).toBe("resume")
     // Said for real, it's for the model to make sense of.
     expect(faint("Thank you.", 1.2)).toBeUndefined()
   })
@@ -123,6 +125,7 @@ describe("Brain", () => {
     const project = { kind: "project" as const, asked: "Which project is the retry fix for?", about: "the retry fix" }
     const usage: Option.Option<T3Actions.Usage> = Option.some([
       { provider: "Claude", windows: [{ label: "5h", usedPercent: 60.4, resetsAt: "2026-10-08T20:10:00.000Z" }, { label: "Weekly · Fable", usedPercent: 40, resetsAt: undefined }] },
+      { provider: "Codex", windows: [{ label: "Weekly", usedPercent: 20, resetsAt: "2026-10-12T13:00:00.000Z" }] },
     ])
     const resolved = Drafts.resolve(
       [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") }, researcher: Research.unavailable("") }],
@@ -139,11 +142,13 @@ describe("Brain", () => {
       Brain.notYet(lines),
       Brain.nothingSaid(lines),
       Brain.needing(desk(), lines, now),
-      Brain.used(usage, "how much claude have i got left", lines),
-      Brain.used(Option.none(), "usage", lines),
+      Brain.used(usage, "how much claude have i got left", lines, now),
+      Brain.used(usage, "usage", lines, now),
+      Brain.used(Option.none(), "usage", lines, now),
       ...Persona.sayable(Persona.plain),
       Conversation.movedOn,
       Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
+      Brain.speakable("I updated src/Brain.ts and the config in ~/.yapd/config.json, commit a1b2c3d4e5. The Codex agent is idle.", desk()),
       Brain.speakable(
         "t2 is still at it: it rewrote /Users/me/code/integration/src/fees.ts at 5c529e6b, and the agent says the session ends soon, see https://github.com/x/y/pull/412.",
         desk(),
@@ -156,9 +161,15 @@ describe("Brain", () => {
       expect(line).not.toMatch(/\b(?=[\da-f]*\d)(?=[\da-f]*[a-f])[\da-f]{7,}\b/)
       expect(line).not.toMatch(/(^|\s)~?\/[\w.-]+\//)
       expect(line).not.toMatch(/https?:/)
-      expect(line).not.toMatch(/\bthe (agent|session)\b/i)
+      expect(line).not.toMatch(/\bthe (\w+ )?(agent|session)\b/i)
+      expect(line).not.toMatch(/\w\.(ts|js|json|md)\b/)
     }
-    expect(said.at(-1)).toBe("Migrate Tezos Integration is still at it: it rewrote at, and the work says the work ends soon, see")
+    expect(said.at(-1)).toBe("Migrate Tezos Integration is still at it: it rewrote a file at a commit, and the work says the work ends soon, see a link.")
+    expect(said.at(-2)).toBe("I updated a file and the config in a file, a commit. The work is idle.")
+    // A weekly window resets days away, so the day is said, and "sir" only once however many lines.
+    const everything = Brain.used(usage, "usage", lines, now)
+    expect(everything).toContain("resetting Monday at")
+    expect(everything.match(/sir/g)).toHaveLength(1)
     expect(said[0]).toBe("Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?")
     expect(said[1]).toBe("Which one, sir: Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?")
   })
