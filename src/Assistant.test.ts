@@ -980,6 +980,42 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
+  test("what he said before an approval was asked, or before its turn came to be said, never allows it, however late it's handed on", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?"
+    // A model that takes anything for a yes to it, as one might, seeing what waits on him.
+    const yes = (situation: Brain.Situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" })
+    const sent = (made: { readonly dispatched: ReadonlyArray<Record<string, unknown>> }) => made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`)
+    // Dictated a second before it was even asked, and handed on once he'd heard it to the end: it stays open, for him to answer.
+    const early = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(yes, undefined, { others: [cloud], items: approval("r1", "npm install left-pad") })
+        yield* asked(made, cloud)
+        yield* made.heard({ heard: "Approve the cloud deployment one.", via: "shortcut", at: now - 1000, voiced: 3, turns: 1 })
+        yield* made.flush
+        const before = { dispatched: sent(made), open: Option.isSome(yield* made.open) }
+        yield* made.answer("Yes.")
+        return { before, spoken: made.spoken(), dispatched: sent(made) }
+      }),
+    )
+    expect(early).toEqual({ before: { dispatched: [], open: true }, spoken: [allow, "Approved, sir."], dispatched: ["r1 accept"] })
+    // Said once it was asked, but before its turn came to be said, and handed on once he'd heard it.
+    const waiting = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(yes, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        yield* made.wait(1)
+        const at = yield* TestClock.currentTimeMillis
+        yield* made.wait(1)
+        yield* made.play()
+        yield* made.heard({ heard: "Yes.", via: "shortcut", at, voiced: 1, turns: 1 })
+        yield* made.flush
+        return { spoken: made.spoken(), open: Option.isSome(yield* made.open), dispatched: sent(made) }
+      }),
+    )
+    expect(waiting).toEqual({ spoken: [allow], open: true, dispatched: [] })
+  })
+
   test("an approval answered in T3 Code meanwhile is not said, and a late yes does nothing", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

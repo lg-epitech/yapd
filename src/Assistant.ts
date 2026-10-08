@@ -46,10 +46,11 @@ export type Asks =
   /** The agent's own message ended on a question. */
   | { readonly _tag: "Agent" }
 
-/** What a thread waits on him for that he heard asked, and the thread. */
+/** What a thread waits on him for that he heard asked, the thread, and when he first heard all of it, which only what he said after can answer. */
 interface Heard {
   readonly ref: Threads.Ref
   readonly asks: Exclude<Asks, { readonly _tag: "Agent" }>
+  readonly through: number
 }
 
 /**
@@ -370,12 +371,22 @@ export const make = (options: {
      */
     /**
      * The open question, with what's being said meanwhile that may answer it,
-     * by press or request, which holds it until each is dealt with; whether
-     * he's heard all of it as it was last asked; and for what a thread waits
-     * on him for, what it was asked from.
+     * by press or request, which holds it until each is dealt with; when it
+     * first started being said to him, and when he'd heard all of it as it
+     * was last asked, so what he said before either is told apart, however
+     * late it's handed on; and for what a thread waits on him for, what it
+     * was asked from.
      */
     let asking:
-      | { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: Set<string>; said: boolean; whole: boolean; from?: Queued }
+      | {
+          open: Open
+          asks: number
+          repeat: Fiber.RuntimeFiber<void> | undefined
+          held: Set<string>
+          said: number | undefined
+          whole: number | undefined
+          from?: Queued
+        }
       | undefined
     /** Changes whenever the open question does, so what was worked out against another can tell. */
     let version = 0
@@ -468,19 +479,30 @@ export const make = (options: {
         }),
       )
 
+    /** Whether he'd heard it, as `at` says he had, by the time he said this: what he said before can't be about it, however late it's handed on. */
+    const heardBy = (utterance: Pick<Utterance, "at">, at: number | undefined) => at !== undefined && at <= utterance.at
+
     /**
      * The open question, unless it's been open so long it no longer counts:
-     * for an approval, with whether he's heard all of it as it was last
-     * asked, which a plain yes to it needs.
+     * for an approval, with whether he'd heard all of it as it was last
+     * asked by the time he said what's answering it, `by`, which a plain yes
+     * to it needs.
      */
-    const current = (now: number) => {
+    const current = (now: number, by = Number.POSITIVE_INFINITY) => {
       if (asking === undefined || now - asking.open.at >= fresh) return Option.none<Open>()
       const { open, whole } = asking
-      return Option.some(open.asks?._tag === "Approval" ? { ...open, asks: { ...open.asks, inFull: whole } } : open)
+      return Option.some(open.asks?._tag === "Approval" ? { ...open, asks: { ...open.asks, inFull: heardBy({ at: by }, whole) } } : open)
     }
 
-    /** The open question, if it was asked by the time this was said: one asked after can't be what it's about, so it never answers, dismisses or closes it. */
-    const before = (utterance: Pick<Utterance, "at">) => (asking !== undefined && asking.open.at <= utterance.at ? asking : undefined)
+    /**
+     * The open question, if it was asked by the time this was said, and he
+     * hadn't started hearing it only after: one asked after, or one said to
+     * him only once he'd said this, can't be what it's about, so it never
+     * answers, dismisses or closes it. One he hasn't heard at all yet is his
+     * to have something new take its place.
+     */
+    const before = (utterance: Pick<Utterance, "at">) =>
+      asking !== undefined && asking.open.at <= utterance.at && (asking.said === undefined || heardBy(utterance, asking.said)) ? asking : undefined
 
     /** What "it" means now: what's playing, or the latest heard lately, an update or an answer. */
     const subject = Effect.gen(function* () {
@@ -510,8 +532,8 @@ export const make = (options: {
     const situate = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        // One he hasn't heard yet can't be what he's answering, nor one asked after he said this.
-        const open = Option.filter(current(now), () => before(utterance)?.said === true)
+        // One he hadn't heard by the time he said this can't be what he's answering, nor one asked after.
+        const open = Option.filter(current(now, utterance.at), () => before(utterance)?.said !== undefined)
         const focus = Brain.about(about)
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
@@ -605,7 +627,7 @@ export const make = (options: {
         const { repeat, whole, from } = asking
         // What a thread waits on him for, cut off before he heard all of it by something new, or what made no sense, is asked once more,
         // after; cut off by turning yapd off, it's asked once it's on again, since it still waits on him, and that's no asking of his.
-        if (from !== undefined && !whole) {
+        if (from !== undefined && whole === undefined) {
           if (how === "dropped: off") asked.unshift(from)
           else if (!from.again && (how === "replaced" || how === "dropped: unclear")) asked.unshift({ ...from, again: true })
         }
@@ -661,7 +683,7 @@ export const make = (options: {
         const at = yield* Clock.currentTimeMillis
         version++
         // A dictation begun before it was asked can't be answering it, so nothing holds it yet.
-        asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: new Set(), said: false, whole: false }
+        asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: new Set(), said: undefined, whole: undefined }
         yield* Effect.logInfo(`Asked: ${open.asked}`)
         return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
       })
@@ -704,7 +726,7 @@ export const make = (options: {
           yield* close(open, "dropped: asked enough")
           return unfinished(reply(said.leaving, { _tag: "Nothing" }), open.decision.rest, said)
         }
-        asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: new Set(), whole: false }
+        asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: new Set(), whole: undefined }
         yield* Effect.logInfo(`Asked again: ${asked}`)
         return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
       })
@@ -1419,14 +1441,15 @@ export const make = (options: {
       })
 
     /**
-     * What a thread waits on him for that he heard asked and that this
-     * answers, an approval or a question: what it shows it waits on, or else
-     * the latest still waiting behind something it asked since, which T3
-     * Code's summary of the thread shows in its place.
+     * What a thread waits on him for that he'd heard asked by the time he
+     * said this, `utterance`, and that this answers, an approval or a
+     * question: what it shows it waits on, or else the latest still waiting
+     * behind something it asked since, which T3 Code's summary of the thread
+     * shows in its place.
      */
-    const meant = (ref: Threads.Ref, shown: string, kind: "Approval" | "Question") =>
+    const meant = (ref: Threads.Ref, shown: string, kind: "Approval" | "Question", utterance: Pick<Utterance, "at">) =>
       Effect.gen(function* () {
-        const answers = (heard: Heard) => Threads.same(heard.ref, ref) && heard.asks._tag === kind
+        const answers = (heard: Heard) => Threads.same(heard.ref, ref) && heard.asks._tag === kind && heardBy(utterance, heard.through)
         const showing = known.get(shown)
         if (showing !== undefined && answers(showing)) return Option.some(showing.asks)
         for (const heard of [...known.values()].toReversed()) {
@@ -1447,10 +1470,16 @@ export const make = (options: {
         const { decision } = plan
         const pending = target.thread.pendingRuntimeRequest
         if (pending === null) return reply(Brain.dealtWith(said), thought.subject)
-        const heard = Option.getOrUndefined(yield* meant(target.ref, pending.id, decision.act === "decide" ? "Approval" : "Question"))
+        const heard = Option.getOrUndefined(yield* meant(target.ref, pending.id, decision.act === "decide" ? "Approval" : "Question", thought.utterance))
         const risky = heard?._tag === "Approval" && heard.dangerous && decision.how !== "decline" && !Brain.approving(thought.utterance.heard)
         if (heard !== undefined && !risky) return yield* write(plan, thought, said, at, heard)
-        const worded = yield* options.compose(target.ref, heard?.requestId ?? pending.id)
+        const request = heard?.requestId ?? pending.id
+        // Asked since he said this, it's the question open, his to answer now he's heard it: it isn't read back over itself.
+        if (asking !== undefined && requestOf(asking.open) === request && Threads.same(asking.open.candidates[0] ?? { machine: "", id: "" }, target.ref)) {
+          yield* Effect.logInfo("Not reading back what it waits on, since it's the question open, asked since he said this")
+          return quiet(thought.subject)
+        }
+        const worded = yield* options.compose(target.ref, request)
         if (Option.isNone(worded)) return reply(`I couldn't read what ${target.called} is waiting on just now${addressed(said)}.`, thought.subject)
         const about = { _tag: "Answer", said: "", about: Option.some(target.ref) } satisfies Subject
         // Said now, so it's never brought up again as news, and noted as heard once he's heard it, so it's nothing he missed.
@@ -1569,7 +1598,7 @@ export const make = (options: {
         // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
         if (decided.source === "failed") {
           const heard = before(utterance)
-          if (heard?.said !== true) return reply(decision.spoken, decided.subject)
+          if (heard?.said === undefined) return reply(decision.spoken, decided.subject)
           const { open } = heard
           yield* close(open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
           return ahead(reply(decision.spoken, decided.subject), open.decision.rest, said)
@@ -1577,10 +1606,11 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         if (asking !== undefined && Option.isNone(current(now))) yield* close(asking.open, "dropped: unanswered")
         // One asked since he said this stays open, to be asked as usual, as if it weren't there.
-        const open = before(utterance)?.open
-        if (open === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+        const opened = before(utterance)
+        if (opened === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+        const { open } = opened
         // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it: what didn't go, and the rest of its request.
-        if (asking?.said === false) {
+        if (opened.said === undefined) {
           if (decision.act === "resume") return quiet(decided.subject)
           yield* close(open, "replaced", utterance.id)
           // What a thread waits on him for is asked after instead, so there's nothing to tell him of it now.
@@ -1606,7 +1636,7 @@ export const make = (options: {
         const approval = open.asks?._tag === "Approval" ? open.asks : undefined
         const allowing = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline"
         const unapproved = allowing && approval.dangerous && !Brain.approving(utterance.heard)
-        if (allowing && (unapproved || asking?.whole !== true)) {
+        if (allowing && (unapproved || !heardBy(utterance, opened.whole))) {
           if ((asking?.asks ?? asks) < asks) return yield* reask(said)
           yield* close(open, unapproved ? "dropped: not approved" : "dropped: not heard in full", utterance.id)
           return reply(unapproved ? Brain.unapproved(said) : Brain.cutShort(said), decided.subject)
@@ -1726,11 +1756,11 @@ export const make = (options: {
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
               Effect.sync(() => {
                 const before = answered
-                // Asked again in other words, he may have heard it already.
-                const heard = asking?.said === true
+                // Asked again in other words, he may have heard it already, from when he first did.
+                const heard = asking?.said
                 const meant = { subject, at: now }
                 answered = meant
-                if (open !== undefined && asking?.open.id === open.id) asking.said = true
+                if (open !== undefined && asking?.open.id === open.id) asking.said ??= now
                 unsaid = Effect.sync(() => {
                   if (answered === meant) answered = before
                   if (open !== undefined && asking?.open.id === open.id) asking.said = heard
@@ -1768,12 +1798,17 @@ export const make = (options: {
                   }),
                   question: {
                     // Heard to the end, a plain yes can only be to it, and what a thread waits on is his to answer by dictation too.
-                    through: Effect.sync(() => {
-                      if (asking?.open.id !== open.id) return
-                      asking.whole = true
-                      const [ref] = open.candidates
-                      if (open.asks !== undefined && open.asks._tag !== "Agent" && ref !== undefined) known.set(open.asks.requestId, { ref, asks: open.asks })
-                    }),
+                    through: Effect.flatMap(Clock.currentTimeMillis, (now) =>
+                      Effect.sync(() => {
+                        if (asking?.open.id !== open.id) return
+                        asking.whole ??= now
+                        const [ref] = open.candidates
+                        // From when he first heard all of it, which what he said before, however late it's handed on, can't answer.
+                        if (open.asks !== undefined && open.asks._tag !== "Agent" && ref !== undefined) {
+                          known.set(open.asks.requestId, { ref, asks: open.asks, through: known.get(open.asks.requestId)?.through ?? now })
+                        }
+                      }),
+                    ),
                     answer: listen(open),
                     unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),
                     // Broken off, he can't be taken to have heard it, so what he says next is something new, as before it was said.
@@ -2034,14 +2069,14 @@ export const make = (options: {
         Effect.gen(function* () {
           yield* release(`press:${press}`)
           // In case it isn't got ready for yet, so it held nothing, it keeps the question he'd heard by now, which it may have cut off.
-          const kept = yield* ended(press, asking?.said === true ? asking.open.id : undefined)
+          const kept = yield* ended(press, asking?.said !== undefined ? asking.open.id : undefined)
           yield* kept?.arrived ?? Effect.void
           // What waited for the dictation to be over is asked now.
           yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
         }),
       // Not one he hasn't heard yet, which what he said can't have been about. What was left of its request is said.
       replied: Effect.suspend(() => {
-        if (asking === undefined || !asking.said) return Effect.void
+        if (asking === undefined || asking.said === undefined) return Effect.void
         const { open } = asking
         return Effect.gen(function* () {
           yield* close(open, "replaced")
