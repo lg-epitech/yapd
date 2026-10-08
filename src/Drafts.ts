@@ -1,10 +1,10 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type * as Ledger from "./Ledger.ts"
-import type * as T3Live from "./T3Live.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
+import type * as T3Live from "./T3Live.ts"
 import { type Decision, type Destination, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
 // New work, from what the user said to where it starts: the writer decides
