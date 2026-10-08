@@ -2,7 +2,7 @@ import { Clock, Context, Effect, Option, type Scope, Stream, SubscriptionRef } f
 import * as Brain from "./Brain.ts"
 import { english } from "./Condenser.ts"
 import type { Kept } from "./Journal.ts"
-import { addressed, type Lines } from "./Persona.ts"
+import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as Process from "./Process.ts"
 import type * as Server from "./Server.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -532,13 +532,6 @@ export const said = (line: string, heard: Option.Option<string>): Draft => ({
   title: "What I said",
   markdown: [`### I said\n\n${plainly(line)}`, ...Option.match(heard, { onNone: () => [], onSome: (heard) => [`### I heard you say\n\n${plainly(heard)}`] })].join("\n\n"),
 })
-
-/** A line in his style without addressing him, like "It's on your screen.", for after one that did already. */
-const unaddressed = (line: string, { address }: Pick<Lines, "address">) => {
-  const word = address.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  if (word === "") return line
-  return Brain.capital(line.replace(new RegExp(`^${word},\\s*`, "i"), "").replace(new RegExp(`,\\s*${word}(?=[.!?]*$)`, "i"), ""))
-}
 
 /** A line said with a card, without "it's on your screen", which is only true while an app shows it: what's said of it again. */
 export const offScreen = (line: string, lines: Lines) =>
