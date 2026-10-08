@@ -995,6 +995,32 @@ describe("Daemon", () => {
     expect(result.kept.slice(1)).toEqual([["Rosie", "t-loader", "done:Rosie:run-1"]])
   })
 
+  test("a turn no hook told of, waiting to be said, isn't once its thread started again or went", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, wait, played, finish, nextEvent } = yield* make()
+        const { turns } = yield* made.power
+        // It waits behind something else being said, and he follows it up in T3 Code meanwhile.
+        yield* finish("a", "Something else first.")
+        yield* made.finished({
+          about: { machine: "Rosie", id: "t-loader" },
+          project: "yapd",
+          cwd: "/code/yapd",
+          turn: { prompt: Option.some("Fix the loader."), message: "The loader is fixed." },
+          at: 0,
+          key: "done:Rosie:run-1",
+          turns,
+        })
+        yield* nextEvent("Ready: yapd. The loader")
+        yield* made.overtaken({ machine: "Rosie", id: "t-loader" })
+        yield* wait(11)
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Something else first."])
+  })
+
   test("says what yapd has to say for itself in turn, questions first", async () => {
     const result = await run(
       Effect.gen(function* () {

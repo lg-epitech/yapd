@@ -292,6 +292,8 @@ export const make = (options: {
     readonly key: string
     readonly turns: number
   }) => Effect.Effect<void>
+  /** A thread started again, or went: what it said last that no hook told of, if that's still to be said, isn't. */
+  readonly overtaken: (ref: Threads.Ref) => Effect.Effect<void>
   readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
   /** Asks what a thread waits on him for, as the one question open. */
   readonly ask: (asking: Assistant.Asking) => Effect.Effect<void>
@@ -413,6 +415,8 @@ export const make = (options: {
         if (Option.isNone(thread) || Option.isNone(shown)) return
         const { called, project } = shown.value
         if (status === "failed") return yield* failed(ref, run.value, thread.value, called, project, turns, at)
+        // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes.
+        if (thread.value.latestRunId !== null && thread.value.latestRunId !== runId) return yield* Effect.logInfo("Not saying a turn no hook told of, since it started again")
         if (quick(run.value, at, options.shortest)) return yield* Effect.logInfo("Skipped quick turn, with no hook")
         if (run.value.said === "") return
         yield* options.finished({
@@ -451,6 +455,8 @@ export const make = (options: {
     /** Looks into what a change to a thread comes to, in the background, unless yapd is off. */
     const hear = (machine: string, change: T3Live.Change) =>
       Effect.gen(function* () {
+        // Started again, or gone, a turn of it no hook told of that's still to be said isn't, as a hook's update isn't once the next prompt comes.
+        if (change._tag === "Started" || change._tag === "Removed") yield* options.overtaken({ machine, id: change.thread.id })
         const news = verdict(change)
         if (Option.isNone(news)) return
         if (news.value._tag === "Settled") {

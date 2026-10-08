@@ -76,7 +76,7 @@ const notices = (
     const store = given.store ?? (yield* Store.make(":memory:"))
     const journal = Journal.fromStore(store)
     const changes = yield* Queue.unbounded<T3Live.Change>()
-    const view: T3Live.View = {
+    let view: T3Live.View = {
       projects: new Map([["p", { id: "p", title: "integration", workspaceRoot: "/code/integration" }]]),
       threads: new Map(given.view.map((thread) => [thread.id, thread])),
       sequence: 1,
@@ -94,7 +94,7 @@ const notices = (
     })
     const threads = yield* Threads.make({
       machine: "Rosie",
-      live: { view: Effect.succeed(Option.some(view)), changes: Stream.fromQueue(changes) },
+      live: { view: Effect.sync(() => Option.some(view)), changes: Stream.fromQueue(changes) },
       actions: Option.some(T3Actions.make(reach)),
       others: [],
       journal,
@@ -105,6 +105,8 @@ const notices = (
     const asked: Array<string> = []
     const settled: Array<string> = []
     const finished: Array<{ readonly key: string; readonly message: string }> = []
+    /** The threads whose turn no hook told of was overtaken, by starting again or going. */
+    const overtaken: Array<string> = []
     const tell = (notice: Notice) =>
       Effect.gen(function* () {
         if (yield* notice.stale) return
@@ -123,6 +125,7 @@ const notices = (
           return at.length === 0 ? Option.none() : Option.some(Math.max(...at))
         }),
       finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message })),
+      overtaken: (ref) => Effect.sync(() => void overtaken.push(ref.id)),
       mention: () => Effect.void,
       ask: (asking) => Effect.map(journal.claim(asking.entry), (kept) => void (Option.isSome(kept) && asked.push(asking.asked))),
       settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
@@ -138,8 +141,14 @@ const notices = (
       asked,
       settled,
       finished,
+      overtaken,
       /** T3 Code tells of these. */
       hear: (...happened: ReadonlyArray<T3Live.Change>) => Queue.offerAll(changes, happened).pipe(Effect.zipRight(flush)),
+      /** T3 Code has the thread as it is now, without telling of it. */
+      becomes: (thread: T3Live.Thread) =>
+        Effect.sync(() => {
+          view = { ...view, threads: new Map([...view.threads, [thread.id, thread]]) }
+        }),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       flush,
     }
@@ -209,6 +218,33 @@ describe("Notices", () => {
     )
     expect(result.early).toEqual([])
     expect(result.finished).toEqual([{ key: "done:Rosie:run-2", message: "The loader is fixed." }])
+  })
+
+  test("a turn no hook told of isn't said once its thread started again or went, as a hook's update isn't once the next prompt comes", async () => {
+    const loader = thread("loader", "Fix the loader", { latestRunId: "run-2", modelSelection: { instanceId: "opencode", model: "kimi-k3" } })
+    const bounded = {
+      loader: {
+        runs: [{ id: "run-2", status: "completed", ordinal: 1, startedAt: minutes(4), userMessageId: "m2" }],
+        messages: [{ id: "a2", runId: "run-2", role: "assistant", text: "The loader is fixed.", createdAt: minutes(0) }],
+        sessions: ["oc-loader"],
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, becomes, finished, overtaken } = yield* notices({ view: [loader], bounded })
+        yield* hear(ended(loader, "run-2"))
+        // He follows it up in T3 Code within the grace, so it starts again.
+        yield* wait(5)
+        const again = { ...loader, activeRunId: "run-3", latestRunId: "run-3" }
+        yield* becomes(again)
+        yield* hear({ _tag: "Started", thread: again }, { _tag: "Removed", thread: again })
+        yield* wait(15)
+        return { finished, overtaken }
+      }),
+    )
+    expect(result.finished).toEqual([])
+    // And what was waiting to be said of it, if anything was, isn't.
+    expect(result.overtaken).toEqual(["loader", "loader"])
   })
 
   test("a pending request is announced once after a restart, and not at all if it was already said", async () => {

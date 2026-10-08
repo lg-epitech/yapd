@@ -607,6 +607,13 @@ export const make = (
       )
     }).pipe(events.withPermits(1))
 
+  /**
+   * A thread T3 Code said finished a turn no hook told of started again, or
+   * went: that turn, if it's still to be said, isn't, as a hook's update
+   * isn't once the next prompt comes.
+   */
+  const overtaken = (about: Threads.Ref) => discard(`finished:${about.machine}:${about.id}`).pipe(events.withPermits(1))
+
   /** Returns the ticket of the session's Stop hook when it waits for a reply. */
   const receive = (agent: Agent, payload: Payload, origin: Origin, wait: boolean) =>
     Effect.gen(function* () {
@@ -1062,5 +1069,6 @@ export const make = (
         return at.length === 0 ? Option.none<number>() : Option.some(Math.max(...at))
       }),
     finished,
+    overtaken,
   }
 })
