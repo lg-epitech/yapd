@@ -779,14 +779,47 @@ describe("Assistant", () => {
       Effect.gen(function* () {
         const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "git push --force origin main"), waiting: true })
         yield* asked(made, cloud)
-        // Said over it, before he's heard all of it.
-        yield* made.cut()
+        yield* made.play()
         yield* made.answer("Approve it.")
         return { spoken: made.spoken(), dispatched: made.dispatched.map(({ decision }) => decision) }
       }),
     )
-    expect(result.spoken.at(-1)).toBe("Approved, sir.")
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "Approved, sir.",
+    ])
     expect(result.dispatched).toEqual(["accept"])
+  })
+
+  test("'approve' said over an approval before what it would run was said asks it again in full, and allows it only once he's heard it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2"].flatMap((requestId) => approval(requestId, "git push --force origin main"))
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items, waiting: true })
+        yield* asked(made, cloud)
+        // He knows the word, and says it over "Cloud deployment discovery wants to—".
+        yield* made.cut()
+        yield* made.answer("Approve.")
+        const before = made.dispatched.length
+        yield* made.play()
+        yield* made.answer("Approve.")
+        // Another, cut off both times it's asked: it's left waiting, never allowed.
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.cut()
+        yield* made.answer("Approve.")
+        yield* made.cut()
+        yield* made.answer("Approve it.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    const asking = "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir."
+    const again = "Shall I still allow Cloud deployment discovery to run git push --force origin main, sir? Only 'approve' will do."
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([asking, again, "Approved, sir.", asking, again, "You stopped me before the end, so I've left it waiting for you in T3 Code, sir."])
+    expect(result.dispatched).toEqual(["r1 accept"])
   })
 
   test("a dangerous approval he heard and let go is allowed by dictation only with 'approve', and read back to him otherwise", async () => {

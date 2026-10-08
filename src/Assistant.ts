@@ -1588,14 +1588,16 @@ export const make = (options: {
         const named = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         const elsewhere = requestOf(open) !== undefined && named !== undefined && !open.candidates.some((ref) => Threads.same(ref, named.ref))
         const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume" && !elsewhere
-        // A plain yes allows an approval only once he's heard all of it as it was last asked, and a risky one only the word its asking
-        // named will: otherwise it's asked once more, in full and naming the word for a risky one, then it's let go.
+        // An approval is allowed only once he's heard all of it as it was last asked, even with "approve", since what it would run comes
+        // last; and a risky one only by the word its asking named, never a plain yes: otherwise it's asked once more, in full and naming
+        // the word for a risky one, then it's let go. A no needs neither.
         const approval = open.asks?._tag === "Approval" ? open.asks : undefined
-        const plain = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline" && !Brain.approving(utterance.heard)
-        if (plain && (approval.dangerous || asking?.whole !== true)) {
+        const allowing = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline"
+        const unapproved = allowing && approval.dangerous && !Brain.approving(utterance.heard)
+        if (allowing && (unapproved || asking?.whole !== true)) {
           if ((asking?.asks ?? asks) < asks) return yield* reask(said)
-          yield* close(open, approval.dangerous ? "dropped: not approved" : "dropped: not heard in full", utterance.id)
-          return reply(approval.dangerous ? Brain.unapproved(said) : Brain.cutShort(said), decided.subject)
+          yield* close(open, unapproved ? "dropped: not approved" : "dropped: not heard in full", utterance.id)
+          return reply(unapproved ? Brain.unapproved(said) : Brain.cutShort(said), decided.subject)
         }
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : answers ? "answered" : "replaced", utterance.id)
         if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)

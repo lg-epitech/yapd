@@ -610,10 +610,10 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
 
 /**
  * What answers what a thread waits on him for without the model: "approve",
- * a plain yes or a no to an approval, of which a plain yes only allows one
- * he's heard all of that isn't risky, as the assistant sees to, asking once
- * more otherwise; an option of a question, by position or a name only it
- * has. Anything else is the model's to judge.
+ * a plain yes or a no to an approval, of which either yes only allows one
+ * he's heard all of, and a plain yes only one that isn't risky, as the
+ * assistant sees to, asking once more otherwise; an option of a question,
+ * by position or a name only it has. Anything else is the model's to judge.
  */
 const settling = (asks: Assistant.Asks | undefined, said: string, target: string): Decision | undefined => {
   switch (asks?._tag) {
