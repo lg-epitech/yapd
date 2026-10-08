@@ -3713,6 +3713,27 @@ describe("Assistant", () => {
     expect(result.other).toEqual({ said: tezosAnswer, up: Option.some({ kind: "said", line: true }) })
   })
 
+  test("turned off and on, nothing said before is said again for 'say that again', nor its card put back up, even once it's gone", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Showing what's running and saying it again need no model, which can't be asked here.
+        const { dictate, heard, spoken, show, toggle } = yield* assistant(() => undefined)
+        yield* show.watch
+        yield* dictate("Show me what's running.")
+        const before = Option.map(yield* show.seen, ({ kind }) => kind)
+        // The app faded it, and took it down too.
+        yield* show.hide
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* heard({ heard: "Say that again.", via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: 3 })
+        return { before, said: spoken(), up: Option.flatten(yield* Stream.runHead(show.showing)) }
+      }).pipe(Effect.scoped),
+    )
+    expect(result.before).toEqual(Option.some("threads"))
+    expect(result.said).toEqual(["It's on your screen. One running.", "I haven't said anything just now, sir."])
+    expect(result.up).toEqual(Option.none())
+  })
+
   test("a pull request taken on a low guess between two is asked about before anything opens, and the one he picks is opened", async () => {
     const migration = (id: string, coin: string, number: number) =>
       thread(id, `Migrate the ${coin} integration`, "integration", {

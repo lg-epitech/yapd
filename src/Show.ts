@@ -36,6 +36,16 @@ export interface Card {
 /** A card before it's put up. */
 export type Draft = Omit<Card, "id" | "at">
 
+/**
+ * The line a card goes up with, and how many times yapd had been turned on or
+ * off as it was said: saying it again puts the card back up, but never once
+ * yapd has been turned off since.
+ */
+export interface Line {
+  readonly said: string
+  readonly turns: number
+}
+
 /** What showing something comes to: what's said, the card put up as it's said, and the thread it's about. */
 export interface Shown {
   readonly say: string
@@ -54,7 +64,7 @@ export class Show extends Context.Tag("yapd/Show")<
   Show,
   {
     /** Puts a card up in place of the one there, as it's talked about: saying `line` again puts it back up. */
-    readonly put: (draft: Draft, line?: string) => Effect.Effect<Card>
+    readonly put: (draft: Draft, line?: Line) => Effect.Effect<Card>
     /** Takes the card down, and says whether one was up. */
     readonly hide: Effect.Effect<boolean>
     /** Puts one of the cards put up lately back up as it was, with nothing said of it, and says whether there was one. */
@@ -82,8 +92,8 @@ export class Show extends Context.Tag("yapd/Show")<
     /**
      * A card to put up as `line` is said again, while an app watches to show
      * it: the one that went up with it, if one did, so it's on his screen as
-     * long as it's talked about, and otherwise what was said last and heard
-     * last.
+     * long as it's talked about, unless yapd was turned off since, and
+     * otherwise what was said last and heard last.
      */
     readonly caption: (line: string, situation: Brain.Situation) => Effect.Effect<Option.Option<Draft>>
   }
@@ -670,9 +680,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     // Whether the card that's up went up while an app was there to show it: one put up before isn't on his screen, even once an app is.
     let shownTo = false
     // The last card that went up as something was said, and what was: said again, it goes up again, whether it's still up or not.
-    let withLine: { readonly line: string; readonly draft: Draft } | undefined
+    let withLine: { readonly line: Line; readonly draft: Draft } | undefined
 
-    const put = (draft: Draft, line?: string) =>
+    const put = (draft: Draft, line?: Line) =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const card: Card = { ...draft, id: `c${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`, at }
@@ -823,8 +833,10 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           // Like a thread's card with a command he couldn't hear, which is what he'd want to see while it's said again. Put up
           // anew, it fades only once this is said, not a while after it was first. Said again before, it went up with the line
           // as it was said then, without "it's on your screen".
+          // Never one from before yapd was turned off, which isn't what's talked about now, whatever's said.
           const repeated = situation.subject._tag === "Nothing" ? undefined : situation.subject.said
-          if (withLine !== undefined && (withLine.line === repeated || withLine.line === line)) return Option.some(withLine.draft)
+          const kept = withLine?.line.turns === situation.utterance.turns ? withLine : undefined
+          if (kept !== undefined && (kept.line.said === repeated || kept.line.said === line)) return Option.some(kept.draft)
           return Option.some(said(line, lastHeard(situation)))
         }),
     } satisfies Show["Type"]

@@ -319,8 +319,13 @@ export const make = (options: {
     let asking: { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: Set<string>; said: boolean } | undefined
     /** Changes whenever the open question does, so what was worked out against another can tell. */
     let version = 0
-    /** What yapd said last of its own accord, which "it" may mean, and when it started saying it. */
-    let answered: { readonly subject: Subject; readonly at: number } | undefined
+    /**
+     * What yapd said last of its own accord, which "it" may mean, when it
+     * started saying it, and how many times yapd had been turned on or off
+     * then: once it's turned off, nothing said before is "it", nor said or
+     * shown again.
+     */
+    let answered: { readonly subject: Subject; readonly at: number; readonly turns: number } | undefined
     /**
      * For each press whose dictation hasn't ended, by the press: what "it"
      * meant then, before the dictation stopped what was playing, and what lets
@@ -410,7 +415,8 @@ export const make = (options: {
     const subject = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
       const update = Option.filter(yield* options.lastHeard, ({ playing, at }) => playing || now - at < recall)
-      const said = answered !== undefined && now - answered.at < recall ? answered : undefined
+      const { turns } = yield* options.power
+      const said = answered !== undefined && answered.turns === turns && now - answered.at < recall ? answered : undefined
       if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
         return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject
       }
@@ -1561,7 +1567,7 @@ export const make = (options: {
                 const before = answered
                 // Asked again in other words, he may have heard it already.
                 const heard = asking?.said === true
-                const meant = { subject, at: now }
+                const meant = { subject, at: now, turns: utterance.turns }
                 answered = meant
                 if (open !== undefined && asking?.open.id === open.id) asking.said = true
                 unsaid = Effect.sync(() => {
@@ -1569,7 +1575,7 @@ export const make = (options: {
                   if (open !== undefined && asking?.open.id === open.id) asking.said = heard
                 })
               }),
-            ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(options.show.put(card, line)))),
+            ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns })))),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
