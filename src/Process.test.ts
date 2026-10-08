@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber } from "effect"
+import { Effect, Fiber, Option } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -48,6 +48,25 @@ describe("Process", () => {
     try {
       for (const leave of [true, false]) pids.push(Number((await Effect.runPromise(run(helper, { leave }))).trim()))
       expect(pids.map(alive)).toEqual([true, false])
+    } finally {
+      for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL")
+    }
+  })
+
+  // SSH leaves its own stderr to a ProxyCommand or ProxyJump proxy, which keeps it for as long as the connection lasts.
+  test("finishes when a command that leaves something running has, even when that keeps the command's output", async () => {
+    const pids: Array<number> = []
+    try {
+      const done = await Effect.runPromise(
+        Effect.timeoutOption(run(["sh", "-c", "sleep 30 </dev/null & echo $!"], { leave: true }), "2 seconds"),
+      )
+      pids.push(...Option.toArray(done).map((stdout) => Number(stdout.trim())))
+      expect(pids.map(alive)).toEqual([true])
+      // What went wrong is still said, though what it left running keeps writing where it's read from.
+      const failed = await Effect.runPromise(
+        Effect.flip(Effect.timeout(run(["sh", "-c", "sleep 30 </dev/null & echo nope >&2; exit 3"], { leave: true }), "2 seconds")),
+      )
+      expect(failed).toMatchObject({ _tag: "ProcessError", code: 3, stderr: "nope" })
     } finally {
       for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL")
     }
