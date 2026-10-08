@@ -131,6 +131,37 @@ describe("Show", () => {
     expect(result).toEqual({ first: Option.none(), latest: Option.some(true), gone: false, back: Option.some(true) })
   })
 
+  test("lists the threads on each machine, with their pull requests, and the machines it can't see, as /threads documents", () => {
+    const url = "https://github.com/lg-epitech/integration/pull/412"
+    const tezos = Schema.decodeUnknownSync(T3Live.Thread)({
+      ...waiting,
+      id: "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+      title: "Migrate the Tezos integration",
+      pendingRuntimeRequest: null,
+      pullRequests: [{ number: 412, url, repository: "lg-epitech/integration", snapshot: { state: "OPEN", title: "Migrate Tezos", checksState: "PASSING" } }],
+    })
+    const relay = Schema.decodeUnknownSync(T3Live.Thread)({ ...waiting, id: "r-1", title: "Fix the relay", pendingRuntimeRequest: null })
+    const machines = Show.listing({
+      threads: [
+        listed,
+        { ...listed, handle: "t2", ref: { machine: "Rosie", id: tezos.id }, project: "integration", thread: tezos, state: "running", since: Date.parse("2026-10-08T21:40:00.000Z") },
+        { ...listed, handle: "t3", ref: { machine: "rig", id: relay.id }, here: false, thread: relay, state: "idle", since: Date.parse("2026-10-08T20:00:00.000Z") },
+      ],
+      away: [{ machine: "Alaska", reason: "I can't reach Alaska right now." }],
+    })
+    expect(machines).toEqual([
+      {
+        machine: "Rosie",
+        threads: [
+          { id: waiting.id, project: "yapd", title: "Clean up the build", state: "approval", since: "2026-10-08T21:55:00.000Z" },
+          { id: tezos.id, project: "integration", title: "Migrate the Tezos integration", state: "running", since: "2026-10-08T21:40:00.000Z", pr: { number: 412, url, state: "open", checks: "passing" } },
+        ],
+      },
+      { machine: "rig", threads: [{ id: relay.id, project: "yapd", title: "Fix the relay", state: "idle", since: "2026-10-08T20:00:00.000Z" }] },
+      { machine: "Alaska", reason: "I can't reach Alaska right now.", threads: [] },
+    ])
+  })
+
   test("a message made to trip a pattern up is tamed at once", () => {
     const started = performance.now()
     for (const message of ["[](<".repeat(625), "[](".repeat(833), "![](".repeat(625)]) Show.tamed(message)
