@@ -259,6 +259,60 @@ describe("Brain", () => {
     )
   })
 
+  test("what's risky enough to need 'approve' is found however the command is written, and only words that say so approve it", () => {
+    const risky = [
+      "rm -rf build",
+      "rm -fr build",
+      "rm -r -f build",
+      "rm -v -f -R node_modules",
+      "rm --recursive --force dist",
+      "git push --force origin main",
+      "git push origin main --force",
+      "git push -f",
+      "git push origin +main",
+      "git push --force-with-lease",
+      "git reset --hard origin/main",
+      "git branch -D main",
+      "git branch --delete --force old",
+      "git clean -fdx",
+      "git filter-repo --path secrets",
+      "git commit --no-verify -m wip",
+      "aws s3 rm s3://backups --recursive",
+      "psql -c 'DROP TABLE users;'",
+      "DELETE FROM accounts;",
+      "terraform apply -auto-approve",
+      "kubectl delete pod api",
+      "deploys the site",
+      "bun run deploy:staging",
+      "the production database",
+      "cat ~/.aws/credentials",
+      "export OPENAI_API_KEY=sk-123",
+      "echo $GITHUB_TOKEN",
+      "cat .env",
+      "chmod -R 777 /",
+    ]
+    const ordinary = [
+      "npm install left-pad",
+      "git push origin main",
+      "git push --follow-tags",
+      "git branch -d merged-feature",
+      "git clean -n",
+      "rm notes.txt",
+      "rm -f build.log",
+      "bun test src/token.test.ts",
+      "Read the fee tables",
+      "cat .envrc",
+    ]
+    expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
+    expect(ordinary.filter(Brain.dangerous)).toEqual([])
+    // The words that allow a risky one, and never one turned down in the same breath.
+    expect(["Approve.", "Yes, approve it.", "Allow it.", "Confirm.", "I approve."].filter((heard) => !Brain.approving(heard))).toEqual([])
+    expect(["Yes.", "Sure.", "Go ahead.", "No, don't approve that.", "Never approve it.", "Do not allow it.", "Don't confirm."].filter(Brain.approving)).toEqual([])
+    // For the rest of its work only in so many words.
+    expect(["Yes, for the session.", "Allow it from now on."].every(Brain.forSession)).toBe(true)
+    expect(["Yes.", "Approve it, it's a session thing.", "Always."].some(Brain.forSession)).toBe(false)
+  })
+
   test("a near-silence 'Thank you.' is ignored", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")

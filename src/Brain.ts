@@ -293,16 +293,55 @@ export const unapproved = (lines: Lines) => `It needs an 'approve', so I've left
 /** What's said of an approval he said a plain yes over once it was asked again, before he'd heard all of it. */
 export const cutShort = (lines: Lines) => `You stopped me before the end, so I've left it waiting for you in T3 Code${addressed(lines)}.`
 
+/** Flags before the ones that count, like "-v" in "rm -v -rf". */
+const flags = String.raw`(?:-\S+\s+)*`
+
 /**
  * What makes what a thread wants to do risky enough to need "approve", in
  * its prompt or the command, change or tool it's for, whatever the model
- * made of it. It never turns anything down: it only asks for the word.
+ * made of it: deleting for good, forcing history, production and deploys,
+ * and credentials. It never turns anything down: it only asks for the word.
  */
-const risky =
-  /rm\s+-[a-z]*r[a-z]*f|reset\s+--hard|push\s+(-f|--force)|--force-with-lease|drop\s+(table|database|schema)|truncate\s+table|delete\s+from\s+\w+\s*(;|$)|terraform\s+(apply|destroy)|kubectl\s+delete|\bprod(uction)?\b|\bdeploy\b|git\s+filter-(branch|repo)|--no-verify|chmod\s+-R\s+777|mkfs|dd\s+if=/i
+const risky = new RegExp(
+  [
+    // Deleting a tree, its flags together or apart, in either order, or a bucket's.
+    String.raw`\brm\s+${flags}(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-[a-z]*r[a-z]*\s+${flags}-[a-z]*f|-[a-z]*f[a-z]*\s+${flags}-[a-z]*r|--recursive\s+${flags}--force|--force\s+${flags}--recursive)`,
+    String.raw`\b(?:s3|gsutil)\s+(?:rm|rb)\b`,
+    // Forcing what git keeps, wherever the flag goes: a push, a reset, a clean, a rewrite, or skipping its checks.
+    String.raw`\bpush\b[^\n;|&]*(?:\s-f\b|\s--force\b|\s\+\S)`,
+    String.raw`--force-with-lease`,
+    String.raw`reset\s+--hard`,
+    String.raw`\bclean\s+${flags}-[a-z]*f`,
+    String.raw`git\s+filter-(?:branch|repo)`,
+    String.raw`--no-verify`,
+    // Data and infrastructure.
+    String.raw`drop\s+(?:table|database|schema)`,
+    String.raw`truncate\s+table`,
+    String.raw`delete\s+from\s+\w+\s*(?:;|$)`,
+    String.raw`terraform\s+(?:apply|destroy)`,
+    String.raw`kubectl\s+delete`,
+    String.raw`\bprod(?:uction)?\b`,
+    String.raw`\bdeploy\w*`,
+    String.raw`chmod\s+-R\s+777`,
+    String.raw`mkfs`,
+    String.raw`dd\s+if=`,
+    // Credentials, read or set.
+    String.raw`\bcredentials?\b`,
+    String.raw`(?:\b|_)(?:api|secret|private|access)[_-]?keys?\b`,
+    String.raw`\w+_(?:token|secret|password)\b`,
+    String.raw`\b(?:access|auth|bearer)[_-]?tokens?\b`,
+    String.raw`\bsecrets?\b`,
+    String.raw`\bpasswords?\b`,
+    String.raw`(?:^|[\s/])\.env\b`,
+  ].join("|"),
+  "i",
+)
+
+/** What's risky only as it's written, since a capital is what tells it apart: deleting a branch whatever it holds, as "-d" never does. */
+const forced = /\bbranch\s+(?:-\S+\s+)*(?:-[a-zA-Z]*D\b|--delete\s+--force|--force\s+--delete)/
 
 /** Whether what a thread wants to do is risky, by what it says it would run or change. */
-export const dangerous = (text: string) => risky.test(text)
+export const dangerous = (text: string) => risky.test(text) || forced.test(text)
 
 /** Whether he allowed it in so many words, like "yes, approve it", "allow it" or "confirm", and didn't say not to. */
 export const approving = (heard: string) => {
