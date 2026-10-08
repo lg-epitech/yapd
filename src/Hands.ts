@@ -148,7 +148,7 @@ export const make = (options: {
       const actions = threads.actions(to.machine)
       if (Option.isNone(actions)) return Either.left(`I can't reach the threads on ${to.machine} right now.`)
       const thread = yield* threads.find(to)
-      if (Option.isNone(thread)) return Either.left("It isn't among your threads any more.")
+      if (Option.isNone(thread)) return Either.left("I can't find it among your threads right now.")
       if (thread.value.archivedAt !== null) return Either.left("It's been archived.")
       if (thread.value.lineage?.relationshipToParent === "subagent") return Either.left("It's part of another thread, and takes nothing on its own.")
       return Either.right({ actions: actions.value, thread: thread.value })
