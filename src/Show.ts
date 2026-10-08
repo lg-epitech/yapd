@@ -80,9 +80,10 @@ export class Show extends Context.Tag("yapd/Show")<
      */
     readonly aside: (target: Threads.Listed, detail: T3Actions.Detail, answer: string, lines: Lines) => Effect.Effect<Option.Option<{ readonly say: string; readonly card: Draft }>>
     /**
-     * What was said last and heard last, as a card, while an app watches to
-     * show it: for when he asks to hear it again. None when the card on his
-     * screen went up with what's said again, which it would only hide.
+     * A card to put up as `line` is said again, while an app watches to show
+     * it: the one that went up with it, if one did, so it's on his screen as
+     * long as it's talked about, and otherwise what was said last and heard
+     * last.
      */
     readonly caption: (line: string, situation: Brain.Situation) => Effect.Effect<Option.Option<Draft>>
   }
@@ -631,8 +632,8 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     let watching = 0
     // Whether the card that's up went up while an app was there to show it: one put up before isn't on his screen, even once an app is.
     let shownTo = false
-    // What was said as the card that's up went up, if anything was.
-    let upWith: string | undefined
+    // The last card that went up as something was said, and what was: said again, it goes up again, whether it's still up or not.
+    let withLine: { readonly line: string; readonly draft: Draft } | undefined
 
     const put = (draft: Draft, line?: string) =>
       Effect.gen(function* () {
@@ -641,7 +642,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         recent.set(card.id, card)
         for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) recent.delete(id)
         shownTo = watching > 0
-        upWith = line
+        if (line !== undefined) withLine = { line, draft }
         yield* SubscriptionRef.set(up, Option.some(card))
         yield* Effect.logInfo(`Showing ${card.kind}: ${card.title}`)
         return card
@@ -744,7 +745,6 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           recent.delete(id)
           recent.set(id, card)
           shownTo = watching > 0
-          upWith = undefined
           yield* SubscriptionRef.set(up, Option.some(card))
           yield* Effect.logInfo(`Showing ${card.kind} again: ${card.title}`)
           return true
@@ -777,9 +777,11 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
       caption: (line, situation) =>
         Effect.gen(function* () {
           if (!(yield* watched) || line.trim() === "") return Option.none()
-          // Like a thread's card with a command he couldn't hear, which is what he'd want to see while it's said again.
+          // Like a thread's card with a command he couldn't hear, which is what he'd want to see while it's said again. Put up
+          // anew, it fades only once this is said, not a while after it was first. Said again before, it went up with the line
+          // as it was said then, without "it's on your screen".
           const repeated = situation.subject._tag === "Nothing" ? undefined : situation.subject.said
-          if (Option.isSome(yield* seen) && upWith !== undefined && upWith === repeated) return Option.none()
+          if (withLine !== undefined && (withLine.line === repeated || withLine.line === line)) return Option.some(withLine.draft)
           return Option.some(said(line, lastHeard(situation)))
         }),
     } satisfies Show["Type"]
