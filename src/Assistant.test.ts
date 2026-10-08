@@ -651,6 +651,85 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r2 accept"])
   })
 
+  test("an approval cut off before its end by something new is asked once more after it, in the same words, and cut off again isn't asked a third time", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        // He asks something else over it before it's done, and again over it asked once more.
+        yield* made.cut()
+        yield* made.dictate("What's the status on Mina?")
+        const again = made.spoken()
+        yield* made.cut()
+        yield* made.dictate("What's the status on Mina?")
+        yield* made.wait(120)
+        return { again, spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?"
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(result.again).toEqual([allow, status, allow])
+    expect(result.spoken).toEqual([allow, status, allow, status])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("an approval that comes while another question is open is asked once that one's answered", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.open)
+              ? Brain.decision({ act: "answer", target: handle(situation, tezos), sure: "low", others: handle(situation, mina), spoken: "It's comparing formats." })
+              : Brain.decision({ act: "answer", target: handle(situation, tezos), pending: "answers", spoken: "The Tezos migration is comparing request formats, sir." }),
+          undefined,
+          { others: [cloud], items: approval("r1", "npm install left-pad") },
+        )
+        yield* made.dictate("What's the status on my Tesla's migration request comparison?")
+        const worded = Option.getOrThrow(yield* made.compose(cloud))
+        if (worded._tag === "Ask") yield* made.ask(worded.asking)
+        yield* made.flush
+        const held = made.spoken()
+        yield* made.answer("Migrate Tezos.", made.questions()[0])
+        return { held, spoken: made.spoken(), open: Option.map(yield* made.open, ({ kind }) => kind) }
+      }),
+    )
+    expect(result.held).toEqual(["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?"])
+    expect(result.spoken).toEqual([
+      "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
+      "The Tezos migration is comparing request formats, sir.",
+      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+    ])
+    expect(result.open).toEqual(Option.some("approval"))
+  })
+
+  test("an approval he heard and didn't answer is asked once more in other words a minute later, then left waiting in T3 Code with a word", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install left-pad") })
+        yield* asked(made, cloud)
+        yield* made.unanswered()
+        yield* made.wait(59)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        yield* made.unanswered()
+        yield* made.wait(120)
+        return { soon, spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.soon).toBe(1)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir?",
+      "I didn't hear back about whether to allow Cloud deployment discovery to run npm install left-pad, so it's still waiting for you in T3 Code, sir.",
+    ])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
+  })
+
   test("what a thread waits on is kept under its key as it comes up to be asked, and noted heard once he's heard it, so a restart never asks it again", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
