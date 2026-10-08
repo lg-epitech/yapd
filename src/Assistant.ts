@@ -490,19 +490,21 @@ export const make = (options: {
         ),
       )
 
-    /** An answer, which what he said next can be about. */
-    const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
+    /** An answer, which what he said next can be about, as a step of its request: the rest of it follows. */
+    const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines, step: number) =>
       Effect.gen(function* () {
         const text = spoken.trim() === "" ? said.misheard : spoken.trim()
         // What he missed has now been heard, once the model has told him.
         if (Brain.catchingUp(thought.utterance.heard) || thought.decision.how === "missed") {
           yield* journal.markHeard(thought.situation.unheard.map(({ id }) => id), yield* Clock.currentTimeMillis)
         }
-        return { say: text, subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref) }, kind: "answer" } satisfies Outcome
+        const ref = Option.map(about, ({ ref }) => ref)
+        const told = { say: text, subject: { _tag: "Answer", said: text, about: ref }, kind: "answer" } satisfies Outcome
+        return yield* onward(thought, told, ref, step + 1, said)
       })
 
     /** Reads what a thread is doing now, and answers from it with a second look. */
-    const look = (target: Threads.Listed, thought: Thought, said: Lines) =>
+    const look = (target: Threads.Listed, thought: Thought, said: Lines, step: number) =>
       Effect.gen(function* () {
         yield* meanwhile(said.checking, thought.utterance)
         const detail = yield* threads.detail(target.ref, target.thread.pendingRuntimeRequest?.id).pipe(Effect.either)
@@ -516,11 +518,11 @@ export const make = (options: {
           if (Either.isLeft(decided)) yield* Effect.logWarning("Could not answer from what I read", decided.left)
           return reply(`I read ${target.called}, but couldn't put it into words just now${addressed(said)}.`, thought.subject)
         }
-        return yield* answer(decided.right.spoken, Option.some(target), thought, said)
+        return yield* answer(decided.right.spoken, Option.some(target), thought, said, step)
       })
 
     /** Searches the threads, or what yapd heard and said, and answers from what's found with a second look. */
-    const find = (thought: Thought, said: Lines) =>
+    const find = (thought: Thought, said: Lines, step: number) =>
       Effect.gen(function* () {
         const { decision, situation } = thought
         const wanted = decision.text.trim() || thought.utterance.heard
@@ -552,7 +554,7 @@ export const make = (options: {
           return reply(`I found something, but couldn't put it into words just now${addressed(said)}.`, thought.subject)
         }
         const about = Option.fromNullable(called(situation, decided.right.target))
-        return yield* answer(decided.right.spoken, about, thought, said)
+        return yield* answer(decided.right.spoken, about, thought, said, step)
       })
 
     /** Notes work as it starts, as part of starting it, so turning yapd off can't come between the two. */
@@ -671,7 +673,14 @@ export const make = (options: {
         const prompt = ready.value
         if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
         const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance.heard), undefined, { utterance: utterance.id, step })
-        return yield* begun(outcome, utterance, said, false)
+        const told = yield* begun(outcome, utterance, said, false)
+        // What comes of starting it is known only later, so the rest isn't done on the strength of it, and he's told so, ahead of any question.
+        const rest = thought.decision.rest.trim()
+        if (rest === "") return told
+        const left = `I left the rest for now${addressed(said)}: ${rest.replace(/[.!?]+$/, "")}.`
+        return told.kind === "question"
+          ? { ...told, say: joined(left, told.say, said) }
+          : { ...told, say: joined(told.say, left, said), kind: told.kind === "none" ? "answer" : told.kind }
       })
 
     /** An answer to which project new work is for: the prompt is written again with it, and a second question isn't asked. */
@@ -743,7 +752,7 @@ export const make = (options: {
       outcome: Hands.Outcome,
       thought: Thought,
       said: Lines,
-      at: { readonly step: number; readonly commandId: string; readonly rest: boolean },
+      at: { readonly step: number; readonly commandId: string },
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { utterance, situation, decision } = thought
@@ -779,8 +788,7 @@ export const make = (options: {
             yield* noting(line, { how: outcome.how })
             const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
             // Taking a stop back is two steps: letting go of the queue, then the message to carry on.
-            const next = at.step + (act._tag === "Undo" ? 2 : 1)
-            return at.rest && decision.rest.trim() !== "" && next < steps ? yield* rest(thought, first, outcome.to, next, said) : first
+            return yield* onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" ? 2 : 1), said)
           }
           case "Twin": {
             // One that may not have got there is offered again under its own ids; one that did, to a thread that hasn't answered since, is asked about.
@@ -816,16 +824,20 @@ export const make = (options: {
         }
       })
 
+    /** Once a step has gone as asked, the rest of its request, if there's any, as the next step. */
+    const onward = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, next: number, said: Lines): Effect.Effect<Outcome> =>
+      thought.decision.rest.trim() !== "" && next < steps ? rest(thought, first, on, next, said) : Effect.succeed(first)
+
     /**
      * The rest of a request with several steps, worked out again now that the
      * step before is done, with "it" the thread that was, and done as the next
      * step. One line covers the lot; a failure stops the rest, and says so.
      */
-    const rest = (thought: Thought, first: Outcome, on: Threads.Ref, step: number, said: Lines): Effect.Effect<Outcome> =>
+    const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const utterance: Utterance = { ...thought.utterance, heard: thought.decision.rest }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
-        const next = yield* think(utterance, { _tag: "Answer", said: first.say, about: Option.some(on) }, [
+        const next = yield* think(utterance, { _tag: "Answer", said: first.say, about: on }, [
           { speaker: "user", text: thought.utterance.heard },
           { speaker: "yapd", text: first.say },
         ])
@@ -848,7 +860,7 @@ export const make = (options: {
         const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted)
         if (act === undefined) return reply(said.cantTell, thought.subject)
         const outcome = yield* hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice })
-        return yield* told(act, outcome, thought, said, { step: at.step, commandId: Ledger.ids(utterance.id, at.step, false).commandId, rest: true })
+        return yield* told(act, outcome, thought, said, { step: at.step, commandId: Ledger.ids(utterance.id, at.step, false).commandId })
       })
 
     /**
@@ -897,7 +909,7 @@ export const make = (options: {
           if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
           const outcome = yield* hands.again(resend.value)
           const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: open.decision.text, how: "now" }
-          return yield* told(act, outcome, { ...thought, decision: open.decision }, said, { step: 0, commandId: resend.value, rest: false })
+          return yield* told(act, outcome, { ...thought, decision: open.decision }, said, { step: 0, commandId: resend.value })
         }
         return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: true })
       })
@@ -911,11 +923,14 @@ export const make = (options: {
         case "undo":
           return write(plan, thought, said, at)
         case "answer":
-          return answer(decision.spoken, target, thought, said)
+          return answer(decision.spoken, target, thought, said, at.step)
         case "look":
-          return Option.match(target, { onNone: () => Effect.succeed(reply(said.cantTell, thought.subject)), onSome: (target) => look(target, thought, said) })
+          return Option.match(target, {
+            onNone: () => Effect.succeed(reply(said.cantTell, thought.subject)),
+            onSome: (target) => look(target, thought, said, at.step),
+          })
         case "find":
-          return find(thought, said)
+          return find(thought, said, at.step)
         case "again":
           return Effect.gen(function* () {
             const { subject } = thought

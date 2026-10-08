@@ -1226,6 +1226,51 @@ describe("Assistant", () => {
     expect(result.states).toEqual(["unknown", "sent"])
   })
 
+  test("the rest of a request follows an answer, and a yes to sending again, and is said as left after starting new work", async () => {
+    const rest = "tell the Mina one to use its fee table"
+    const toMina = (situation: Brain.Situation) => Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
+    const answered = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, dispatched } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing fee tables, sir.", rest })
+            : toMina(situation),
+        )
+        yield* dictate("What's the Tezos one doing, and tell the Mina one to use its fee table.")
+        return { spoken: spoken(), sent: dispatched.map(({ threadId, commandId }) => [threadId, String(commandId).replace(/^yapd:u\w+:/, "")]) }
+      }),
+    )
+    expect(answered.spoken).toEqual(["The Tezos migration is comparing fee tables, sir. On it: Open Mina SSV2 Bug Tickets."])
+    expect(answered.sent).toEqual([[mina.id, "1"]])
+    let lost = true
+    const resent = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, dispatched } = yield* assistant(
+          (situation) => (situation.utterance.heard.startsWith("Tell") ? { ...tezosMessage("high")(situation), rest } : toMina(situation)),
+          undefined,
+          { answer: () => (payload, bounded) => (lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes(payload, bounded)) },
+        )
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work, and tell the Mina one to use its fee table.")
+        lost = false
+        yield* answer("Yes.")
+        return dispatched.map(({ threadId }) => threadId)
+      }),
+    )
+    expect(resent).toEqual([tezos.id, tezos.id, mina.id])
+    const begun = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, dispatched } = yield* assistant(
+          (situation) => Brain.decision({ act: "start", text: situation.utterance.heard, rest }),
+          () => written({ spoken: "Started in yapd, on Opus, without a worktree." }),
+        )
+        yield* dictate("Start a thread in yapd to fix the loader, and tell the Mina one to use its fee table.")
+        return { spoken: spoken(), dispatched: dispatched.length }
+      }),
+    )
+    expect(begun.spoken).toEqual(["I left the rest for now, sir: tell the Mina one to use its fee table.", "Started in yapd, on Opus, without a worktree."])
+    expect(begun.dispatched).toBe(0)
+  })
+
   test("the rest of a request is done as its next step, once the first is", async () => {
     const result = await run(
       Effect.gen(function* () {
