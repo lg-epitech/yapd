@@ -1554,12 +1554,15 @@ export const make = (options: {
         let unsaid: Effect.Effect<void> = Effect.void
         // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
         const line = subject._tag === "Nothing" ? outcome.say : subject.said
+        // Told while an app was there to show its card, it's said without "it's on your screen" if none is by the time it's played.
+        const unseen = card === undefined ? outcome.say : Show.offScreen(outcome.say, yield* persona.lines)
         yield* options.tell(
           {
             id: mint(at, "a"),
             kind: open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer",
             priority: "needs-you",
             spoken: outcome.say,
+            ...(unseen === outcome.say || unseen === "" ? {} : { instead: { spoken: unseen, when: Effect.map(options.show.watched, (watched) => !watched) } }),
             at,
             // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>

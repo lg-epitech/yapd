@@ -518,6 +518,23 @@ export const make = Effect.gen(function* () {
     })
 
   /**
+   * What's played for a notice: its own words, or those it says in their
+   * place when it asks for them just before it's played, rendered then and
+   * removed once it's said. Should rendering fail, its own words go after all.
+   */
+  const words = (said: Inbox.Said) =>
+    Effect.gen(function* () {
+      const { instead } = said.notice
+      if (instead === undefined || !(yield* instead.when)) return said.audio
+      const path = join(dir, `${crypto.randomUUID()}${extension}`)
+      return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
+        Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`)),
+        Effect.as(path),
+        Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say "${instead.spoken}" instead`, error), said.audio)),
+      )
+    })
+
+  /**
    * Says a notice. Only a question is listened to: whatever else they'd say to
    * it has nowhere to go. What can't be played was never said, so it isn't
    * what the user heard last; and a question that can't be asked in full, even
@@ -529,8 +546,9 @@ export const make = Effect.gen(function* () {
       const { question } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
       const saying = said.notice.saying ?? Effect.void
+      const played = yield* words(said)
       if (question === undefined) {
-        const playback = yield* audio.play(said.audio)
+        const playback = yield* audio.play(played)
         yield* saying
         yield* playback.finished
         yield* said.notice.heard ?? Effect.void
@@ -538,7 +556,7 @@ export const make = Effect.gen(function* () {
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, saying, answer }).pipe(
+      const answered = yield* conversation.ask({ audio: played, saying, answer }).pipe(
         Effect.onError((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
         ),

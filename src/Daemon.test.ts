@@ -304,13 +304,14 @@ const assisted = (
       Effect.provideService(Writer, { decide: () => Effect.never, research: () => Effect.never, prepare: Effect.void }),
     )
     const asked: Array<Brain.Situation> = []
+    const show = yield* Show.make(threads.detail, () => Effect.void)
     const assistant = yield* Assistant.make({
       threads,
       journal,
       drafts,
       hands: Hands.make({ threads, ledger }),
       ledger,
-      show: yield* Show.make(threads.detail, () => Effect.void),
+      show,
       tell: made.tell,
       power: made.power,
       lastHeard: made.lastHeard,
@@ -346,7 +347,7 @@ const assisted = (
         yield* assistant.heard({ heard, via: "shortcut", at: yield* Clock.currentTimeMillis, voiced: 2, turns }, press)
         yield* daemon.flush
       })
-    return { ...daemon, assistant, asked, dictating }
+    return { ...daemon, assistant, asked, dictating, show }
   })
 
 describe("Daemon", () => {
@@ -1429,6 +1430,30 @@ describe("Daemon", () => {
       "yapd. The tests pass.",
     ])
     expect(result.unheard).toBe(0)
+  })
+
+  test("an answer said to be on his screen, which waits its turn while the app that would show its card goes away, is said without that", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, made, assistant, show, played, warnings, journal } = yield* assisted(() => Brain.decision({ act: "answer", spoken: "Asked." }), {}, [
+          thread("f0000000-0000-4000-8000-000000000001", "Fix the loader"),
+        ])
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        // Typed while the update is read, so what comes of it waits for the update to end, by when the app has gone.
+        const watching = yield* Scope.make()
+        yield* Scope.extend(show.watch, watching)
+        const { turns } = yield* made.power
+        yield* assistant.heard({ heard: "Show me what's running.", via: "typed", at: yield* Clock.currentTimeMillis, voiced: Number.POSITIVE_INFINITY, turns })
+        yield* Scope.close(watching, Exit.void)
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { told: (yield* journal.since(0, { kinds: ["answer"] })).map(({ said }) => said), played: [...played], seen: yield* show.seen, warnings }
+      }),
+    )
+    expect(result.told).toEqual(["It's on your screen. Nothing's running."])
+    expect(result.played).toEqual(["yapd. The PR is ready.", "Nothing's running."])
+    expect(result.seen).toEqual(Option.none())
+    expect(result.warnings).toEqual([])
   })
 
   test("anything else dictated over an update, even thanks, has it read again from the start once it's dealt with", async () => {

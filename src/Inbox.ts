@@ -41,6 +41,12 @@ export interface Notice {
   readonly at: number
   /** Whether it's no longer worth saying, asked as its turn comes. */
   readonly stale: Effect.Effect<boolean>
+  /**
+   * What's said in its place when `when`, asked just before it's played, says
+   * so, like the line without "it's on your screen" once no app is there to
+   * show its card: rendered only then.
+   */
+  readonly instead?: { readonly spoken: string; readonly when: Effect.Effect<boolean> }
   /** Run as it starts being said, which is when the user hears of it: never when it can't be played, and for a question, undone if it breaks off. */
   readonly saying?: Effect.Effect<void>
   /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
