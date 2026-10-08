@@ -719,7 +719,8 @@ export const make = (options: {
     const written = (utterance: Utterance, lines: ReadonlyArray<Line>, answering?: Material) =>
       Effect.gen(function* () {
         const ahead = writing.get(utterance.id)
-        const prompt = yield* Fiber.join(ahead ?? (yield* Effect.forkIn(drafts.begin(lines, answering), scope)))
+        // Written here when it wasn't begun ahead, so it stops with whatever stops this, like yapd being turned off.
+        const prompt = yield* ahead === undefined ? drafts.begin(lines, answering) : Fiber.join(ahead)
         const power = yield* options.power
         return !power.on || power.turns !== utterance.turns ? Option.none() : Option.some(prompt)
       })

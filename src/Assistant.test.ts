@@ -560,6 +560,34 @@ describe("Assistant", () => {
     expect(result).toBe(true)
   })
 
+  test("turned off while the prompt is written again with the project he named, it stops being written", async () => {
+    let writes = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const again = yield* Deferred.make<void>()
+        let stopped = 0
+        const { dictate, answer, toggle } = yield* assistant(
+          (situation) => Brain.decision({ act: "start", text: situation.utterance.heard, pending: Option.isNone(situation.open) ? "" : "answers" }),
+          ({ lines }) =>
+            lines.length === 1 ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" }) : written({ project: "std", evidence: "Std" }),
+          // Written again with his answer, it takes as long as it takes.
+          {
+            writer: {
+              begun: Effect.suspend(() => (++writes === 2 ? Effect.zipRight(Deferred.complete(again, Effect.void), Effect.never) : Effect.void)),
+              stopped: Effect.sync(() => void stopped++),
+            },
+          },
+        )
+        yield* dictate("Fix the loader.")
+        yield* Effect.fork(answer("Std."))
+        yield* Deferred.await(again)
+        yield* toggle(false)
+        return stopped
+      }),
+    )
+    expect(result).toBe(2)
+  })
+
   test("starting new work that mentions an existing thread starts new work", async () => {
     const dictated =
       "Can you please go and look at what I did for the migration process for Mina and start another thread in integration on the main worktree to start working on the migration for Tezos, so I have a ticket open for that as well in my linear."
