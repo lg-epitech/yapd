@@ -431,6 +431,25 @@ describe("Drafts", () => {
     expect(result.said[1]).toEqual({ spoken: "I've already asked for that to start.", came: "Said" })
   })
 
+  test("new work read through first, as a step of a request, is written down and asked for under its ids, whether the reading comes to anything or not", async () => {
+    const through = (reads: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, started, ledger } = yield* drafts(
+            ({ research }) => (research ? decision({ action: "research", prompt: "What the loader does.", spoken: "Looking through yapd first." }) : decision({})),
+            { ledger: true, ...(reads ? { written: { action: "start", why: "Read the loader.", prompt: "Make the loader stream.", spoken: "" } } : {}) },
+          )
+          yield* dictate("In yapd, do the streaming thing for the loader.", { utterance: "u1", step: 1 })
+          const row = yield* ledger.get("yapd:u1:1")
+          return {
+            asked: started.map(({ request }) => request.ids?.command),
+            row: Option.map(row, ({ kind, state, thread }) => [kind, state, thread === started[0]?.request.ids?.thread]),
+          }
+        }),
+      )
+    for (const reads of [true, false]) expect(await through(reads)).toEqual({ asked: ["yapd:u1:1"], row: Option.some(["start", "sent", true]) })
+  })
+
   test("new work written down is asked for even when yapd is turned off just then, never left as if it may have started", async () => {
     const result = await run(
       Effect.gen(function* () {
