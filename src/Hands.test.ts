@@ -408,6 +408,49 @@ describe("Hands", () => {
     expect(result).toEqual({ second: "Done", dispatched: 2 })
   })
 
+  test("the same words are asked about while the run they started, or wait in, hasn't answered, whatever other runs do, and go once it has", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    const ended = (at: number, overrides: Record<string, unknown> = {}) => thread(tezos.id, { latestRunCompletedAt: new Date(at).toISOString(), ...overrides })
+    const queued = await run(
+      Effect.gen(function* () {
+        const { send, becomes, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* send("u1", "When it's done, open a PR.", "after")
+        // The turn it waited behind ended a minute on, and its own run started.
+        yield* TestClock.adjust("90 seconds")
+        bounded.runs[0]!.status = "completed"
+        bounded.runs[1]!.status = "running"
+        becomes(ended(now + 60_000, { activeRunId: "run-2", activityRunStatus: "running", status: "running" }))
+        const waiting = yield* send("u2", "When it's done, open a PR.", "after")
+        // Its own run has answered since.
+        yield* TestClock.adjust("2 minutes")
+        bounded.runs[1]!.status = "completed"
+        becomes(ended(now + 200_000))
+        const answered = yield* send("u3", "When it's done, open a PR.", "after")
+        return { waiting: waiting._tag, answered: answered._tag, dispatched: dispatched.map(({ commandId }) => commandId) }
+      }),
+    )
+    expect(queued).toEqual({ waiting: "Twin", answered: "Done", dispatched: ["yapd:u1:0", "yapd:u3:0"] })
+    const restarted = await run(
+      Effect.gen(function* () {
+        const { send, answering, becomes, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        // T3 Code stops the turn under way, which ends it, and starts one of its own.
+        answering((payload, bounded) =>
+          Effect.sync(() => {
+            bounded.runs[0]!.status = "interrupted"
+            bounded.runs.push({ id: "run-2", status: "running", ordinal: 2, userMessageId: String(payload.messageId) })
+            return { sequence: 7 }
+          }),
+        )
+        yield* send("u1", "Drop that and use the fee table.", "restart")
+        yield* TestClock.adjust("5 seconds")
+        becomes(ended(now + 1000, { activeRunId: "run-2", activityRunStatus: "running", status: "running" }))
+        const again = yield* send("u2", "Drop that and use the fee table.", "restart")
+        return { again: again._tag, dispatched: dispatched.length }
+      }),
+    )
+    expect(restarted).toEqual({ again: "Twin", dispatched: 1 })
+  })
+
   test("a message to a busy thread says whether it was steered or queued, as T3 Code did", async () => {
     const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
     const sent = (intent: "steer" | "queued_turn") =>

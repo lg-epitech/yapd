@@ -120,9 +120,24 @@ export const plainly = (reason: string) => {
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`
 }
 
-/** Whether a thread has said anything since `at`: a turn that ended, or something it asks. */
-const answered = (thread: T3Live.Thread, at: number) =>
-  [thread.latestRunCompletedAt, thread.pendingRuntimeRequest?.createdAt].some((iso) => iso !== null && iso !== undefined && Date.parse(iso) > at)
+/** Runs that haven't said anything back yet: waiting in the queue, or getting going or at it. */
+const unanswered: ReadonlyArray<string> = ["queued", "preparing", "starting", "running"]
+
+/**
+ * Whether a thread has answered a message that went at `at`. One that started
+ * a run of its own, or waits in the queue to, is answered once that run has
+ * ended its turn or asks something, never by another run ending, as the one
+ * it waited behind or the one it restarted does. One steered into the turn
+ * under way is answered by a turn that ended since, or something it asks.
+ */
+const answered = (thread: T3Live.Thread, at: number, own: Option.Option<{ readonly status: string }>) => {
+  const since = (iso: string | null | undefined) => iso !== null && iso !== undefined && Date.parse(iso) > at
+  const asked = since(thread.pendingRuntimeRequest?.createdAt)
+  return Option.match(own, {
+    onNone: () => since(thread.latestRunCompletedAt) || asked,
+    onSome: ({ status }) => !unanswered.includes(status) || (status !== "queued" && asked),
+  })
+}
 
 /** Whether it's in the middle of something a message would go into, or wait behind. */
 const busy = (thread: T3Live.Thread) => T3Live.busy(thread) || thread.activityRunStatus === "waiting"
@@ -280,26 +295,26 @@ export const make = (options: {
 
   /**
    * What's made of the same words going to a thread they went to lately,
-   * when it isn't to go straight through. One that went is asked about,
-   * unless the thread has said something since. One that may not have got
-   * there is looked for once: found, it's one that went; withdrawn before it
-   * was read, what's said now is new; otherwise it's offered again under its
-   * own ids, never sent under new ones, and once it's been sent again
-   * already, it isn't risked a third time.
+   * when it isn't to go straight through. It's looked for once in the thread.
+   * One that went is asked about, unless the thread has answered it since, or
+   * it can't be told whether it has. One that may not have got there, found,
+   * is one that went; withdrawn before it was read, what's said now is new;
+   * otherwise it's offered again under its own ids, never sent under new
+   * ones, and once it's been sent again already, it isn't risked a third time.
    */
   const twinned = (twin: Ledger.Row, reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread }) =>
     Effect.gen(function* () {
+      const look = twin.messageId === null ? Either.right(Option.none<T3Actions.Found>()) : yield* Effect.either(reached.actions.message(twin.thread, twin.messageId))
+      const found = Either.getOrElse(look, () => Option.none<T3Actions.Found>())
+      const own = Option.flatMap(found, ({ run }) => run)
+      if (Option.exists(own, ({ status }) => status === "cancelled")) return Option.none<Outcome>()
       let row = twin
-      if (row.state !== "sent" && row.messageId !== null) {
-        const found = yield* Effect.either(reached.actions.message(row.thread, row.messageId))
-        if (Either.isRight(found) && Option.isSome(found.right)) {
-          if (Option.exists(found.right.value.run, ({ status }) => status === "cancelled")) return Option.none<Outcome>()
-          yield* ledger.settle(row.commandId, "sent", { from: [row.state] })
-          yield* Effect.logInfo(`Found ${row.commandId} in the thread after all`)
-          row = { ...row, state: "sent" }
-        }
+      if (row.state !== "sent" && Option.isSome(found)) {
+        yield* ledger.settle(row.commandId, "sent", { from: [row.state] })
+        yield* Effect.logInfo(`Found ${row.commandId} in the thread after all`)
+        row = { ...row, state: "sent" }
       }
-      if (row.state === "sent" && answered(reached.thread, row.at)) return Option.none<Outcome>()
+      if (row.state === "sent" && Either.isRight(look) && answered(reached.thread, row.at, own)) return Option.none<Outcome>()
       if (row.state === "abandoned") {
         const reason = "I couldn't confirm either of the last two got there, so I won't risk sending it a third time."
         return Option.some<Outcome>(yield* failing({ _tag: "Refused", reason } satisfies Outcome, doing.message))
