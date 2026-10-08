@@ -382,6 +382,8 @@ const assistant = (
       show,
       opened,
       spoken: () => said.map(({ spoken }) => spoken),
+      /** What it told, to be played in its turn. */
+      notices: () => [...said],
       aloud: () => [...aloud],
       questions,
       flush,
@@ -3982,6 +3984,52 @@ describe("Assistant", () => {
     expect(result.told).toEqual(["It's on your screen. One running."])
     expect(result.said).toEqual(["One running."])
     expect(result.up).toEqual(Option.none())
+  })
+
+  test("the rest of a request that takes its card down, worked out once another request is answered, keeps only its own card down", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Each waits its turn behind something else being said, until the test plays it, and the model takes two seconds.
+        const { heard, wait, flush, play, notices, spoken, aloud, show } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Hide that")
+              ? Brain.decision({ act: "show", how: "hide" })
+              : Brain.decision({ act: "show", how: "threads", rest: "Hide that." }),
+          undefined,
+          { waiting: true, thinking: 2 },
+        )
+        const up = Effect.map(Stream.runHead(show.showing), (up) => Option.map(Option.flatten(up), ({ kind }) => kind))
+        yield* show.watch
+        const dictated = yield* Effect.fork(heard({ heard: "Show me everything, then hide that.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+        yield* flush
+        yield* wait(2)
+        yield* wait(1)
+        yield* Fiber.join(dictated)
+        // His usage needs no model, so it's answered while the rest of the request before it is worked out, which takes a card down after.
+        yield* heard({ heard: "Show me my usage.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 })
+        yield* wait(2)
+        const [everything, usage] = notices()
+        yield* play(everything)
+        const first = yield* up
+        yield* play(usage)
+        const then = yield* up
+        // Said on its own, it keeps down any card still to go up, even one asked for before it.
+        yield* heard({ heard: "Show me what's running.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 })
+        yield* heard({ heard: "Hide that.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 })
+        yield* play(notices().at(-1))
+        return { told: spoken(), said: aloud(), first, then, alone: yield* up }
+      }).pipe(Effect.scoped),
+    )
+    expect(result.told).toEqual([
+      "It's on your screen. One running.",
+      "It's on your screen. I can't read your usage right now.",
+      "It's on your screen. One running.",
+    ])
+    // "That" was the card of what's running, never the one he asked for after.
+    expect(result.said).toEqual(["One running.", "It's on your screen. I can't read your usage right now.", "One running."])
+    expect(result.first).toEqual(Option.none())
+    expect(result.then).toEqual(Option.some("usage"))
+    expect(result.alone).toEqual(Option.none())
   })
 
   test("a pull request opened for any thread but the one just talked about is said with whose it is", async () => {
