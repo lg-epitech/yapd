@@ -101,7 +101,7 @@ export interface View {
   readonly projects: ReadonlyMap<string, Project>
   readonly threads: ReadonlyMap<string, Thread>
   readonly sequence: number
-  /** Whether it has caught up, so what it sends next is news rather than history. */
+  /** Whether it has caught up once, so what it sends from then on is news rather than history. */
   readonly synced: boolean
 }
 
@@ -169,7 +169,8 @@ export const apply = (view: View, item: Item): { readonly view: View; readonly c
       if (item.resolvedRepositoryIdentityRoots !== undefined) return { view: { ...view, projects }, changes: [] }
       const threads = new Map(each(item.snapshot.threads, decodeThread).map((thread) => [thread.id, thread]))
       const fresh = new Map(each(item.snapshot.projects, decodeProject).map((project) => [project.id, project]))
-      const next: View = { projects: fresh, threads, sequence: item.snapshot.snapshotSequence, synced: false }
+      // Once there's a baseline, what follows is news to it, even if this connection drops before catching up.
+      const next: View = { projects: fresh, threads, sequence: item.snapshot.snapshotSequence, synced: view.synced }
       if (!view.synced) return { view: next, changes: [] }
       const changes = [
         ...[...threads.values()].flatMap((thread) => compare(view.threads.get(thread.id), thread)),

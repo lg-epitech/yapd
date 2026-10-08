@@ -100,6 +100,19 @@ describe("T3Live.apply", () => {
     expect(changes).toEqual(["Asked", "Created", "Removed"])
   })
 
+  test("keeps telling what changed after a whole new snapshot, even if the connection that sent it dropped before catching up", () => {
+    const before = run([snapshot(5, [thread()]), { kind: "synchronized" }]).view
+    const { changes } = run(
+      [
+        snapshot(50, [thread()]),
+        // The next connection picks up from the snapshot.
+        { kind: "thread.updated", sequence: 51, location: "active", thread: thread({ pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "x" } }) },
+      ],
+      before,
+    )
+    expect(changes).toEqual(["Asked"])
+  })
+
   test("leaves out a thread whose shape it doesn't know, rather than the whole snapshot", () => {
     const { view } = run([snapshot(1, [thread(), { id: "broken" }]), { kind: "synchronized" }])
     expect([...view.threads.keys()]).toEqual(["t1"])
