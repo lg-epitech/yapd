@@ -136,11 +136,18 @@ final class Yapd {
     send("POST", "updates/\(update.id)/replay")
   }
 
-  /// Shows the last card again, for a while, with nothing said of it.
+  /// Shows the last card again, for a while, with nothing said of it, and has yapd put it back up too, so "hide that" takes it down.
   func showLast() {
     guard let last else { return }
     Task {
-      if let card = await fetch(last) { panel.show(card, talking: false) }
+      guard let card = await fetch(last) else {
+        // Gone, with a yapd that restarted since or after twenty more, so there's nothing to show again.
+        if self.last == last { self.last = nil }
+        return
+      }
+      shown = card.id
+      panel.show(card, talking: false)
+      send("PUT", "cards/current", body: try? JSONEncoder().encode(["id": card.id]))
     }
   }
 
