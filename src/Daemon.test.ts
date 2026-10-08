@@ -1450,7 +1450,8 @@ describe("Daemon", () => {
         return { told: (yield* journal.since(0, { kinds: ["answer"] })).map(({ said }) => said), played: [...played], seen: yield* show.seen, warnings }
       }),
     )
-    expect(result.told).toEqual(["It's on your screen. Nothing's running."])
+    // Noted as said in the words played.
+    expect(result.told).toEqual(["Nothing's running."])
     expect(result.played).toEqual(["yapd. The PR is ready.", "Nothing's running."])
     expect(result.seen).toEqual(Option.none())
     expect(result.warnings).toEqual([])

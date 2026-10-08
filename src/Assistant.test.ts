@@ -3690,6 +3690,28 @@ describe("Assistant", () => {
     expect(result.gone).toEqual({ watched: false, seen: Option.none(), up: Option.some("thread") })
   })
 
+  test("a line played once no app is there to show its card is noted as said in the words played, never that it's on his screen", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Showing needs no model, which can't be asked here, and each line waits its turn behind something else being said, until the test plays it.
+        const { dictate, play, aloud, show, journal } = yield* assistant(() => undefined, undefined, { waiting: true })
+        // The app goes away before its turn comes, and is still there for the next.
+        yield* Effect.scoped(Effect.zipRight(show.watch, dictate("Show me what's running.")))
+        yield* play()
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* show.watch
+            yield* dictate("Show me my usage.")
+            yield* play()
+          }),
+        )
+        return { said: aloud(), noted: (yield* journal.since(0, { kinds: ["answer"] })).map(({ said }) => said) }
+      }),
+    )
+    expect(result.said).toEqual(["One running, sir.", "It's on your screen. I can't read your usage right now."])
+    expect(result.noted).toEqual(result.said)
+  })
+
   test("a request in steps whose card goes up as it's said, played once no app is there to show it, is said as it is with none watching", async () => {
     const result = await run(
       Effect.gen(function* () {

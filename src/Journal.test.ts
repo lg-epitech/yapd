@@ -61,6 +61,22 @@ describe("Journal", () => {
     expect(kept.rows.map(({ at }) => at)).toEqual([1])
   })
 
+  test("what was said for an entry can be noted as other words, like those played in its place", async () => {
+    const said = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const answer = Option.getOrThrow(yield* journal.write({ at: 10, kind: "answer", said: "It's on your screen. One running.", detail: { question: false } }))
+        yield* journal.write({ at: 20, kind: "answer", said: "It's on your screen. Two running." })
+        yield* journal.reword(answer, "One running, sir.")
+        return (yield* journal.since(0)).map(({ said, detail }) => ({ said, detail }))
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(said).toEqual([
+      { said: "One running, sir.", detail: { question: false } },
+      { said: "It's on your screen. Two running.", detail: undefined },
+    ])
+  })
+
   test("an update counts as heard once it has played or been answered", async () => {
     const found = await Effect.runPromise(
       Effect.gen(function* () {

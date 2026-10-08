@@ -1653,16 +1653,17 @@ export const make = (options: {
         const open = outcome.kind === "question" && asking !== undefined ? asking.open : undefined
         const about = outcome.subject._tag === "Answer" ? outcome.subject.about : Option.none<Threads.Ref>()
         // Work that started has its own entry.
-        if (outcome.kind !== "done") {
-          yield* journal.write({
-            at,
-            kind: "answer",
-            ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-            said: outcome.say,
-            utterance: utterance.id,
-            ...(open === undefined ? {} : { detail: { question: true, open: open.id } }),
-          })
-        }
+        const entry =
+          outcome.kind === "done"
+            ? Option.none<number>()
+            : yield* journal.write({
+                at,
+                kind: "answer",
+                ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
+                said: outcome.say,
+                utterance: utterance.id,
+                ...(open === undefined ? {} : { detail: { question: true, open: open.id } }),
+              })
         yield* Effect.logInfo(`Said: ${outcome.say}`)
         const { subject, missed, card } = outcome
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
@@ -1674,14 +1675,23 @@ export const make = (options: {
         if (kept !== undefined) cards.add(kept)
         // Told while an app was there to show its card, it's said as it is with none watching if none is by the time it's played, or the card won't go up.
         const { unseen } = outcome
-        const off = Effect.map(options.show.watched, (watched) => !watched || kept?.down === true)
+        const instead = card === undefined || unseen === undefined || unseen === outcome.say || unseen === "" ? undefined : unseen
+        /** Whether it's played in the words said in its place, which are then what it's noted as having said, never "it's on your screen". */
+        let reworded = false
+        const off = Effect.map(options.show.watched, (watched) => !watched || kept?.down === true).pipe(
+          Effect.tap((off) =>
+            Effect.sync(() => {
+              reworded = off
+            }),
+          ),
+        )
         yield* options.tell(
           {
             id: mint(at, "a"),
             kind: open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer",
             priority: "needs-you",
             spoken: outcome.say,
-            ...(card === undefined || unseen === undefined || unseen === outcome.say || unseen === "" ? {} : { instead: { spoken: unseen, when: off } }),
+            ...(instead === undefined ? {} : { instead: { spoken: instead, when: off } }),
             at,
             // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
@@ -1705,6 +1715,7 @@ export const make = (options: {
                   return kept.down ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns, request: utterance.id }))
                 }),
               ),
+              Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) ? journal.reword(entry.value, instead) : Effect.void))),
             ),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
             ...(open === undefined
