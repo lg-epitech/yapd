@@ -149,7 +149,11 @@ export const serve = Effect.gen(function* () {
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(shortcut.events, (event) => (event._tag === "Started" ? assistant.prepare : Effect.void)))
-  yield* Effect.forkScoped(Stream.runForEach(dictation.transcripts, ({ heard: text, voiced }) => heard(text, "shortcut", voiced)))
+  yield* Effect.forkScoped(
+    Stream.runForEach(dictation.transcripts, ({ heard: text, voiced }) => (text === "" ? assistant.nothing : heard(text, "shortcut", voiced))),
+  )
+  // Whatever he says over an update takes the place of a question yapd asked before.
+  yield* Effect.forkScoped(Stream.runForEach(daemon.replies, () => assistant.replied))
   return yield* daemon.speak
 }).pipe(
   Effect.scoped,

@@ -135,9 +135,9 @@ describe("Brain", () => {
     const said = [
       Brain.which(candidates, lines, []),
       Brain.which(candidates, lines, [Brain.which(candidates, lines, []) ?? ""]),
-      Brain.reworded({ kind: "which", asked: Brain.which(candidates, lines, []) ?? "", about: "" }, candidates, lines),
+      Brain.reworded({ kind: "which", asked: Brain.which(candidates, lines, []) ?? "", about: Brain.choices(candidates) }, [], lines),
       Brain.reworded(project, [], lines),
-      Brain.dropped({ kind: "which", about: "" }, lines),
+      Brain.dropped({ kind: "which", about: Brain.choices(candidates) }, lines),
       Brain.dropped(project, lines),
       Brain.notYet(lines),
       Brain.nothingSaid(lines),

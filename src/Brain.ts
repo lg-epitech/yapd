@@ -196,19 +196,25 @@ export const which = (candidates: ReadonlyArray<Threads.Listed>, lines: Lines, a
   return repeated(second, asked) ? undefined : second
 }
 
-/** A question asked once more, in other words than the first time. */
-export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about">, candidates: ReadonlyArray<Threads.Listed>, lines: Lines) => {
-  if (open.kind === "which" && candidates.length > 1) {
-    const second = `Which one${addressed(lines)}: ${choices(candidates)}?`
-    return words(second) === words(open.asked) ? `I still need to know which you meant${addressed(lines)}: ${choices(candidates)}?` : second
-  }
-  const project = `Which project should ${open.about || "that"} go in${addressed(lines)}?`
-  return words(project) === words(open.asked) ? `I still need a project for ${open.about || "that"}${addressed(lines)}.` : project
+/**
+ * A question asked once more, in other words than it was, and than any asked
+ * in the last ten minutes. None once every wording has been used.
+ */
+export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about">, before: ReadonlyArray<string>, lines: Lines) => {
+  const wordings =
+    open.kind === "which"
+      ? [`Which one${addressed(lines)}: ${open.about}?`, `I still need to know which you meant${addressed(lines)}: ${open.about}?`]
+      : [`Which project should ${open.about || "that"} go in${addressed(lines)}?`, `I still need a project for ${open.about || "that"}${addressed(lines)}.`]
+  return wordings.find((wording) => !repeated(wording, [open.asked, ...before]))
 }
+
+/** A question as it is, unless it was asked in the last ten minutes: then in other words, or none. */
+export const unrepeated = (open: Pick<Assistant.Open, "kind" | "asked" | "about">, before: ReadonlyArray<string>, lines: Lines) =>
+  repeated(open.asked, before) ? reworded(open, before, lines) : open.asked
 
 /** What's said when a question went unanswered twice, and is let go. */
 export const dropped = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines) =>
-  `I didn't hear back about ${open.kind === "which" ? "which one you meant" : open.about || "what you dictated"}, so I dropped it${addressed(lines)}.`
+  `I didn't hear back about ${open.kind === "which" ? `whether you meant ${open.about}` : open.about || "what you dictated"}, so I dropped it${addressed(lines)}.`
 
 /** An act the brain understood, but yapd can't do yet. */
 export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.`
@@ -447,7 +453,8 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
         decision: choice,
         candidates: among.slice(0, 3).map(({ ref }) => ref),
         asked,
-        about: "",
+        // Its choices as they were named, so it's asked again and let go in the same names, whatever the threads do meanwhile.
+        about: choices(among),
         material: Option.none(),
         resend: Option.none(),
       },
