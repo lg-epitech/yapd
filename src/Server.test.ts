@@ -32,6 +32,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   utter: () => Effect.succeed(Option.none()),
   card: () => Effect.succeed(Option.none()),
   hide: Effect.void,
+  back: () => Effect.succeed(false),
   threads: Effect.succeed([]),
   journal: () => Effect.succeed([]),
   watch: Effect.void,
@@ -56,6 +57,8 @@ const stateful = Effect.gen(function* () {
       utter: (text) => Effect.map(SubscriptionRef.get(ref), (state) => (state.on ? Option.some(`u-${text.length}`) : Option.none())),
       card: (id) => Effect.succeed(id === card.id ? Option.some(card) : Option.none()),
       hide: SubscriptionRef.update(ref, (state) => ({ ...state, showing: null })),
+      back: (id) =>
+        id === card.id ? Effect.as(SubscriptionRef.update(ref, (state) => ({ ...state, showing: { id, kind, title, at } })), true) : Effect.succeed(false),
       threads: Effect.succeed(machines),
       journal: (page) =>
         Effect.sync(() => {
@@ -180,6 +183,12 @@ describe("Server", () => {
       expect(hidden.status).toBe(204)
       expect(yield* json("/state")).toMatchObject({ showing: null })
       expect((yield* call("/cards/current", { method: "DELETE" })).status).toBe(204)
+      // Put back up, like Show Last Card does, so "hide that" can take it down.
+      const back = (body: string) => call("/cards/current", { method: "PUT", headers: { "content-type": "application/json" }, body })
+      expect((yield* back('{"id": "c1"}')).status).toBe(204)
+      expect(yield* json("/state")).toMatchObject({ showing: { id: "c1" } })
+      expect((yield* back('{"id": "c2"}')).status).toBe(404)
+      expect((yield* back("{}")).status).toBe(400)
 
       const threads = yield* call("/threads")
       expect(threads.status).toBe(200)

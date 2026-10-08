@@ -114,6 +114,23 @@ describe("Show", () => {
     expect(result).toEqual({ before: Option.none(), after: Option.some(true) })
   })
 
+  test("keeps the last twenty cards to fetch again, and puts one back up as it was, on his screen while an app watches", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+        const cards = yield* Effect.forEach(Array.from({ length: 21 }, (_, index) => index), (index) => show.put(Show.said(`Line ${index}.`, Option.none())))
+        const [first, second, latest] = [cards[0]!, cards[1]!, cards[20]!]
+        return {
+          first: yield* show.card(first.id),
+          latest: Option.map(yield* show.card(latest.id), ({ markdown }) => markdown === latest.markdown),
+          gone: yield* show.back(first.id),
+          back: yield* Effect.scoped(Effect.zipRight(show.watch, Effect.zipRight(show.back(second.id), Effect.map(show.seen, Option.map(({ id }) => id === second.id))))),
+        }
+      }),
+    )
+    expect(result).toEqual({ first: Option.none(), latest: Option.some(true), gone: false, back: Option.some(true) })
+  })
+
   test("a message made to trip a pattern up is tamed at once", () => {
     const started = performance.now()
     for (const message of ["[](<".repeat(625), "[](".repeat(833), "![](".repeat(625)]) Show.tamed(message)

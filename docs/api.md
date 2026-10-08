@@ -116,6 +116,18 @@ When you ask about a thread that waits on something that can't be read aloud, li
 
 `DELETE /cards/current` takes the card down, so `showing` becomes `null`. It answers `204`, whether or not one was up.
 
+`PUT /cards/current` with one of those cards' `id` puts it back up, as the menu's Show Last Card does, so `showing` points at it again and "hide that" takes it down. Nothing is said of it.
+
+```sh
+curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1"}' http://127.0.0.1:4747/cards/current
+```
+
+| Status | |
+| --- | --- |
+| `204` | It's up again. |
+| `400` | There's no `id`. |
+| `404` | No such card, or yapd restarted since. |
+
 ## Threads
 
 `GET /threads` lists the threads yapd can see, by machine, those that need you first:

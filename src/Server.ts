@@ -111,6 +111,8 @@ export interface Api {
   readonly card: (id: string) => Effect.Effect<Option.Option<Card>>
   /** Takes the card down. */
   readonly hide: Effect.Effect<void>
+  /** Puts one of the cards shown lately back up, and says whether there was one. */
+  readonly back: (id: string) => Effect.Effect<boolean>
   readonly threads: Effect.Effect<ReadonlyArray<Machine>>
   readonly journal: (page: Page) => Effect.Effect<ReadonlyArray<Entry>>
   /** Counts whoever follows the state as watching for as long as the scope lasts, so yapd knows what it shows is seen. */
@@ -119,6 +121,7 @@ export interface Api {
 
 const decodeTurn = Schema.decodeUnknown(Schema.Struct({ on: Schema.Boolean }))
 const decodeUtterance = Schema.decodeUnknown(Schema.Struct({ text: Schema.String }))
+const decodeCard = Schema.decodeUnknown(Schema.Struct({ id: Schema.String }))
 
 /** How many journal entries a page has unless asked for fewer, and at most. */
 const pages = { usual: 50, most: 200 }
@@ -204,6 +207,11 @@ export const serve = (port: number, api: Api) =>
           )
         }
         if (route === "DELETE /cards/current") return yield* Effect.as(api.hide, new Response(null, { status: 204 }))
+        if (route === "PUT /cards/current") {
+          const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.flatMap(decodeCard), Effect.option)
+          if (Option.isNone(body)) return new Response('Send {"id": "the card\'s id"}.', { status: 400 })
+          return (yield* api.back(body.value.id)) ? new Response(null, { status: 204 }) : new Response("No such card.", { status: 404 })
+        }
         const card = request.method === "GET" ? /^\/cards\/([^/]+)$/.exec(url.pathname) : null
         if (card !== null) {
           return Option.match(yield* api.card(decodeURIComponent(card[1]!)), {

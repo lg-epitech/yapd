@@ -57,6 +57,8 @@ export class Show extends Context.Tag("yapd/Show")<
     readonly put: (draft: Draft) => Effect.Effect<Card>
     /** Takes the card down, and says whether one was up. */
     readonly hide: Effect.Effect<boolean>
+    /** Puts one of the cards put up lately back up as it was, with nothing said of it, and says whether there was one. */
+    readonly back: (id: string) => Effect.Effect<boolean>
     /** One of the cards put up lately. */
     readonly card: (id: string) => Effect.Effect<Option.Option<Card>>
     /** The card that's up, then each time that changes. */
@@ -711,6 +713,18 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     return {
       put,
       hide,
+      back: (id) =>
+        Effect.gen(function* () {
+          const card = recent.get(id)
+          if (card === undefined) return false
+          // The latest shown again, so it's kept as long as one just made.
+          recent.delete(id)
+          recent.set(id, card)
+          shownTo = watching > 0
+          yield* SubscriptionRef.set(up, Option.some(card))
+          yield* Effect.logInfo(`Showing ${card.kind} again: ${card.title}`)
+          return true
+        }),
       card: (id) => Effect.sync(() => Option.fromNullable(recent.get(id))),
       showing: up.changes,
       seen: Effect.flatMap(watched, (watching) => (watching && shownTo ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>()))),

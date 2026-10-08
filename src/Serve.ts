@@ -155,6 +155,7 @@ export const serve = Effect.gen(function* () {
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
     card: (id) => Effect.map(show.card(id), Option.map(Show.face)),
     hide: Effect.asVoid(show.hide),
+    back: show.back,
     // Every thread it can see, not only the likeliest, in the order the desk puts them.
     threads: Effect.map(threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), Show.listing),
     journal: (page) => Effect.map(journal.page(page), (kept) => kept.map(Show.entry)),
