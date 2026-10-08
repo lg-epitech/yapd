@@ -1,5 +1,5 @@
 import type { Subprocess } from "bun"
-import { Cause, Clock, Data, Deferred, Effect, Either, ExecutionStrategy, Exit, Fiber, FiberSet, Option, Schema, Scope } from "effect"
+import { Cause, Clock, Data, Deferred, Effect, Either, ExecutionStrategy, Exit, Fiber, FiberSet, Option, Schema, Scope, Stream } from "effect"
 import { tmpdir } from "node:os"
 import { detached, run as command, stop } from "./Process.ts"
 
@@ -27,6 +27,16 @@ export interface Turn {
   /** JSON Schema of the final message. */
   readonly schema: object
 }
+
+/** What a streamed turn gives: its message piece by piece as the model writes it, then the message whole. */
+export type Written =
+  /**
+   * The next piece of a message. A turn writes one message, but one that wrote
+   * another before its last would start over, so each piece says which it's of.
+   */
+  | { readonly _tag: "Piece"; readonly message: string; readonly text: string }
+  /** The final message, as `run` returns it. Nothing follows. */
+  | { readonly _tag: "Whole"; readonly text: string }
 
 /**
  * Unlike `codex exec`, the server can't skip the user's config, so this turns
@@ -94,6 +104,7 @@ const Completed = Schema.Struct({
   turn: Schema.Struct({ status: Schema.String, error: Schema.optional(Schema.Unknown) }),
 })
 const AgentMessage = Schema.Struct({ item: Schema.Struct({ type: Schema.Literal("agentMessage"), text: Schema.String }) })
+const AgentMessageDelta = Schema.Struct({ itemId: Schema.String, delta: Schema.String })
 
 interface Connection {
   readonly process: Subprocess<"pipe", "pipe", "ignore">
@@ -444,8 +455,9 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
     /**
      * Starts a turn on the thread, and returns what waits for its answer. When the
      * scope closes, it stops a turn that's still going and forgets the thread.
+     * `written` hears each piece of a message as the model writes it.
      */
-    const begin = (server: Connection, thread: string, turn: Turn) =>
+    const begin = (server: Connection, thread: string, turn: Turn, written?: (message: string, text: string) => void) =>
       Effect.gen(function* () {
         const done = yield* Deferred.make<string, ServerError | TurnError>()
         let text: string | undefined
@@ -457,6 +469,8 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
                 Deferred.unsafeDone(done, message.interrupted === undefined
                   ? Exit.fail(new ServerError({ cause: message.error ?? "Codex's app-server stopped" }))
                   : Exit.failCause(message.interrupted))
+              } else if (message.method === "item/agentMessage/delta" && written !== undefined) {
+                Option.map(Schema.decodeUnknownOption(AgentMessageDelta)(message.params), ({ itemId, delta }) => written(itemId, delta))
               } else if (message.method === "item/completed") {
                 Option.map(Schema.decodeUnknownOption(AgentMessage)(message.params), ({ item }) => {
                   text = item.text
@@ -511,9 +525,9 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
         return Deferred.await(done)
       })
 
-    const fresh = (turn: Turn) =>
+    const fresh = (turn: Turn, written?: (message: string, text: string) => void) =>
       connection.pipe(
-        Effect.flatMap((server) => threadFor(server).pipe(Effect.flatMap((thread) => begin(server, thread, turn)))),
+        Effect.flatMap((server) => threadFor(server).pipe(Effect.flatMap((thread) => begin(server, thread, turn, written)))),
       )
 
     // So the first update doesn't wait for the server or a thread.
@@ -543,5 +557,38 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
         return yield* answer
       }).pipe(Effect.scoped)
 
-    return { run, prepare }
+    /**
+     * Runs a turn like `run`, but passes its message on as the model writes it,
+     * so the caller can act on the start of it. Stopping early stops the turn,
+     * as giving up on `run` does. A ready thread Codex let go of is swapped for a
+     * new one only while nothing has been passed on, since that can't be taken back.
+     */
+    const stream = (turn: Turn): Stream.Stream<Written, ServerError | TurnError> =>
+      Stream.asyncPush<Written, ServerError | TurnError>((emit) =>
+        Effect.gen(function* () {
+          yield* connection
+          const spare = yield* take
+          // After the turn, so starting threads doesn't compete with it.
+          yield* Effect.addFinalizer(() => refill)
+          let passed = false
+          const written = (message: string, text: string) => {
+            passed = true
+            emit.single({ _tag: "Piece", message, text })
+          }
+          const answer =
+            spare === undefined
+              ? yield* fresh(turn, written)
+              : yield* begin(spare.server, spare.thread, turn, written).pipe(
+                  Effect.catchTag("ServerError", (error) => (passed ? Effect.fail(error) : fresh(turn, written))),
+                )
+          yield* answer.pipe(
+            Effect.map((text): Written => ({ _tag: "Whole", text })),
+            Effect.exit,
+            Effect.flatMap((exit) => Effect.sync(() => emit.done(exit))),
+            Effect.forkScoped,
+          )
+        }),
+      )
+
+    return { run, stream, prepare }
   })
