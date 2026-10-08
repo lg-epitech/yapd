@@ -696,6 +696,8 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     const recent = new Map<string, Card>()
     /** The request each of those cards was put up for, when it went up with what was said for one. */
     const requests = new Map<string, string>()
+    /** How many cards were put up since yapd started, which makes each id one of its own, however many go up in the same millisecond. */
+    let made = 0
     let watching = 0
     // Whether the card that's up went up while an app was there to show it: one put up before isn't on his screen, even once an app is.
     let shownTo = false
@@ -705,7 +707,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     const put = (draft: Draft, line?: Line) =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
-        const card: Card = { ...draft, id: `c${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`, at }
+        const card: Card = { ...draft, id: `c${at.toString(36)}${(made++).toString(36)}`, at }
         recent.set(card.id, card)
         if (line?.request !== undefined) requests.set(card.id, line.request)
         for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) {

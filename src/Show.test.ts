@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Option, Schema, Stream, TestClock, TestContext } from "effect"
+import { Effect, Fiber, Logger, LogLevel, Option, Schema, Stream, TestClock, TestContext } from "effect"
 import type * as Brain from "./Brain.ts"
 import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
@@ -356,6 +356,18 @@ describe("Show", () => {
       }),
     )
     expect(result).toEqual({ first: Option.none(), latest: Option.some(true), gone: false, back: Option.some(true) })
+  })
+
+  test("gives every card an id of its own, however many go up in the same millisecond", async () => {
+    const ids = await Effect.runPromise(
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+        // The test's clock stands still, so they all go up at once.
+        const cards = yield* Effect.forEach(Array.from({ length: 2000 }, (_, index) => index), (index) => show.put(Show.said(`Line ${index}.`, Option.none())))
+        return cards.map(({ id }) => id)
+      }).pipe(Effect.provide(TestContext.TestContext), Logger.withMinimumLogLevel(LogLevel.None)),
+    )
+    expect(new Set(ids).size).toBe(2000)
   })
 
   test("lists the threads on each machine, with their pull requests, and the machines it can't see, as /threads documents", () => {
