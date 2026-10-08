@@ -70,8 +70,12 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
     const dispatched: Array<Record<string, unknown>> = []
     let answer: Answer = takes()
     let current = given.thread ?? thread(tezos.id)
+    let readable = true
     const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
-      api: (<A, I>(_: string, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)) as Server.Transport["api"],
+      api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
+        readable
+          ? Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)
+          : Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." }))) as Server.Transport["api"],
       call: (<A, I>(method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
         method === "orchestration.dispatchCommand"
           ? Effect.suspend(() => {
@@ -102,6 +106,10 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
       },
       becomes: (next: T3Live.Thread) => {
         current = next
+      },
+      /** Whether T3 Code answers reads of the thread, or times out. */
+      reads: (ok: boolean) => {
+        readable = ok
       },
       /** The ids each dispatch went under. */
       ids: () => dispatched.map(({ commandId, messageId }) => [commandId, messageId]),
@@ -493,6 +501,35 @@ describe("Hands", () => {
       }),
     )
     expect(restarted).toEqual({ again: "Twin", dispatched: 1 })
+  })
+
+  test("the same words are asked about while they still wait in the queue, once the turn ahead asks something, or when the thread can't be read", async () => {
+    const busy = (overrides: Record<string, unknown> = {}) => thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running", ...overrides })
+    const twice = (meanwhile: (helpers: Effect.Effect.Success<ReturnType<typeof hands>>) => void) =>
+      run(
+        Effect.gen(function* () {
+          const helpers = yield* hands({ thread: busy(), runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          yield* helpers.send("u1", "When it's done, open a PR.", "after")
+          yield* TestClock.adjust("1 minute")
+          meanwhile(helpers)
+          const again = yield* helpers.send("u2", "When it's done, open a PR.", "after")
+          return { again: again._tag, dispatched: helpers.dispatched.length }
+        }),
+      )
+    // Still waiting behind the turn under way.
+    expect(await twice(() => {})).toEqual({ again: "Twin", dispatched: 1 })
+    // The turn ahead of it asks something, which isn't its answer.
+    expect(await twice(({ becomes }) => becomes(busy({ pendingRuntimeRequest: { id: "r2", kind: "approval", createdAt: new Date(now + 30_000).toISOString() } })))).toEqual({
+      again: "Twin",
+      dispatched: 1,
+    })
+    // A turn ended since, but the thread can't be read to tell whether it was its own.
+    expect(
+      await twice(({ becomes, reads }) => {
+        reads(false)
+        becomes(busy({ latestRunCompletedAt: new Date(now + 30_000).toISOString() }))
+      }),
+    ).toEqual({ again: "Twin", dispatched: 1 })
   })
 
   test("a message to a busy thread says whether it was steered or queued, as T3 Code did", async () => {
