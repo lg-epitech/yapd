@@ -1082,6 +1082,27 @@ describe("Assistant", () => {
     })
   })
 
+  test("an approval he heard that was answered in T3 Code since is never what a dictated approve goes to: the newer one he hasn't heard is read back", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const items = [...approval("r1", "npm install left-pad"), ...approval("r2", "npm install right-pad")]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        // Answered in T3 Code's app; it then asks something else, which he hasn't heard.
+        Object.assign(items[0]!, { status: "resolved" })
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:17:30.000Z" } })
+        yield* made.dictate("Approve the cloud deployment one.")
+        return { spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`), open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const newer = "Cloud deployment discovery wants to run npm install right-pad. Allow it, sir?"
+    expect(result.spoken).toEqual([newer])
+    expect(result.open).toEqual(Option.some(newer))
+    expect(result.dispatched).toEqual([])
+  })
+
   test("an option said aloud answers the thread's question", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [
