@@ -22,7 +22,8 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 
 ## Needs you (built, waiting on review and its live check)
 
-- yapd hears from T3 Code itself and says each once, even across restarts: a thread waiting on you (an approval, a question, or a secret, which it never takes by voice), a run that failed and why, a usage limit and when it resets, and finished work from agents with no hooks. Hook updates are tied to their thread by its session id, so "it" means that thread. Answering approvals and questions by voice comes next.
+- yapd hears from T3 Code itself and says each once, even across restarts: a run that failed and why, a usage limit and when it resets, finished work from agents with no hooks, and a secret a thread waits for, which it never takes by voice. Hook updates are tied to their thread by its session id, so "it" means that thread.
+- Approvals and questions are asked and answered by voice ("The cloudmate discovery wants to install the deploy tooling. Allow it, sir?" … "Yes." … "Approved."): a risky one needs "approve" and says so, an option said aloud answers a question, and only the request you heard is answered, never one dealt with in T3 Code meanwhile. "Tell it to…" after an update goes into that thread's turn under way, and is held back, with why, if you've given it something else since.
 
 ## Faster
 

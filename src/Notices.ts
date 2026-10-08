@@ -129,7 +129,7 @@ const secretName = (label: string) => {
   return trimmed !== "" && /^[\p{L}\p{N} '’&-]+$/u.test(trimmed) && english(trimmed) && trimmed.split(/\s+/).length <= 6 ? `the ${trimmed}` : "a secret"
 }
 
-/** What's said of each, about the thread called `called`. Only ever news: what he'd answer is asked in T3 Code. */
+/** What's said of each, about the thread called `called`, as news: what he can answer by voice is asked instead. */
 export const lines = {
   failed: (called: string, why: string, said: Lines) => `${capital(called)} failed${addressed(said)}: ${why}`,
   limited: (called: string, who: string, resets: Option.Option<string>, said: Lines) =>
