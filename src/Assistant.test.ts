@@ -1663,6 +1663,35 @@ describe("Assistant", () => {
     expect(result.watched).toEqual({ said: answer, up: Option.some({ kind: "said", line: true }) })
   })
 
+  test("a pull request taken on a low guess between two is asked about before anything opens, and the one he picks is opened", async () => {
+    const migration = (id: string, coin: string, number: number) =>
+      thread(id, `Migrate the ${coin} integration`, "integration", {
+        pullRequests: [
+          { number, url: `https://github.com/lg-epitech/integration/pull/${number}`, repository: "lg-epitech/integration", snapshot: { state: "open", title: `Migrate ${coin}`, checksState: "passing" } },
+        ],
+        updatedAt: new Date(now - 30 * 60_000).toISOString(),
+      })
+    const polkadot = migration("f0000000-0000-4000-8000-000000000101", "Polkadot", 101)
+    const cosmos = migration("f0000000-0000-4000-8000-000000000202", "Cosmos", 202)
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, opened, questions } = yield* assistant(
+          (situation) => Brain.decision({ act: "show", how: "pr", target: handle(situation, polkadot), others: handle(situation, cosmos), sure: "low" }),
+          undefined,
+          { others: [polkadot, cosmos] },
+        )
+        yield* dictate("Show me the migration PR.")
+        const asked = { opened: [...opened], questions: questions().length }
+        // Shown, not read, now that it's known which one.
+        yield* dictate("The second one.")
+        return { asked, opened, said: spoken().at(-1) }
+      }),
+    )
+    expect(result.asked).toEqual({ opened: [], questions: 1 })
+    expect(result.opened).toEqual(["https://github.com/lg-epitech/integration/pull/202"])
+    expect(result.said).toBe("Migrate the Cosmos integration: checks pass, sir.")
+  })
+
   test("a pull request opened for any thread but the one just talked about is said with whose it is", async () => {
     const url = "https://github.com/lg-epitech/yapd/pull/7"
     const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader", "yapd", {
