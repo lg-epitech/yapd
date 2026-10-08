@@ -42,6 +42,7 @@ export interface Step {
   readonly step: number
 }
 
+/** What yapd does to threads, each step once. */
 export class Hands extends Context.Tag("yapd/Hands")<
   Hands,
   {
@@ -129,6 +130,7 @@ const settled = (row: Ledger.Row): Outcome => {
   }
 }
 
+/** Hands that reach threads through `threads` and write each step in `ledger` first. */
 export const make = (options: {
   /** Where each thread is, and what reaches its machine. */
   readonly threads: Pick<Threads.Threads["Type"], "find" | "actions">

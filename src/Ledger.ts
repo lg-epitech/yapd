@@ -19,6 +19,7 @@ export type State = "prepared" | "sent" | "refused" | "failed" | "unknown" | "ab
 /** How a message went in, as T3 Code said: at once, into the turn under way, or after it. */
 export type How = "now" | "steered" | "queued"
 
+/** A step, as the ledger keeps it. */
 export interface Row {
   readonly commandId: string
   /** For messages and new work: the message's own id, which is how it's found in the thread. */
@@ -63,6 +64,7 @@ export interface Filter {
   readonly thread?: string
 }
 
+/** The steps yapd committed to, each written before it goes out. */
 export class Ledger extends Context.Tag("yapd/Ledger")<
   Ledger,
   {
@@ -150,6 +152,7 @@ const one = (database: Database, commandId: string) =>
 const reading = <A>(effect: Effect.Effect<Option.Option<A>, Store.StoreError>) =>
   effect.pipe(Effect.catchAll((error) => Effect.logWarning("Could not read what I did to your threads", error).pipe(Effect.as(Option.none<A>()))))
 
+/** The ledger, kept in yapd's database. */
 export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
   prepare: (step) =>
     Effect.gen(function* () {
