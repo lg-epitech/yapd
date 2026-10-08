@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Context, Deferred, Effect, Layer, Option, PubSub, type Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import { basename } from "node:path"
 import { Audio, AudioError } from "./Audio.ts"
-import { Dictation, WhisperDictation, windows } from "./Dictation.ts"
+import { Dictation, Turns, WhisperDictation, windows } from "./Dictation.ts"
 import * as Floor from "./Floor.ts"
 import * as Shortcut from "./Shortcut.ts"
 import { DictationTranscriber } from "./Transcriber.ts"
@@ -15,7 +15,7 @@ const frames = (picture: string) => [...picture].map((frame) => frame === "x")
 /**
  * Runs a dictation against a shortcut and microphone the test drives, and a transcriber that hears `transcribed` in
  * turn. Audio plays as the helper does: one thing at a time, each taking `seconds`, and one cut off by the next never
- * finishing, only timing out. Playing opens the microphone and resting closes it.
+ * finishing, only timing out. Playing opens the microphone and resting closes it. yapd was turned on once before.
  */
 const dictation = (
   transcribed: ReadonlyArray<string>,
@@ -26,6 +26,8 @@ const dictation = (
     readonly transcribe?: (call: number) => Effect.Effect<string> | undefined
     /** Stands in for voice detection on the given frame, counting from 0. */
     readonly detect?: (call: number) => Effect.Effect<number> | undefined
+    /** How long whoever takes the transcripts in takes over the one a press began. */
+    readonly consume?: (press: number) => Effect.Effect<void>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -41,6 +43,9 @@ const dictation = (
     /** The presses dictations started with, as they started, and those their transcripts carry, in order. */
     const presses: Array<number> = []
     const ended: Array<number> = []
+    /** The same, each with how many times yapd had been turned on or off as it was pressed, as they carry it. */
+    const turned = { pressed: [] as Array<readonly [number, number]>, ended: [] as Array<readonly [number, number]> }
+    let turns = 1
     const remaining = [...transcribed]
     let cancelled = 0
     let detected = 0
@@ -93,20 +98,29 @@ const dictation = (
             prepare: Effect.void,
           }),
           Layer.succeed(Voice, { render: (text) => Effect.sync(() => void said.push(text)) }),
+          Layer.succeed(Turns, Effect.sync(() => turns)),
           Floor.layer,
         ),
       ),
     )
     const context = yield* Layer.build(layer)
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ press, heard }) =>
+      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ press, turns, heard }) =>
         Effect.sync(() => {
           transcripts.push(heard)
           ended.push(press)
+          turned.ended.push([press, turns])
+        }).pipe(Effect.zipRight(options.consume?.(press) ?? Effect.void)),
+      ),
+    )
+    yield* Effect.forkScoped(
+      Stream.runForEach(Context.get(context, Dictation).presses, ({ press, turns }) =>
+        Effect.sync(() => {
+          presses.push(press)
+          turned.pressed.push([press, turns])
         }),
       ),
     )
-    yield* Effect.forkScoped(Stream.runForEach(Context.get(context, Dictation).presses, (press) => Effect.sync(() => void presses.push(press))))
     const floor = Context.get(context, Floor.Floor)
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -135,10 +149,16 @@ const dictation = (
       transcripts,
       presses,
       ended,
+      turned,
       cancelled: () => cancelled,
       listening: () => open,
       flush,
       drop: Context.get(context, Dictation).drop.pipe(Effect.zipRight(flush)),
+      /** yapd is turned off, which drops the dictations, and on again. */
+      offAndOn: Context.get(context, Dictation).drop.pipe(
+        Effect.zipRight(Effect.sync(() => void (turns += 2))),
+        Effect.zipRight(flush),
+      ),
     }
   })
 
@@ -279,6 +299,40 @@ describe("Dictation", () => {
     expect(result.transcripts).toEqual([])
     expect(result.dictating).toBe(0)
     expect(result.listening).toBe(false)
+  })
+
+  test("hands on each dictation with how many times yapd had been turned on or off as it was pressed, however late", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const first = yield* Deferred.make<void>()
+        const second = yield* Deferred.make<void>()
+        const { press, talk, flush, offAndOn, turned } = yield* dictation(["First.", "Second.", "Third.", "Fourth."], {
+          // Whoever takes them in is slow with the first two, so the third waits behind them.
+          consume: (press) => (press === 1 ? Deferred.await(first) : press === 2 ? Deferred.await(second) : Effect.void),
+        })
+        const dictate = Effect.zipRight(press("Started"), talk("x".repeat(20))).pipe(Effect.zipRight(press("Sent")))
+        yield* dictate
+        yield* dictate
+        yield* dictate
+        yield* Deferred.succeed(first, undefined)
+        yield* flush
+        // yapd is turned off and on while the second is still being taken in, then he dictates again.
+        yield* offAndOn
+        yield* dictate
+        yield* Deferred.succeed(second, undefined)
+        yield* flush
+        return turned
+      }),
+    )
+    expect(result.pressed).toEqual([
+      [1, 1],
+      [2, 1],
+      [3, 1],
+      [4, 3],
+    ])
+    // Whatever was said before yapd was turned off and is still handed on says so.
+    expect(result.ended.at(-1)).toEqual([4, 3])
+    expect(result.ended.slice(0, -1).every(([press, turns]) => press < 4 && turns === 1)).toBe(true)
   })
 
   test("hands on what the user said in the order they said it, each with the press it began with", async () => {

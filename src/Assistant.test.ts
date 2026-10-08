@@ -649,12 +649,12 @@ describe("Assistant", () => {
         yield* unanswered()
         // He presses the shortcut just before it's asked again: it isn't said while he talks...
         yield* wait(58)
-        yield* prepare(1)
+        yield* prepare(1, 1)
         const held = yield* questions()[0]!.stale
         yield* wait(5)
         const during = spoken().length
         // ...and cancels, so it's waited on again, and asked a minute later.
-        yield* nothing(1)
+        yield* nothing(1, 1)
         yield* wait(60)
         const cancelled = spoken()
         // Asked afresh, then he answers an update instead, which takes its place.
@@ -733,6 +733,50 @@ describe("Assistant", () => {
     // Left alone, it starts, so it's the off and on that stops it.
     expect(await starting(false)).toEqual({ started: ["/code/yapd"], spoken: 1 })
     expect(await starting(true)).toEqual({ started: [], spoken: 0 })
+  })
+
+  test("a dictation pressed before yapd was turned off and on is neither worked out nor acted on, however late it's handed on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { prepare, heard, nothing, toggle, wait, started, seen, spoken, questions, journal } = yield* assistant((situation) =>
+          situation.utterance.heard === "Fix the loader in yapd."
+            ? Brain.decision({ act: "start", text: situation.utterance.heard })
+            : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+        )
+        yield* prepare(1, 1)
+        yield* toggle(false)
+        yield* toggle(true)
+        // He asks something once it's on again, which yapd asks him about.
+        yield* heard({ heard: "What's the status on the migration one?", via: "shortcut", at: now, voiced: 3, turns: 3 })
+        // A press from before is only handed on now, which holds nothing up...
+        yield* prepare(2, 1)
+        const before = yield* questions()[0]!.stale
+        // ...unlike his press to answer it, which its dictation coming to nothing doesn't let go of.
+        yield* prepare(3, 3)
+        yield* nothing(2, 1)
+        const held = yield* questions()[0]!.stale
+        // And what he said before, which would start work.
+        const taken = yield* heard({ heard: "Fix the loader in yapd.", via: "shortcut", at: now, voiced: 3, turns: 1 }, 1)
+        yield* wait(5)
+        const noted = yield* journal.since(0, { kinds: ["dictation"] })
+        return {
+          before,
+          held,
+          taken,
+          asked: seen.map(({ utterance }) => utterance.heard),
+          noted: noted.map(({ text }) => text),
+          started: started.length,
+          spoken: spoken(),
+        }
+      }),
+    )
+    expect(result.before).toBe(false)
+    expect(result.held).toBe(true)
+    expect(result.taken).toEqual(Option.none())
+    expect(result.asked).toEqual(["What's the status on the migration one?"])
+    expect(result.noted).toEqual(["What's the status on the migration one?"])
+    expect(result.started).toBe(0)
+    expect(result.spoken).toEqual(["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?"])
   })
 
   test("still starts what was being started when yapd was turned off, and notes it, without a word", async () => {
@@ -838,9 +882,9 @@ describe("Assistant", () => {
         const { prepare, heard, reading, seen } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir." }))
         // He presses the shortcut over one update, then over the next, before the first dictation is transcribed.
         yield* reading("integration-connectors", "Integration-connectors. The Mina tickets are filed.")
-        yield* prepare(1)
+        yield* prepare(1, 1)
         yield* reading("integration", "Integration. The Tezos migration is comparing request formats.")
-        yield* prepare(2)
+        yield* prepare(2, 1)
         yield* heard({ heard: "What is it doing?", via: "shortcut", at: now, voiced: 3, turns: 1 }, 1)
         yield* heard({ heard: "Tell me more about it.", via: "shortcut", at: now, voiced: 3, turns: 1 }, 2)
         return seen.map(({ subject }) => (subject._tag === "Nothing" ? "nothing" : subject.said))
@@ -854,11 +898,11 @@ describe("Assistant", () => {
       Effect.gen(function* () {
         const { prepare, heard, reading, wait, seen } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir." }))
         yield* reading("integration-connectors", "Integration-connectors. The Mina tickets are filed.")
-        yield* prepare(1)
+        yield* prepare(1, 1)
         // He talks for nearly five minutes, then presses the shortcut again over the next update while the first is transcribed, which takes a while.
         yield* wait(290)
         yield* reading("integration", "Integration. The Tezos migration is comparing request formats.")
-        yield* prepare(2)
+        yield* prepare(2, 1)
         yield* wait(100)
         yield* heard({ heard: "What is it doing?", via: "shortcut", at: now + 390_000, voiced: 250, turns: 1 }, 1)
         yield* heard({ heard: "Tell me more about it.", via: "shortcut", at: now + 390_000, voiced: 3, turns: 1 }, 2)

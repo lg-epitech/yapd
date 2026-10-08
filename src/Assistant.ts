@@ -27,7 +27,7 @@ export interface Utterance {
   readonly at: number
   /** Seconds of it that were speech. */
   readonly voiced: number
-  /** How many times yapd had been turned on or off when it was heard, so nothing is done for it after. */
+  /** How many times yapd had been turned on or off when it was said, as its shortcut was pressed for a dictation, so nothing is done for it after. */
   readonly turns: number
 }
 
@@ -117,12 +117,17 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly think: (utterance: Utterance, subject: Subject, lines: ReadonlyArray<Line>) => Effect.Effect<Thought>
     /** Once, one request at a time; thinks once more if the open question changed meanwhile. Never fails. */
     readonly act: (thought: Thought) => Effect.Effect<Outcome>
-    /** A dictation, begun with the shortcut `press`, or a typed request: worked out and acted on, then what came of it said ahead of anything else. */
-    readonly heard: (utterance: Omit<Utterance, "id">, press?: number) => Effect.Effect<string>
-    /** The shortcut was pressed to start a dictation: the open question waits for what's dictated. */
-    readonly prepare: (press: number) => Effect.Effect<void>
+    /**
+     * A dictation, begun with the shortcut `press`, or a typed request: worked
+     * out and acted on, then what came of it said ahead of anything else. None
+     * when yapd is off or was turned off since it was said, however late it's
+     * handed on: then nothing is done for it at all.
+     */
+    readonly heard: (utterance: Omit<Utterance, "id">, press?: number) => Effect.Effect<Option.Option<string>>
+    /** The shortcut was pressed to start a dictation, when yapd had been turned on or off `turns` times: the open question waits for what's dictated. */
+    readonly prepare: (press: number, turns: number) => Effect.Effect<void>
     /** The dictation a press began came to nothing, like one cancelled, failed or with no words in it: the open question is waited on again. */
-    readonly nothing: (press: number) => Effect.Effect<void>
+    readonly nothing: (press: number, turns: number) => Effect.Effect<void>
     /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
     readonly replied: Effect.Effect<void>
     readonly open: Effect.Effect<Option.Option<Open>>
@@ -236,6 +241,9 @@ export const make = (options: {
     const starting = new Map<string, Kept>()
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
+
+    /** Whether yapd is off, or was turned off since it had been turned on or off `turns` times, so nothing is done now for what was said by then. */
+    const outdated = (turns: number) => Effect.map(options.power, (power) => !power.on || power.turns !== turns)
 
     /**
      * In the background for a request heard when yapd had been turned on or
@@ -987,16 +995,20 @@ export const make = (options: {
         const utterance: Utterance = { ...input, id: mint(input.at, "u") }
         // A dictation's answer was awaited from when the shortcut was pressed, and "it" is what he was listening to then.
         const kept = yield* ended(press)
+        // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
+        if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
         const arrived = kept?.arrived ?? (yield* options.awaiting)
-        return yield* Effect.zipRight(hold, respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived))
+        return Option.some(yield* Effect.zipRight(hold, respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived)))
       })
 
     return {
       think,
       act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought.utterance), outcome))),
       heard,
-      prepare: (press) =>
+      prepare: (press, turns) =>
         Effect.gen(function* () {
+          // Pressed before yapd was turned off, however late it's handed on, there's nothing to get ready for.
+          if (yield* outdated(turns)) return
           // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
           presses.set(press, { subject: yield* subject, arrived: yield* options.awaiting })
           yield* hold
@@ -1004,7 +1016,12 @@ export const make = (options: {
           yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
           yield* Effect.forkIn(threads.refreshUsage, scope)
         }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
-      nothing: (press) => Effect.zipRight(release, Effect.flatMap(ended(press), (kept) => kept?.arrived ?? Effect.void)),
+      // Begun before yapd was turned off, it held nothing that's open now.
+      nothing: (press, turns) =>
+        Effect.zipRight(
+          Effect.unlessEffect(release, outdated(turns)),
+          Effect.flatMap(ended(press), (kept) => kept?.arrived ?? Effect.void),
+        ),
       // Not one he hasn't heard yet, which what he said can't have been about.
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),

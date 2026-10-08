@@ -1,4 +1,4 @@
-import { Clock, Effect, Layer, Logger, Option, Stream } from "effect"
+import { Clock, Context, Effect, Layer, Logger, Option, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
@@ -9,7 +9,7 @@ import * as Codex from "./Codex.ts"
 import { ProviderCondenser } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import * as Daemon from "./Daemon.ts"
-import { Dictation, WhisperDictation } from "./Dictation.ts"
+import { Dictation, Turns, WhisperDictation } from "./Dictation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
 import * as Journal from "./Journal.ts"
@@ -97,7 +97,11 @@ export const serve = Effect.gen(function* () {
     queued: daemon.queued,
   })
   const shortcut = yield* Shortcut
-  const dictation = yield* Dictation
+  // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed on.
+  const dictation = Context.get(
+    yield* Layer.build(WhisperDictation).pipe(Effect.provideService(Turns, Effect.map(daemon.power, ({ turns }) => turns))),
+    Dictation,
+  )
   const settings = yield* Settings.Settings
 
   /**
@@ -117,14 +121,9 @@ export const serve = Effect.gen(function* () {
     yield* Effect.logInfo("yapd is off, until it's turned on from the menu bar or the API")
   }
 
-  /** What the user said to yapd, as heard now, while it's on. */
-  const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, press?: number) =>
-    Effect.gen(function* () {
-      const power = yield* daemon.power
-      if (!power.on) return Option.none<string>()
-      const at = yield* Clock.currentTimeMillis
-      return Option.some(yield* assistant.heard({ heard: text, via, at, voiced, turns: power.turns }, press))
-    })
+  /** What the user said to yapd, as heard now, with how many times yapd had been turned on or off as it was said. */
+  const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number) =>
+    Effect.flatMap(Clock.currentTimeMillis, (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
   const state = Stream.zipLatestWith(daemon.state, (yield* Activity).changes, (state, activity): Server.State => ({
     on: state.on,
@@ -147,14 +146,14 @@ export const serve = Effect.gen(function* () {
       ),
     replay: daemon.replay,
     // Typed words were never faint, so nothing typed is taken for Whisper hearing words in silence.
-    utter: (text) => heard(text, "typed", Number.POSITIVE_INFINITY),
+    utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, assistant.prepare))
+  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns }) => assistant.prepare(press, turns)))
   // Each with the press it began with, which keeps what "it" meant then, however long the dictation took.
   yield* Effect.forkScoped(
-    Stream.runForEach(dictation.transcripts, ({ press, heard: text, voiced }) =>
-      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, press),
+    Stream.runForEach(dictation.transcripts, ({ press, turns, heard: text, voiced }) =>
+      text === "" ? assistant.nothing(press, turns) : heard(text, "shortcut", voiced, turns, press),
     ),
   )
   // Whatever he says over an update takes the place of a question yapd asked before.
@@ -168,7 +167,6 @@ export const serve = Effect.gen(function* () {
         Layer.provideMerge(Persona.layer),
         Layer.provide(ProviderModel),
       ),
-      WhisperDictation,
       Relays,
     ).pipe(
       Layer.provideMerge(
