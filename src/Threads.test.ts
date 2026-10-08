@@ -4,7 +4,8 @@ import * as Brain from "./Brain.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
-import type * as T3Actions from "./T3Actions.ts"
+import * as T3Actions from "./T3Actions.ts"
+import type * as Server from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 
@@ -30,6 +31,35 @@ const viewing = (...threads: ReadonlyArray<T3Live.Thread>): T3Live.View => ({
   sequence: 1,
   synced: true,
 })
+
+/**
+ * Threads on Rosie over a T3 Code whose threads have the agent conversations
+ * `sessions` says, by the agent's own ids, as T3 Code references them, and
+ * which counts how often each thread is read.
+ */
+const linking = (view: Option.Option<T3Live.View>, sessions: Readonly<Record<string, ReadonlyArray<string>>>) =>
+  Effect.gen(function* () {
+    const reads: Array<string> = []
+    const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
+      api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
+        const id = decodeURIComponent(path.split("/").at(-2) ?? "")
+        reads.push(id)
+        const providerThreads = (sessions[id] ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
+        return Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie)
+      }) as Server.Transport["api"],
+      call: (() => Effect.die("not expected")) as Server.Transport["call"],
+    })
+    const store = yield* Store.make(":memory:")
+    const threads = yield* Threads.make({
+      machine: "Rosie",
+      live: { view: Effect.succeed(view), changes: Stream.never },
+      actions: Option.some(T3Actions.make(reach)),
+      others: ["rig"],
+      journal: Journal.fromStore(store),
+      store,
+    })
+    return { threads, reads }
+  })
 
 describe("Threads", () => {
   test("puts threads whose titles have his words up front, however speech spelt them, and the rest of the month's by name", () => {
@@ -132,5 +162,44 @@ describe("Threads", () => {
       "In integration, review the process used for the Mina migration and begin work on the Tezos migration in the main checkout."
     expect(Threads.called("Migrate Tezos Integration", long, "integration", at, now)).toBe("Migrate Tezos Integration")
     expect(Threads.called("Migrate Tezos Integration", "the Tezos migration", "integration", at, now)).toBe("the Tezos migration")
+  })
+
+  test("a hook is linked to its thread by the agent's own session id, even with two threads in one directory", async () => {
+    // Two threads in the integration project, the Mina one the newer, and one in a worktree of its own.
+    const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", "2026-10-08T21:00:00.000Z")
+    const loader = thread("loader", "Fix the loader", "2026-10-08T21:30:00.000Z", { worktreePath: "/code/integration-loader" })
+    const result = await Effect.gen(function* () {
+      const { threads, reads } = yield* linking(Option.some(viewing(tezos, mina, loader)), { tezos: ["s-tezos"], mina: ["s-mina"], loader: ["s-loader"] })
+      const tezosHook = yield* threads.link("Rosie", "s-tezos", "/code/integration")
+      const minaHook = yield* threads.link("Rosie", "s-mina", "/code/integration")
+      const first = reads.length
+      // Told again, each is known, and nothing is read for it.
+      const again = yield* threads.link("Rosie", "s-tezos", "/code/integration")
+      // A terminal session in the same directory is no thread's, and threads that haven't run since aren't read for it twice.
+      const terminal = [yield* threads.link("Rosie", "s-terminal", "/code/integration"), yield* threads.link("Rosie", "s-terminal", "/code/integration")]
+      return { tezosHook, minaHook, first, again, terminal, reads }
+    }).pipe(Effect.scoped, Effect.runPromise)
+    expect(result.tezosHook).toEqual(Option.some({ machine: "Rosie", id: "tezos" }))
+    expect(result.minaHook).toEqual(Option.some({ machine: "Rosie", id: "mina" }))
+    // The newest first: the Mina one, which didn't have it, then the Tezos one; never the one in another directory.
+    expect(result.reads.slice(0, result.first)).toEqual(["mina", "tezos"])
+    expect(result.again).toEqual(Option.some({ machine: "Rosie", id: "tezos" }))
+    expect(result.terminal).toEqual([Option.none(), Option.none()])
+    expect(result.reads).toEqual(["mina", "tezos"])
+  })
+
+  test("a hook is never linked while that machine's T3 Code isn't followed", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
+    const result = await Effect.gen(function* () {
+      // T3 Code isn't running, or hasn't caught up.
+      const away = yield* linking(Option.none(), { tezos: ["s-tezos"] })
+      const unfollowed = yield* away.threads.link("Rosie", "s-tezos", "/code/integration")
+      // Rig's hooks come through the tunnel, but its T3 Code isn't followed, even with the same directory and session as here.
+      const here = yield* linking(Option.some(viewing(tezos)), { tezos: ["s-tezos"] })
+      const rig = yield* here.threads.link("rig", "s-tezos", "/code/integration")
+      return { unfollowed, rig, reads: [...away.reads, ...here.reads] }
+    }).pipe(Effect.scoped, Effect.runPromise)
+    expect(result).toEqual({ unfollowed: Option.none(), rig: Option.none(), reads: [] })
   })
 })
