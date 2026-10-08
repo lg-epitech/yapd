@@ -34,6 +34,8 @@ interface Bounded {
   readonly messages?: ReadonlyArray<Record<string, unknown>>
   readonly turnItems?: ReadonlyArray<Record<string, unknown>>
   readonly sessions?: ReadonlyArray<string>
+  /** T3 Code's own record of each request, which keeps one its summary of the thread hides behind a newer one. */
+  readonly runtimeRequests?: ReadonlyArray<Record<string, unknown>>
 }
 
 /** The thread's run ending, as T3Live tells of it: it was going, and now isn't. */
@@ -85,7 +87,7 @@ const notices = (
         const read = given.bounded[decodeURIComponent(path.split("/").at(-2) ?? "")] ?? {}
         const providerThreads = (read.sessions ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
         return Schema.decodeUnknown(schema)({
-          projection: { runs: read.runs ?? [], messages: read.messages ?? [], turnItems: read.turnItems ?? [], providerThreads },
+          projection: { runs: read.runs ?? [], messages: read.messages ?? [], turnItems: read.turnItems ?? [], providerThreads, runtimeRequests: read.runtimeRequests ?? [] },
         }).pipe(Effect.orDie)
       }) as Server.Transport["api"],
       call: (() => Effect.die("not expected")) as Server.Transport["call"],
@@ -239,6 +241,25 @@ describe("Notices", () => {
     )
     expect(result.first).toEqual(["Migrate Tezos Integration wants to push the branch. Allow it, sir?"])
     expect(result.second).toEqual([])
+  })
+
+  test("a request still waiting behind a newer one asked alongside it isn't taken for answered, and one that was is", async () => {
+    const pending = (id: string) => ({ id, kind: "command", createdAt: minutes(1) })
+    // Each asked two things; T3 Code's summary shows the newer. The Tezos one's first still waits; the Mina one's was answered.
+    const tezos = thread("tezos", "Migrate Tezos Integration", { activeRunId: "run-1", pendingRuntimeRequest: pending("r2") })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { activeRunId: "run-2", pendingRuntimeRequest: pending("r4") })
+    const bounded = {
+      tezos: { runtimeRequests: [{ id: "r1", status: "pending" }, { id: "r2", status: "pending" }] },
+      mina: { runtimeRequests: [{ id: "r3", status: "resolved" }, { id: "r4", status: "pending" }] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, settled } = yield* notices({ view: [tezos, mina], bounded })
+        yield* hear({ _tag: "Answered", thread: tezos, request: pending("r1") }, { _tag: "Answered", thread: mina, request: pending("r3") })
+        return settled
+      }),
+    )
+    expect(result).toEqual(["r3"])
   })
 
   test("a usage limit is said once per window, however many threads hit it", async () => {

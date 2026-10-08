@@ -755,6 +755,29 @@ describe("Assistant", () => {
     expect(result.moot).toBe(1)
   })
 
+  test("a yes to an approval still waiting behind a newer one asked alongside it allows it, and the newer one is asked after", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = [...approval("r1", "npm install left-pad"), ...approval("r2", "npm install right-pad")]
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        // It asks something else alongside, which T3 Code's summary of the thread shows in its place, while the first still waits.
+        const both = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:17:30.000Z" } }
+        yield* made.becomes(both)
+        yield* asked(made, both)
+        yield* made.answer("Yes.", made.questions()[0])
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+      "Approved, sir.",
+      "Cloud deployment discovery wants to run npm install right-pad. Allow it, sir?",
+    ])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
   test("an option said aloud answers the thread's question", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [

@@ -394,10 +394,15 @@ export const make = (options: {
   const landed = (row: Ledger.Row, actions: T3Actions.Actions): Effect.Effect<boolean, T3CodeServer.Trouble> => {
     const sent = command(row.body)
     if (row.messageId !== null && row.kind === "message") return actions.has(row.thread, row.messageId)
-    // An answer got there once the thread no longer says it waits on what it answered.
+    // An answer got there once the thread no longer waits on what it answered, even behind something newer it asked.
     if (Option.isSome(sent) && (sent.value._tag === "Decide" || sent.value._tag === "Answer")) {
       const { requestId } = sent.value
-      return Effect.map(threads.find(refOf(row)), (thread) => !Option.exists(thread, ({ pendingRuntimeRequest }) => pendingRuntimeRequest?.id === requestId))
+      return Effect.flatMap(threads.find(refOf(row)), (thread) => {
+        const pending = Option.getOrNull(Option.flatMap(thread, ({ pendingRuntimeRequest }) => Option.fromNullable(pendingRuntimeRequest)))
+        if (pending === null) return Effect.succeed(true)
+        if (pending.id === requestId) return Effect.succeed(false)
+        return Effect.map(actions.detail(row.thread, requestId), ({ pending }) => !pending.includes(requestId))
+      })
     }
     if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)
     if (Option.isSome(sent) && sent.value._tag === "Cancel") {
@@ -824,14 +829,14 @@ export const make = (options: {
       const reached = yield* reach(act.to)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing[kind])
       const { actions, thread } = reached.right
-      if (thread.pendingRuntimeRequest?.id !== act.requestId) {
-        yield* Effect.logInfo(`Not answering ${act.requestId}, since it no longer waits on it`)
-        return { _tag: "Moot" } satisfies Outcome
-      }
+      const moot = Effect.as(Effect.logInfo(`Not answering ${act.requestId}, since it no longer waits on it`), { _tag: "Moot" } satisfies Outcome)
+      // Waiting on nothing, it was dealt with; waiting on something else, it may still wait on this one too, asked alongside it, which only a read can say.
+      if (thread.pendingRuntimeRequest === null) return yield* moot
       const read = yield* Effect.either(actions.detail(act.to.id, act.requestId))
       if (Either.isLeft(read)) {
         return yield* failing({ _tag: "NotSent", reason: plainly(T3Actions.reason(read.left)), again: Option.none() } satisfies Outcome, doing[kind])
       }
+      if (thread.pendingRuntimeRequest.id !== act.requestId && !read.right.pending.includes(act.requestId)) return yield* moot
       const request = read.right.request
       if (Option.exists(request, ({ _tag }) => _tag === "Secret")) return yield* failing({ _tag: "Refused", reason: secretive } satisfies Outcome, doing[kind])
       const fits = Option.exists(request, (request) =>

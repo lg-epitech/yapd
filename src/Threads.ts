@@ -94,6 +94,13 @@ export class Threads extends Context.Tag("yapd/Threads")<
     readonly link: (machine: string, session: string, cwd: string) => Effect.Effect<Option.Option<Ref>>
     /** The agent's own ids for a thread's conversations, which its hooks report as their session. */
     readonly sessions: (ref: Ref) => Effect.Effect<ReadonlyArray<string>, ThreadsError>
+    /**
+     * Whether a thread still waits on him for this request: as T3 Code's
+     * summary of it shows, which is only the newest, or, while that shows
+     * another, as T3 Code's own record of each says, since one asked
+     * alongside a newer one still waits. Not, when that can't be read.
+     */
+    readonly waiting: (ref: Ref, requestId: string) => Effect.Effect<boolean>
   }
 >() {}
 
@@ -566,5 +573,17 @@ export const make = (options: {
         }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not note the work I started", error))),
       link,
       sessions,
+      waiting: (ref, requestId) =>
+        Effect.gen(function* () {
+          const pending = Option.flatMap(
+            ref.machine === machine ? Option.flatMap(yield* live.view, (view) => Option.fromNullable(view.threads.get(ref.id))) : Option.none(),
+            (thread) => Option.fromNullable(thread.pendingRuntimeRequest),
+          )
+          if (Option.isNone(pending)) return false
+          if (pending.value.id === requestId) return true
+          const read = yield* Effect.either(Effect.flatMap(reach(ref), (actions) => actions.detail(ref.id, requestId)))
+          if (Either.isLeft(read)) yield* Effect.logWarning(`Could not read whether it still waits on ${requestId}`, read.left)
+          return Either.isRight(read) && read.right.pending.includes(requestId)
+        }),
     } satisfies Threads["Type"]
   })

@@ -93,6 +93,9 @@ const ProviderThread = Schema.Struct({
   ),
 })
 
+/** A request T3 Code keeps for a thread, and whether it still waits on it: "pending" until it's answered, expires or is cancelled. */
+const RuntimeRequest = Schema.Struct({ id: Schema.String, status: Schema.String })
+
 const Bounded = Schema.Struct({
   projection: Schema.Struct({
     runs: Schema.Array(Run),
@@ -100,6 +103,7 @@ const Bounded = Schema.Struct({
     turnItems: Schema.Array(Schema.Unknown),
     plans: Schema.optionalWith(Schema.Array(Schema.Unknown), { default: () => [] }),
     providerThreads: Schema.optionalWith(Schema.Array(Schema.Unknown), { default: () => [] }),
+    runtimeRequests: Schema.optionalWith(Schema.Array(Schema.Unknown), { default: () => [] }),
   }),
 })
 
@@ -142,10 +146,13 @@ export interface Detail {
   readonly request: Option.Option<Request>
   /** Its plan or to-do list, if it has one under way. */
   readonly plan: Option.Option<string>
+  /** Every request it still waits on him for, oldest first, even one asked alongside a newer one, which its summary in T3 Code hides. */
+  readonly pending: ReadonlyArray<string>
 }
 
 const decodeItem = Schema.decodeUnknownOption(Item)
 const decodePlan = Schema.decodeUnknownOption(Plan)
+const decodeRuntimeRequest = Schema.decodeUnknownOption(RuntimeRequest)
 
 const every = [
   { decision: "accept", label: "Allow" },
@@ -155,6 +162,20 @@ const every = [
 
 /** The turn items a thread waits on the user for. */
 const asking: ReadonlyArray<string> = ["approval_request", "user_input_request", "secret_request"]
+
+/**
+ * The requests a thread still waits on him for, oldest first: by T3 Code's
+ * own record of each, which keeps one asked alongside a newer one that the
+ * thread's summary shows instead, or by its turn items when it keeps none.
+ */
+export const waitingOn = (projection: Pick<(typeof Bounded.Type)["projection"], "runtimeRequests" | "turnItems">): ReadonlyArray<string> => {
+  const kept = projection.runtimeRequests.flatMap((request) => Option.toArray(decodeRuntimeRequest(request)))
+  if (kept.length > 0) return kept.filter(({ status }) => status === "pending").map(({ id }) => id)
+  return projection.turnItems
+    .flatMap((item) => Option.toArray(decodeItem(item)))
+    .filter(({ type, status }) => asking.includes(type) && (status === "waiting" || status === "pending"))
+    .flatMap(({ type, id, requestId }) => Option.toArray(Option.fromNullable(type === "secret_request" ? id : requestId)))
+}
 
 /** How much of a command or a tool's input is kept: enough to tell what it does. */
 const commandLength = 600
@@ -499,6 +520,7 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
           runs: projection.runs,
           request: Option.flatMap(Option.fromNullable(waiting), (id) => request(projection.turnItems, id)),
           plan: plan(projection.plans),
+          pending: waitingOn(projection),
         } satisfies Detail
       }),
 

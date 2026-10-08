@@ -374,8 +374,18 @@ export const make = (options: {
         if (!on) return
         // Asked as the one question open, for him to answer by voice.
         if (worded.value._tag === "Ask") return yield* options.ask(worded.value.asking)
-        const still = Effect.map(threads.find(ref), Option.exists((thread) => thread.pendingRuntimeRequest?.id === requestId))
-        yield* notify(ref, worded.value.spoken, worded.value.entry, still, at, turns)
+        yield* notify(ref, worded.value.spoken, worded.value.entry, threads.waiting(ref, requestId), at, turns)
+      })
+
+    /**
+     * What a thread waited on him for that it no longer shows: dealt with,
+     * unless a newer one only hides it, as T3 Code's summary of a thread
+     * shows only the newest it waits on, when it still waits behind that.
+     */
+    const answered = (ref: Threads.Ref, requestId: string) =>
+      Effect.gen(function* () {
+        if (yield* threads.waiting(ref, requestId)) return yield* Effect.logInfo(`Still waiting on ${requestId}, behind what it asked since`)
+        yield* options.settled(requestId)
       })
 
     /**
@@ -443,7 +453,12 @@ export const make = (options: {
       Effect.gen(function* () {
         const news = verdict(change)
         if (Option.isNone(news)) return
-        if (news.value._tag === "Settled") return yield* options.settled(news.value.requestId)
+        if (news.value._tag === "Settled") {
+          const ref = { machine, id: news.value.thread.id }
+          // Gone, or waiting on nothing now, it waits on nothing at all; otherwise it's read, in the background.
+          if (change._tag === "Removed" || news.value.thread.pendingRuntimeRequest === null) return yield* options.settled(news.value.requestId)
+          return yield* FiberSet.run(running, answered(ref, news.value.requestId).pipe(trouble))
+        }
         // Off, nothing is said later of what happened meanwhile; what still waits on him is said once it's on.
         const { on, turns } = yield* options.power
         if (!on) return

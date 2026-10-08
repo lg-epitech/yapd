@@ -98,6 +98,10 @@ describe("T3Actions", () => {
     expect(detail.messages.map(({ text }) => text)).toEqual(["Fix it.", "Pushing now."])
     expect(Option.map(detail.request, ({ id }) => id)).toEqual(Option.some("r1"))
     expect(detail.plan).toEqual(Option.some("- [running] Push"))
+    expect(detail.pending).toEqual(["r1"])
+    // What it still waits on, by T3 Code's own record of each when it keeps one, even one hidden behind a newer one.
+    const both = transport(projection({ runtimeRequests: [{ id: "r0", status: "pending" }, { id: "r1", status: "resolved" }, { id: "r2", status: "pending" }] }))
+    expect((await Effect.runPromise(both.actions.detail("t1"))).pending).toEqual(["r0", "r2"])
     const settled = transport(projection({ turnItems: [{ ...approval, status: "completed" }] }))
     expect((await Effect.runPromise(settled.actions.detail("t1"))).request).toEqual(Option.none())
   })

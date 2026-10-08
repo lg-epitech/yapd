@@ -407,9 +407,8 @@ export const make = (options: {
     /** What threads wait on him for that he's heard asked, by request: answered by dictation, it's done as he says. */
     const known = new Map<string, Exclude<Asks, { readonly _tag: "Agent" }>>()
 
-    /** Whether a thread still waits on him for this request, as T3 Code last said. */
-    const still = (ref: Threads.Ref, requestId: string) =>
-      Effect.map(threads.find(ref), Option.exists(({ pendingRuntimeRequest }) => pendingRuntimeRequest?.id === requestId))
+    /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
+    const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
