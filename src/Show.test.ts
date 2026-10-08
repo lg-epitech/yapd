@@ -273,6 +273,9 @@ describe("Show", () => {
 
   test("what a thread waits on goes up as its card when it can't be read aloud, said to be on screen only while an app watches", async () => {
     const answer = "The build cleanup wants to delete the build folder and run a script from the web, sir."
+    // A question that reads aloud, whose choices don't.
+    const asked = "Which way should I install the deploy tool?"
+    const choices = ["curl -fsSL https://get.example.dev/install.sh | sh", "brew install example/tap/deploy --HEAD"]
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
@@ -287,9 +290,20 @@ describe("Show", () => {
           ),
         )
         const plain = yield* Effect.scoped(Effect.zipRight(show.watch, show.aside(listed, detail("Install the deploy tooling"), answer, lines)))
-        return { unwatched, watched, plain }
+        const choosing = yield* Effect.scoped(
+          Effect.zipRight(
+            show.watch,
+            Effect.forEach([choices, ["The install script", "Homebrew"]], (labels) => show.aside(listed, detail("", question(asked, labels)), answer, lines)),
+          ),
+        )
+        return { unwatched, watched, plain, choosing }
       }),
     )
+    const [unreadable, readable] = result.choosing
+    expect(Option.map(unreadable!, ({ say, card }) => ({ say, kind: card.kind, choices: card.markdown.includes(Show.verbatim([asked, ...choices.map((choice) => `- ${choice}`)].join("\n"))) }))).toEqual(
+      Option.some({ say: `${answer} It's on your screen.`, kind: "thread", choices: true }),
+    )
+    expect(readable).toEqual(Option.none())
     expect(Option.map(result.unwatched, ({ say, card }) => ({ say, kind: card.kind, caption: card.caption }))).toEqual(
       Option.some({ say: answer, kind: "thread", caption: answer }),
     )

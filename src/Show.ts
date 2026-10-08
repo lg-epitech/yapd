@@ -768,7 +768,13 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
       aside: (target, detail, answer, lines) =>
         Effect.gen(function* () {
           const request = Option.getOrUndefined(detail.request)
-          const words = request === undefined ? [] : request._tag === "Approval" ? [request.what] : request.questions.map(({ question }) => question)
+          // A question's choices too, which he can't pick between by ear when they're commands or addresses.
+          const words =
+            request === undefined
+              ? []
+              : request._tag === "Approval"
+                ? [request.what]
+                : request.questions.flatMap(({ question, options }) => [question, ...options.map(({ label }) => label)])
           if (words.every(readable)) return Option.none()
           const now = yield* Clock.currentTimeMillis
           // The answer addressed him already.
