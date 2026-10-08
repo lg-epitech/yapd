@@ -353,47 +353,48 @@ export interface Ran {
   readonly prompt: Option.Option<string>
   /** What it said back, oldest first, as one. */
   readonly said: string
+  /** What it said last, which is what its Stop hook says last too: how a Stop is told to be its own. */
+  readonly final: string
+  /** What each of the thread's other runs read with it said last, so a Stop of theirs, like the run before's come late, isn't taken for its own. */
+  readonly others: ReadonlyArray<string>
   /** Why it failed, when it did. */
   readonly failure: Option.Option<typeof Failure.Type>
   /** The agent's own ids for the thread's conversations. */
   readonly natives: ReadonlyArray<string>
-  /** The run before it, when that went well, so a Stop hook came of it: when it started and ended, in ms. */
-  readonly previous: Option.Option<{ readonly startedAt: number; readonly endedAt: number }>
 }
 
 const instant = (iso: string | null | undefined) =>
   Option.filter(Option.map(Option.fromNullable(iso), Date.parse), (at) => !Number.isNaN(at))
 
+/** What a run said back, oldest first: only what's done being said, and not empty. */
+const answers = (projection: (typeof Bounded.Type)["projection"], runId: string) =>
+  projection.messages
+    .filter(({ role, runId: said, streaming }) => role === "assistant" && said === runId && !streaming)
+    .map(({ text }) => text.trim())
+    .filter((text) => text !== "")
+
 /** How one of the thread's runs went, by its id, out of a bounded read. */
 export const ran = (projection: (typeof Bounded.Type)["projection"], runId: string): Option.Option<Ran> => {
   const run = projection.runs.find(({ id }) => id === runId)
   if (run === undefined) return Option.none()
+  const said = answers(projection, runId)
   const failure = projection.turnItems
     .flatMap((item) => Option.toArray(decodeItem(item)))
     .filter((item) => item.type === "error" && item.runId === runId && item.status === "failed")
     .at(-1)?.failure
   const prompt = projection.messages.find(({ id, role }) => role === "user" && id !== undefined && id === run.userMessageId)?.text
   const startedAt = Option.orElse(instant(run.startedAt), () => instant(run.requestedAt))
-  // The last that got going before it: one taken out of the queue never did.
-  const before = projection.runs.filter(({ ordinal, startedAt }) => ordinal < run.ordinal && Option.isSome(instant(startedAt))).toSorted((a, b) => b.ordinal - a.ordinal)[0]
   return Option.some({
     id: run.id,
     status: run.status,
     startedAt,
     userMessageId: Option.fromNullable(run.userMessageId),
     prompt: Option.filter(Option.fromNullable(prompt), (text) => text.trim() !== ""),
-    said: projection.messages
-      .filter(({ role, runId: said, streaming }) => role === "assistant" && said === runId && !streaming)
-      .map(({ text }) => text.trim())
-      .filter((text) => text !== "")
-      .join("\n\n"),
+    said: said.join("\n\n"),
+    final: said.at(-1) ?? "",
+    others: projection.runs.flatMap(({ id }) => (id === runId ? [] : Option.toArray(Option.fromNullable(answers(projection, id).at(-1))))),
     failure: Option.fromNullable(failure),
     natives: natives(projection.providerThreads),
-    // One that went well ended by the time this one started, which is when it's taken to have when T3 Code doesn't say.
-    previous:
-      before?.status === "completed"
-        ? Option.all({ startedAt: instant(before.startedAt), endedAt: Option.orElse(instant(before.completedAt), () => startedAt) })
-        : Option.none(),
   })
 }
 

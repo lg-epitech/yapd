@@ -12,6 +12,7 @@ import * as Inbox from "./Inbox.ts"
 import * as Hands from "./Hands.ts"
 import { type Entry, Journal } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Notices from "./Notices.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
 import { Persona } from "./Persona.ts"
@@ -116,8 +117,29 @@ export const make = (
     hook?: Ticket
   }
   const followed = new Map<string, Replies>()
-  /** When each session's Stops came, oldest first, by the agent's own id for it, whether or not they were said, for an hour. */
-  const stops = new Map<string, ReadonlyArray<number>>()
+  /** Each session's Stops, when they came and what they said last, oldest first, by the agent's own id for it, whether or not they were said, for an hour. */
+  const stops = new Map<string, ReadonlyArray<Notices.Stop>>()
+  /**
+   * A turn T3 Code said finished that no hook had told of, said in its hook's
+   * place, under the session `finished:<machine>:<thread>`: what tells a Stop
+   * of its own from another's, which is what decides the turn is its, and
+   * whether it's begun being said, after which a Stop of its own coming late
+   * isn't said too; until then, one gives way to it.
+   */
+  interface Fallback {
+    readonly about: Threads.Ref
+    readonly session: string
+    readonly key: string
+    readonly run: Notices.Finished["run"]
+    readonly at: number
+    begun: boolean
+    /** Its entry in the journal, once it's kept, to note as dealt with if a Stop of its own takes its place. */
+    row?: number
+  }
+  /** Each turn said in its hook's place, by the key it's said once under, which is its run's, for an hour: only it or its Stop's update is said. */
+  const fallbacks = new Map<string, Fallback>()
+  /** The turn said in its hook's place that each update is. */
+  const standing = new WeakMap<Conversation.Update, Fallback>()
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
   /**
@@ -412,7 +434,7 @@ export const make = (
       ),
   })
 
-  const fallback = (project: string): Summary => ({
+  const unsummarized = (project: string): Summary => ({
     priority: "done",
     spoken: `${speakable(project) ? project : "One of your threads"} finished a turn, but I couldn't summarize it.`,
   })
@@ -432,8 +454,8 @@ export const make = (
     readonly turns: number
     /** The T3 Code thread it's from, worked out alongside the summary, when there's one. */
     readonly about: Effect.Effect<Option.Option<Threads.Ref>>
-    /** What it's said under only once, ever, for an update no hook told of. */
-    readonly key?: string
+    /** For a turn no hook told of, said in its hook's place, which is said once, ever, under its key. */
+    readonly fallback?: Fallback
   }
 
   const prepare = (finished: Finished) => {
@@ -443,7 +465,7 @@ export const make = (
         [
           condenser.condense(project, turn).pipe(
             Effect.retry({ times: 1 }),
-            Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),
+            Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(unsummarized(project)))),
           ),
           finished.about,
         ],
@@ -492,16 +514,34 @@ export const make = (
         },
       }
       // Said once ever: one already kept under its key was said, or held, before. Never kept for one yapd won't say, as it's off.
+      const { fallback } = finished
       const power = yield* switched
-      if (finished.key !== undefined && (!power.on || power.turns !== turns)) {
+      if (fallback !== undefined && (!power.on || power.turns !== turns)) {
         yield* removeFile(audio)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
       }
-      const claimed = finished.key === undefined ? undefined : yield* journal.claim({ ...entry, key: finished.key })
+      // Given way since to a Stop of its own, it isn't said.
+      if (fallback !== undefined && fallbacks.get(fallback.key) !== fallback) {
+        yield* removeFile(audio)
+        return yield* Effect.logInfo("Skipped a turn no hook told of, since its hook came")
+      }
+      // Its entry is noted as it's kept, so giving way to a Stop of its own notes it as dealt with, however soon that comes.
+      const claimed =
+        fallback === undefined
+          ? undefined
+          : yield* Effect.uninterruptible(
+              Effect.tap(journal.claim({ ...entry, key: fallback.key }), (claimed) =>
+                Effect.sync(() => {
+                  const row = Option.flatten(claimed)
+                  if (Option.isSome(row)) fallback.row = row.value
+                }),
+              ),
+            )
       if (claimed !== undefined && Option.isNone(claimed)) {
         yield* removeFile(audio)
         return yield* Effect.logInfo(`Skipped update, said already: ${spoken}`)
       }
+      if (fallback !== undefined) standing.set(update, fallback)
       if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns))) {
         yield* removeFile(audio)
         yield* release(hook)
@@ -558,25 +598,75 @@ export const make = (
     )
   }
 
+  /** The Stops of these sessions in the last hour, oldest first, by the agent's own ids for them. */
+  const stopsOf = (sessions: ReadonlyArray<string>) => sessions.flatMap((session) => stops.get(session) ?? []).toSorted((a, b) => a.at - b.at)
+
+  /** Turns said in a hook's place under this session that haven't begun being said, which are dropped with what's waiting under it. */
+  const forsake = (session: string) => {
+    for (const [key, fallback] of fallbacks) if (fallback.session === session && !fallback.begun) fallbacks.delete(key)
+  }
+
+  /**
+   * A Stop came for a turn T3 Code's word may have been said of in its hook's
+   * place, by the session its run had: one whose run's last words it has, or
+   * whose it can't be told, takes the place of one still to be said, which is
+   * then dealt with, as the Stop's own update is said in its stead. One begun
+   * being said, whose run's words it has, was said already, so it's given back
+   * for the Stop's update not to be. Called with the event lock held.
+   */
+  const giveWay = (session: string, stop: Notices.Stop) =>
+    Effect.gen(function* () {
+      const theirs = [...fallbacks.values()].filter((fallback) => fallback.run.natives.includes(session))
+      const own = theirs.find((fallback) => Notices.whose(stop, fallback.run) === "own")
+      for (const fallback of theirs) {
+        if (fallback.begun || (fallback !== own && Notices.whose(stop, fallback.run) !== "unknown")) continue
+        fallbacks.delete(fallback.key)
+        yield* discard(fallback.session)
+        yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came after all")
+        if (fallback.row !== undefined) yield* journal.markHeard([fallback.row], stop.at)
+      }
+      return own?.begun === true ? own : undefined
+    })
+
+  /**
+   * A turn said in its hook's place, as its turn to be said comes: begun, it's
+   * the turn's, so a Stop of its own coming later isn't said too; unless it
+   * gave way to one already. Taken with the event lock held, so it's one or
+   * the other.
+   */
+  const begin = (fallback: Fallback) =>
+    Effect.sync(() => {
+      if (fallbacks.get(fallback.key) !== fallback) return false
+      fallback.begun = true
+      return true
+    }).pipe(events.withPermits(1))
+
   /**
    * A turn T3 Code says one of its threads finished, which no hook told of,
    * like one run by an agent yapd has no hooks for: summed up and said like a
-   * hook's update, once ever under its `key`. It's the thread's own session
-   * to yapd, and a reply to it can only go through T3 Code.
+   * hook's update, once ever under its `key`, unless a Stop of its own came,
+   * said or skipped. It's the thread's own session to yapd, and a reply to
+   * it can only go through T3 Code. The turn is its, or its Stop's, as
+   * decided with the event lock held, so neither is said once the other is.
    */
-  const finished = (input: {
-    readonly about: Threads.Ref
-    readonly project: string
-    readonly cwd: string
-    readonly turn: Turn
-    readonly at: number
-    readonly key: string
-    /** How many times yapd had been turned on or off when T3 Code said so, so it isn't said if yapd was turned off since. */
-    readonly turns: number
-  }) =>
+  const finished = (input: Notices.Finished) =>
     Effect.gen(function* () {
       // Not what notices about the thread go under, so neither takes the other's place.
       const session = `finished:${input.about.machine}:${input.about.id}`
+      // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands.
+      if (Notices.hooked(stopsOf(input.run.natives), input.run, input.run.startedAt)) return yield* Effect.logInfo("Left to its hook")
+      // Heard of twice, as after a reconnect, it's said the once.
+      if (fallbacks.has(input.key)) return
+      const fallback: Fallback = {
+        about: input.about,
+        session,
+        key: input.key,
+        run: input.run,
+        at: yield* Clock.currentTimeMillis,
+        begun: false,
+      }
+      forsake(session)
+      fallbacks.set(input.key, fallback)
       // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.
       const generation = { chain: {} }
       yield* invalidate(session)
@@ -604,7 +694,7 @@ export const make = (
           needsYou: false,
           turns: input.turns,
           about: Effect.succeedSome(input.about),
-          key: input.key,
+          fallback,
         }),
       )
     }).pipe(events.withPermits(1))
@@ -614,7 +704,12 @@ export const make = (
    * went: that turn, if it's still to be said, isn't, as a hook's update
    * isn't once the next prompt comes.
    */
-  const overtaken = (about: Threads.Ref) => discard(`finished:${about.machine}:${about.id}`).pipe(events.withPermits(1))
+  const overtaken = (about: Threads.Ref) =>
+    Effect.suspend(() => {
+      const session = `finished:${about.machine}:${about.id}`
+      forsake(session)
+      return discard(session)
+    }).pipe(events.withPermits(1))
 
   /** Returns the ticket of the session's Stop hook when it waits for a reply. */
   const receive = (agent: Agent, payload: Payload, origin: Origin, wait: boolean) =>
@@ -636,13 +731,15 @@ export const make = (
           return undefined
         }
         case "Stop": {
+          const stop: Notices.Stop = { at: arrivedAt, message: payload.last_assistant_message?.trim() ?? "" }
           // Every one, even one that's never said, so T3 Code's word that its thread finished leaves it to the hook.
-          for (const [other, times] of stops) {
-            const kept = times.filter((at) => arrivedAt - at <= forgotten)
-            if (kept.length === 0) stops.delete(other)
-            else stops.set(other, kept)
+          for (const [other, kept] of stops) {
+            const recent = kept.filter(({ at }) => arrivedAt - at <= forgotten)
+            if (recent.length === 0) stops.delete(other)
+            else stops.set(other, recent)
           }
-          stops.set(payload.session_id, [...(stops.get(payload.session_id) ?? []), arrivedAt])
+          for (const [key, fallback] of fallbacks) if (arrivedAt - fallback.at > forgotten) fallbacks.delete(key)
+          stops.set(payload.session_id, [...(stops.get(payload.session_id) ?? []), stop])
           // Not kept for later, so a waiting hook is let go of at once.
           const { on, turns } = yield* switched
           if (!on) {
@@ -662,6 +759,8 @@ export const make = (
             yield* release(hook)
             return hook
           }
+          // Said already in its place from T3 Code's word, it isn't said again; still to be said that way, it's said this way instead.
+          const through = yield* giveWay(payload.session_id, stop)
           const needsYou = payload.needs_you === true
           // Nobody watches a session yapd started, so it's heard from however quick its turn, as is one that needs the user.
           const watched = !needsYou && origin.launched !== true
@@ -679,6 +778,23 @@ export const make = (
           const queued = channel !== undefined && channel.queued.length > 0
           if (queued && hook !== undefined) channel.hook = hook
           const summaryHook = queued ? undefined : hook
+          if (through !== undefined) {
+            yield* release(summaryHook)
+            yield* Effect.logInfo("Skipped update, said already from T3 Code's word that it finished").pipe(Effect.annotateLogs({ project }))
+            // Kept as said that way, which is what "it" was.
+            yield* journal.write({
+              at: arrivedAt,
+              kind: "action",
+              host: origin.host,
+              project,
+              machine: through.about.machine,
+              thread: through.about.id,
+              directory: payload.cwd,
+              text: message,
+              detail: { through: through.key, session },
+            })
+            return hook
+          }
           yield* FiberMap.run(
             preparing,
             session,
@@ -881,6 +997,13 @@ export const make = (
     // What was about to be ready never came, so the speaker rests again, the next time round.
     if (Option.isNone(next)) return
     const { ready, turns } = next.value
+    // A turn said in its hook's place is the turn's once it's begun, unless it gave way to a Stop of its own by now.
+    const fallback = "update" in ready ? standing.get(ready.update) : undefined
+    if (fallback !== undefined && !(yield* begin(fallback))) {
+      yield* removeFile(Inbox.audio(ready))
+      yield* STM.commit(TRef.set(floor.reading, false))
+      return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came")
+    }
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
@@ -1068,9 +1191,8 @@ export const make = (
     ),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
-    /** When the Stop hooks of these sessions came in the last hour, oldest first, by the agent's own ids for them, whether their updates were said or not. */
-    stopped: (sessions: ReadonlyArray<string>) =>
-      Effect.sync((): ReadonlyArray<number> => sessions.flatMap((session) => stops.get(session) ?? []).toSorted((a, b) => a - b)),
+    /** The Stop hooks of these sessions in the last hour, when they came and what they said last, oldest first, by the agent's own ids for them, whether their updates were said or not. */
+    stopped: (sessions: ReadonlyArray<string>) => Effect.sync((): ReadonlyArray<Notices.Stop> => stopsOf(sessions)),
     finished,
     overtaken,
   }

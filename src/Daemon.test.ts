@@ -269,6 +269,22 @@ const make = (says?: string, options: {
 
 const daemon = make()
 
+/**
+ * The loader's turn T3 Code said finished, with no hook to tell of it, as of
+ * when yapd had been turned on or off `turns` times: it said `message` last,
+ * in its session `native-loader`.
+ */
+const unhooked = (message: string, runId: string, turns: number) => ({
+  about: { machine: "Rosie", id: "t-loader" },
+  project: "yapd",
+  cwd: "/code/yapd",
+  turn: { prompt: Option.some("Fix the loader."), message },
+  at: 0,
+  key: `done:Rosie:${runId}`,
+  turns,
+  run: { final: message, others: [], natives: ["native-loader"], startedAt: -60_000 },
+})
+
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
   Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
 
@@ -826,7 +842,12 @@ describe("Daemon", () => {
       }),
     )
     const [first, other, second] = result.at as [number, number, number]
-    expect(result.kept).toEqual({ a: [first, second], b: [other], both: [first, other, second] })
+    const [pr, loader, merged] = [
+      { at: first, message: "The PR is ready." },
+      { at: other, message: "The loader is fixed." },
+      { at: second, message: "Done, it's merged." },
+    ]
+    expect(result.kept).toEqual({ a: [pr, merged], b: [loader], both: [pr, loader, merged] })
     expect(result.later).toEqual({ a: [], b: 1 })
   })
 
@@ -1044,16 +1065,7 @@ describe("Daemon", () => {
     const result = await run(
       Effect.gen(function* () {
         const { made, wait, played, journal, finish, notice } = yield* make()
-        const loader = (turns: number, runId: string) =>
-          made.finished({
-            about: { machine: "Rosie", id: "t-loader" },
-            project: "yapd",
-            cwd: "/code/yapd",
-            turn: { prompt: Option.some("Fix the loader."), message: `The loader is fixed, ${runId}.` },
-            at: 0,
-            key: `done:Rosie:${runId}`,
-            turns,
-          })
+        const loader = (turns: number, runId: string) => made.finished(unhooked(`The loader is fixed, ${runId}.`, runId, turns))
         const { turns } = yield* made.power
         // While something else is being said, it waits alongside a notice about the same thread, and neither takes the other's place.
         yield* finish("a", "Something else first.")
@@ -1086,15 +1098,7 @@ describe("Daemon", () => {
         const { turns } = yield* made.power
         // It waits behind something else being said, and he follows it up in T3 Code meanwhile.
         yield* finish("a", "Something else first.")
-        yield* made.finished({
-          about: { machine: "Rosie", id: "t-loader" },
-          project: "yapd",
-          cwd: "/code/yapd",
-          turn: { prompt: Option.some("Fix the loader."), message: "The loader is fixed." },
-          at: 0,
-          key: "done:Rosie:run-1",
-          turns,
-        })
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", turns))
         yield* nextEvent("Ready: yapd. The loader")
         yield* made.overtaken({ machine: "Rosie", id: "t-loader" })
         yield* wait(11)
@@ -1103,6 +1107,58 @@ describe("Daemon", () => {
       }),
     )
     expect(result).toEqual(["yapd. Something else first."])
+  })
+
+  test("a turn no hook told of, said in its hook's place, is the turn's: its own Stop, come after, isn't said too, and one still waiting gives way to it", async () => {
+    const stop = (handle: Handle, message: string) =>
+      handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: message }, { project: "yapd", host: hostname() }, false)
+    // Said, and heard, before its Stop came, a while getting going: that's kept as said that way.
+    const heard = await run(
+      Effect.gen(function* () {
+        const { made, wait, played, handle, journal, nextEvent } = yield* make(undefined, { link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }) })
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Ready:")
+        yield* wait(11)
+        yield* stop(handle, "The loader is fixed.")
+        yield* wait(11)
+        yield* wait(11)
+        const kept = yield* journal.since(0, { kinds: ["update", "action"] })
+        return { played: [...played], kept: kept.map(({ kind, key, heardAt, detail }) => [kind, key ?? (detail as { through?: string }).through, heardAt !== undefined]) }
+      }),
+    )
+    expect(heard.played).toEqual(["yapd. The loader is fixed."])
+    expect(heard.kept).toEqual([
+      ["update", "done:Rosie:run-1", true],
+      ["action", "done:Rosie:run-1", false],
+    ])
+    // Still waiting behind something else when its Stop comes, it gives way to the Stop's update, and isn't left as something he missed.
+    const waiting = await run(
+      Effect.gen(function* () {
+        const { made, wait, played, handle, finish, journal, nextEvent } = yield* make()
+        yield* finish("a", "Something else first.")
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Ready: yapd. The loader")
+        yield* stop(handle, "The loader is fixed.")
+        yield* wait(11)
+        yield* wait(11)
+        yield* wait(11)
+        return { played: [...played], missed: (yield* journal.unheard(0, 10)).map(({ said }) => said) }
+      }),
+    )
+    expect(waiting).toEqual({ played: ["yapd. Something else first.", "yapd. The loader is fixed."], missed: [] })
+    // Its Stop came, and was said, by the time T3 Code's word was looked into, however late that was: it's left to it.
+    const late = await run(
+      Effect.gen(function* () {
+        const { made, wait, played, handle } = yield* make()
+        yield* stop(handle, "The loader is fixed.")
+        yield* wait(11)
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(late).toEqual(["yapd. The loader is fixed."])
   })
 
   test("says what yapd has to say for itself in turn, questions first", async () => {

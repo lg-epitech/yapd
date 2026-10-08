@@ -15,9 +15,11 @@ import * as Threads from "./Threads.ts"
 // finished with no hook to tell of it. Each is kept in the journal under a key
 // as it's said, so it's said once, ever, whatever restarts or reconnects come
 // in between. A finished turn is left to its hook whenever one came, even one
-// that wasn't said, since only hooks know a turn the user was watching. An
-// approval or a question is asked, for the user to answer by voice; a secret
-// is only told, since it's only ever given in T3 Code.
+// that wasn't said, since only hooks know a turn the user was watching: a
+// Stop is the run's whose last words it has, and one whose words are no run's
+// that can be told is left to as if it were, since a turn said twice is worse
+// than one not said. An approval or a question is asked, for the user to
+// answer by voice; a secret is only told, since it's only ever given in T3 Code.
 
 /** What a change to a thread may come to, before anything is read of it. */
 export type News =
@@ -68,8 +70,8 @@ const finishing = "10 seconds"
 const pending = 12 * 60 * 60_000
 /** How long before a run started its hook may have come and still be its. */
 const leeway = 1000
-/** How long after a run ended its Stop hook may still come, getting going and naming its project first. */
-const late = 5000
+/** How much of two last words, case and punctuation aside, one ending the other needs to be the same words, as T3 Code may keep only the end of them. */
+const ending = 24
 /** How long a limit whose reset nobody said is taken to hold: the shortest window a provider has. */
 const lasting = 5 * 60 * 60_000
 /** How far back a limit said before is looked for: the longest a provider's holds. */
@@ -127,23 +129,41 @@ export const reason = (failure: Option.Option<{ readonly class: string; readonly
   return said.replace(/^(The|A|An|It|Its|This|That|There|No|Nothing|Something|Your)\b/, (word) => word.toLowerCase())
 }
 
-/**
- * Whether a run had a Stop hook of its own, out of when the thread's Stops
- * came, oldest first: one since it started, unless it's the run before's,
- * come late. That one went well, so had one coming as it ended, which takes
- * a moment to get going: when none had come by the time this one started,
- * the first since, while it could still be that one's, is taken for it. It
- * matters for a run that fails at once, since Claude has no Stop for that.
- */
-export const hooked = (stops: ReadonlyArray<number>, run: Pick<T3Actions.Ran, "previous">, startedAt: number) => {
-  const since = startedAt - leeway
-  const after = stops.filter((at) => at >= since)
-  const theirs = Option.exists(
-    run.previous,
-    (previous) => after[0] !== undefined && after[0] <= previous.endedAt + late && !stops.some((at) => at >= previous.startedAt - leeway && at < since),
-  )
-  return after.length > (theirs ? 1 : 0)
+/** A Stop hook as it came: when, and what the agent said last, which tells whose turn it ended. */
+export interface Stop {
+  readonly at: number
+  readonly message: string
 }
+
+/** Words as they're compared: case, punctuation and spacing aside. */
+const plain = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+
+/** Whether a Stop's last words are what a run said last: the same, or one ending the other, with enough of it to tell. */
+export const alike = (stop: string, said: string) => {
+  const [one, other] = [plain(stop), plain(said)]
+  if (one === "" || other === "") return false
+  return one === other || (Math.min(one.length, other.length) >= ending && (one.endsWith(other) || other.endsWith(one)))
+}
+
+/**
+ * Whose a Stop is, by what it said last: the run's "own", "another" run's
+ * read with it, like the one before's come late, or "unknown", when its words
+ * are no run's that can be told, as when T3 Code keeps them otherwise.
+ */
+export const whose = (stop: Stop, run: Pick<T3Actions.Ran, "final" | "others">) =>
+  alike(stop.message, run.final) ? ("own" as const) : run.others.some((other) => alike(stop.message, other)) ? ("another" as const) : ("unknown" as const)
+
+/**
+ * Whether a run had a Stop hook of its own, out of the thread's Stops, oldest
+ * first: one since it started with its last words, or with words that are no
+ * run's that can be told, which the hook is left to all the same, since a
+ * turn said twice is worse than one not said. Never one with another run's
+ * words, like the one before's come late, which matters for a run that fails
+ * at once, since Claude has no Stop for that; nor one with no words, which
+ * tells of nothing.
+ */
+export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "final" | "others">, startedAt: number) =>
+  stops.some((stop) => stop.message.trim() !== "" && stop.at >= startedAt - leeway && whose(stop, run) !== "another")
 
 /** Whether a run was short enough that he was likely still looking at it, unless yapd sent what started it. */
 export const quick = (run: Pick<T3Actions.Ran, "startedAt" | "userMessageId">, ended: number, shortest: number) =>
@@ -308,10 +328,27 @@ export const composer = (threads: Threads.Threads["Type"]) =>
   })
 
 /**
+ * A turn that finished with no hook to tell of it, to be said like a hook's
+ * update, once under `key`, unless yapd was turned off since `turns`: with
+ * what tells a Stop of its own from another's, which takes its place
+ * whenever one comes.
+ */
+export interface Finished {
+  readonly about: Threads.Ref
+  readonly project: string
+  readonly cwd: string
+  readonly turn: { readonly prompt: Option.Option<string>; readonly message: string }
+  readonly at: number
+  readonly key: string
+  readonly turns: number
+  readonly run: Pick<T3Actions.Ran, "final" | "others" | "natives"> & { readonly startedAt: number }
+}
+
+/**
  * Says what T3 Code's threads need the user for, whenever yapd is on, and
  * what failed and what finished with no hook to tell of it, unless yapd was
- * turned off since, as `tell` queues it. `stopped` is when sessions' Stop
- * hooks came, oldest first, `finished` says a finished turn as a hook's
+ * turned off since, as `tell` queues it. `stopped` is the Stop hooks
+ * sessions had, oldest first, `finished` says a finished turn as a hook's
  * update, and `mention` makes "it" the thread a notice is about as it starts
  * being said.
  */
@@ -320,16 +357,8 @@ export const make = (options: {
   readonly journal: Journal["Type"]
   readonly tell: (notice: Notice, since?: number) => Effect.Effect<void>
   readonly power: Effect.Effect<{ readonly on: boolean; readonly turns: number }>
-  readonly stopped: (sessions: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<number>>
-  readonly finished: (input: {
-    readonly about: Threads.Ref
-    readonly project: string
-    readonly cwd: string
-    readonly turn: { readonly prompt: Option.Option<string>; readonly message: string }
-    readonly at: number
-    readonly key: string
-    readonly turns: number
-  }) => Effect.Effect<void>
+  readonly stopped: (sessions: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Stop>>
+  readonly finished: (input: Finished) => Effect.Effect<void>
   /** A thread started again, or went: what it said last that no hook told of, if that's still to be said, isn't. */
   readonly overtaken: (ref: Threads.Ref) => Effect.Effect<void>
   readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
@@ -446,11 +475,12 @@ export const make = (options: {
         if (Option.isNone(actions)) return
         const run = yield* actions.value.ran(ref.id, runId)
         if (Option.isNone(run)) return
-        const { status, natives, startedAt } = run.value
+        const { status, natives } = run.value
+        const startedAt = Option.getOrElse(run.value.startedAt, () => at)
         if (!["failed", "completed", "waiting"].includes(status)) return
         if (status !== "failed") yield* Effect.sleep(finishing)
         // A Stop hook of its own, said or skipped: what it said, or why it wasn't, stands.
-        if (hooked(yield* options.stopped(natives), run.value, Option.getOrElse(startedAt, () => at))) return yield* Effect.logInfo("Left to its hook")
+        if (hooked(yield* options.stopped(natives), run.value, startedAt)) return yield* Effect.logInfo("Left to its hook")
         const thread = yield* threads.find(ref)
         const shown = yield* listed(ref)
         if (Option.isNone(thread) || Option.isNone(shown)) return
@@ -468,6 +498,7 @@ export const make = (options: {
           at,
           key: key.done(ref.machine, runId),
           turns,
+          run: { final: run.value.final, others: run.value.others, natives, startedAt },
         })
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
 
