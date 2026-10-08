@@ -10,6 +10,7 @@ import * as Daemon from "./Daemon.ts"
 import { Dictation, WhisperDictation } from "./Dictation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
+import * as Journal from "./Journal.ts"
 import { machines } from "./Machines.ts"
 import { ProviderModel } from "./Model.ts"
 import * as Persona from "./Persona.ts"
@@ -19,6 +20,7 @@ import * as Remote from "./Remote.ts"
 import { ProviderResponder } from "./Responder.ts"
 import * as Server from "./Server.ts"
 import * as Settings from "./Settings.ts"
+import * as Store from "./Store.ts"
 import { Shortcut } from "./Shortcut.ts"
 import * as T3Code from "./T3Code.ts"
 import { Vocabulary, WhisperTranscriber } from "./Transcriber.ts"
@@ -116,8 +118,10 @@ export const serve = Effect.gen(function* () {
       WhisperDictation,
       Relays,
     ).pipe(
-      Layer.provideMerge(Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer)),
-      Layer.provideMerge(ClaudeCode.WaitingLive),
+      Layer.provideMerge(
+        Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer),
+      ),
+      Layer.provideMerge(Layer.mergeAll(ClaudeCode.WaitingLive, Store.layer)),
     ),
   ),
   // Outermost, so layers log through it too.

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { mkdtemp, rm, stat } from "node:fs/promises"
@@ -18,6 +19,19 @@ describe("Settings", () => {
       await opened((settings) => settings.remember(true))
       expect(await opened((settings) => settings.on)).toBe(true)
       expect((await stat(path)).mode & 0o777).toBe(0o600)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("keeps what an older yapd remembered, from before its database had versions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yapd-settings-"))
+    const path = join(root, "yapd.sqlite")
+    try {
+      const old = new Database(path)
+      old.exec("create table settings (name text primary key, value text not null); insert into settings values ('on', 'false')")
+      old.close()
+      expect(await Effect.runPromise(Effect.scoped(Effect.flatMap(Settings.make(path), (settings) => settings.on)))).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

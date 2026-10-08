@@ -11,6 +11,7 @@ import { Model, ModelError } from "./Model.ts"
 import * as Responder from "./Responder.ts"
 import { clean, Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
+import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import { Voice } from "./Voice.ts"
 
@@ -39,6 +40,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
     let dispatches = 0
     const layer = Layer.mergeAll(
       Persona.Plain,
+      Journal.memory,
       Layer.succeed(Audio, {
         play: () =>
           Effect.succeed({

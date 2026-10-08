@@ -1,3 +1,5 @@
+import type * as Journal from "./Journal.ts"
+
 // What yapd told the user lately, since new work often builds on it: "follow
 // up on what the std agent just finished". Only the latest few, to keep what
 // the writer reads short.
@@ -21,11 +23,22 @@ export type Recent = ReadonlyArray<Heard>
 export const empty: Recent = []
 
 /** How many are kept. */
-const most = 6
+export const most = 6
 /** Older than this, the user would say more than "what it just finished". */
-const lifetime = 3 * 60 * 60_000
+export const lifetime = 3 * 60 * 60_000
 
 /** Newest first. */
 export const add = (recent: Recent, heard: Heard): Recent => [heard, ...recent].slice(0, most)
 
 export const since = (recent: Recent, now: number): Recent => recent.filter(({ at }) => now - at < lifetime)
+
+/** What the journal kept of it. */
+export const fromJournal = (entry: Journal.Kept): Heard => ({
+  project: entry.project ?? "",
+  ...(entry.machine === undefined ? {} : { host: entry.machine }),
+  directory: entry.directory ?? "",
+  spoken: entry.said ?? "",
+  message: entry.text ?? "",
+  ...(entry.kind === "started" ? { started: true } : {}),
+  at: entry.at,
+})

@@ -9,6 +9,7 @@ import * as Config from "./Config.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Floor from "./Floor.ts"
 import * as Inbox from "./Inbox.ts"
+import { Journal } from "./Journal.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
 import * as Project from "./Project.ts"
@@ -51,6 +52,7 @@ export const make = Effect.gen(function* () {
   const waiting = yield* Waiting
   const relays = yield* Relays
   const floor = yield* Floor.Floor
+  const journal = yield* Journal
   const minMillis = (yield* Config.minSeconds) * 1000
 
   const dir = yield* Effect.acquireRelease(
@@ -79,7 +81,6 @@ export const make = Effect.gen(function* () {
     hook?: Ticket
   }
   const followed = new Map<string, Replies>()
-  let recent = Recent.empty
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
   /**
@@ -158,6 +159,15 @@ export const make = Effect.gen(function* () {
         ),
       )
       yield* Effect.logInfo(`Delivered: ${message}`)
+      yield* journal.write({
+        at: yield* Clock.currentTimeMillis,
+        kind: "sent",
+        machine: pending.thread.origin.host,
+        project: update.project,
+        thread: session,
+        directory: pending.thread.cwd,
+        text: message,
+      })
       // Put back by a dictation that started just as this was sent, and answered now.
       const answered = yield* STM.commit(
         TRef.modify(inbox, (current) => {
@@ -270,13 +280,16 @@ export const make = Effect.gen(function* () {
         yield* release(hook)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
       }
-      recent = Recent.add(recent, {
-        project,
-        ...(thread.origin.host === undefined ? {} : { host: thread.origin.host }),
-        directory: thread.cwd,
-        spoken,
-        message: turn.message,
+      yield* journal.write({
         at: arrivedAt,
+        kind: "update",
+        machine: thread.origin.host,
+        project,
+        thread: session,
+        directory: thread.cwd,
+        said: spoken,
+        text: turn.message,
+        detail: { priority, ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }) },
       })
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
@@ -599,11 +612,19 @@ export const make = Effect.gen(function* () {
     replay,
     tell,
     /** What the user was told lately, newest first. */
-    recent: Effect.map(Clock.currentTimeMillis, (now) => Recent.since(recent, now)),
+    recent: Effect.flatMap(Clock.currentTimeMillis, (now) =>
+      journal.since(now - Recent.lifetime, { most: Recent.most, kinds: ["update", "started"] }),
+    ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
     /** Notes something yapd did itself, for the user to build on like they do on updates. */
     note: (heard: Recent.Heard) =>
-      Effect.sync(() => {
-        recent = Recent.add(recent, heard)
+      journal.write({
+        at: heard.at,
+        kind: heard.started === true ? "started" : "action",
+        machine: heard.host,
+        project: heard.project,
+        directory: heard.directory,
+        said: heard.spoken,
+        text: heard.message,
       }),
   }
 })

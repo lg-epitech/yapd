@@ -5,6 +5,7 @@ import { Audio, type Playback } from "./Audio.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
+import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
 import { type Line, type Reply, Responder } from "./Responder.ts"
 import { Transcriber } from "./Transcriber.ts"
@@ -124,6 +125,7 @@ export const make = (options: {
     const responder = yield* Responder
     const voice = yield* Voice
     const persona = yield* Persona
+    const journal = yield* Journal
 
     let ids = 0
     const fresh = () => ++ids
@@ -450,6 +452,19 @@ export const make = (options: {
                 ),
             )
             yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
+            if (reply.intent !== "resume") {
+              yield* journal.write({
+                at: yield* Clock.currentTimeMillis,
+                kind: "reply",
+                machine: update.thread.origin.host,
+                project: update.project,
+                thread: update.session,
+                directory: update.thread.cwd,
+                said: reply.spoken,
+                text: heard,
+                detail: { intent: reply.intent, ...(reply.message === "" ? {} : { message: reply.message }) },
+              })
+            }
 
             if (reply.intent === "dismiss") return
             if (reply.intent === "resume") {
