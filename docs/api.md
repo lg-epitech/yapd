@@ -61,6 +61,22 @@ Turning it off stops whatever yapd is saying at once, and drops whatever hasn't 
 | `404` | No such update. |
 | `409` | yapd is off. |
 
+## Asking yapd something
+
+`POST /utterances` with `{"text": "who needs me?"}` as JSON takes what you typed as if you'd said it by the shortcut: yapd works out what you meant, does it, and says what came of it ahead of anything else. It answers once that's worked out, which can take the model a few seconds, with the request's id, the same one its log lines carry.
+
+```sh
+curl -X POST -H 'Content-Type: application/json' -d '{"text": "what is going on?"}' http://127.0.0.1:4747/utterances
+```
+
+| Status | |
+| --- | --- |
+| `202` | `{"id": "u…"}`: it's been worked out, and what came of it is waiting to be said. |
+| `400` | There's no text. |
+| `409` | yapd is off. |
+
+It can tell you what your threads are doing, who needs you, how much of your usage is left, what you missed, and say again what it just said, and it can start new work. Anything that would change a thread, like sending it a message or stopping it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant, is answered by speaking over it or right after, or by asking again here.
+
 ## Errors
 
 Besides those, `400` means the body couldn't be read, `403` that the request was addressed to another host, and `500` that something went wrong in yapd, which its log says more about. `GET /health` answers `ok` while yapd runs.
