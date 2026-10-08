@@ -370,10 +370,11 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   if (said === "" || (over !== undefined && over.times >= 3 && !meant) || (hallucinated.has(said) && utterance.voiced < faint)) {
     return decision({ act: "resume" })
   }
-  // Over a question, it's the question he didn't catch, which is asked again in other words.
+  // Right after the question, it's the question he didn't catch, which is asked again in other words; after anything else, like an update, that's said again instead.
   if (again.has(said)) {
     const spoken = subject._tag === "Nothing" ? nothingSaid(lines) : subject.said
-    return decision({ act: "again", how: "same", spoken, pending: Option.isSome(open) ? "answers" : "" })
+    const question = Option.isSome(open) && subject._tag === "Answer" && subject.said === open.value.asked
+    return decision({ act: "again", how: "same", spoken, pending: Option.isNone(open) ? "" : question ? "answers" : "replaces" })
   }
   if (needs.has(said)) return decision({ act: "answer", spoken: needing(desk, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   if (usage.has(said) || /^how much (\w+ ){0,3}(have i got |do i have )?left$/.test(said)) {

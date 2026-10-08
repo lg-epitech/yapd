@@ -104,6 +104,27 @@ describe("Brain", () => {
     expect(pick("No, no, no.")).toEqual({ act: "dismiss", pending: "answers", thread: undefined })
   })
 
+  test("'say that again' is about what he heard last: the question only right after it, an update heard since it", () => {
+    const candidates = [ref(mina), ref(tezos)]
+    const open = which(candidates)
+    const update: Conversation.Update = {
+      session: "claude:s1",
+      project: "yapd",
+      turn: { prompt: Option.none(), message: "The review came back clean." },
+      needsYou: false,
+      spoken: "Yapd's review came back clean, two small fixes left.",
+      audio: "/tmp/update.wav",
+      thread: { agent: "claude", session: "s1", cwd: "/code/yapd", message: "The review came back clean.", origin: {} },
+      at: now - 20_000,
+    }
+    const again = (subject: Assistant.Subject) => {
+      const decided = Brain.fast(situation("Say that again.", { open: Option.some(open), desk: desk(candidates), subject }), lines)
+      return { act: decided?.act, pending: decided?.pending, spoken: decided?.spoken }
+    }
+    expect(again({ _tag: "Answer", said: open.asked, about: Option.none() })).toEqual({ act: "again", pending: "answers", spoken: open.asked })
+    expect(again({ _tag: "Session", update, said: update.spoken })).toEqual({ act: "again", pending: "replaces", spoken: update.spoken })
+  })
+
   test("a bare stop never stops a thread", () => {
     for (const heard of ["Stop.", "Stop", "Quiet!", "Shut up.", "Enough."]) expect(Brain.fast(situation(heard), lines)?.act).toBe("dismiss")
     // Even when the model takes it to mean the thread, stopping one isn't something yapd does yet.
