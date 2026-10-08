@@ -873,6 +873,27 @@ describe("Daemon", () => {
     expect(result.kept).toEqual([["Rosie", "t-tezos", "Tell it to use the fee table from the Mina work."]])
   })
 
+  test("a reply to a linked update whose Stop hook waits for it goes back through the hook, never through T3 Code", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, speak, wait, nextEvent, nextPlayback, followUps } = yield* make("Use the fee table.", {
+          hands: t3.hands,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+        })
+        // A terminal resuming the Tezos thread's session, whose hook waits for his reply.
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, true)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(3)
+        return { relayed: [...followUps], sent: t3.sent() }
+      }),
+    )
+    expect(result.relayed).toEqual(["s-tezos sent: Use the fee table."])
+    expect(result.sent).toEqual([])
+  })
+
   test("a second follow-up to the same update is steered, not refused", async () => {
     const result = await run(
       Effect.gen(function* () {
