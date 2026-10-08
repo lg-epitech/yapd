@@ -43,7 +43,8 @@ const launcher = (machine: string | undefined) =>
 const start = (machine: string | undefined) =>
   Effect.gen(function* () {
     const input = yield* Effect.promise(() => Bun.stdin.text())
-    console.log(yield* Launcher.serve(yield* launcher(machine), input))
+    // On stderr, which comes back over SSH with SSH's own, even when the connection drops before the answer does.
+    console.log(yield* Launcher.serve(yield* launcher(machine), input, Console.error(Launcher.asking)))
   })
 
 const catalog = (machine: string | undefined) =>
