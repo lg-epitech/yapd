@@ -1,4 +1,5 @@
 import { Clock, Context, Effect, Either, Option, Schema } from "effect"
+import * as Brain from "./Brain.ts"
 import * as Ledger from "./Ledger.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as T3Actions from "./T3Actions.ts"
@@ -87,12 +88,20 @@ const Body = Schema.Union(
 )
 const command = Schema.decodeUnknownOption(Body)
 
-/** A reason T3 Code gave, fit to say: no ids, and a full stop. */
+/** A word that's an id, quoted or not: letters and digits run together with _ or :, or long and mostly digits. */
+const id = String.raw`['"‘“]?(?=[\w:.-]*\d)(?:[\w.-]*[_:][\w:.-]*|(?=(?:[a-z-]*\d){4})[\w-]{8,})['"’”]?`
+
+/** A reason T3 Code gave, fit to say: no ids, nothing unreadable, the work never put down to an agent or a session, and a full stop. */
 export const plainly = (reason: string) => {
-  const said = reason
-    .replace(/\b(run|thread|command|message|request)\s+(?=[\w:.-]*[\d_:-])[\w:.-]+/gi, (_, what: string) => `that ${what.toLowerCase()}`)
+  const stripped = reason
+    .replace(/\b(run|thread|command|message|request)\s+(?:['"‘“][^'"’”\s]+['"’”]|(?=[\w:.-]*[\d_:-])[\w:.-]+)/gi, (_, what: string) => `that ${what.toLowerCase()}`)
     .replace(/\byapd:\S+/g, "it")
-    .replace(/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi, "")
+    .replace(new RegExp(String.raw`(?<![\w'"])${id}(?![\w'"])`, "gi"), "")
+    .replace(/['"‘“]\S*\d\S*['"’”]/g, "")
+  const said = Brain.speakable(stripped, { threads: [], away: [] })
+    // What an id came after, like "not found:", ends there.
+    .replace(/\s*:\s*(?=[.!?]*$)/, "")
+    .replace(/\s+([,.;:!?])/g, "$1")
     .replace(/\s{2,}/g, " ")
     .trim()
   const sentence = `${said.charAt(0).toUpperCase()}${said.slice(1)}`

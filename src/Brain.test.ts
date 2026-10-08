@@ -234,6 +234,14 @@ describe("Brain", () => {
         Option.none(),
       ),
       Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }, lines, Option.some("Migrate Tezos Integration")),
+      // As T3 Code words its reasons, with ids of any shape in them, quoted or not.
+      ...[
+        "Command yapd:u1:0 was previously rejected: Thread 'thr_01J9ABC' is archived.",
+        "No active provider session for thread abc123.",
+        "The agent session has ended.",
+        `Thread not found: ${tezos.id}`,
+        "Session 01J9ABCDEF2345 expired",
+      ].map((reason) => Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Refused", reason: Hands.plainly(reason) }, lines, Option.none())),
       Hands.twice(now - 54_000, now, lines, Option.none()),
       Hands.read(lines, Option.some("Migrate Tezos Integration")),
       Hands.lost(lines, Option.none()),
@@ -258,6 +266,8 @@ describe("Brain", () => {
       expect(line).not.toMatch(/\bthe ((claude code|t3 code|claude|codex|coding|ai|opencode) )?(agent|session)s?\b/i)
       expect(line).not.toMatch(/0x[\da-f]{6,}/i)
       expect(line).not.toMatch(/\w\.(ts|js|json|md)\b/)
+      expect(line).not.toMatch(/\w_\w*\d|\d{4}|\byapd:|['"]\w*\d/)
+      expect(line).not.toMatch(/\b(agent|provider) session/i)
     }
     expect(said.at(-1)).toBe("Migrate Tezos Integration is still at it: it rewrote a file at a commit, and the work says the work ends soon, see a link.")
     expect(said.at(-2)).toBe("It flagged an address as unmatched, and/or skipped it.")

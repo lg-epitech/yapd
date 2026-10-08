@@ -143,6 +143,26 @@ describe("Hands", () => {
     expect(result.dispatched).toBe(1)
   })
 
+  test("T3 Code's reasons are said without its ids, quoted or not, and about the work, never a session", () => {
+    expect(
+      [
+        "Command yapd:u1:0 was previously rejected: Thread 'thr_01J9ABC' is archived.",
+        "No active provider session for thread abc123.",
+        "The agent session has ended.",
+        "Thread not found: 850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+        "Run run_7f3a9c2b is not interruptible.",
+      ].map(Hands.plainly),
+    ).toEqual([
+      "That command was previously rejected: that thread is archived.",
+      "Nothing running for that thread.",
+      "The work has ended.",
+      "Thread not found.",
+      "That run is not interruptible.",
+    ])
+    // Names of things, like a model, are said as they are.
+    expect(Hands.plainly("Model gpt-6-sol isn't available.")).toBe("Model gpt-6-sol isn't available.")
+  })
+
   test("a request that never left is said as not sent, and yes sends it again under the same ids", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -702,6 +702,9 @@ const coding = "(?:claude code|t3 code|claude|codex|coding|ai|opencode) "
 
 /** The work put down to an agent or a session, and what's said instead. */
 const agents: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bno active (?:agent |provider )?session\b/gi, "nothing running"],
+  [/\b(the|that|this|its|your|my|our) (?:agent|provider) session\b/gi, "$1 work"],
+  [/\b(?:agent|provider) sessions?\b/gi, "the work"],
   [new RegExp(`\\b(the|that|this|its|your|my|our) (?:${coding})?(agent|session)\\b`, "gi"), "$1 work"],
   [new RegExp(`\\b(an?|one) (?:${coding})?(agent|session)\\b`, "gi"), "a thread"],
   [new RegExp(`\\b(the|these|those|its|your|my|our|their|all|both|some|other|several|many|two|three|four|five|\\d+) (?:${coding})?(agents|sessions)\\b`, "gi"), "$1 threads"],
