@@ -3932,6 +3932,47 @@ describe("Assistant", () => {
     }
   })
 
+  test("asked by the model to say something again, yapd says what it knows it said, never the model's line from before it was turned off and on, nor a question in the words it asked", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const said = (setup: "cycled" | "closed" | "update") =>
+      run(
+        Effect.gen(function* () {
+          // The model repeats what LATELY shows it said last, whatever that was, and works out the rest; showing, hiding and
+          // turning off need none.
+          const { dictate, heard, reading, toggle, spoken, show } = yield* assistant((situation) =>
+            situation.utterance.heard.startsWith("Could")
+              ? Brain.decision({
+                  act: "again",
+                  how: "same",
+                  spoken: situation.lately.findLast(({ kind }) => kind === "answer")?.said ?? "",
+                  pending: Option.isSome(situation.open) ? "replaces" : "",
+                })
+              : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          )
+          yield* show.watch
+          if (setup === "cycled") {
+            yield* dictate("Show me what's running.")
+            yield* toggle(false)
+            yield* toggle(true)
+          } else if (setup === "closed") {
+            // Closed with nothing said, so the question is the last line it said.
+            yield* dictate("Show me what's running.")
+            yield* dictate("Which migration was that?")
+            yield* dictate("Hide that.")
+          } else {
+            // He heard the question, then an update.
+            yield* dictate("Which migration was that?")
+            yield* reading("yapd", "The loader is fixed.")
+          }
+          yield* heard({ heard: "Could you repeat what you told me before?", via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: setup === "cycled" ? 3 : 1 })
+          return spoken().at(-1)
+        }).pipe(Effect.scoped),
+      )
+    expect(await said("cycled")).toBe("I haven't said anything just now, sir.")
+    expect(await said("closed")).toBe(`I asked whether you meant ${choices}, sir.`)
+    expect(await said("update")).toBe("The loader is fixed.")
+  })
+
   test("a pull request taken on a low guess between two is asked about before anything opens, and the one he picks is opened", async () => {
     const migration = (id: string, coin: string, number: number) =>
       thread(id, `Migrate the ${coin} integration`, "integration", {
