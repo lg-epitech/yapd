@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Either, Redacted, Schema } from "effect"
+import { Effect, Either, Fiber, Option, Redacted, Schema, TestClock, TestContext } from "effect"
 import * as Launcher from "./Launcher.ts"
 import * as T3CodeLauncher from "./T3CodeLauncher.ts"
 import * as Server from "./T3CodeServer.ts"
@@ -140,94 +140,89 @@ describe("T3CodeLauncher", () => {
     expect(Either.isLeft(T3CodeLauncher.select(providers, { effort: "max" }, fable))).toBe(true)
   })
 
-  test("creates the thread with its first turn, in the checkout", () => {
-    const command = T3CodeLauncher.turnStart(planned(), fresh)
-    expect(command).toEqual({
-      type: "thread.turn.start",
+  test("launches the thread with its first message, in the checkout", () => {
+    expect(T3CodeLauncher.launch(planned(), fresh)).toEqual({
       commandId: "yapd:command-1",
+      creationSource: "web",
       threadId: "thread-1",
-      message: { messageId: "message-1", role: "user", text: "Fix the loader.", attachments: [] },
+      projectId: "project-1",
+      title: "Fix the loader.",
+      generateTitle: true,
       modelSelection: fable,
-      titleSeed: "Fix the loader.",
       runtimeMode: "full-access",
       interactionMode: "default",
-      bootstrap: {
-        createThread: {
-          projectId: "project-1",
-          title: "Fix the loader.",
-          modelSelection: fable,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: "feature",
-          worktreePath: null,
-          createdAt: "2026-09-29T18:00:00.000Z",
-        },
-      },
-      createdAt: "2026-09-29T18:00:00.000Z",
+      workspaceStrategy: { type: "root", branch: "feature" },
+      initialMessage: { messageId: "message-1", text: "Fix the loader.", attachments: [] },
     })
   })
 
   test("has T3 Code prepare the worktree, on a branch it will rename", () => {
-    const { bootstrap } = T3CodeLauncher.turnStart(planned({ settings: { defaultThreadEnvMode: "worktree" } }), fresh)
-    expect(bootstrap).toMatchObject({
-      createThread: { branch: "main", worktreePath: null },
-      prepareWorktree: { projectCwd: "/code/free-sound", baseBranch: "main", branch: "t3code/0a1b2c3d", startFromOrigin: true },
-      runSetupScript: true,
-    })
-    const local = T3CodeLauncher.turnStart(planned({ settings: { defaultThreadEnvMode: "worktree", newWorktreesStartFromOrigin: false } }), fresh)
-    expect(local.bootstrap.prepareWorktree).not.toHaveProperty("startFromOrigin")
+    const { workspaceStrategy } = T3CodeLauncher.launch(planned({ settings: { defaultThreadEnvMode: "worktree" } }), fresh)
+    expect(workspaceStrategy).toEqual({ type: "worktree", baseRef: "main", branch: "t3code/0a1b2c3d", startFromOrigin: true })
+    const local = T3CodeLauncher.launch(planned({ settings: { defaultThreadEnvMode: "worktree", newWorktreesStartFromOrigin: false } }), fresh)
+    expect(local.workspaceStrategy).not.toHaveProperty("startFromOrigin")
   })
 })
 
 describe("T3CodeLauncher's start", () => {
-  /** T3 Code as the launcher reaches it, answering with a thread that did or didn't get its worktree. */
-  const reached = (worktreePath: string | null, dispatched: Array<unknown>, stops = true) => {
+  const thread = (worktreePath: string | null, status: string) => ({
+    projection: { thread: { branch: worktreePath === null ? "main" : "t3code/0a1b2c3d", worktreePath, modelSelection: fable }, runs: [{ status }] },
+  })
+  /** T3 Code as the launcher reaches it, answering a launch and then each look at the thread in turn. */
+  const reached = (launched: unknown, looks: Array<unknown>, calls: Array<{ method: string; payload: unknown }> = []) => {
     const answers: Record<string, unknown> = {
       "/api/orchestration/shell": { projects: [project()], threads: [] },
-      "/api/orchestration/threads/thread-1": { thread: { branch: "main", worktreePath, modelSelection: fable } },
       "server.getSettings": { defaultThreadEnvMode: "worktree" },
       "server.getConfig": { providers },
       "vcs.listRefs": refs,
+      "orchestration.launchThread": launched,
     }
-    const answer = <A, I>(name: string, schema: Schema.Schema<A, I>) => Effect.orDie(Schema.decodeUnknown(schema)(answers[name]))
-    const transport: T3CodeLauncher.Transport = {
-      api: (path, schema) => answer(path, schema),
+    const answer = <A, I>(value: unknown, schema: Schema.Schema<A, I>) => Effect.orDie(Schema.decodeUnknown(schema)(value))
+    const transport: Server.Transport = {
+      api: (path, schema) => answer(path === "/api/orchestration/threads/thread-1/bounded" ? looks.shift() : answers[path], schema),
       call: (method, payload, schema) => {
-        if (method !== "orchestration.dispatchCommand") return answer(method, schema)
-        dispatched.push(payload)
-        const stop = (payload as { readonly type: string }).type === "thread.session.stop"
-        return stop && !stops
-          ? Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me." }))
-          : Effect.orDie(Schema.decodeUnknown(schema)({ sequence: 1 }))
+        calls.push({ method, payload })
+        return answer(answers[method], schema)
       },
     }
     return T3CodeLauncher.launcher(Redacted.make("token"), Effect.succeed(transport), () => fresh)
   }
   const request = { project: "free-sound", prompt: "Fix the loader.", model: "fable" }
-  const stop = { type: "thread.session.stop", commandId: "yapd:command-1:stop", threadId: "thread-1", createdAt: "2026-09-29T18:00:00.000Z" }
+  /** Starts it, letting time pass while T3 Code gets the workspace ready. */
+  const start = (launcher: Launcher.Launcher, wanted: Launcher.Request = request) =>
+    Effect.runPromise(Effect.gen(function* () {
+      const starting = yield* Effect.fork(Effect.either(launcher.start(wanted)))
+      while (Option.isNone(yield* Fiber.poll(starting))) yield* TestClock.adjust("1 second")
+      return yield* Fiber.join(starting)
+    }).pipe(Effect.provide(TestContext.TestContext)))
 
-  test("leaves a thread alone that started where it was meant to", async () => {
-    const dispatched: Array<unknown> = []
-    const started = await Effect.runPromise(reached("/worktrees/free-sound/t3code-0a1b2c3d", dispatched).start(request))
-    expect(started).toMatchObject({ thread: "thread-1", directory: "/worktrees/free-sound/t3code-0a1b2c3d", worktree: true })
-    expect(started).not.toHaveProperty("warning")
-    expect(dispatched).toHaveLength(1)
-    expect(dispatched[0]).toMatchObject({ type: "thread.turn.start", threadId: "thread-1" })
-    const local = await Effect.runPromise(reached(null, dispatched).start({ ...request, worktree: false }))
-    expect(local).not.toHaveProperty("warning")
-    expect(dispatched).toHaveLength(2)
+  test("says where it started once T3 Code has the worktree ready", async () => {
+    const calls: Array<{ method: string; payload: unknown }> = []
+    const looks = [thread(null, "preparing"), thread("/worktrees/free-sound/t3code-0a1b2c3d", "running")]
+    const started = Either.getOrThrow(await start(reached(thread(null, "preparing"), looks, calls)))
+    expect(started).toEqual({
+      thread: "thread-1",
+      project: "free-sound",
+      directory: "/worktrees/free-sound/t3code-0a1b2c3d",
+      branch: "t3code/0a1b2c3d",
+      model: "claude-fable-5-1",
+      effort: "high",
+      worktree: true,
+    })
+    expect(looks).toEqual([])
+    expect(calls.filter(({ method }) => method === "orchestration.launchThread")).toEqual([
+      { method: "orchestration.launchThread", payload: expect.objectContaining({ threadId: "thread-1", workspaceStrategy: expect.objectContaining({ type: "worktree" }) }) },
+    ])
   })
 
-  test("stops a thread at once that was meant for a worktree and started in the checkout, or says it couldn't", async () => {
-    const dispatched: Array<unknown> = []
-    const started = await Effect.runPromise(reached(null, dispatched).start(request))
-    expect(started).toMatchObject({ directory: "/code/free-sound", worktree: false })
-    expect(started.warning).toBe(
-      "T3 Code couldn't make the worktree and started it in free-sound's own folder instead, so I stopped it at once. It may have changed something there before I did.",
-    )
-    expect(dispatched.slice(1)).toEqual([stop])
-    const running = await Effect.runPromise(reached(null, [], false).start(request))
-    expect(running.warning).toContain("I couldn't stop it")
+  test("doesn't wait on a checkout that's ready at once", async () => {
+    const started = Either.getOrThrow(await start(reached(thread(null, "starting"), []), { ...request, worktree: false }))
+    expect(started).toMatchObject({ directory: "/code/free-sound", branch: "main", worktree: false })
+  })
+
+  test("says nothing started when T3 Code couldn't make the worktree", async () => {
+    const failed = await start(reached(thread(null, "preparing"), [thread(null, "failed")]))
+    expect(failed).toEqual(Either.left(new Launcher.LaunchError({ reason: "T3 Code couldn't make the worktree, so the thread it made didn't start." })))
   })
 })
 
@@ -283,9 +278,9 @@ describe("T3CodeServer", () => {
 
   test("hands back what a request succeeded with, or why T3 Code refused", () => {
     expect(Server.outcome({ _tag: "Success", value: { sequence: 7 } })).toEqual(Either.right({ sequence: 7 }))
-    const error = { _tag: "OrchestrationDispatchCommandError", message: "git worktree add failed", bootstrapThreadDisposition: "deleted" }
+    const error = { _tag: "OrchestrationV2ThreadLaunchError", commandId: "yapd:command-1", projectId: "project-1", message: "git worktree add failed" }
     expect(Server.outcome(failure({ _tag: "Fail", error }))).toEqual(
-      Either.left(new Server.Refusal({ tag: "OrchestrationDispatchCommandError", message: "git worktree add failed", deleted: true })),
+      Either.left(new Server.Refusal({ tag: "OrchestrationV2ThreadLaunchError", message: "git worktree add failed" })),
     )
     expect(reason(failure({ _tag: "Fail", error }))).toBe("T3 Code couldn't start it. git worktree add failed")
     // A command T3 Code couldn't read.

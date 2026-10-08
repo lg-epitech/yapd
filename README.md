@@ -81,11 +81,11 @@ yapd hands a follow-up to the session the update came from, through whatever tha
 
 - Claude Code, anywhere it runs: the terminal, an editor or the desktop app. The Stop hook above wakes the session with your reply. Claude sees it as a message relayed from you rather than one you typed.
 - Codex 0.157 or later in the terminal, through `codex queue`. It shows up as your next message.
-- [T3 Code](https://github.com/pingdotgg/t3code) threads, through its API, so the message shows up in the thread as if you'd typed it. This needs a token from the app's own CLI, which matches its version:
+- [T3 Code](https://github.com/pingdotgg/t3code) 0.0.46 or later, for now the nightly, through its API, so the message shows up in the thread as if you'd typed it. This needs a token from the app's own CLI, which matches its version:
 
   ```sh
-  ELECTRON_RUN_AS_NODE=1 "/Applications/T3 Code (Alpha).app/Contents/MacOS/T3 Code (Alpha)" \
-    "/Applications/T3 Code (Alpha).app/Contents/Resources/app.asar/apps/server/dist/bin.mjs" \
+  ELECTRON_RUN_AS_NODE=1 "/Applications/T3 Code (Nightly).app/Contents/MacOS/T3 Code (Nightly)" \
+    "/Applications/T3 Code (Nightly).app/Contents/Resources/app.asar/apps/server/dist/bin.mjs" \
     auth session issue --label yapd --ttl 365d --token-only
   ```
 
