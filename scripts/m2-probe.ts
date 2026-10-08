@@ -55,10 +55,14 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //       9. message.dispatch, start_immediately with deliveryIntent auto, as
 //          before: the slow message again, to have a turn under way.
 //      10. run.interrupt with 9's run and holdQueue true, as "stop that and
-//          tell it X instead" sends it first, once 9's run is going, whatever
-//          it's doing: only if it gets going within 30 seconds. yapd never
-//          uses T3 Code's own restart, which it turned down live for a turn
-//          busy only in the background.
+//          tell it X instead" sends it first, once 9's run is at work:
+//          running, with its shell command under way, or five seconds into
+//          running when the thread shows none. One stopped while it's still
+//          getting going is ended at once, before there's a turn of the
+//          agent's to stop, which says nothing of how long a real stop takes.
+//          Only if it gets there within 30 seconds; otherwise nothing more is
+//          sent. yapd never uses T3 Code's own restart, which it turned down
+//          live for a turn busy only in the background.
 //      11. message.dispatch, start_immediately with deliveryIntent auto, as
 //          yapd tells the turn it stopped: "This is a test from yapd, please
 //          ignore it: stop that and reply with just OK instead." It's sent
@@ -133,6 +137,17 @@ type Projection = (typeof Bounded.Type)["projection"]
 
 /** Runs that are still going. */
 const going = ["preparing", "starting", "running", "waiting"]
+
+/** A turn item as the probe looks at it: what it is, the run it's in, and whether it's under way. */
+const Item = Schema.Struct({ type: Schema.String, runId: Schema.optional(Schema.NullOr(Schema.String)), status: Schema.optional(Schema.String) })
+const item = Schema.decodeUnknownOption(Item)
+
+/** Whether a run's shell command is under way, as the thread's turn items show it. */
+const shelling = (projection: Projection, runId: string) =>
+  projection.turnItems.some((turnItem) => Option.exists(item(turnItem), ({ type, runId: of, status }) => type === "command_execution" && of === runId && status === "running"))
+
+/** How long into running a turn counts as at work when the thread shows no shell command of its. */
+const settling = 5_000
 
 /** Whether nothing's going in the thread, once it's had a turn. */
 const idle = (projection: Projection) => projection.runs.length > 0 && !projection.runs.some(({ status }) => going.includes(status))
@@ -242,7 +257,7 @@ const session = (thread: string, connection: Effect.Effect.Success<typeof connec
 
 /**
  * Steps 9 to 12: a turn under way, then "stop that and do this instead" as
- * yapd does it: the stop, holding the queue, once the turn is going, then,
+ * yapd does it: the stop, holding the queue, once the turn is at work, then,
  * once the thread shows it stopped, the message at once, under an id of its
  * own. What came of it, for the report.
  */
@@ -252,11 +267,18 @@ const restarting = (thread: string, stamp: string, connection: Effect.Effect.Suc
     const busyId = planned.messages.busy
     const insteadId = planned.messages.instead
     yield* use.sending("message.dispatch now, for a turn to stop", planned.busy, busyId)
-    const underWay = runOf(Option.getOrUndefined(yield* use.until((projection) => going.includes(runOf(projection, busyId)?.status ?? ""))) ?? (yield* use.read), busyId)
-    const stop =
-      underWay === undefined || !going.includes(underWay.status)
-        ? undefined
-        : yield* use.dispatch("run.interrupt, holding the queue, to tell it something in its place", commands(thread, stamp, { ...unknown, busy: underWay.id }).stop)
+    // Stopped only once it's at work, as a turn he'd stop is: one still getting going is ended at once, which says nothing of a real stop.
+    let running: number | undefined
+    const atWork = yield* use.until((projection) => {
+      const run = runOf(projection, busyId)
+      if (run?.status !== "running") return false
+      running ??= Date.now()
+      return shelling(projection, run.id) || Date.now() - running >= settling
+    })
+    const underWay = Option.flatMap(atWork, (projection) => Option.fromNullable(runOf(projection, busyId)))
+    const stop = Option.isNone(underWay)
+      ? undefined
+      : yield* use.dispatch("run.interrupt, holding the queue, to tell it something in its place", commands(thread, stamp, { ...unknown, busy: underWay.value.id }).stop)
     // Told only once the thread shows it stopped, as yapd waits for its live view to, for at most fifteen seconds.
     const began = Date.now()
     const shown = stop === undefined || Either.isLeft(stop) ? Option.none() : yield* use.until((projection) => !going.includes(runOf(projection, busyId)?.status ?? ""), 15)
@@ -266,7 +288,11 @@ const restarting = (thread: string, stamp: string, connection: Effect.Effect.Suc
     if (own?.status === "queued") yield* use.dispatch("queued-run.cancel, tidying up what was held", commands(thread, stamp, { ...unknown, instead: own.id }).leftover)
     yield* use.until(idle, 120)
     return {
-      stop: stop === undefined ? "not sent: the turn to stop never got going in 30 seconds" : Either.isRight(stop),
+      stop: stop === undefined ? "not sent: the turn to stop wasn't at work within 30 seconds, so nothing more was sent" : Either.isRight(stop),
+      stoppedAt: Option.match(atWork, {
+        onNone: () => null,
+        onSome: (projection) => (Option.exists(underWay, ({ id }) => shelling(projection, id)) ? "its shell command under way" : "running five seconds, with no shell command shown"),
+      }),
       stoppedRunStatus: Option.match(shown, { onNone: () => null, onSome: (projection) => runOf(projection, busyId)?.status ?? null }),
       shownStoppedAfterSeconds: Option.isNone(shown) ? null : Math.round((Date.now() - began) / 1000),
       told: told === undefined ? "not sent: it didn't show stopped within fifteen seconds" : Either.isRight(told),
@@ -432,7 +458,8 @@ if (!process.argv.includes("--send")) {
     instead: "<the run of the message in its place>",
   })
   const { messages: _, ...sent } = planned
-  const stopThenTell = "the stop only once the turn before it is going, the message in its place only once that turn shows stopped within fifteen seconds, and its cancel only if it's still queued"
+  const stopThenTell =
+    "the stop only once the turn before it is at work, its shell command under way or five seconds into running, the message in its place only once that turn shows stopped within fifteen seconds, and its cancel only if it's still queued"
   if (thread !== undefined) {
     console.log(`Nothing is sent without --send. With --send --thread ${thread}, once it's made sure the probe started that thread, it sends it, in order:`)
     for (const name of ["busy", "stop", "instead", "leftover"] as const) console.log(`${name}: ${JSON.stringify(sent[name])}`)
