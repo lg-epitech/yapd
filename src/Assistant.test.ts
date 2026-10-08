@@ -3369,6 +3369,52 @@ describe("Assistant", () => {
     expect(result.after).toBe("One running, sir.")
   })
 
+  test("asked to see a question he heard, it's asked again in other words and shown, never closed and said again as it was, however that's taken", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, questions, show, open, journal } = yield* assistant((situation) =>
+          // The model takes it for something new, in place of the question.
+          situation.utterance.heard.startsWith("Put")
+            ? Brain.decision({ act: "show", how: "said", pending: "replaces" })
+            : Option.isSome(situation.second)
+              ? Brain.decision({ act: "answer", spoken: "The Tezos migration is comparing fee tables, sir." })
+              : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+        )
+        const asked = Effect.map(open, Option.map(({ asked }) => asked))
+        yield* show.watch
+        yield* dictate("Which migration was that?")
+        yield* dictate("Show me what you said.")
+        const shown = { open: yield* asked, up: Option.map(yield* show.seen, ({ kind, markdown }) => ({ kind, markdown })) }
+        yield* dictate("Put what you asked me on my screen.")
+        const put = { open: yield* asked, up: Option.map(yield* show.seen, ({ markdown }) => markdown.includes("I still need to know")) }
+        yield* dictate("The first one.")
+        // Asked about again, it's never in words used in the last ten minutes, even those said with the card.
+        yield* dictate("Which migration was that?")
+        // Noted as about the question, which it was taken for without the model.
+        const noted = (yield* journal.since(0, { kinds: ["dictation"] })).find(({ text }) => text === "Show me what you said.")?.detail
+        return { spoken: spoken(), questions: questions().length, shown, put, pending: (noted as { decision: Brain.Decision }).decision.pending }
+      }).pipe(Effect.scoped),
+    )
+    const again = `Which one, sir: ${choices}?`
+    const more = `I still need to know which you meant, sir: ${choices}?`
+    expect(result.spoken).toEqual([
+      `${choices}, sir?`,
+      `It's on your screen. ${again}`,
+      `It's on your screen. ${more}`,
+      "One moment.",
+      "The Tezos migration is comparing fee tables, sir.",
+      "I couldn't tell which one you meant, sir.",
+    ])
+    expect(result.questions).toBe(3)
+    expect(result.shown).toEqual({
+      open: Option.some(again),
+      up: Option.some({ kind: "said", markdown: `### I said\n\n${again}\n\n### I heard you say\n\nWhich migration was that?` }),
+    })
+    expect(result.put).toEqual({ open: Option.some(more), up: Option.some(true) })
+    expect(result.pending).toBe("answers")
+  })
+
   test("only an https address that came from T3 Code is opened", async () => {
     const linked = (id: string, title: string, url: string) =>
       thread(id, title, "yapd", {

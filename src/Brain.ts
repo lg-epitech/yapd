@@ -548,10 +548,10 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
     return decision({ act: "resume" })
   }
   // Right after the question, it's the question he didn't catch, which is asked again in other words; after anything else, like an update, that's said again instead.
+  const askedLast = Option.isSome(open) && subject._tag === "Answer" && subject.said === open.value.asked
   if (again.has(said)) {
     const spoken = subject._tag === "Nothing" ? nothingSaid(lines) : subject.said
-    const question = Option.isSome(open) && subject._tag === "Answer" && subject.said === open.value.asked
-    return decision({ act: "again", how: "same", spoken, pending: Option.isNone(open) ? "" : question ? "answers" : "replaces" })
+    return decision({ act: "again", how: "same", spoken, pending: Option.isNone(open) ? "" : askedLast ? "answers" : "replaces" })
   }
   if (needs.has(said)) return decision({ act: "answer", spoken: needing(desk, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   if (usage.has(said) || askingUsage(said, situation.usage)) {
@@ -571,7 +571,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   }
   if (hiding.has(said) && situation.showing !== undefined) return decision({ act: "show", how: "hide", pending: replacing })
   const shown = shows.get(said)
-  if (shown !== undefined) return decision({ act: "show", how: shown, pending: replacing })
+  // Asking to see the question, like asking to hear it again, is about it.
+  if (shown !== undefined) return decision({ act: "show", how: shown, pending: shown === "said" && askedLast ? "answers" : replacing })
   // "P.R." comes out of the gist as two letters.
   const pr = said.replace(/\bp r\b/g, "pr")
   if (showing.has(said) || threading.has(said) || pulling.has(pr)) {

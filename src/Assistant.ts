@@ -420,7 +420,9 @@ export const make = (options: {
     /** What yapd asked in the last ten minutes, so no question is asked in the same words again. */
     const askedLately = Effect.gen(function* () {
       const kept = yield* journal.since((yield* Clock.currentTimeMillis) - fresh, { kinds: ["answer"] })
-      return kept.filter(question).flatMap(({ said }) => (said === undefined ? [] : [said]))
+      const lines = yield* persona.lines
+      // In its own words, without "it's on your screen" when it went up on a card as it was asked.
+      return kept.filter(question).flatMap(({ said }) => (said === undefined ? [] : [said, Show.offScreen(said, lines)]))
     })
 
     /** Threads a search for his words turns up, to add to the desk. T3 Code answers in a few ms, so only what's there within the cap is taken. */
@@ -628,6 +630,19 @@ export const make = (options: {
         asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: new Set() }
         yield* Effect.logInfo(`Asked again: ${asked}`)
         return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
+      })
+
+    /**
+     * Asked to see the open question, it's asked once more as `reask` does,
+     * with what's said put on his screen as it's said, rather than closed and
+     * said again in the words it was asked in.
+     */
+    const reshown = (said: Lines, situation: Brain.Situation) =>
+      Effect.gen(function* () {
+        const asked = yield* reask(said)
+        if (asked.kind !== "question") return asked
+        const { say, card } = yield* options.show.present("said", Option.none(), { ...situation, subject: asked.subject }, said)
+        return { ...asked, say, ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }) } satisfies Outcome
       })
 
     /** A minute on, the question is asked once more in other words, or let go with a word if it's been asked as often as it will be. */
@@ -1430,6 +1445,10 @@ export const make = (options: {
         }
         // He didn't catch the question, so it's asked again in other words, now rather than later.
         if (decision.act === "again" && decision.pending === "answers") return yield* reask(said)
+        // Nor when he asks to see it, however that was taken: what he'd see is the question, which is never closed and then said again (I4).
+        if (decision.act === "show" && decision.how === "said" && decided.subject._tag === "Answer" && decided.subject.said === open.asked) {
+          return yield* reshown(said, decided.situation)
+        }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
         // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.
         const same = open.kind === "resend" ? { ...decision, how: "" } : decision
