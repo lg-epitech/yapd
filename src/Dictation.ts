@@ -1,4 +1,4 @@
-import { Cause, Chunk, Context, Deferred, Effect, Either, Fiber, FiberSet, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
+import { Cause, Chunk, Clock, Context, Deferred, Effect, Either, Fiber, FiberSet, Layer, Option, PubSub, Queue, Scope, Stream } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -36,11 +36,12 @@ export class Dictation extends Context.Tag("yapd/Dictation")<
     readonly presses: Stream.Stream<Press>
     /**
      * What the user said, each time a dictation ends, in the order they said
-     * it, with how many seconds of it was speech and the press it began with:
-     * nothing when it came to nothing, like one cancelled or one that failed,
-     * so whoever waited on it knows it's over.
+     * it, with how many seconds of it was speech, when they stopped talking,
+     * however long it took to hear, and the press it began with: nothing when
+     * it came to nothing, like one cancelled or one that failed, so whoever
+     * waited on it knows it's over.
      */
-    readonly transcripts: Stream.Stream<Press & { readonly heard: string; readonly voiced: number }>
+    readonly transcripts: Stream.Stream<Press & { readonly heard: string; readonly voiced: number; readonly at: number }>
     /** Drops every dictation not handed on yet, without a sound, like when yapd is turned off. */
     readonly drop: Effect.Effect<void>
   }
@@ -177,7 +178,7 @@ export const wav = (samples: Float32Array, sampleRate = rate) => {
 type End = "Sent" | "Cancelled"
 
 /** What a dictation that came to nothing hands on. */
-const nothing = { text: "", voiced: 0 }
+const silence = { text: "", voiced: 0 }
 
 /**
  * Records the user from the shortcut to the next press, through the helper's
@@ -197,7 +198,7 @@ export const WhisperDictation = Layer.scoped(
     const device = Floor.use(yield* Floor.Floor, audio)
     const scope = yield* Effect.scope
     /** Each with how many times dictations were dropped before it was sent, so one handed on just before isn't taken in after. */
-    const transcripts = yield* PubSub.unbounded<Press & { readonly heard: string; readonly voiced: number; readonly drops: number }>()
+    const transcripts = yield* PubSub.unbounded<Press & { readonly heard: string; readonly voiced: number; readonly at: number; readonly drops: number }>()
     /** Likewise each press that starts one. */
     const presses = yield* PubSub.unbounded<Press & { readonly drops: number }>()
     const dictations = yield* FiberSet.make()
@@ -291,6 +292,8 @@ export const WhisperDictation = Layer.scoped(
         const end = yield* Deferred.await(ended).pipe(
           Effect.timeoutTo({ duration: longest, onSuccess: (end): End | "Expired" => end, onTimeout: () => "Expired" }),
         )
+        // When it was said, which is what it can be about, however long it then takes to hear.
+        const at = yield* Clock.currentTimeMillis
         yield* Fiber.interrupt(recording)
         if (end === "Sent") {
           // Also keep frames the helper had delivered before the capture fiber stopped.
@@ -307,7 +310,7 @@ export const WhisperDictation = Layer.scoped(
         if (end === "Expired") yield* cancel(ended)
         if (end !== "Sent") {
           yield* cue("cancelled")
-          return { end, heard: undefined }
+          return { end, heard: undefined, at }
         }
         // Transcribing starts as the cue plays rather than after it, which only says it was sent.
         const heard = yield* Fiber.join(classified).pipe(
@@ -315,7 +318,7 @@ export const WhisperDictation = Layer.scoped(
           Effect.forkIn(scope),
         )
         yield* cue("sent")
-        return { end, heard }
+        return { end, heard, at }
       }).pipe(Effect.scoped, device)
 
     /**
@@ -326,6 +329,7 @@ export const WhisperDictation = Layer.scoped(
     const hear = (ended: Deferred.Deferred<End>) =>
       Effect.gen(function* () {
         const recorded = yield* record(ended, yield* Effect.scope)
+        const nothing = { ...silence, at: recorded?.at ?? (yield* Clock.currentTimeMillis) }
         if (recorded === undefined) {
           yield* cancel(ended)
           return yield* Effect.as(say("I can't hear you, the microphone is off."), nothing)
@@ -353,12 +357,15 @@ export const WhisperDictation = Layer.scoped(
           )
         }
         if (heard.right.text === "") return yield* Effect.as(say("I didn't catch anything."), nothing)
-        return heard.right
+        return { ...heard.right, at: recorded.at }
       }).pipe(
         Effect.catchAllCause((cause) =>
           Cause.isInterruptedOnly(cause)
             ? Effect.failCause(cause)
-            : Effect.logError("Dictation failed", cause).pipe(Effect.zipRight(cancel(ended)), Effect.as(nothing)),
+            : Effect.logError("Dictation failed", cause).pipe(
+                Effect.zipRight(cancel(ended)),
+                Effect.zipRight(Effect.map(Clock.currentTimeMillis, (at) => ({ ...silence, at }))),
+              ),
         ),
       )
 
@@ -374,7 +381,7 @@ export const WhisperDictation = Layer.scoped(
         yield* Floor.take
         const heard = yield* hear(ended)
         if (before !== undefined) yield* Deferred.await(before)
-        yield* PubSub.publish(transcripts, { ...press, heard: heard.text, voiced: heard.voiced, drops })
+        yield* PubSub.publish(transcripts, { ...press, heard: heard.text, voiced: heard.voiced, at: heard.at, drops })
       }).pipe(
         Effect.ensuring(Deferred.succeed(done, undefined)),
         Effect.scoped,

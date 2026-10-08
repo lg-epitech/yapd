@@ -43,6 +43,8 @@ const dictation = (
     /** The presses dictations started with, as they started, and those their transcripts carry, in order. */
     const presses: Array<number> = []
     const ended: Array<number> = []
+    /** When each transcript says it was said, in the order they were handed on. */
+    const spoken: Array<number> = []
     /** The same, each with how many times yapd had been turned on or off as it was pressed, as they carry it. */
     const turned = { pressed: [] as Array<readonly [number, number]>, ended: [] as Array<readonly [number, number]> }
     let turns = 1
@@ -105,9 +107,10 @@ const dictation = (
     )
     const context = yield* Layer.build(layer)
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ press, turns, heard }) =>
+      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ press, turns, heard, at }) =>
         Effect.sync(() => {
           transcripts.push(heard)
+          spoken.push(at)
           ended.push(press)
           turned.ended.push([press, turns])
         }).pipe(Effect.zipRight(options.consume?.(press) ?? Effect.void)),
@@ -149,6 +152,7 @@ const dictation = (
       transcripts,
       presses,
       ended,
+      spoken,
       turned,
       cancelled: () => cancelled,
       listening: () => open,
@@ -357,6 +361,28 @@ describe("Dictation", () => {
     expect(result.transcripts).toEqual(["Fix the loader in yapd.", "Then do the same in std."])
     expect(result.presses).toEqual([1, 2])
     expect(result.ended).toEqual([1, 2])
+  })
+
+  test("hands on each dictation as said when they stopped talking, however long the one before it took to hear", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, wait, spoken } = yield* dictation([], {
+          // The first takes five seconds to hear, so the second, sent a second in, is handed on only after it.
+          transcribe: (call) => (call === 0 ? Effect.sleep("5 seconds").pipe(Effect.as("Which migration is running?")) : Effect.succeed("The second one.")),
+        })
+        const start = yield* TestClock.currentTimeMillis
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* press("Sent")
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* wait(1)
+        yield* press("Sent")
+        yield* wait(5)
+        return spoken.map((at) => at - start)
+      }),
+    )
+    expect(result).toEqual([0, 1000])
   })
 
   test("turns the microphone off after saying something, while an earlier dictation is still transcribed", async () => {
