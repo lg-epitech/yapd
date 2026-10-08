@@ -55,6 +55,32 @@ describe("T3CodeServer HTTP", () => {
     }
   })
 
+  test("is seen through where nothing can cut it short, like a step once it's written, when what waits on it is stopped", async () => {
+    let release: (() => void) | undefined
+    let signal: AbortSignal | undefined
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (_input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]) => {
+      signal = init?.signal ?? undefined
+      await new Promise<void>((resolve) => { release = resolve })
+      return new Response(JSON.stringify({ sequence: 7 }))
+    }, { preconnect: globalThis.fetch.preconnect }))
+    try {
+      const aborted = await Effect.runPromise(Effect.gen(function* () {
+        const pending = yield* Effect.fork(Effect.uninterruptible(api("/api/test", Schema.Unknown)))
+        while (release === undefined) yield* Effect.promise(() => Bun.sleep(5))
+        // Turned off meanwhile: whatever waits on it is stopped.
+        const stopping = yield* Effect.fork(Fiber.interrupt(pending))
+        yield* Effect.promise(() => Bun.sleep(20))
+        const before = signal?.aborted
+        release?.()
+        yield* Fiber.join(stopping)
+        return before
+      }))
+      expect(aborted).toBe(false)
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
   test("aborts body consumption when its caller stops waiting", async () => {
     let reading = false
     let signal: AbortSignal | undefined
