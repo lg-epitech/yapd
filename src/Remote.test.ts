@@ -159,6 +159,36 @@ describe("Remote launcher", () => {
     expect(await after("7 minutes")).toBe("rig isn't answering, so I don't know if it started.")
   })
 
+  test("says when the machine's T3 Code may have started it all the same, as it does there, or it stops answering, and never when nothing started", async () => {
+    /** What `yapd start` there makes of what its own launcher came to, as it comes back here: the reason, and whether it may have started. */
+    const through = (start: Launcher.Launcher["start"]) =>
+      Effect.runPromise(
+        Remote.launcher("rig", "rig", (_, stdin) => Launcher.serve({ ...own, start }, stdin))
+          .start(request)
+          .pipe(
+            Effect.flip,
+            Effect.map(({ reason, sent }) => ({ reason, sent: sent === true })),
+          ),
+      )
+    // T3 Code there took it, and its answer was lost.
+    expect(await through(() => Effect.fail(new Launcher.LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started.", sent: true })))).toEqual({
+      reason: "T3 Code is taking too long, so I don't know if it started.",
+      sent: true,
+    })
+    expect(await through(() => Effect.fail(new Launcher.LaunchError({ reason: "T3 Code isn't running." })))).toEqual({ reason: "T3 Code isn't running.", sent: false })
+    // It was handed to yapd there, which never answered.
+    const silent = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.fork(Effect.flip(Remote.launcher("rig", "rig", () => Effect.never).start(request)))
+        yield* TestClock.adjust("7 minutes")
+        return yield* fiber
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    )
+    expect({ reason: silent.reason, sent: silent.sent === true }).toEqual({ reason: "rig isn't answering, so I don't know if it started.", sent: true })
+    // Never handed over, it can't have started.
+    expect((await Effect.runPromise(Effect.flip(failing(255).start(request)))).sent).toBeUndefined()
+  })
+
   test("picks the launcher by the machine's name, which for this one can be what the user calls it", async () => {
     const calls: Array<ReadonlyArray<string>> = []
     const launchers = Remote.launchers(

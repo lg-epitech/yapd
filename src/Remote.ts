@@ -87,7 +87,9 @@ const nowhere: Masters = () => none
  * with. The command is fixed and what it's given goes over stdin: SSH joins its
  * arguments into a shell command, and what names the machine or fills the
  * request came in over the network, or from a model. With `master`, it goes
- * through the connection to the machine that's open already.
+ * through the connection to the machine that's open already. `fail` is told
+ * it was `sent` when the machine stopped answering once it had what it was
+ * asked, which it may have done all the same.
  */
 export const ask = <E>(
   exec: Exec,
@@ -97,7 +99,7 @@ export const ask = <E>(
   stdin: string,
   // `silent` and `failed` end the sentences that start with the machine's name.
   wording: { readonly patience: Duration.DurationInput; readonly silent: string; readonly failed: string },
-  fail: (reason: string, cause?: unknown) => E,
+  fail: (reason: string, cause?: unknown, sent?: boolean) => E,
   master: Master = none,
 ) =>
   Effect.flatMap(master, (socket) =>
@@ -128,7 +130,7 @@ export const ask = <E>(
         ),
       ),
     ),
-    Effect.timeoutFail({ duration: wording.patience, onTimeout: () => fail(`${host} ${wording.silent}`) }),
+    Effect.timeoutFail({ duration: wording.patience, onTimeout: () => fail(`${host} ${wording.silent}`, undefined, true) }),
     // The remote shell's startup files may print something first.
     Effect.map((stdout) => stdout.trim().split("\n").at(-1) ?? ""),
   )
@@ -172,6 +174,8 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh, ma
   return {
     start: (request) =>
       Effect.gen(function* () {
+        // Asked for there, it may have started all the same, as T3 Code there says when its answer is lost, or when yapd there stops answering.
+        const failing = (reason: string, cause?: unknown, sent?: boolean) => new Launcher.LaunchError({ reason, cause, ...(sent === true ? { sent } : {}) })
         const answer = yield* ask(
           exec,
           host,
@@ -183,11 +187,11 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh, ma
             silent: "isn't answering, so I don't know if it started.",
             failed: "couldn't start it.",
           },
-          refuse,
+          failing,
           master,
         )
-        const { started, reason } = yield* read(Launcher.Response, answer)
-        return started ?? (yield* refuse(reason ?? garbled(host)))
+        const { started, reason, sent } = yield* read(Launcher.Response, answer)
+        return started ?? (yield* failing(reason ?? garbled(host), undefined, sent))
       }),
     catalog: Effect.gen(function* () {
       const answer = yield* ask(

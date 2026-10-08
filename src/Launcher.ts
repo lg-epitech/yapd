@@ -87,8 +87,8 @@ export interface Launcher {
   readonly catalog: Effect.Effect<Catalog, LaunchError>
 }
 
-/** Either what started, or the reason nothing did. */
-export const Response = Schema.Struct({ started: Schema.optional(Started), reason: Schema.optional(Schema.String) })
+/** Either what started, or the reason nothing did, and whether it was asked for before that went wrong, so it may have started all the same. */
+export const Response = Schema.Struct({ started: Schema.optional(Started), reason: Schema.optional(Schema.String), sent: Schema.optional(Schema.Boolean) })
 
 /** `yapd start`: starts the work described on stdin and prints how it went. */
 export const serve = (launcher: Launcher, input: string) =>
@@ -100,7 +100,7 @@ export const serve = (launcher: Launcher, input: string) =>
     ),
     Effect.flatMap(launcher.start),
     Effect.map((started) => Response.make({ started })),
-    Effect.catchTag("LaunchError", ({ reason }) => Effect.succeed(Response.make({ reason }))),
+    Effect.catchTag("LaunchError", ({ reason, sent }) => Effect.succeed(Response.make({ reason, ...(sent === true ? { sent } : {}) }))),
     Effect.map((response) => JSON.stringify(response)),
   )
 
