@@ -69,6 +69,15 @@ describe("Persona", () => {
     expect(result.stored.cantTell).toBe("I couldn't tell which one you meant, sir.")
   })
 
+  test("'it's on your screen' never asks either, since nothing waits on an answer to it", async () => {
+    const result = await persona(undefined, { ...jarvis, onScreen: "It's on your screen, sir. Shall I walk you through it?" })
+    expect(result.lines.onScreen).toBe("It's on your screen, sir.")
+    expect(result.stored.onScreen).toBe("It's on your screen, sir.")
+    const kept = await persona({ ...jarvis, onScreen: "Shall I put it on your screen, sir?" }, jarvis)
+    expect(kept.asked).toBe(1)
+    expect(kept.lines.onScreen).toBe("It's on your screen, sir.")
+  })
+
   test("how he's addressed is kept without marks, so a line said in its place doesn't ask, and isn't written again at the next start", async () => {
     const first = await persona(undefined, { ...jarvis, address: "sir?", cantTell: "Which one, sir?" })
     expect(first.lines.address).toBe("sir")

@@ -50,7 +50,7 @@ export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim(
  * The lines that tell rather than ask: worded as a question, he'd answer one
  * yapd isn't waiting on. Not "misheard", which may well ask him to say it again.
  */
-const telling = ["onIt", "queued", "checking", "leaving", "cantTell"] as const
+const telling = ["onIt", "queued", "checking", "leaving", "cantTell", "onScreen"] as const
 
 /** Whether none of the lines that tell asks something, nor how he's addressed, which goes into lines of every kind. */
 const tells = (lines: Lines) => !lines.address.includes("?") && telling.every((key) => !lines[key].includes("?"))
@@ -87,7 +87,7 @@ export const prompt = (style: string) =>
     `- "checking": that you're looking into something before answering, like "${plain.checking}"`,
     `- "leaving": that you'll let a question you asked go, since it wasn't answered, like "${plain.leaving}"`,
     `- "cantTell": that you couldn't tell which of their threads they meant, like "${plain.cantTell}" It's said instead of asking, so don't ask.`,
-    `- "onScreen": that what they asked to see is on their screen now, like "${plain.onScreen}"`,
+    `- "onScreen": that what they asked to see is on their screen now, like "${plain.onScreen}" It's said as it goes up, so don't ask.`,
     `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")
 
