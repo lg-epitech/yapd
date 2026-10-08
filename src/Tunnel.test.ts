@@ -31,16 +31,28 @@ const machine = (
   const unsure: Array<"failed" | "hung"> = []
   /** How many of the next cancels of a forward hang. */
   let stalled = 0
-  /** The forwards listening here, as `-L` gives them, which go with the connection. */
-  const forwards = new Set<string>()
+  /** Whether the connection on the socket hangs when told to exit. */
+  let deaf = false
+  /** The connections running here, by their process, each with its forwards listening here, as `-L` gives them. */
+  const connections = new Map<number, Set<string>>()
+  /** The one on the socket, that what's told through it reaches. */
+  let current: number | undefined
+  let pids = 100
+  const start = () => {
+    current = ++pids
+    connections.set(current, new Set())
+  }
+  if (options.open === true) start()
+  /** A connection that's gone, and its forwards with it. */
+  const end = (pid: number) => {
+    connections.delete(pid)
+    if (current === pid) current = undefined
+  }
+  /** The processes killed here. */
+  const killed: Array<number> = []
   const calls: Array<string> = []
   /** When each try to connect was made, by the test's clock. */
   const tries: Array<number> = []
-  let alive = options.open ?? false
-  const close = () => {
-    alive = false
-    forwards.clear()
-  }
   let tokens = 0
   const exec: Exec = (command) =>
     Effect.gen(function* () {
@@ -55,8 +67,17 @@ const machine = (
           stalled--
           return yield* Effect.never
         }
-        if (command.includes("exit")) close()
-        if (!alive) return yield* fail(255, `Control socket connect(${command[2]}): No such file or directory`)
+        if (command.includes("exit") && deaf) return yield* Effect.never
+        const forwards = current === undefined ? undefined : connections.get(current)
+        if (current === undefined || forwards === undefined) {
+          return yield* fail(255, `Control socket connect(${command[2]}): No such file or directory`)
+        }
+        // SSH answers these on stderr, which comes back with the rest.
+        if (command.includes("check")) return `Master running (pid=${current})\r\n`
+        if (command.includes("exit")) {
+          end(current)
+          return "Exit request sent.\r\n"
+        }
         const spec = command[command.indexOf("-L") + 1] ?? ""
         if (command.includes("forward")) forwards.add(spec)
         if (command.includes("cancel")) forwards.delete(spec)
@@ -65,23 +86,38 @@ const machine = (
       if (command.includes("-M")) {
         tries.push(yield* Clock.currentTimeMillis)
         if (options.opening !== undefined) yield* Effect.sleep(options.opening)
-        alive = opens.shift() ?? true
-        return alive ? "" : yield* fail(255, "ssh: connect to host rig port 22: Operation timed out")
+        if (!(opens.shift() ?? true)) return yield* fail(255, "ssh: connect to host rig port 22: Operation timed out")
+        // One that was there is left running, with its forwards, where nothing reaches it through the socket.
+        start()
+        return ""
       }
       const answer = answers.shift() ?? JSON.stringify({ origin: "http://127.0.0.1:3774", token: `token-${++tokens}` })
       return answer instanceof ProcessError ? yield* Effect.fail(answer) : `Welcome to rig\n${answer}\n`
     })
   return {
     exec,
+    kill: (pid: number) =>
+      Effect.sync(() => {
+        killed.push(pid)
+        end(pid)
+      }),
     calls,
     tries,
     answers,
     unsure,
-    forwards,
+    killed,
+    /** The forwards listening here, whichever connection they go with. */
+    listening: () => [...connections.values()].flatMap((forwards) => [...forwards]),
     stall: () => {
       stalled++
     },
-    drop: close,
+    deafen: () => {
+      deaf = true
+    },
+    /** The connection on the socket drops, like when the network does. */
+    drop: () => {
+      if (current !== undefined) end(current)
+    },
   }
 }
 
@@ -172,7 +208,7 @@ describe("Tunnel", () => {
         yield* Fiber.interrupt(refreshing)
 
         const origin = (yield* tunnel.refresh).server.origin
-        expect([origin, [...rig.forwards]]).toEqual(["http://127.0.0.1:50002", ["127.0.0.1:50002:127.0.0.1:3775"]])
+        expect([origin, rig.listening()]).toEqual(["http://127.0.0.1:50002", ["127.0.0.1:50002:127.0.0.1:3775"]])
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
@@ -254,6 +290,24 @@ describe("Tunnel", () => {
         yield* flush
         expect(Option.isSome(yield* closing.poll)).toBe(true)
         expect(rig.calls.filter((line) => line.includes(" -O exit "))).toHaveLength(1)
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("closes the connection with its scope before long even when it hangs, killing it with its forward", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine()
+        const scope = yield* Scope.make()
+        const tunnel = yield* Scope.extend(Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder, rig.kill), scope)
+        yield* flush
+        expect(yield* tunnel.status).toEqual({ _tag: "Up" })
+        rig.deafen()
+        const closing = yield* Effect.forkDaemon(Scope.close(scope, Exit.void))
+        yield* flush
+        yield* TestClock.adjust("5 seconds")
+        yield* flush
+        expect(Option.isSome(yield* closing.poll)).toBe(true)
+        expect([rig.killed, rig.listening()]).toEqual([[101], []])
       }).pipe(Effect.provide(TestContext.TestContext)),
     ))
 

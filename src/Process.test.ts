@@ -41,6 +41,12 @@ describe("Process", () => {
     expect((await Effect.runPromise(run(["pwd"], { cwd: "/" }))).trim()).toBe("/")
   })
 
+  // Like `ssh -O check`, which says the connection's process there.
+  test("gives what a command wrote to stderr too, only when asked to", async () => {
+    const both = ["sh", "-c", "echo out; echo err >&2"]
+    expect(await Effect.runPromise(Effect.all([run(both, { both: true }), run(both)]))).toEqual(["out\nerr\n", "out\n"])
+  })
+
   // Like the proxy an SSH connection goes through, which stays behind in the group when the connection goes into the background.
   test("leaves what a command put in the background running once it succeeds, only when asked to", async () => {
     const helper = ["sh", "-c", "sleep 30 >/dev/null 2>&1 </dev/null & echo $!"]

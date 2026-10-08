@@ -84,10 +84,18 @@ const text = (output: ReadableStream<Uint8Array> | number) => {
  * Runs a command to completion and returns its stdout. Interrupting kills the
  * process. With `leave`, what it left running in its group is left alone once
  * it succeeds, for a command that puts something in the background on purpose.
+ * With `both`, what it wrote to stderr comes back after its stdout, for a
+ * command that answers there, like `ssh -O check`.
  */
 export const run = (
   command: ReadonlyArray<string>,
-  options: { readonly stdin?: string; readonly env?: Record<string, string>; readonly cwd?: string; readonly leave?: boolean } = {},
+  options: {
+    readonly stdin?: string
+    readonly env?: Record<string, string>
+    readonly cwd?: string
+    readonly leave?: boolean
+    readonly both?: boolean
+  } = {},
 ) => {
   const failed = (cause: unknown) => new ProcessError({ command: command.join(" "), code: -1, stderr: String(cause) })
   return Effect.scoped(
@@ -123,7 +131,7 @@ export const run = (
             if (code !== 0) {
               return yield* new ProcessError({ command: command.join(" "), code, stderr: stderr.trim() })
             }
-            return stdout
+            return options.both === true ? stdout + stderr : stdout
           }),
         (proc, exit) => (options.leave === true && Exit.isSuccess(exit) ? Effect.void : stop(proc)),
       )

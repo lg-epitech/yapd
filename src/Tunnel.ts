@@ -85,8 +85,25 @@ export interface Tunnel {
  * Runs SSH here. Opening the connection leaves it running in the background,
  * and with a ProxyCommand or ProxyJump, the proxy it reaches the machine
  * through stays behind in the group SSH started in, so that's left running too.
+ * What the connection answers when told something, SSH says on stderr.
  */
-const shell: Remote.Exec = (command, stdin) => run(command, { stdin, leave: command.includes("-M") })
+const shell: Remote.Exec = (command, stdin) => run(command, { stdin, leave: command.includes("-M"), both: command.includes("-O") })
+
+/** Kills a process here by its pid, for a connection that doesn't exit when asked. */
+const kill = (pid: number) =>
+  Effect.sync(() => {
+    try {
+      process.kill(pid, "SIGKILL")
+    } catch {
+      // It may have exited since.
+    }
+  })
+
+/** The connection's process here, as `ssh -O check` gives it. Never 0 or 1, which would be yapd's own group, or launchd. */
+const pidOf = (said: string) => {
+  const pid = Number(/Master running \(pid=(\d+)\)/.exec(said)?.[1])
+  return Number.isSafeInteger(pid) && pid > 1 ? pid : undefined
+}
 
 /**
  * A port nothing listens on here right now. Something else could take it
@@ -129,22 +146,36 @@ const port = (origin: string) => {
 
 /**
  * Keeps `host`'s T3 Code reachable through an SSH connection to `destination`,
- * connecting again when it drops. `folder` holds the connection's socket.
+ * connecting again when it drops. `folder` holds the connection's socket, and
+ * `end` kills a process here.
  */
-export const forward = (host: string, destination: string, exec: Remote.Exec = shell, free = unused, folder = Home.home) =>
+export const forward = (
+  host: string,
+  destination: string,
+  exec: Remote.Exec = shell,
+  free = unused,
+  folder = Home.home,
+  end: (pid: number) => Effect.Effect<void> = kill,
+) =>
   Effect.gen(function* () {
     const socket = join(folder, `ssh-${host.toLowerCase().replace(/[^a-z0-9.-]/g, "_")}.sock`)
     const unreachable = `I can't reach ${host} right now.`
     const trouble = (reason: string, cause?: unknown) => new Server.Trouble({ reason, cause })
-    /** Tells the open connection what to do, through its socket. */
+    /**
+     * Tells the open connection what to do, through its socket. SSH can be
+     * given up on even where nothing can be interrupted, like when closing the
+     * connection as yapd stops: the timeout would wait on it otherwise.
+     */
     const control = (...args: ReadonlyArray<string>) =>
-      exec(["ssh", "-S", socket, ...args, "--", destination], "").pipe(
+      Effect.interruptible(exec(["ssh", "-S", socket, ...args, "--", destination], "")).pipe(
         Effect.mapError((cause) => trouble(unreachable, cause)),
         Effect.timeoutFail({ duration: "5 seconds", onTimeout: () => trouble(unreachable) }),
       )
 
     /** Whether the connection is known to be open. */
     let open = false
+    /** Its process here, as SSH last said, to kill it by should it not exit when asked. */
+    let pid: number | undefined
     let forwarded: Forward | undefined
     /** Forwards the connection may still have that lead nowhere, to cancel before opening another. */
     const stale: Array<Forward> = []
@@ -155,27 +186,51 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
     const first = yield* Deferred.make<void>()
     const lock = yield* Effect.makeSemaphore(1)
 
+    /** Whether SSH failed because nothing listens on the socket, which is how it says the connection is gone. */
+    const missing = ({ cause }: Server.Trouble) =>
+      cause instanceof ProcessError && /No such file or directory|Connection refused/.test(cause.stderr)
+
     /**
      * Whether the connection is open or gone, failing when SSH couldn't say,
      * like when it took too long or couldn't start. Only nothing listening on
      * the socket means it's gone. Taking one that's just slow for gone would
      * open a second connection and leave the first running, with its forwards,
-     * where nothing can reach it or close it.
+     * where nothing can reach it or close it. When it's open, SSH says its
+     * process, which is kept.
      */
     const check = control("-O", "check").pipe(
-      Effect.as("open" as const),
-      Effect.catchIf(
-        ({ cause }) => cause instanceof ProcessError && /No such file or directory|Connection refused/.test(cause.stderr),
-        () => Effect.succeed("gone" as const),
-      ),
+      Effect.map((said) => {
+        pid = pidOf(said)
+        return "open" as const
+      }),
+      Effect.catchIf(missing, () => Effect.succeed("gone" as const)),
     )
 
     /** Forgets the connection that's gone, and the forwards that went with it. */
     const forget = () => {
       open = false
+      pid = undefined
       forwarded = undefined
       stale.length = 0
     }
+
+    /**
+     * Closes the connection, and its forwards with it. One that doesn't exit
+     * when asked, before long, like one that hangs, is killed by its process
+     * instead, and the socket it leaves then removed, so it can neither hold up
+     * yapd stopping nor leave a forward listening. Fails when it may still be
+     * there and its process isn't known, keeping its socket for SSH to find it
+     * by again.
+     */
+    const close = Effect.gen(function* () {
+      const exited = yield* Effect.either(control("-O", "exit"))
+      if (Either.isLeft(exited) && !missing(exited.left)) {
+        if (pid === undefined) return yield* exited.left
+        yield* end(pid)
+      }
+      forget()
+      yield* Effect.ignore(Effect.tryPromise(() => rm(socket, { force: true })))
+    })
 
     /** Fails, with the reason to say, once SSH says the connection is gone. When it can't say, it's asked again next time. */
     const still = Effect.gen(function* () {
@@ -212,6 +267,8 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
         Effect.timeoutFail({ duration: "20 seconds", onTimeout: () => trouble(unreachable) }),
       )
       open = true
+      // For its process. When SSH can't say yet, the next check on it does.
+      yield* Effect.ignore(check)
     })
 
     /**
@@ -317,7 +374,7 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
     })
 
     // Closed with yapd, rather than left running in the background after it.
-    yield* Effect.addFinalizer(() => Effect.exit(control("-O", "exit")))
+    yield* Effect.addFinalizer(() => Effect.ignore(close))
     // A fork takes after where it starts, and opening the tunnel where nothing can be interrupted, like a layer's
     // or acquireRelease's acquisition, would leave closing the scope waiting forever on the loop, and SSH open.
     yield* Effect.forkScoped(Effect.interruptible(loop))
