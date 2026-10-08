@@ -1094,14 +1094,14 @@ export const make = (options: {
       Effect.gen(function* () {
         const utterance: Utterance = { ...thought.utterance, heard: thought.decision.rest }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
-        // Working it out has no effect, so it carries on whether or not what's said waits for it.
-        const thinking = yield* Effect.forkIn(
+        // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
+        const thinking = yield* job(
           think(utterance, { _tag: "Answer", said: first.say, about: on }, [
             { speaker: "user", text: thought.utterance.heard },
             // Nothing said of the step before, like a thanks, is nothing to show.
             ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say } satisfies Line]),
           ]),
-          scope,
+          utterance.turns,
         )
         const ready = yield* Effect.timeoutOption(Fiber.join(thinking), joining)
         if (Option.isSome(ready)) return yield* then(ready.value, first, step, said, false)

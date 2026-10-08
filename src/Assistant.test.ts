@@ -2444,6 +2444,36 @@ describe("Assistant", () => {
     expect(await sending(true)).toEqual(["run.interrupt"])
   })
 
+  test("turning yapd off stops the rest of a request being worked out, as it does the request itself", async () => {
+    const rest = "tell the Mina one to use its fee table"
+    let slow = false
+    let stopped = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { heard, toggle, wait, flush, dispatched } = yield* assistant(
+          (situation) => {
+            slow = situation.utterance.heard === rest
+            return situation.utterance.heard.startsWith("Stop")
+              ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest })
+              : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
+          },
+          undefined,
+          { deciding: Effect.suspend(() => (slow ? Effect.sleep("3 seconds").pipe(Effect.onInterrupt(() => Effect.sync(() => void stopped++))) : Effect.void)) },
+        )
+        const dictated = yield* Effect.fork(heard({ heard: "Stop the Tezos one and tell the Mina one to use its fee table.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+        yield* flush
+        // Not worked out within a second, the stop is said on its own, and the rest is worked out meanwhile.
+        yield* wait(1)
+        yield* Fiber.join(dictated)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* wait(3)
+        return { stopped, dispatched: dispatched.map(({ type }) => type) }
+      }),
+    )
+    expect(result).toEqual({ stopped: 1, dispatched: ["run.interrupt"] })
+  })
+
   test("the rest of a request follows an answer, and a yes to sending again, and is said as left after starting new work", async () => {
     const rest = "tell the Mina one to use its fee table"
     const toMina = (situation: Brain.Situation) => Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
