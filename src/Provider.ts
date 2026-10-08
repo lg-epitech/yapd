@@ -13,13 +13,21 @@ export interface Call {
   readonly schema: { readonly json: string; readonly path: string }
 }
 
+/** How to run the CLI for a call. */
+export interface Invocation {
+  readonly argv: ReadonlyArray<string>
+  readonly stdin?: string
+  /** Added to yapd's own environment. */
+  readonly env?: Record<string, string>
+}
+
 /** A coding agent CLI run headless, read-only and without the user's setup, as far as each CLI allows. */
 export interface Provider {
   /** Used when no model is configured. The tier is a faster service tier, where the CLI has one. */
   readonly defaults?: { readonly model: string; readonly effort: string; readonly tier?: string }
   /** False when the CLI has no reasoning effort setting, only models that bake one in. */
   readonly takesEffort: boolean
-  readonly command: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
+  readonly command: (call: Call) => Invocation
   /** Pulls the reply's JSON value out of stdout. Defaults to finding the object in plain text. */
   readonly reply?: (stdout: string) => unknown
   /**
@@ -27,7 +35,7 @@ export interface Provider {
    * that keep the model from changing anything themselves, and were seen to:
    * OpenCode's plan agent, for one, still has its shell and only asks it not to.
    */
-  readonly research?: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
+  readonly research?: (call: Call) => Invocation
 }
 
 const flag = (name: string, value: string | undefined) => (value === undefined ? [] : [name, value])
@@ -74,6 +82,9 @@ const claude =
       ...flag("--effort", effort),
       "--output-format", "json",
       "--json-schema", schema.json,
+      // Prompts end by asking for a JSON object, which other CLIs need. Claude would then often write it out, be told
+      // to call StructuredOutput, and send it again: Sonnet did on 9 of 11 replies, at 2 s each.
+      "--append-system-prompt", "When asked to reply with a JSON object, give it as the input of the StructuredOutput tool rather than writing it out.",
       "--tools", tools,
       "--setting-sources", "",
       "--strict-mcp-config",
@@ -81,6 +92,10 @@ const claude =
       "--no-session-persistence",
     ],
     stdin: prompt,
+    // Without these, Claude Code spent about 1.5 s of each call on traffic a one-off call has no use for, like
+    // titling the session, before it answered, and another second sending telemetry before it exited. It would
+    // also offer the model its Opus advisor tool every time.
+    env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" },
   })
 
 export const providers: Record<Name, Provider> = {
