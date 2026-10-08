@@ -68,6 +68,10 @@ const pulled = (url: string): Threads.Listed => ({
   }),
 })
 
+/** Where markdown could link to: an inline link's address, or one in angle brackets, unless a backslash escapes what would make it one. */
+const targets = (markdown: string) =>
+  [...markdown.matchAll(/(?<!\\)\]\(\s*<?([^\s)>]*)|(?<!\\)<([a-z][a-z0-9+.-]*:[^\s<>]*)>/gi)].map(([, inline, angled]) => inline ?? angled ?? "")
+
 /** What he said, with these threads on the desk and nothing said before. */
 const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["away"] = []): Brain.Situation => ({
   utterance: { id: "u1", heard: "Open that PR.", via: "shortcut", at: now, voiced: 2, turns: 1 },
@@ -134,6 +138,26 @@ describe("Show", () => {
     expect(tamed("[https://gіthub.com/pull/7](https://gіthub.com/pull/7)")).toBe("[https://gіthub.com/pull/7](<https://xn--gthub-n2e.com/pull/7>) (xn--gthub-n2e.com)")
     // Words that are the address show where it goes already.
     expect(tamed(`PR is up: [${pr}](${pr}) and [https://ok.example](https://ok.example)`)).toBe(`PR is up: [${pr}](<${pr}>) and [https://ok.example](<https://ok.example/>)`)
+  })
+
+  test("nothing a thread, T3 Code or he wrote links anywhere but an https page, on any card", () => {
+    const hostile = "[Run it](file:///Applications/Calculator.app) <javascript:alert(1)> ![x](https://evil.example/p.png)"
+    const titled: Threads.Listed = { ...listed, thread: Schema.decodeUnknownSync(T3Live.Thread)({ ...waiting, title: "[x](javascript:alert(1)) <file:///etc/passwd>" }) }
+    const cards = [
+      Show.thread(listed, Option.some({ ...detail("Clean the build"), plan: Option.some(`1. ${hostile}\n2. Read [the notes](https://ok.example/notes)`) }), now),
+      Show.overview({ threads: [titled], away: [{ machine: "rig", reason: hostile }] }, now),
+      Show.missed(
+        [
+          { id: 1, at: now, kind: "update", project: "[p](javascript:1)", said: hostile },
+          { id: 2, at: now, kind: "notice", text: hostile },
+        ],
+        now,
+      ),
+      Show.said(hostile, Option.some("Show me [that](javascript:alert(1)) <file:///etc/passwd>")),
+    ]
+    for (const { markdown } of cards) expect(targets(markdown).filter((target) => !target.startsWith("https://"))).toEqual([])
+    // What's an https link stays one.
+    expect(targets(cards[0]!.markdown)).toEqual(["https://ok.example/notes"])
   })
 
   test("points at the card that's up, and serves a card and a journal entry, as the API documents them", () => {
