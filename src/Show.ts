@@ -239,12 +239,16 @@ export const tally = (desk: Threads.Desk, address: string, now: number) => {
   return parts.length === 0 ? `Nothing's running${address}.` : `${Brain.capital(Brain.both(parts))}${address}.`
 }
 
-/** What a thread waits on, as text only: a command in a code block, never a link. */
+/**
+ * What a thread waits on, as text only, in code blocks: a command, or a
+ * question with its choices, where nothing written out, like an address, can
+ * become a link.
+ */
 const waiting = (request: T3Actions.Request) =>
   request._tag === "Approval"
     ? `### Waiting for your approval\n\n${verbatim(request.what)}`
     : `### Asking you\n\n${request.questions
-        .map(({ question, options }) => [plainly(question), ...options.map(({ label }) => `- ${plainly(label)}`)].join("\n\n"))
+        .map(({ question, options }) => verbatim([question, ...options.map(({ label }) => `- ${label}`)].join("\n")))
         .join("\n\n")}`
 
 /** A thread: where and how it's doing, what it waits on, its latest message and its plan. */
