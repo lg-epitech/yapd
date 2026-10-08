@@ -97,7 +97,8 @@ export class Hands extends Context.Tag("yapd/Hands")<
      * His yes to sending it again: the same step once more, under the same
      * ids, and never after that (I2). At another time than it first went,
      * `how`, only if it never left yapd: one that may have got there can only
-     * go as it first went, so it's left, and he's told why.
+     * go as it first went, so it's left, and he's told why. One for now to a
+     * turn that's waiting by then goes behind it, as T3 Code takes it.
      */
     readonly again: (commandId: string, options?: { readonly how?: T3Actions.When }) => Effect.Effect<Outcome>
     /**
@@ -369,19 +370,21 @@ export const make = (options: {
    * Sends a step written in the ledger and notes what came of it. When it
    * may have got there, it's looked for once. `last` is for the one time
    * it's sent again, after which it's never offered again, unless it never
-   * left yapd, which isn't sending it.
+   * left yapd, which isn't sending it. `at` is when a message goes in this
+   * time, when T3 Code can't take it as it first went, still under its ids.
    */
-  const dispatch = (row: Ledger.Row, actions: T3Actions.Actions, wasBusy: boolean, last = false): Effect.Effect<Went> =>
+  const dispatch = (row: Ledger.Row, actions: T3Actions.Actions, wasBusy: boolean, last = false, at?: T3Actions.When): Effect.Effect<Went> =>
     Effect.gen(function* () {
       const what = doing[row.kind]
-      const sent = command(row.body)
-      if (Option.isNone(sent)) {
+      const read = command(row.body)
+      if (Option.isNone(read)) {
         yield* ledger.settle(row.commandId, "abandoned", { reason: "I couldn't read back what to send." })
         return yield* failing({ _tag: "NotSent", reason: "I couldn't read back what to send.", again: Option.none() }, what)
       }
-      const how = sent.value._tag === "Send" ? sent.value.how : "now"
+      const sent = read.value._tag === "Send" && at !== undefined ? { ...read.value, how: at } : read.value
+      const how = sent._tag === "Send" ? sent.how : "now"
       const again = row.kind === "message" && !last ? Option.some(row.commandId) : Option.none<string>()
-      const result = yield* Effect.either(actions.run(row.thread, sent.value, row.commandId))
+      const result = yield* Effect.either(actions.run(row.thread, sent, row.commandId))
       if (Either.isRight(result)) {
         const entry = yield* entered(row, actions, wasBusy, how)
         yield* ledger.settle(row.commandId, "sent", { how: entry })
@@ -715,8 +718,12 @@ export const make = (options: {
             yield* unsent(row, reached.left)
             return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing[row.kind])
           }
-          yield* Effect.logInfo(`Sending ${row.commandId} once more, as you said`)
-          return yield* dispatch(row, reached.right.actions, busy(reached.right.thread), true)
+          // T3 Code takes nothing into a turn that's waiting, so a message for now goes in its queue behind it, as one sent fresh does: under
+          // the same ids, so one it has from the first time is done once all the same, and goes in as it did then.
+          const waiting = Option.exists(went(row), ({ how }) => how !== "after") ? waits(reached.right.thread) : undefined
+          yield* Effect.logInfo(`Sending ${row.commandId} once more, as you said${waiting === undefined ? "" : ", behind the turn under way, which is waiting"}`)
+          const sent = yield* dispatch(row, reached.right.actions, busy(reached.right.thread), true, waiting === undefined ? undefined : "after")
+          return sent._tag === "Done" && waiting !== undefined && sent.how === "queued" ? { ...sent, waiting } : sent
         }),
       ),
     leave: (commandId, reason) =>

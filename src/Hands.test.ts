@@ -805,6 +805,47 @@ describe("Hands", () => {
     expect(finishing.said).toBe("Migrate Tezos Integration is finishing something off, sir, so that will go once it's done.")
   })
 
+  test("a yes to sending again a message for now, once the thread is waiting on him, sends it behind the turn under the same ids, and he's told why", async () => {
+    const asking = thread(tezos.id, {
+      activeRunId: null,
+      activityRunStatus: "waiting",
+      status: "waiting",
+      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" },
+    })
+    const resent = (sent: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, becomes, bounded, dispatched } = yield* hands()
+          // T3 Code isn't answering as he says it, so it never left, or may not have got there.
+          answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering.", ...(sent ? { sent: true } : {}) })))
+          yield* send("u1", "Use the Mina fee table.")
+          // By the time he says yes, its turn is waiting on him for an approval.
+          becomes(asking)
+          bounded.runs.push({ id: "run-1", status: "waiting", ordinal: 1 })
+          answering(takes())
+          const outcome = yield* again("yapd:u1:0")
+          return {
+            said:
+              outcome._tag === "Done"
+                ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome.how, lines, Option.none(), outcome)
+                : outcome._tag === "Refused" || outcome._tag === "NotSent" || outcome._tag === "Unknown"
+                  ? Hands.failed({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome, lines, Option.none())
+                  : outcome._tag,
+            dispatched: dispatched.map(({ commandId, messageId, dispatchMode }) => [commandId, messageId, (dispatchMode as { type: string }).type]),
+          }
+        }),
+      )
+    for (const sent of [false, true]) {
+      expect(await resent(sent)).toEqual({
+        said: "It's waiting on you for something, sir, so that will go once it's dealt with.",
+        dispatched: [
+          ["yapd:u1:0", "yapd:u1:0:m", "start_immediately"],
+          ["yapd:u1:0", "yapd:u1:0:m", "queue_after_active"],
+        ],
+      })
+    }
+  })
+
   test("a message in place of the turn under way stops it, holding its queue, then tells it at once once the live view shows it stopped, whatever the turn was doing, and never asks T3 Code to restart it", async () => {
     const at = (status: string, overrides: Record<string, unknown> = {}) =>
       thread(tezos.id, { activeRunId: status === "waiting" ? null : "run-1", activityRunStatus: status, status, ...overrides })

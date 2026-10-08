@@ -2066,6 +2066,48 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a yes to sending again a message for now, once the thread is waiting on him, sends it behind the turn under the same ids, and says why", async () => {
+    let down = true
+    const result = await run(
+      Effect.gen(function* () {
+        const others = [thread(tezos.id, tezos.title, "integration")]
+        const { dictate, answer, spoken, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
+          others,
+          answer: () => (payload, bounded) =>
+            down
+              ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code isn't answering." }))
+              : (payload.dispatchMode as { type: string }).type === "queue_after_active"
+                ? Effect.sync(() => {
+                    // Behind the turn under way, as T3 Code queues it.
+                    bounded.messages.push({ id: String(payload.messageId), role: "user", text: String(payload.text), createdAt: "x" })
+                    bounded.runs.push({ id: "run-4", status: "queued", ordinal: 4, userMessageId: String(payload.messageId) })
+                    return { sequence: 2 }
+                  })
+                : takes(payload, bounded),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        // By the time he says yes, its turn is waiting on him for an approval.
+        others[0] = thread(tezos.id, tezos.title, "integration", {
+          activeRunId: null,
+          activityRunStatus: "waiting",
+          status: "waiting",
+          pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" },
+        })
+        down = false
+        yield* answer("Yes.")
+        return { spoken: spoken(), sent: dispatched.map(({ commandId, messageId, dispatchMode }) => [commandId, messageId, (dispatchMode as { type: string }).type]) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "That didn't get to Migrate Tezos Integration, sir: T3 Code isn't answering. Send it again?",
+      "It's waiting on you for something, sir, so that will go once it's dealt with.",
+    ])
+    expect(result.sent).toEqual([
+      [result.sent[0]![0], result.sent[0]![1], "start_immediately"],
+      [result.sent[0]![0], result.sent[0]![1], "queue_after_active"],
+    ])
+  })
+
   test("yes, but once it's done, to sending again goes after the turn under way if it never left, and is left, saying why, if it may have got there", async () => {
     const later = (left: boolean) => {
       let down = true
