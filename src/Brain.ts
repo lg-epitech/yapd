@@ -506,7 +506,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   }
   if (Option.isSome(open)) {
     const question = open.value
-    if (refused.has(said)) return decision({ act: "dismiss", pending: "answers" })
+    // Said over a question, "stop" or "enough" is to stop talking, which lets it go: never a yes to what it asks, like stopping a thread.
+    if (refused.has(said) || enough.has(said)) return decision({ act: "dismiss", pending: "answers" })
     const candidates = question.candidates.flatMap((ref) => desk.threads.filter((listed) => Threads.same(listed.ref, ref)))
     const pick = (listed: Threads.Listed | undefined) =>
       listed === undefined

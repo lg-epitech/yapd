@@ -134,6 +134,20 @@ describe("Brain", () => {
       expect(Brain.fast(situation(heard), lines)?.act).toBe("dismiss")
       expect(Brain.fast(situation(heard, { subject: busy }), lines)?.act).toBe("dismiss")
     }
+    // Nor with a question open whose yes would stop one, or send something again: it lets the question go.
+    const confirming: Assistant.Open = {
+      ...which([ref(tezos)]),
+      kind: "confirm",
+      decision: Brain.decision({ act: "stop", target: "t1", sure: "medium" }),
+      asked: "Stop Migrate Tezos Integration, sir?",
+      about: "stop Migrate Tezos Integration",
+    }
+    const resending: Assistant.Open = { ...confirming, kind: "resend", decision: Brain.decision({ act: "send", text: "Use the fee table." }), resend: Option.some("yapd:u0:0") }
+    for (const open of [confirming, resending]) {
+      for (const heard of ["Stop.", "Quiet!", "Enough."]) {
+        expect(Brain.fast(situation(heard, { subject: busy, open: Option.some(open) }), lines)).toMatchObject({ act: "dismiss", pending: "answers" })
+      }
+    }
     // Saying to stop the work does, at once, for the one he's hearing about.
     const working = Brain.fast(situation("Stop working.", { subject: busy }), lines)
     expect(working === undefined ? undefined : desk().threads.find(({ handle }) => handle === working.target)?.thread.title).toBe("Migrate Tezos Integration")
