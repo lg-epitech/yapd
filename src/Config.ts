@@ -54,7 +54,10 @@ export const style = optional("YAPD_STYLE")
 /** Kokoro voice, see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md */
 export const voice = Config.string("YAPD_VOICE").pipe(Config.withDefault("bm_fable"))
 
-/** ffmpeg audio filter applied to Kokoro's output, or "none". The default is a light Jarvis-style treatment. */
+/**
+ * ffmpeg audio filter applied to Kokoro's output, or "none". The default is a light Jarvis-style treatment. An update's
+ * first sentences only play while the rest renders with filters known to leave them as the whole starts, see Voice.keepsItsStart.
+ */
 export const effect = Config.string("YAPD_EFFECT").pipe(
   Config.withDefault(
     "highpass=f=120,equalizer=f=3000:t=q:w=1:g=3,chorus=0.7:0.9:25:0.25:0.3:2,aecho=0.8:0.5:40|70:0.25|0.15,volume=9dB",

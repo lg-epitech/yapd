@@ -288,17 +288,58 @@ export const ffmpeg = (effect: string, rate: number) => (raw: string, path: stri
   run([
     "ffmpeg", "-loglevel", "error", "-y", "-i", raw, "-af", effect,
     // ffmpeg rings echoes out past the end, which a first part mustn't: the whole carries on from exactly where it stops.
-    // Its effect is the very same up to there, since each filter only hears what came before.
+    // Its effect is the very same up to there, for an effect that `keepsItsStart`.
     ...(samples === undefined ? [] : ["-t", `${samples / rate}`]),
     path,
   ]).pipe(Effect.asVoid)
+
+/**
+ * ffmpeg filters that only hear what came before, with the options each may be
+ * given, in ffmpeg's order, as it also reads them unnamed. Filtered with these
+ * alone, a first part is exactly how the whole filtered starts, sample for
+ * sample, as ffmpeg showed of each, alone and chained as the default effect.
+ * Left out are options that hear ahead, like the block size highpass and
+ * equalizer filter backwards by, or that a first part's shorter last frame
+ * could change, like volume's evaluation for each frame.
+ */
+const causal = new Map<string, ReadonlyArray<ReadonlyArray<string>>>([
+  ["highpass", [["frequency", "f"], ["width_type", "t"], ["width", "w"], ["poles", "p"], ["mix", "m"], ["channels", "c"], ["normalize", "n"], ["transform", "a"], ["precision", "r"]]],
+  ["equalizer", [["frequency", "f"], ["width_type", "t"], ["width", "w"], ["gain", "g"], ["mix", "m"], ["channels", "c"], ["normalize", "n"], ["transform", "a"], ["precision", "r"]]],
+  ["chorus", [["in_gain"], ["out_gain"], ["delays"], ["decays"], ["speeds"], ["depths"]]],
+  ["aecho", [["in_gain"], ["out_gain"], ["delays"], ["decays"]]],
+  ["volume", [["volume"], ["precision"]]],
+])
+
+/**
+ * Whether a first part filtered with `effect` on its own is sure to start the
+ * whole exactly. Other effects, like loudnorm, which hears seconds ahead, or
+ * areverse, which hears all of it, have no first part: the whole plays first.
+ */
+export const keepsItsStart = (effect: string) =>
+  effect === "none" ||
+  // A plain chain of filters, as quoting, escapes, labels and graphs aren't read here.
+  (!/['"\\[\];]/.test(effect) &&
+    effect.split(",").every((filter) => {
+      const equals = filter.indexOf("=")
+      const options = causal.get((equals === -1 ? filter : filter.slice(0, equals)).trim())
+      if (options === undefined) return false
+      const given = equals === -1 ? [] : filter.slice(equals + 1).split(":")
+      // ffmpeg reads options by place until the first one named, and none by place after it.
+      const firstNamed = given.findIndex((option) => option.includes("="))
+      return given.every((option, place) =>
+        option.includes("=")
+          ? options.some((names) => names.includes(option.slice(0, option.indexOf("="))))
+          : (firstNamed === -1 || place < firstNamed) && place < options.length,
+      )
+    }))
 
 /**
  * Renders a request as the Kokoro process does, with `effect` unless it's
  * "none". Asked for a first part, it renders the first sentences, saves them as
  * the whole will start and tells `part`, then renders the rest: all in one
  * request, so no other render can slip in between. `cancelled` says whether it
- * was given up on meanwhile.
+ * was given up on meanwhile. With an effect that may not keep its start, it
+ * renders the whole only, which then plays first.
  */
 export const speaking = <E>(speaker: Speaker<E>, effect: string) => {
   const { rate, fits } = speaker
@@ -326,7 +367,7 @@ export const speaking = <E>(speaker: Speaker<E>, effect: string) => {
 
   return ({ text, path, first }: Extract<Request, { type: "render" }>, part: (path: string) => void, cancelled: () => boolean) =>
     Effect.gen(function* () {
-      const opened = first === undefined ? undefined : yield* opening(text, fits)
+      const opened = first === undefined || !keepsItsStart(effect) ? undefined : yield* opening(text, fits)
       if (first === undefined || opened === undefined) return yield* save(join(yield* speakAll(yield* split(text, fits)), rate), path)
       const lead = yield* speaker.speak(opened.first)
       yield* save(head(lead, rate), first, true)

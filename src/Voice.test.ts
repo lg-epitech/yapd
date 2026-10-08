@@ -1,10 +1,26 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { Deferred, Effect, Exit, Fiber, Scope, TestClock, TestContext } from "effect"
-import { mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { RawAudio } from "@huggingface/transformers"
+import { ConfigProvider, Deferred, Effect, Exit, Fiber, Scope, TestClock, TestContext } from "effect"
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
+import * as Config from "./Config.ts"
 import { ProcessError } from "./Process.ts"
-import { early, head, join, KokoroError, kokoro, opening, remembering, split, startRender, type Voice, withFallback } from "./Voice.ts"
+import {
+  early,
+  ffmpeg,
+  head,
+  join,
+  KokoroError,
+  kokoro,
+  opening,
+  remembering,
+  speaking,
+  split,
+  startRender,
+  type Voice,
+  withFallback,
+} from "./Voice.ts"
 
 /** Samples at `level`, with `rate` samples a second. */
 const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.round(seconds * rate)).fill(level)
@@ -98,6 +114,84 @@ describe("opening", () => {
     // Too long for Kokoro in one go, it would have to break somewhere in the middle.
     expect(open("The loader is fixed, its tests pass, and I merged it. Nothing needs you.", 30)).toBeUndefined()
   })
+})
+
+describe("speaking", () => {
+  const rate = 24000
+  const text = "The tests pass. Nothing needs you."
+
+  /** Speech as Kokoro has it, a third of a second a word between its padding of quiet, pitched by the text so no two sound alike. */
+  const speech = (text: string) => {
+    const audio = new Float32Array(Math.round((0.2 + text.split(/\s+/).length / 3) * rate))
+    for (let i = rate / 10; i < audio.length - rate / 10; i++) {
+      audio[i] = 0.3 * Math.sin(i / (2 + text.length / 5)) * Math.sin(i / 1500) + 0.05 * Math.sin(i / 2.3)
+    }
+    return audio
+  }
+
+  /** Renders `text` with a first part, through ffmpeg unless `filter` stands in for it, and says which parts it told of. */
+  const render = (dir: string, effect: string, filter = ffmpeg(effect, rate)) =>
+    Effect.gen(function* () {
+      const told: Array<string> = []
+      const path = Path.join(dir, `${crypto.randomUUID()}.wav`)
+      const speaker = speaking(
+        {
+          rate,
+          fits: (text) => Effect.succeed(text.length <= 250),
+          speak: (text) => Effect.succeed(speech(text)),
+          write: (audio, path) => Effect.promise(() => new RawAudio(audio, rate).save(path)),
+          filter,
+          warn: () => {},
+        },
+        effect,
+      )
+      const exit = yield* Effect.exit(speaker({ type: "render", id: 1, text, path, first: `${path}.first.wav` }, (part) => told.push(part), () => false))
+      return { exit, told, path }
+    })
+
+  /** A WAV file's samples, as the bytes they're stored as. */
+  const samples = (path: string) => {
+    const file = readFileSync(path)
+    for (let at = 12; at < file.length; at += 8 + file.readUInt32LE(at + 4) + (file.readUInt32LE(at + 4) % 2)) {
+      if (file.toString("ascii", at, at + 4) === "data") return file.subarray(at + 8, at + 8 + file.readUInt32LE(at + 4))
+    }
+    throw new Error(`${path} has no samples`)
+  }
+
+  /** Whether the whole starts exactly as its first part, sample for sample, and goes on after it. */
+  const carriesOn = (first: string, path: string) => {
+    const part = samples(first)
+    const whole = samples(path)
+    return part.length > 0 && part.length < whole.length && whole.subarray(0, part.length).equals(part)
+  }
+
+  const run = <A>(test: (dir: string) => Effect.Effect<A, unknown>) => {
+    const dir = mkdtempSync(Path.join(tmpdir(), "yapd-speaking-"))
+    return Effect.runPromise(test(dir)).finally(() => rmSync(dir, { recursive: true, force: true }))
+  }
+
+  const defaultEffect = Config.effect.pipe(Effect.withConfigProvider(ConfigProvider.fromMap(new Map())))
+
+  test("has a first part early only with an effect sure to start the whole exactly as that part plays", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        // Unlike the others, loudnorm hears seconds ahead, areverse all of it, and highpass, given a block size, a block.
+        const effects = [
+          [yield* defaultEffect, true],
+          ["none", true],
+          ["loudnorm", false],
+          ["areverse", false],
+          ["highpass=f=120:b=4096", false],
+          ["highpass=120:q:0.707:2:1:all:0:di:auto:4096", false],
+        ] as const
+        for (const [effect, early] of effects) {
+          const { exit, told, path } = yield* render(dir, effect)
+          expect(Exit.isSuccess(exit)).toBe(true)
+          expect([effect, told.length]).toEqual([effect, early ? 1 : 0])
+          if (early) expect([effect, carriesOn(told[0]!, path)]).toEqual([effect, true])
+        }
+      }),
+    ))
 })
 
 describe("early", () => {

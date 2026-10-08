@@ -4,7 +4,7 @@ import { rm } from "node:fs/promises"
 import * as ort from "onnxruntime-node"
 import * as Hub from "./Hub.ts"
 import { phonemize } from "./vendor/kokoro/phonemize.js"
-import { type Device, ffmpeg, kokoroRepo as repo, type Reply, type Request, speaking, voices } from "./Voice.ts"
+import { type Device, ffmpeg, keepsItsStart, kokoroRepo as repo, type Reply, type Request, speaking, voices } from "./Voice.ts"
 
 // Kokoro, in a process of its own that the daemon starts. onnxruntime runs a
 // model on the thread that asks, and in the daemon that froze everything else
@@ -97,6 +97,10 @@ const program = Effect.gen(function* () {
     else if (request.id > handled) cancelled.add(request.id)
   })
   send({ type: "ready", device })
+  // So it's clear why updates wait to be rendered whole before they play.
+  if (!keepsItsStart(effect)) {
+    send({ type: "warning", message: `The effect may change how a first part starts, so updates play once rendered whole: ${effect}` })
+  }
 
   const render = speaking(
     {
