@@ -51,6 +51,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
           }),
         microphone: Effect.succeed(Option.some(microphone)),
         rest: Effect.void,
+        warm: Effect.void,
       }),
       // Each frame holds the probability that it's speech.
       Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),

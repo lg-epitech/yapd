@@ -10,6 +10,8 @@ A running list of what this branch changed and what yapd can do now, for review.
 
 - After a quiet spell, the first update or reply no longer waits about two extra seconds for Codex to set up a thread: the ready ones are replaced every quarter of an hour, before they'd be too old to trust. That was one update in five.
 
+- The speaker gets ready while an update is still being rendered, instead of after, which took macOS about a second on nearly every update. If nothing comes after all, it rests again within fifteen seconds.
+
 ## Smarter
 
 ## More capable

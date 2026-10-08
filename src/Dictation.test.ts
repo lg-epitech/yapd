@@ -75,6 +75,7 @@ const dictation = (
               playing++
               open = false
             }),
+            warm: Effect.void,
           }),
           // Each frame holds the probability that it's speech.
           Layer.succeed(Vad, {

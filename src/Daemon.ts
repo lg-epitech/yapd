@@ -40,6 +40,9 @@ export interface State {
 /** How many updates can be heard again. */
 const replayable = 5
 
+/** How long the speaker stays ready for something that was about to be said, before it rests again. */
+const patience = "15 seconds"
+
 /**
  * Updates are condensed and rendered in parallel, then spoken one at a time,
  * along with what yapd has to say for itself.
@@ -89,6 +92,9 @@ export const make = Effect.gen(function* () {
    */
   const power = yield* STM.commit(TRef.make({ on: true, turns: 0 }))
   const switched = STM.commit(TRef.get(power))
+  /** Something is about to be ready to say, so the speaker can be got ready meanwhile. */
+  const coming = yield* STM.commit(TRef.make(false))
+  const soon = STM.commit(TRef.set(coming, true))
   const state = yield* SubscriptionRef.make<State>({ on: true, heard: [] })
 
   /** Queues something to say, unless yapd is off or was turned off and on since `turns`, and returns whether it did. */
@@ -110,6 +116,7 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const turns = since ?? (yield* switched).turns
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
+      yield* soon
       yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio }
       if (!(yield* enqueue(said, turns))) {
@@ -272,6 +279,8 @@ export const make = Effect.gen(function* () {
 
       const spoken = introduce(project, summary.spoken)
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
+      // Rendering takes about as long as the speaker takes to get ready.
+      yield* soon
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
       generations.set(update, generation)
@@ -397,7 +406,15 @@ export const make = Effect.gen(function* () {
     if (ready === undefined) return yield* STM.retry
     yield* TRef.set(inbox, Inbox.remove(current, ready.session))
     yield* TRef.set(floor.reading, true)
+    yield* TRef.set(coming, false)
     return { ready, turns }
+  })
+
+  /** Something about to be ready, while yapd is on and nobody is dictating. Taken once. */
+  const expected = STM.gen(function* () {
+    const { on } = yield* TRef.get(power)
+    if (!on || (yield* Floor.dictating(floor)) || !(yield* TRef.get(coming))) return yield* STM.retry
+    yield* TRef.set(coming, false)
   })
 
   /**
@@ -474,6 +491,18 @@ export const make = Effect.gen(function* () {
       if (replays.get(replay.id) === replay) replays.delete(replay.id)
     })
 
+  /**
+   * Waits for something to say. When something is about to be ready, the
+   * speaker gets ready meanwhile, and if it doesn't come after all, like an
+   * update that turned out trivial, there's nothing to say for now.
+   */
+  const nextUp = Effect.gen(function* () {
+    const first = yield* STM.commit(STM.orElse(STM.map(takeNext, Option.some), () => STM.as(expected, Option.none())))
+    if (Option.isSome(first)) return first
+    yield* floor.device.withPermits(1)(audio.warm)
+    return yield* STM.commit(takeNext).pipe(Effect.timeoutOption(patience))
+  })
+
   const speakNext = Effect.gen(function* () {
     const queued = yield* STM.commit(
       takeNext.pipe(
@@ -481,11 +510,14 @@ export const make = Effect.gen(function* () {
         STM.orElse(() => STM.succeed(Option.none())),
       ),
     )
-    const { ready, turns } = yield* Option.match(queued, {
+    const next = yield* Option.match(queued, {
       // Nothing left to say, so the microphone goes off until there is, once no dictation is using it.
-      onNone: () => Floor.use(floor, audio)(Effect.void).pipe(Effect.zipRight(STM.commit(takeNext))),
-      onSome: Effect.succeed,
+      onNone: () => Floor.use(floor, audio)(Effect.void).pipe(Effect.zipRight(nextUp)),
+      onSome: (ready) => Effect.succeed(Option.some(ready)),
     })
+    // What was about to be ready never came, so the speaker rests again, the next time round.
+    if (Option.isNone(next)) return
+    const { ready, turns } = next.value
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
@@ -546,6 +578,7 @@ export const make = Effect.gen(function* () {
           const { on, turns } = yield* TRef.get(power)
           if (on === next) return undefined
           yield* TRef.set(power, { on: next, turns: turns + 1 })
+          yield* TRef.set(coming, false)
           return next ? [] : yield* TRef.modify(inbox, (queued) => [[...queued.values()], Inbox.empty] as const)
         }),
       )
@@ -591,6 +624,7 @@ export const make = Effect.gen(function* () {
   const again = (found: HeardUpdate, asked: Inbox.Replay) =>
     Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
+      yield* soon
       yield* voice.render(found.update.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update = { ...found.update, audio }
       // Replays keep both the hook generation and the original chain of voice replies.

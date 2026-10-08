@@ -50,6 +50,7 @@ const make = (says?: string, options: {
   const waiting = options.waitingHooks ? yield* Waiting.pipe(Effect.provide(WaitingLive)) : undefined
   let handle: Handle
   let rests = 0
+  let warms = 0
   const layer = Layer.mergeAll(
     Persona.Plain,
     Journal.memory,
@@ -85,6 +86,7 @@ const make = (says?: string, options: {
         }),
       microphone: Effect.succeed(says === undefined ? Option.none() : Option.some(microphone)),
       rest: Effect.sync(() => void rests++),
+      warm: Effect.sync(() => void warms++),
     }),
     Layer.succeed(Waiting, waiting === undefined ? {
       open: (session) => Effect.map(Deferred.make<string | undefined>(), (answer) => ({ session, answer })),
@@ -186,7 +188,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay }
 })
 
 const daemon = make()
@@ -195,6 +197,29 @@ const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
   Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
 
 describe("Daemon", () => {
+  test("gets the speaker ready while an update renders, and lets it rest again when nothing comes", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, warms, rests, played, toggle } = yield* make(undefined, { renderSeconds: 1 })
+        const restedBefore = rests()
+        yield* finish("s1", "The PR is ready.")
+        const whileRendering = warms()
+        yield* wait(1)
+        yield* wait(10)
+        const playedFirst = [...played]
+        yield* finish("s2", "The tests pass.")
+        // Turned off before it's ready, so nothing comes.
+        yield* toggle(false)
+        const restedAfterOff = rests()
+        yield* wait(16)
+        return { whileRendering, playedFirst, restedBefore, restedAfterOff, restedLater: rests() }
+      }),
+    )
+    expect(result.whileRendering).toBe(1)
+    expect(result.playedFirst).toEqual(["yapd. The PR is ready."])
+    expect(result.restedLater).toBeGreaterThan(result.restedAfterOff)
+  })
+
   test("stops an update for a dictation, and reads it again after, before newer ones", async () => {
     const result = await run(
       Effect.gen(function* () {

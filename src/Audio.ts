@@ -53,6 +53,12 @@ export class Audio extends Context.Tag("yapd/Audio")<
     readonly microphone: Effect.Effect<Option.Option<Queue.Dequeue<Float32Array>>, never, Scope.Scope>
     /** Turns the microphone off until the next update. */
     readonly rest: Effect.Effect<void>
+    /**
+     * Gets the speaker ready for something about to be said, since macOS takes
+     * about a second to set it up from rest. Nothing when it's ready already.
+     * Whoever calls it rests it again if nothing comes.
+     */
+    readonly warm: Effect.Effect<void>
   }
 >() {}
 
@@ -115,6 +121,7 @@ export const AfplayAudio = Layer.effectContext(
       }),
       microphone: Effect.succeed(Option.none()),
       rest: Effect.void,
+      warm: Effect.void,
     }
     return Context.make(Audio, audio).pipe(Context.add(Activity, activity))
   }),
@@ -147,6 +154,26 @@ const settle = (current: Current, error: AudioError, at: number) => {
   Deferred.unsafeDone(current.finished, Exit.fail(error))
   if (current.stopped !== undefined) Deferred.unsafeDone(current.stopped, Exit.succeed(at))
 }
+
+/** Twenty milliseconds of 16-bit mono silence at 24 kHz, as a WAV file. */
+const quiet20ms = (() => {
+  const samples = 480
+  const bytes = new Uint8Array(44 + samples * 2)
+  const view = new DataView(bytes.buffer)
+  bytes.set(new TextEncoder().encode("RIFF"), 0)
+  view.setUint32(4, 36 + samples * 2, true)
+  bytes.set(new TextEncoder().encode("WAVEfmt "), 8)
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, 24000, true)
+  view.setUint32(28, 48000, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  bytes.set(new TextEncoder().encode("data"), 36)
+  view.setUint32(40, samples * 2, true)
+  return bytes
+})()
 
 /**
  * How long yapd talks before the helper's echo cancellation has learnt its
@@ -187,6 +214,11 @@ export const native = (
       ),
     )
     const path = join(dir, "socket")
+    const silence = join(dir, "silence.wav")
+    yield* Effect.tryPromise({
+      try: () => Bun.write(silence, quiet20ms),
+      catch: (cause) => new Helper.HelperError({ message: "Could not prepare the audio helper's warm-up", cause }),
+    })
     const runtime = yield* Effect.runtime<never>()
     const runSync = Runtime.runSync(runtime)
     const runFork = yield* FiberSet.makeRuntime<never>()
@@ -195,6 +227,8 @@ export const native = (
     let connection: Socket<Helper.Decoder> | undefined
     let greeted: Deferred.Deferred<void> | undefined
     let current: Current | undefined
+    /** The silence played to get the speaker ready, while it plays. It's nobody's playback. */
+    let warming: string | undefined
     let listening = false
     /** How long the echo cancellation has heard yapd for, in what it played to the end or stopped. */
     let heard = 0
@@ -277,21 +311,35 @@ export const native = (
           playingSince = undefined
           return
         case "playing":
+          // Silence, which neither speaks nor teaches the echo cancellation anything.
+          if (event.value.id === warming) return
           // Playing something new stops what it played before without saying so.
           quiet()
           playingSince = now()
           if (current?.id === event.value.id) Deferred.unsafeDone(current.started, Exit.succeed(event.value.duration))
           return
         case "failed":
+          if (event.value.id === warming) {
+            warming = undefined
+            return
+          }
           quiet()
           // Also after it started, when the helper couldn't carry on after a device change.
           if (current?.id === event.value.id) settle(current, new AudioError({ message: event.value.message }), 0)
           return
         case "finished":
+          if (event.value.id === warming) {
+            warming = undefined
+            return
+          }
           quiet()
           if (current?.id === event.value.id) Deferred.unsafeDone(current.finished, Exit.void)
           return
         case "stopped":
+          if (event.value.id !== undefined && event.value.id === warming) {
+            warming = undefined
+            return
+          }
           quiet()
           // Without an id, nothing was playing anymore: it had just finished.
           if (current?.stopped !== undefined && (event.value.id === undefined || event.value.id === current.id)) {
@@ -323,6 +371,7 @@ export const native = (
 
     const disconnected = () => {
       connection = undefined
+      warming = undefined
       unsent = []
       runFork(endMicrophone())
       quiet()
@@ -438,6 +487,8 @@ export const native = (
               return Option.getOrElse(at, () => 0)
             })
             current = playback
+            // It replaces the silence, if that's still playing.
+            warming = undefined
             yield* Effect.addFinalizer(() => stop)
             send({ type: "play", id: playback.id, path: file, from })
             playback.duration = yield* restore(
@@ -476,7 +527,14 @@ export const native = (
       microphone: Effect.suspend(() =>
         listening && frames !== undefined ? Effect.map(PubSub.subscribe(frames), Option.some) : Effect.succeed(Option.none()),
       ),
+      // Playing anything sets the helper up, so it plays a moment's silence. It isn't heard, and isn't waited for.
+      warm: Effect.sync(() => {
+        if (connection === undefined || listening || current !== undefined || warming !== undefined) return
+        warming = crypto.randomUUID()
+        send({ type: "play", id: warming, path: silence, from: 0 })
+      }),
       rest: Effect.suspend(() => {
+        warming = undefined
         send({ type: "rest" })
         // It stops whatever it's playing without saying so.
         quiet()
