@@ -307,7 +307,13 @@ describe("Assistant", () => {
     const result = await run(
       Effect.gen(function* () {
         const { dictate, spoken, questions, journal } = yield* assistant((situation) =>
-          Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing both request formats, sir." }),
+          Brain.decision({
+            act: "answer",
+            target: handle(situation, tezos),
+            // The most mangled ones it's only fairly sure of, which is still enough to answer.
+            ...(["Dazzles", "stasos", "grades"].some((word) => situation.utterance.heard.includes(word)) ? { sure: "medium" as const, others: handle(situation, mina) } : {}),
+            spoken: "The Tezos migration is comparing both request formats, sir.",
+          }),
         )
         for (const words of heard) yield* dictate(words)
         const answers = yield* journal.since(0, { kinds: ["answer"] })
@@ -398,6 +404,23 @@ describe("Assistant", () => {
     expect(result.started.map(({ project }) => project)).toEqual(["/code/integration"])
     expect(result.spoken).toEqual(["Started in integration, on Opus, without a worktree."])
     expect(result.kept).toEqual([["new-thread", true]])
+  })
+
+  test("\"say that again\" says the last answer once more, and nothing when it's about to be said again anyway", async () => {
+    const answer = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    const queued = new Set<string>()
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken } = yield* assistant(minaStatus, undefined, { queued })
+        yield* dictate("Can you please tell me what's the status on MiNAS SV2?")
+        yield* dictate("Say that again.")
+        // Already waiting to be said, it isn't said twice.
+        queued.add(answer)
+        yield* dictate("Say that again.")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual([answer, answer])
   })
 
   test("a garbled answer to an open question closes it without asking again", async () => {
