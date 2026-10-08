@@ -610,4 +610,31 @@ describe("Assistant", () => {
     expect(result.kept).toEqual(["new-thread"])
     expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?"])
   })
+
+  test("when the model can't be asked, what he missed stays unheard and the question stays open", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, wait, spoken, open, journal } = yield* assistant((situation) =>
+          situation.utterance.heard === "What did I miss?"
+            ? undefined
+            : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+        )
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The PR is ready." })
+        yield* dictate("What's the status on the migration one?")
+        yield* dictate("What did I miss?")
+        const missed = (yield* journal.unheard(0, 12)).length
+        const kept = Option.isSome(yield* open)
+        // Asked again a minute later, as when it goes unanswered.
+        yield* wait(60)
+        return { missed, kept, spoken: spoken() }
+      }),
+    )
+    expect(result.missed).toBe(1)
+    expect(result.kept).toBe(true)
+    expect(result.spoken).toEqual([
+      "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
+      "I couldn't work that out just now, sir. What you said is in my log.",
+      "Which one, sir: Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?",
+    ])
+  })
 })

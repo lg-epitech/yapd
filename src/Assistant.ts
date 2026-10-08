@@ -91,7 +91,8 @@ export interface Thought {
   readonly situation: Brain.Situation
   /** The open question's version it was worked out against. */
   readonly version: number
-  readonly source: "fast" | "model"
+  /** Without the model, by it, or what's said when it couldn't be asked, which changes nothing. */
+  readonly source: "fast" | "model" | "failed"
 }
 
 /** What came of it. */
@@ -161,6 +162,17 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
+
+/** The words in what he said that tell threads apart: none too short or too common. */
+const distinctive = (text: string) =>
+  [...new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length > 3 && !common.has(word)))].slice(0, searches)
+
+/** What yapd knows as it works something out, and what that comes to without the model, when it's enough. */
+interface Glance {
+  readonly version: number
+  readonly situation: Brain.Situation
+  readonly quick: Brain.Decision | undefined
+}
 
 /** The assistant, saying what came of each request through `tell`. */
 export const make = (options: {
@@ -237,28 +249,39 @@ export const make = (options: {
     })
 
     /**
-     * Threads whose messages have the words he said that tell threads apart,
-     * one search each, the ones with most of them first. T3 Code answers in
-     * a few ms, so only what's there within the cap is taken.
+     * Threads whose messages have the words that tell threads apart, one
+     * search each, since T3 Code matches a phrase only as it's written: those
+     * with most of the words first, each with what was found. It fails only
+     * when no search could be made at all.
      */
-    const searching = (heard: string) =>
-      Effect.forEach(
-        [...new Set(heard.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length > 3 && !common.has(word)))].slice(0, searches),
-        (word) => threads.search(word).pipe(Effect.orElseSucceed(() => [])),
-        { concurrency: "unbounded" },
-      ).pipe(
-        Effect.map((all) => {
-          const hits = new Map<string, { readonly ref: Threads.Ref; count: number }>()
-          for (const matches of all) {
-            for (const ref of new Set(matches.map(({ ref }) => `${ref.machine}\n${ref.id}`))) {
-              const [machine = "", id = ""] = ref.split("\n")
-              const hit = hits.get(ref) ?? { ref: { machine, id }, count: 0 }
-              hit.count++
-              hits.set(ref, hit)
-            }
+    const matching = (text: string) =>
+      Effect.gen(function* () {
+        const words = distinctive(text)
+        const sought = words.length > 0 ? words : text.trim() === "" ? [] : [text.trim()]
+        const all = yield* Effect.forEach(sought, (word) => Effect.either(threads.search(word)), { concurrency: "unbounded" })
+        const failed = all.find(Either.isLeft)
+        if (failed !== undefined && all.every(Either.isLeft)) return yield* failed
+        const hits = new Map<string, { readonly ref: Threads.Ref; readonly snippet: string; count: number }>()
+        for (const matches of all.flatMap((searched) => (Either.isRight(searched) ? [searched.right] : []))) {
+          // Once for each word, however many of its messages have it.
+          const seen = new Set<string>()
+          for (const { ref, snippet } of matches) {
+            const key = `${ref.machine}\n${ref.id}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            const hit = hits.get(key)
+            if (hit === undefined) hits.set(key, { ref, snippet, count: 1 })
+            else hit.count++
           }
-          return [...hits.values()].toSorted((one, other) => other.count - one.count).slice(0, added).map(({ ref }) => ref)
-        }),
+        }
+        return [...hits.values()].toSorted((one, other) => other.count - one.count)
+      })
+
+    /** Threads a search for his words turns up, to add to the desk. T3 Code answers in a few ms, so only what's there within the cap is taken. */
+    const searching = (heard: string) =>
+      matching(heard).pipe(
+        Effect.map((hits) => hits.slice(0, added).map(({ ref }) => ref)),
+        Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []),
         Effect.timeoutTo({ duration: cap, onTimeout: () => [], onSuccess: (found): ReadonlyArray<Threads.Ref> => found }),
       )
 
@@ -295,24 +318,40 @@ export const make = (options: {
         } satisfies Brain.Situation
       })
 
-    const think = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
+    /** What it comes to without the model, when that's enough. */
+    const glance = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
       Effect.gen(function* () {
-        const at = version
+        const against = version
         const situation = yield* situate(utterance, about, lines)
-        const said = yield* persona.lines
-        const quick = Brain.fast(situation, said)
-        if (quick !== undefined) {
-          return { utterance, subject: about, decision: quick, situation, version: at, source: "fast" } satisfies Thought
-        }
-        const decided = yield* brain.decide(situation).pipe(
-          Effect.catchAll((error) =>
-            Effect.logWarning("Could not work out what you meant", error).pipe(
-              Effect.as(Brain.decision({ act: "answer", spoken: `I couldn't work that out just now${addressed(said)}. What you said is in my log.` })),
-            ),
-          ),
-        )
-        return { utterance, subject: about, decision: decided, situation, version: at, source: "model" } satisfies Thought
+        return { version: against, situation, quick: Brain.fast(situation, yield* persona.lines) } satisfies Glance
       })
+
+    const worked = (glanced: Glance, utterance: Utterance, about: Subject, decision: Brain.Decision, source: Thought["source"]): Thought => ({
+      utterance,
+      subject: about,
+      decision,
+      situation: glanced.situation,
+      version: glanced.version,
+      source,
+    })
+
+    /** What the model makes of it, or, when it can't be asked, a line saying so. */
+    const decide = (glanced: Glance, utterance: Utterance, about: Subject) =>
+      brain.decide(glanced.situation).pipe(
+        Effect.map((decision) => worked(glanced, utterance, about, decision, "model")),
+        Effect.catchAll((error) =>
+          Effect.gen(function* () {
+            yield* Effect.logWarning("Could not work out what you meant", error)
+            const spoken = `I couldn't work that out just now${addressed(yield* persona.lines)}. What you said is in my log.`
+            return worked(glanced, utterance, about, Brain.decision({ act: "answer", spoken }), "failed")
+          }),
+        ),
+      )
+
+    const think = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
+      Effect.flatMap(glance(utterance, about, lines), (glanced) =>
+        glanced.quick === undefined ? decide(glanced, utterance, about) : Effect.succeed(worked(glanced, utterance, about, glanced.quick, "fast")),
+      )
 
     const called = (situation: Brain.Situation, handle: string) => situation.desk.threads.find((listed) => listed.handle === handle)
 
@@ -324,7 +363,7 @@ export const make = (options: {
         `${act}${listed === undefined ? "" : ` → ${listed.called} (${listed.ref.machine})`}`,
         sure,
         ...(pending === "" ? [] : [`${pending} the question`]),
-        thought.source === "fast" ? "at once" : `${(ms / 1000).toFixed(1)} s`,
+        thought.source === "fast" ? "at once" : thought.source === "failed" ? "the model failed" : `${(ms / 1000).toFixed(1)} s`,
       ].join(", ")
     }
 
@@ -443,8 +482,8 @@ export const make = (options: {
     const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
         const text = spoken.trim() === "" ? said.misheard : spoken.trim()
-        // What he missed has now been heard, once it's been told.
-        if (Brain.catchingUp(thought.utterance.heard)) {
+        // What he missed has now been heard, once the model has told him.
+        if (Brain.catchingUp(thought.utterance.heard) || thought.decision.how === "missed") {
           yield* journal.markHeard(thought.situation.unheard.map(({ id }) => id), yield* Clock.currentTimeMillis)
         }
         return { say: text, subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref) }, kind: "answer" } satisfies Outcome
@@ -468,9 +507,6 @@ export const make = (options: {
         return yield* answer(decided.right.spoken, Option.some(target), thought, said)
       })
 
-    /** What the words of a search look for: the ones that say something. */
-    const telling = (text: string) => text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length > 3)
-
     /** Searches the threads, or what yapd heard and said, and answers from what's found with a second look. */
     const find = (thought: Thought, said: Lines) =>
       Effect.gen(function* () {
@@ -479,25 +515,24 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         let found: ReadonlyArray<string>
         if (decision.how === "journal") {
-          const words = telling(wanted)
+          const words = distinctive(wanted)
           const kept = yield* journal.since(now - 30 * day, { most: 2000 })
           found = kept
             .map((entry) => ({ entry, score: words.filter((word) => `${entry.said ?? ""} ${entry.text ?? ""}`.toLowerCase().includes(word)).length }))
             .filter(({ score }) => score > 0)
             .toSorted((one, other) => other.score - one.score || other.entry.at - one.entry.at)
             .slice(0, 8)
-            .map(({ entry }) => `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined ? "" : ` in ${entry.project}`}: «${entry.said ?? entry.text ?? ""}»`)
+            .map(({ entry }) => `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}`)
         } else {
-          const matches = yield* threads.search(wanted).pipe(Effect.either)
+          const matches = yield* matching(wanted).pipe(Effect.either)
           if (Either.isLeft(matches)) return reply(`I couldn't search your threads just now${addressed(said)}. ${matches.left.reason}`, thought.subject)
-          const named = yield* Effect.forEach(matches.right.slice(0, 8), ({ ref, snippet }) =>
+          found = yield* Effect.forEach(matches.right.slice(0, 8), ({ ref, snippet }) =>
             Effect.gen(function* () {
               const listed = situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))
-              const title = listed?.handle ?? Option.match(yield* threads.find(ref), { onNone: () => "a thread", onSome: ({ title }) => `«${title}»` })
-              return `${title}: «${snippet}»`
+              const title = listed?.handle ?? Option.match(yield* threads.find(ref), { onNone: () => "a thread", onSome: ({ title }) => Brain.fenced(title, 90) })
+              return `${title}: ${Brain.fenced(snippet, 300)}`
             }),
           )
-          found = named
         }
         if (found.length === 0) return reply(`I couldn't find anything like that${addressed(said)}.`, thought.subject)
         const decided = yield* brain.decide({ ...situation, second: Option.some({ found }) }).pipe(Effect.either)
@@ -679,6 +714,11 @@ export const make = (options: {
         // Nothing was really said, like words Whisper hears in silence: a question stays open.
         if (decided.source === "fast" && decision.act === "resume") return quiet(decided.subject)
         const said = yield* persona.lines
+        // Nothing was made of it, so that's all that's said: what he missed isn't marked heard, and a question stays open, to be asked again.
+        if (decided.source === "failed") {
+          if (asking !== undefined) yield* later(asking.open.id)
+          return reply(decision.spoken, decided.subject)
+        }
         const now = yield* Clock.currentTimeMillis
         if (asking !== undefined && Option.isNone(current(now))) yield* close(asking.open, "dropped: unanswered")
         const open = asking?.open
@@ -810,31 +850,37 @@ export const make = (options: {
           const began = yield* Clock.currentTimeMillis
           const about = utterance.via === "shortcut" && pressed !== undefined ? pressed : yield* subject
           pressed = undefined
-          // In case it's new work, or names the project asked about, the prompt is written meanwhile.
-          const asked = Option.filter(current(began), ({ kind }) => kind === "project")
-          const lines: ReadonlyArray<Line> = Option.match(asked, {
-            onNone: () => [{ speaker: "user", text: utterance.heard }],
-            onSome: (open) => [
-              { speaker: "yapd", text: open.asked },
-              { speaker: "user", text: utterance.heard },
-            ],
-          })
-          const ahead = yield* drafts.begin(lines, Option.getOrUndefined(Option.flatMap(asked, ({ material }) => material))).pipe(Effect.forkIn(scope))
-          writing.set(utterance.id, ahead)
-          const thought = yield* think(utterance, about, [])
-          const { act, pending } = thought.decision
-          // Kept only for what it was written for: new work, or the answer to which project.
-          const answering = Option.isSome(asked) && pending === "answers"
-          if (!(answering || (act === "start" && Option.isNone(asked)))) {
-            writing.delete(utterance.id)
-            yield* Fiber.interruptFork(ahead)
+          const glanced = yield* glance(utterance, about, [])
+          let ahead: Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>> | undefined
+          let thought: Thought
+          if (glanced.quick !== undefined) thought = worked(glanced, utterance, about, glanced.quick, "fast")
+          else {
+            // In case it's new work, or names the project asked about, the prompt is written while the model works out which.
+            const asked = Option.filter(glanced.situation.open, ({ kind }) => kind === "project")
+            const lines: ReadonlyArray<Line> = Option.match(asked, {
+              onNone: () => [{ speaker: "user", text: utterance.heard }],
+              onSome: (open) => [
+                { speaker: "yapd", text: open.asked },
+                { speaker: "user", text: utterance.heard },
+              ],
+            })
+            ahead = yield* drafts.begin(lines, Option.getOrUndefined(Option.flatMap(asked, ({ material }) => material))).pipe(Effect.forkIn(scope))
+            writing.set(utterance.id, ahead)
+            thought = yield* decide(glanced, utterance, about)
+            const { act, pending } = thought.decision
+            // Kept only for what it was written for: new work, or the answer to which project.
+            const answering = Option.isSome(asked) && pending === "answers"
+            if (!(answering || (act === "start" && Option.isNone(asked)))) {
+              writing.delete(utterance.id)
+              yield* Fiber.interruptFork(ahead)
+            }
           }
           yield* Effect.logInfo(`Routed: ${routed(thought, (yield* Clock.currentTimeMillis) - began)}`)
           const outcome = yield* acting(thought).pipe(
             Effect.ensuring(
               Effect.suspend(() => {
                 writing.delete(utterance.id)
-                return Fiber.interruptFork(ahead)
+                return ahead === undefined ? Effect.void : Fiber.interruptFork(ahead)
               }),
             ),
           )
