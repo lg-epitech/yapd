@@ -346,6 +346,8 @@ const assistant = (
     )
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
+    /** Lets the fibers catch up until `ready` says they have, like a command T3 Code was sent, however slowly they run. */
+    const until = (ready: () => boolean): Effect.Effect<void> => Effect.suspend(() => (ready() ? flush : Effect.zipRight(flush, until(ready))))
     const questions = () => said.filter(({ kind }) => kind === "question")
     return {
       ...made,
@@ -357,6 +359,7 @@ const assistant = (
       spoken: () => said.map(({ spoken }) => spoken),
       questions,
       flush,
+      until,
       /** An update starts being read to him. */
       reading: (project: string, spoken: string) =>
         Effect.flatMap(TestClock.currentTimeMillis, (at) =>
@@ -2702,7 +2705,7 @@ describe("Assistant", () => {
       run(
         Effect.gen(function* () {
           // T3 Code takes the stop, but the live view goes on showing the turn as it was.
-          const { dictate, wait, flush, spoken, dispatched, journal } = yield* assistant(
+          const { dictate, wait, until, spoken, dispatched, journal } = yield* assistant(
             (situation) =>
               situation.utterance.heard.startsWith("Stop")
                 ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" })
@@ -2711,7 +2714,7 @@ describe("Assistant", () => {
             { others: [turn] },
           )
           const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
-          yield* flush
+          yield* until(() => dispatched.length > 0)
           yield* wait(15)
           yield* Fiber.join(going)
           yield* dictate("What's the Mina one doing?")
@@ -2735,13 +2738,13 @@ describe("Assistant", () => {
     const result = await run(
       Effect.gen(function* () {
         const others = [tezos]
-        const { dictate, toggle, wait, flush, spoken, dispatched, journal } = yield* assistant(
+        const { dictate, toggle, wait, until, spoken, dispatched, journal } = yield* assistant(
           (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
           undefined,
           { others },
         )
         const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
-        yield* flush
+        yield* until(() => dispatched.length > 0)
         yield* wait(2)
         yield* toggle(false)
         yield* toggle(true)
@@ -2768,7 +2771,7 @@ describe("Assistant", () => {
     const result = await run(
       Effect.gen(function* () {
         const others = [tezos]
-        const { dictate, toggle, wait, flush, dispatched, journal } = yield* assistant(
+        const { dictate, toggle, wait, until, dispatched, journal } = yield* assistant(
           (situation) => Brain.decision({ act: "stop", target: handle(situation, tezos) }),
           undefined,
           {
@@ -2782,7 +2785,7 @@ describe("Assistant", () => {
         )
         yield* dictate("Stop the Tezos one.")
         const going = yield* Effect.fork(dictate("Scratch that."))
-        yield* flush
+        yield* until(() => dispatched.length > 1)
         yield* wait(2)
         yield* toggle(false)
         yield* toggle(true)
