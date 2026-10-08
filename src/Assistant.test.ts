@@ -868,6 +868,33 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual([{ type: "runtime-request.respond", requestId: "q1", answers: { "Which network first?": "Ghostnet" } }])
   })
 
+  test("'stop', 'skip', 'cancel' or 'enough' over a question lets it go, never picking an option it's a word of, which only its name in full picks", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    for (const [said, label] of [
+      ["Stop.", "Stop here"],
+      ["Skip.", "Skip the flaky test"],
+      ["Cancel.", "Cancel the migration"],
+      ["Enough.", "That's enough for now"],
+    ] as const) {
+      const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "next", question: "What next?", options: [{ label }, { label: "Keep going" }] }] }]
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer(said)
+          const quiet = { dispatched: made.dispatched.length, open: Option.isSome(yield* made.open) }
+          // Its name, said in full, picks it.
+          yield* asked(made, cloud)
+          yield* made.answer(`${label}.`)
+          return { said, quiet, left: made.spoken()[1], picked: made.dispatched.map(({ answers }) => answers) }
+        }),
+      )
+      expect(result.quiet).toEqual({ dispatched: 0, open: false })
+      expect(result.left).toBe("I'll leave that one, sir.")
+      expect(result.picked).toEqual([{ next: label }])
+    }
+  })
+
   test("a secret request is never answered by voice", async () => {
     const secret = "turn-item:secret-request:cloud:stripe"
     const cloud = waitingOn({ id: secret, kind: "user_input" })

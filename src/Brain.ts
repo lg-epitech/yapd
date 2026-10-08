@@ -605,10 +605,12 @@ const settling = (asks: Assistant.Asks | undefined, said: string, target: string
     }
     case "Question": {
       const [only, ...more] = asks.questions
-      if (only === undefined || more.length > 0) return undefined
+      // "Stop", "skip" or "enough" is to stop talking, never an option, even one that starts with it, like "Stop here".
+      if (only === undefined || more.length > 0 || enough.has(said)) return undefined
       const { options } = only
       const ordinal = ordinals.find(([pattern]) => pattern.test(said))
-      const named = said.split(" ").filter((word) => !pointing.has(word))
+      // A no, or "cancel", is only the option that's just that, never one it's a word of, like "Cancel the migration".
+      const named = refused.has(said) ? [] : said.split(" ").filter((word) => !pointing.has(word))
       /** The one option that fits, if only one does. */
       const one = (fitting: typeof options) => (fitting.length === 1 ? fitting[0] : undefined)
       const picked =
