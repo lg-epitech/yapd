@@ -87,6 +87,16 @@ describe("T3Actions", () => {
     // One too long to look through, like a tool given a whole file, is said as it starts, and taken for unread.
     const huge = T3Actions.request([{ ...command, input: `echo '${"a".repeat(30_000)}'` }, { ...approval, nativeItemRef: { nativeId: "toolu_1" } }], "r1")
     expect(Option.map(huge, (found) => (found._tag === "Approval" ? [found.command?.length, found.whole] : []))).toEqual(Option.some([600, undefined]))
+    // A tool's input is looked through as the tool gets it, each line on its own, and is unread when T3 Code sent only how it starts.
+    const tool = (input: unknown) =>
+      Option.map(
+        T3Actions.request([{ type: "dynamic_tool", status: "running", toolName: "Monitor", input, nativeItemRef: { nativeId: "toolu_1" } }, { ...approval, nativeItemRef: { nativeId: "toolu_1" } }], "r1"),
+        (found) => (found._tag === "Approval" ? [found.command, found.whole] : []),
+      )
+    expect(tool({ command: "cd build\nrm -rf ~/work", timeout: 30 })).toEqual(
+      Option.some(['Monitor {"command":"cd build\\nrm -rf ~/work","timeout":30}', "Monitor\ncommand\ncd build\nrm -rf ~/work\ntimeout\n30"]),
+    )
+    expect(tool({ summary: '{"command":"echo aaaa…', truncated: true })).toEqual(Option.some(['Monitor {"summary":"{\\"command\\":\\"echo aaaa…","truncated":true}', undefined]))
     // A secret goes by its own item's id, which is what the thread says it waits on.
     const secret = { type: "secret_request", id: "turn-item:secret-request:t1:deploy", status: "waiting", label: "Deploy key", reason: "To deploy", secretStatus: "pending" }
     expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(

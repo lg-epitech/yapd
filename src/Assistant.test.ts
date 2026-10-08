@@ -899,6 +899,45 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r2 accept"])
   })
 
+  test("a tool's approval is risky by what it's given as the tool gets it, line breaks and all, and needs 'approve' when T3 Code sends only how that starts", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    /** Asks for a tool given `input` to be allowed, under T3 Code's own harmless words for it, and says yes. */
+    const allowing = (input: unknown) =>
+      run(
+        Effect.gen(function* () {
+          const items = [
+            { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "run a maintenance check", nativeItemRef: { nativeId: "tool-r1" } },
+            { type: "dynamic_tool", status: "running", toolName: "Monitor", input, nativeItemRef: { nativeId: "tool-r1" } },
+          ]
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    // What's risky on a line of its own, which is how the tool runs it.
+    expect(await allowing({ command: "cd build\nrm -rf ~/work" })).toEqual({
+      spoken: [
+        "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
+        "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+      ],
+      dispatched: [],
+    })
+    // Given too much to send whole, T3 Code sends how it starts in its place, which leaves out whatever comes after.
+    expect(await allowing({ summary: '{"command":"echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…', truncated: true })).toEqual({
+      spoken: [
+        "Cloud deployment discovery wants to run a maintenance check, but I couldn't read all of what it would run, so say 'approve' if you want it, sir.",
+        "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+      ],
+      dispatched: [],
+    })
+    // Sent whole, with nothing risky in it, a yes will do.
+    expect(await allowing({ command: "cd build\nls" })).toEqual({
+      spoken: ["Cloud deployment discovery wants to run a maintenance check. Allow it, sir?", "Approved, sir."],
+      dispatched: ["r1 accept"],
+    })
+  })
+
   test("'approve' allows a dangerous approval first time", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

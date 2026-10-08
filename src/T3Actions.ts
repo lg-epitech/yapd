@@ -122,10 +122,10 @@ export type Request =
       /** The command it would run, the file it would change or the tool it would call, when the thread shows it, cut short to be said. */
       readonly command?: string
       /**
-       * All of what it would run, change or call, when the thread shows it and
-       * it isn't too long to look through, which is what tells whether it's
-       * risky: what's said of it, or T3 Code's own words for it, may be cut
-       * short before the risky part.
+       * All of what it would run, change or call, as it would run, when the
+       * thread shows all of it and it isn't too long to look through, which
+       * is what tells whether it's risky: what's said of it, or T3 Code's own
+       * words for it, may be cut short before the risky part.
        */
       readonly whole?: string
     }
@@ -191,24 +191,53 @@ const commandLength = 600
 /** How much of one is looked through for what's risky, at most: longer, like a tool given a whole file, it's taken for unread. */
 const checkable = 20_000
 
-/** What an approval is for, all of it, from the item it shares the agent's id with: the command, the file it changes, or the tool and what it's given. */
+/**
+ * Whether T3 Code sent only how a tool's input starts, in its place, as it
+ * does with one too big to send whole: what comes after could be anything.
+ */
+const cutShort = (input: unknown) => typeof input === "object" && input !== null && (input as { readonly truncated?: unknown }).truncated === true
+
+/**
+ * What a tool is given, as it gets it: each name and each value on a line of
+ * its own, and its text as it is, where its JSON writes a line break as "\n"
+ * run into the next word, which hides a command on a line of its own.
+ */
+const given = (value: unknown): ReadonlyArray<string> => {
+  if (typeof value === "string") return [value]
+  if (Array.isArray(value)) return value.flatMap(given)
+  if (typeof value === "object" && value !== null) return Object.entries(value).flatMap(([name, inner]) => [name, ...given(inner)])
+  return value === undefined || value === null ? [] : [String(value)]
+}
+
+/**
+ * What an approval is for, from the item it shares the agent's id with: the
+ * command, the file it changes, or the tool and what it's given, as it's
+ * said, and all of it as it would run, to look through for what's risky,
+ * when T3 Code sent all of it.
+ */
 const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.Type) => {
   const native = approval.nativeItemRef?.nativeId
   if (native === null || native === undefined) return undefined
   const found = items.find((item) => item.type !== "approval_request" && item.nativeItemRef?.nativeId === native)
-  const text = (() => {
+  const text = ((): { readonly said: string; readonly whole: string | undefined } | undefined => {
     switch (found?.type) {
       case "command_execution":
-        return typeof found.input === "string" ? found.input : undefined
+        return typeof found.input === "string" ? { said: found.input, whole: found.input } : undefined
       case "file_change":
-        return found.fileName === undefined ? undefined : `change ${found.fileName}`
-      case "dynamic_tool":
-        return `${found.toolName ?? "a tool"} ${JSON.stringify(found.input ?? null)}`
+        return found.fileName === undefined ? undefined : { said: `change ${found.fileName}`, whole: `change ${found.fileName}` }
+      case "dynamic_tool": {
+        const tool = found.toolName ?? "a tool"
+        return {
+          said: `${tool} ${JSON.stringify(found.input ?? null)}`,
+          whole: cutShort(found.input) ? undefined : [tool, ...given(found.input)].join("\n"),
+        }
+      }
       default:
         return undefined
     }
   })()
-  return text === undefined || text.trim() === "" ? undefined : text.trim()
+  if (text === undefined || text.said.trim() === "") return undefined
+  return { said: text.said.trim(), whole: text.whole?.trim() }
 }
 
 /**
@@ -315,7 +344,7 @@ export const request = (items: ReadonlyArray<unknown>, id: string): Option.Optio
     }
     if (found.type === "approval_request") {
       const runs = wouldRun(decoded, found)
-      const command = runs?.slice(0, commandLength)
+      const command = runs?.said.slice(0, commandLength)
       return Option.some({
         _tag: "Approval",
         id,
@@ -323,7 +352,7 @@ export const request = (items: ReadonlyArray<unknown>, id: string): Option.Optio
         kind: found.requestKind ?? "permission",
         decisions: found.options !== undefined && found.options.length > 0 ? found.options : every,
         ...(command === undefined ? {} : { command }),
-        ...(runs === undefined || runs.length > checkable ? {} : { whole: runs }),
+        ...(runs?.whole === undefined || runs.whole.length > checkable ? {} : { whole: runs.whole }),
       })
     }
   }
