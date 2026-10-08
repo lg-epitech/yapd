@@ -1581,6 +1581,40 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a catch-up said in one breath with the rest of the request is one too: what it told him is heard once he's heard the lot, and one told on a second look is noted as such", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, spoken, journal } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("tell")
+              ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
+              : Option.isNone(situation.second)
+                ? Brain.decision({ act: "find", how: "journal", text: "loader", rest: "tell the Mina one to use its fee table" })
+                : Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
+          undefined,
+          { waiting: true },
+        )
+        const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        // Put the way the model has to look up, so it's told on a second look, with something to do after.
+        yield* dictate("Anything happen to the loader while I was out? And tell the Mina one to use its fee table.")
+        const waiting = yield* unheard
+        yield* play()
+        const noted = yield* journal.since(0, { kinds: ["dictation"] })
+        return {
+          waiting,
+          after: yield* unheard,
+          spoken: spoken(),
+          second: noted.map(({ detail }) => (detail as { second?: Brain.Decision }).second?.how),
+        }
+      }),
+    )
+    expect(result.spoken).toEqual(["The loader fix is ready, sir. On it: Open Mina SSV2 Bug Tickets."])
+    expect(result.waiting).toEqual(["yapd. The loader fix is ready."])
+    expect(result.after).toEqual([])
+    expect(result.second).toEqual(["missed"])
+  })
+
   test("new work T3 Code never answered for is looked for once: there, it's said as started; not there, as maybe started", async () => {
     const launched = (unanswered: "started" | "not started") =>
       run(
