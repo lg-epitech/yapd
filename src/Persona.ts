@@ -22,6 +22,12 @@ export const Lines = Schema.Struct({
   leaving: Schema.String,
   /** What the user meant could be any of several threads, and asking wouldn't help. */
   cantTell: Schema.String,
+  /** The work they asked to stop has stopped. */
+  stopped: Schema.String,
+  /** Whether to send something once more that may not have got there, after saying why. */
+  again: Schema.String,
+  /** The work they stopped is going again. */
+  carrying: Schema.String,
   /** How the user is addressed, like "sir", or nothing. Lines made up on the spot use it too. */
   address: Schema.String,
 })
@@ -34,11 +40,23 @@ export const plain: Lines = {
   checking: "One moment.",
   leaving: "I'll leave that one.",
   cantTell: "I couldn't tell which one you meant.",
+  stopped: "Stopped.",
+  again: "Send it again?",
+  carrying: "Carrying on.",
   address: "",
 }
 
 /** The lines that are said on their own, to render ahead. */
-export const sayable = (lines: Lines) => [lines.onIt, lines.queued, lines.misheard, lines.checking, lines.leaving, lines.cantTell]
+export const sayable = (lines: Lines) => [
+  lines.onIt,
+  lines.queued,
+  lines.misheard,
+  lines.checking,
+  lines.leaving,
+  lines.cantTell,
+  lines.stopped,
+  lines.carrying,
+]
 
 /** ", sir" before a line's last mark, when the user is addressed at all. */
 export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
@@ -62,6 +80,9 @@ export const prompt = (style: string) =>
     `- "checking": that you're looking into something before answering, like "${plain.checking}"`,
     `- "leaving": that you'll let a question you asked go, since it wasn't answered, like "${plain.leaving}"`,
     `- "cantTell": that you couldn't tell which of their threads they meant, like "${plain.cantTell}"`,
+    `- "stopped": that the work they asked you to stop has stopped, like "${plain.stopped}"`,
+    `- "again": asking whether to send something once more, after you've said it may not have got there, like "${plain.again}" A question.`,
+    `- "carrying": that the work they had stopped is going again, like "${plain.carrying}"`,
     `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")
 
