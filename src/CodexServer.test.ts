@@ -356,6 +356,24 @@ describe("CodexServer", () => {
       }),
     ))
 
+  test("stops a turn it gives up on mid-stream, even read where nothing can be interrupted", () =>
+    withServer("trickle", (server, log) =>
+      Effect.gen(function* () {
+        yield* until(log, threadsStarted(2))
+        const written = yield* Stream.runCollect(Stream.take(server.stream(turn), 2)).pipe(
+          Effect.uninterruptible,
+          // Fails the test, in real time, should closing the stream wait on the model, which never finishes here.
+          Effect.disconnect,
+          Effect.raceFirst(Effect.promise(() => Bun.sleep(2_000)).pipe(Effect.zipRight(Effect.dieMessage("Closing the stream hung")))),
+        )
+        expect(Chunk.toReadonlyArray(written).map((entry) => entry.text)).toEqual(['{"sp', 'oken'])
+        const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 1)
+        expect(calls("turn/interrupt")(recorded).map((entry) => entry.params)).toEqual([
+          { threadId: "thread-1", turnId: "turn-1" },
+        ])
+      }),
+    ))
+
   test("doesn't lose a thread a call stopped waiting for", () =>
     withServer("slow-thread", (server, log) =>
       Effect.gen(function* () {

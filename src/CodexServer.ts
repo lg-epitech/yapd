@@ -585,6 +585,9 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
             Effect.map((text): Written => ({ _tag: "Whole", text })),
             Effect.exit,
             Effect.flatMap((exit) => Effect.sync(() => emit.done(exit))),
+            // A fork takes after where it starts, and a stream read where nothing can be interrupted would start it
+            // there, so stopping early would wait for the model to finish before the turn could be stopped.
+            Effect.interruptible,
             Effect.forkScoped,
           )
         }),
