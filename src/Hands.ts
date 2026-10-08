@@ -572,7 +572,7 @@ export const make = (options: {
          * message stays as it may be, never offered again on its own, so the
          * same words said again find it, and are offered under its own ids.
          */
-        const unsure = (reason: string) =>
+        const unverified = (reason: string) =>
           Effect.gen(function* () {
             if (row.kind === "message") {
               yield* ledger.settle(row.commandId, "unknown", { reason, from })
@@ -583,26 +583,26 @@ export const make = (options: {
           })
         const actions = threads.actions(row.machine)
         if (Option.isNone(actions)) {
-          yield* unsure(`I can't reach the threads on ${row.machine} right now.`)
+          yield* unverified(`I can't reach the threads on ${row.machine} right now.`)
           continue
         }
         if (row.kind === "start") {
           const thread = yield* threads.find(refOf(row))
           if (Option.isSome(thread)) yield* ledger.settle(row.commandId, "sent", { from })
-          else yield* unsure(unconfirmable)
+          else yield* unverified(unconfirmable)
           continue
         }
         const found = yield* Effect.either(landed(row, actions.value))
         if (Either.isLeft(found)) {
-          yield* unsure(`I couldn't look for it just now: ${after(plainly(found.left.reason))}`)
+          yield* unverified(`I couldn't look for it just now: ${after(plainly(found.left.reason))}`)
           continue
         }
         if (found.right) {
           yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }), from })
           yield* Effect.logInfo(`Found ${row.commandId} after restarting: it got there`)
-        } else if (row.kind !== "message") yield* unsure(unconfirmable)
+        } else if (row.kind !== "message") yield* unverified(unconfirmable)
         // Too long ago to send again, it's only said.
-        else if (now - row.at > recent) yield* unsure(tooLong)
+        else if (now - row.at > recent) yield* unverified(tooLong)
         else {
           yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", from })
           yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
