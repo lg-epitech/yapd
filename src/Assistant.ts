@@ -1530,6 +1530,13 @@ export const make = (options: {
         // One asked since he said this stays open, to be asked as usual, as if it weren't there.
         const open = before(utterance)?.open
         if (open === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
+        // Whether "it" is the question, as when he pressed the shortcut while it was being asked, even if it broke off before he'd heard it all.
+        const asked = decided.subject._tag === "Answer" && (decided.subject.question?.id === open.id || decided.subject.said === open.asked)
+        // He didn't catch the question, so it's asked again in other words, now rather than later, however that was taken: what he'd hear is the
+        // question, which is never closed and then said again (I4).
+        if (decision.act === "again" && (decision.pending === "answers" || asked)) return yield* reask(said)
+        // Nor when he asks to see it.
+        if (decision.act === "show" && decision.how === "said" && asked) return yield* reshown(said, decided.situation)
         // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it: what didn't go, and the rest of its request.
         if (asking?.said === false) {
           if (decision.act === "resume") return quiet(decided.subject)
@@ -1537,12 +1544,6 @@ export const make = (options: {
           const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
           yield* deliver(unfinished(reply(left, decided.subject), open.decision.rest, said), utterance)
           return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
-        }
-        // He didn't catch the question, so it's asked again in other words, now rather than later.
-        if (decision.act === "again" && decision.pending === "answers") return yield* reask(said)
-        // Nor when he asks to see it, however that was taken: what he'd see is the question, which is never closed and then said again (I4).
-        if (decision.act === "show" && decision.how === "said" && decided.subject._tag === "Answer" && decided.subject.said === open.asked) {
-          return yield* reshown(said, decided.situation)
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
         // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.

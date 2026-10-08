@@ -3491,6 +3491,43 @@ describe("Assistant", () => {
     expect(result).toEqual({ said: [`I asked whether you meant ${choices}, sir.`], open: Option.none() })
   })
 
+  test("asked to hear or see a question again, it's asked in other words, though it broke off before he'd heard it all or the model took that for something new, never closed and said as it was", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const clarify = (situation: Brain.Situation) => Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+    // He presses the shortcut while it's being asked, and then it breaks off, as when the audio helper quits, so he never heard it all.
+    const broken = (words: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, cut, prepare, heard, spoken, questions, show, open } = yield* assistant(clarify, undefined, { waiting: true })
+          yield* show.watch
+          yield* dictate("Which migration was that?")
+          yield* cut()
+          yield* prepare(1, 1)
+          yield* questions().at(-1)!.question!.unsaid
+          yield* heard({ heard: words, via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 }, 1)
+          return { spoken: spoken(), open: Option.map(yield* open, ({ asked }) => asked) }
+        }).pipe(Effect.scoped),
+      )
+    // He heard it, and the model takes his asking for it again for something new in its place, with the question as the line it says again.
+    const replaced = run(
+      Effect.gen(function* () {
+        const { dictate, spoken, open } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "again", how: "same", spoken: situation.lately.findLast(({ kind }) => kind === "answer")?.said ?? "", pending: "replaces" })
+            : clarify(situation),
+        )
+        yield* dictate("Which migration was that?")
+        yield* dictate("What was it you just asked me?")
+        return { spoken: spoken(), open: Option.map(yield* open, ({ asked }) => asked) }
+      }),
+    )
+    const asked = `${choices}, sir?`
+    const again = `Which one, sir: ${choices}?`
+    expect(await broken("Say that again.")).toEqual({ spoken: [asked, again], open: Option.some(again) })
+    expect(await broken("Show me what you said.")).toEqual({ spoken: [asked, `It's on your screen. ${again}`], open: Option.some(again) })
+    expect(await replaced).toEqual({ spoken: [asked, again], open: Option.some(again) })
+  })
+
   test("only an https address that came from T3 Code is opened", async () => {
     const linked = (id: string, title: string, url: string) =>
       thread(id, title, "yapd", {
