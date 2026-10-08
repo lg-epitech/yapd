@@ -1679,22 +1679,23 @@ export const make = (options: {
         // Told while an app was there to show its card, it's said as it is with none watching if none is by the time it's played, or the card won't go up.
         const { unseen } = outcome
         const instead = card === undefined || unseen === undefined || unseen === outcome.say || unseen === "" ? undefined : unseen
-        /** Whether it's played in the words said in its place, which are then what it's noted as having said, never "it's on your screen". */
+        /**
+         * Whether it's played in the words said in its place, which are then
+         * what it's noted as having said, never "it's on your screen": only
+         * once they're rendered, since its own words go if they can't be.
+         */
         let reworded = false
-        const off = Effect.map(options.show.watched, (watched) => !watched || kept?.down === true).pipe(
-          Effect.tap((off) =>
-            Effect.sync(() => {
-              reworded = off
-            }),
-          ),
-        )
+        const off = Effect.map(options.show.watched, (watched) => !watched || kept?.down === true)
+        const used = Effect.sync(() => {
+          reworded = true
+        })
         yield* options.tell(
           {
             id: mint(at, "a"),
             kind: open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer",
             priority: "needs-you",
             spoken: outcome.say,
-            ...(instead === undefined ? {} : { instead: { spoken: instead, when: off } }),
+            ...(instead === undefined ? {} : { instead: { spoken: instead, when: off, used } }),
             at,
             // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>

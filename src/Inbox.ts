@@ -44,9 +44,10 @@ export interface Notice {
   /**
    * What's said in its place when `when`, asked just before it's played, says
    * so, like the line without "it's on your screen" once no app is there to
-   * show its card: rendered only then.
+   * show its card: rendered only then, and `used` once it's what's played,
+   * never when it can't be rendered and its own words go after all.
    */
-  readonly instead?: { readonly spoken: string; readonly when: Effect.Effect<boolean> }
+  readonly instead?: { readonly spoken: string; readonly when: Effect.Effect<boolean>; readonly used?: Effect.Effect<void> }
   /** Run as it starts being said, which is when the user hears of it: never when it can't be played, and for a question, undone if it breaks off. */
   readonly saying?: Effect.Effect<void>
   /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */

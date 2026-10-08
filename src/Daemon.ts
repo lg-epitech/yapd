@@ -537,7 +537,8 @@ export const make = Effect.gen(function* () {
   /**
    * What's played for a notice: its own words, or those it says in their
    * place when it asks for them just before it's played, rendered then and
-   * removed once it's said. Should rendering fail, its own words go after all.
+   * removed once it's said. Should rendering fail, its own words go after all,
+   * and it's told which it gets only when it's those in their place.
    */
   const words = (said: Inbox.Said) =>
     Effect.gen(function* () {
@@ -546,6 +547,7 @@ export const make = Effect.gen(function* () {
       const path = join(dir, `${crypto.randomUUID()}${extension}`)
       return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
         Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`)),
+        Effect.zipRight(instead.used ?? Effect.void),
         Effect.as(path),
         Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say "${instead.spoken}" instead`, error), said.audio)),
       )

@@ -320,12 +320,15 @@ const assistant = (
     let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>()
     /** What the browser was asked to open. */
     const opened: Array<string> = []
-    /** What's said aloud as it's played: what a notice says in place of its own words, when it says to by then. */
+    /** What's said aloud as it's played: what a notice says in place of its own words, when it says to by then, which it's told of. */
     const aloud: Array<string> = []
     const voice = (notice: Notice | undefined) =>
       Effect.flatMap(notice?.instead?.when ?? Effect.succeed(false), (instead) =>
-        Effect.sync(() => {
-          if (notice !== undefined) aloud.push(instead && notice.instead !== undefined ? notice.instead.spoken : notice.spoken)
+        Effect.suspend(() => {
+          if (notice === undefined) return Effect.void
+          if (!instead || notice.instead === undefined) return Effect.sync(() => void aloud.push(notice.spoken))
+          aloud.push(notice.instead.spoken)
+          return notice.instead.used ?? Effect.void
         }),
       )
     const show = yield* Show.make(threads.detail, (address) => Effect.sync(() => void opened.push(address)))
