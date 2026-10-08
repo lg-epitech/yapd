@@ -53,8 +53,8 @@ const browser: Opener = (address) => Process.run(["open", address])
 export class Show extends Context.Tag("yapd/Show")<
   Show,
   {
-    /** Puts a card up in place of the one there. */
-    readonly put: (draft: Draft) => Effect.Effect<Card>
+    /** Puts a card up in place of the one there, as `line` is said with it. */
+    readonly put: (draft: Draft, line?: string) => Effect.Effect<Card>
     /** Takes the card down, and says whether one was up. */
     readonly hide: Effect.Effect<boolean>
     /** Puts one of the cards put up lately back up as it was, with nothing said of it, and says whether there was one. */
@@ -79,7 +79,11 @@ export class Show extends Context.Tag("yapd/Show")<
      * app watches. None when it can all be said.
      */
     readonly aside: (target: Threads.Listed, detail: T3Actions.Detail, answer: string, lines: Lines) => Effect.Effect<Option.Option<{ readonly say: string; readonly card: Draft }>>
-    /** What was said last and heard last, as a card, while an app watches to show it: for when he asks to hear it again. */
+    /**
+     * What was said last and heard last, as a card, while an app watches to
+     * show it: for when he asks to hear it again. None when the card on his
+     * screen went up with what's said again, which it would only hide.
+     */
     readonly caption: (line: string, situation: Brain.Situation) => Effect.Effect<Option.Option<Draft>>
   }
 >() {}
@@ -627,20 +631,25 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     let watching = 0
     // Whether the card that's up went up while an app was there to show it: one put up before isn't on his screen, even once an app is.
     let shownTo = false
+    // What was said as the card that's up went up, if anything was.
+    let upWith: string | undefined
 
-    const put = (draft: Draft) =>
+    const put = (draft: Draft, line?: string) =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const card: Card = { ...draft, id: `c${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`, at }
         recent.set(card.id, card)
         for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) recent.delete(id)
         shownTo = watching > 0
+        upWith = line
         yield* SubscriptionRef.set(up, Option.some(card))
         yield* Effect.logInfo(`Showing ${card.kind}: ${card.title}`)
         return card
       })
 
     const watched = Effect.sync(() => watching > 0)
+
+    const seen = Effect.flatMap(watched, (watching) => (watching && shownTo ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>())))
 
     const hide = Effect.gen(function* () {
       const was = yield* SubscriptionRef.getAndSet(up, Option.none())
@@ -735,13 +744,14 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           recent.delete(id)
           recent.set(id, card)
           shownTo = watching > 0
+          upWith = undefined
           yield* SubscriptionRef.set(up, Option.some(card))
           yield* Effect.logInfo(`Showing ${card.kind} again: ${card.title}`)
           return true
         }),
       card: (id) => Effect.sync(() => Option.fromNullable(recent.get(id))),
       showing: up.changes,
-      seen: Effect.flatMap(watched, (watching) => (watching && shownTo ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>()))),
+      seen,
       watched,
       watch: Effect.acquireRelease(
         Effect.sync(() => {
@@ -765,6 +775,12 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           return Option.some({ say, card: { ...thread(target, Option.some(detail), now), caption: answer } })
         }),
       caption: (line, situation) =>
-        Effect.map(watched, (watching) => (watching && line.trim() !== "" ? Option.some(said(line, lastHeard(situation))) : Option.none())),
+        Effect.gen(function* () {
+          if (!(yield* watched) || line.trim() === "") return Option.none()
+          // Like a thread's card with a command he couldn't hear, which is what he'd want to see while it's said again.
+          const repeated = situation.subject._tag === "Nothing" ? undefined : situation.subject.said
+          if (Option.isSome(yield* seen) && upWith !== undefined && upWith === repeated) return Option.none()
+          return Option.some(said(line, lastHeard(situation)))
+        }),
     } satisfies Show["Type"]
   })
