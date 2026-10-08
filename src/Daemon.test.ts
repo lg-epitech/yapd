@@ -194,7 +194,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting, arrived: made.arrived.pipe(Effect.zipRight(flush)), journal: Context.get(context, Journal.Journal) }
+  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -253,14 +253,15 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "yapd. The tests pass."])
   })
 
-  test("says the answer to a dictation before the update it cut off, however long it takes to work out", async () => {
+  test("says the answer to a dictation before the update it cut off, however long he talks and it takes to work out", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { finish, wait, dictate, notice, awaiting, arrived, played } = yield* daemon
+        const { finish, wait, dictate, notice, awaiting, played } = yield* daemon
         yield* finish("a", "The PR is ready.")
-        // He presses the shortcut, which awaits what he'll ask, and asks it.
-        yield* awaiting
+        // He presses the shortcut, which awaits what he'll ask, and asks it, taking as long as most dictations do.
+        const arrived = yield* awaiting
         const dictation = yield* dictate
+        yield* wait(27)
         yield* Scope.close(dictation, Exit.void)
         // The model takes a few seconds, while nothing else is said.
         yield* wait(4)

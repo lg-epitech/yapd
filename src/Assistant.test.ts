@@ -202,8 +202,7 @@ const assistant = (
       power: Effect.sync(() => power),
       lastHeard: Effect.succeed(Option.none()),
       coming: Effect.void,
-      awaiting: Effect.void,
-      arrived: Effect.void,
+      awaiting: Effect.succeed(Effect.void),
       queued: () => Effect.succeed(false),
     }).pipe(
       Effect.provide(

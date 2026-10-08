@@ -94,7 +94,6 @@ export const serve = Effect.gen(function* () {
     lastHeard: daemon.lastHeard,
     coming: daemon.coming,
     awaiting: daemon.awaiting,
-    arrived: daemon.arrived,
     queued: daemon.queued,
   })
   const shortcut = yield* Shortcut

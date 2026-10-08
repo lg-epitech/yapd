@@ -106,19 +106,36 @@ export const make = Effect.gen(function* () {
   /** Each time something said over an update is taken in. */
   const replied = yield* PubSub.unbounded<void>()
   /**
-   * Answers on their way, oldest first, from when the user asked until
-   * they're queued: meanwhile nothing but answers and questions is said, so
-   * what they asked for isn't kept waiting behind an update, nor an update put
-   * between them and it. Each lapses on its own, in case it never comes.
+   * Answers on their way, from when the user asked until they're queued:
+   * meanwhile nothing but answers and questions is said, so what they asked
+   * for isn't kept waiting behind an update, nor an update put between them
+   * and it. Each lapses on its own, in case it never comes.
    */
   const awaited = yield* STM.commit(TRef.make<ReadonlyArray<object>>([]))
+  const dictationStarted = STM.commit(
+    STM.flatMap(Floor.dictating(floor), (dictating) => (dictating ? STM.void : STM.retry)),
+  )
+  const dictationOver = STM.commit(
+    STM.flatMap(Floor.dictating(floor), (dictating) => (dictating ? STM.retry : STM.void)),
+  )
+  /**
+   * A while after the user last stopped dictating, counted again whenever
+   * they start: what they're still saying can't be answered yet, and a long
+   * dictation would otherwise use the whole of it up.
+   */
+  const lapse = Effect.gen(function* () {
+    while (true) {
+      yield* dictationOver
+      if (yield* Effect.raceFirst(Effect.as(Effect.sleep(holding), true), Effect.as(dictationStarted, false))) return
+    }
+  })
   const awaiting = Effect.gen(function* () {
     const answer = {}
     yield* STM.commit(TRef.update(awaited, (all) => [...all, answer]))
-    yield* Effect.sleep(holding).pipe(
-      Effect.zipRight(STM.commit(TRef.update(awaited, (all) => all.filter((other) => other !== answer)))),
-      Effect.forkIn(lifetime),
-    )
+    const arrived = STM.commit(TRef.update(awaited, (all) => all.filter((other) => other !== answer)))
+    // Stoppable even when awaited from what can't be stopped, like an answer being taken in, so closing yapd never waits for it.
+    yield* lapse.pipe(Effect.zipRight(arrived), Effect.interruptible, Effect.forkIn(lifetime))
+    return arrived
   })
 
   /** Queues something to say, unless yapd is off or was turned off and on since `turns`, and returns whether it did. */
@@ -498,10 +515,6 @@ export const make = Effect.gen(function* () {
       if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))
     }).pipe(Effect.scoped)
 
-  const dictationStarted = STM.commit(
-    STM.flatMap(Floor.dictating(floor), (dictating) => (dictating ? STM.void : STM.retry)),
-  )
-
   /** Once yapd is turned off, even if it's turned on again before this hears of it. */
   const turnedOff = (since: number) =>
     STM.commit(STM.flatMap(TRef.get(power), ({ turns }) => (turns === since ? STM.retry : STM.void)))
@@ -716,10 +729,12 @@ export const make = Effect.gen(function* () {
     lastHeard: Effect.sync(() => Option.fromNullable(latest)),
     /** Something is about to be said, like an answer being worked out, so the speaker gets ready meanwhile. */
     coming: soon,
-    /** An answer is on its way: nothing but answers is said until it `arrived`, or for twenty seconds at most. */
+    /**
+     * An answer is on its way: nothing but answers is said until what this
+     * gives back is run, once it's queued or won't come, or for twenty seconds
+     * after the user last stopped dictating at most.
+     */
     awaiting,
-    /** The answer longest on its way was queued, or won't come. */
-    arrived: STM.commit(TRef.update(awaited, (all) => all.slice(1))),
     /** Whether these words are waiting to be said, like an update or an answer a dictation cut off. */
     queued: (spoken: string) =>
       STM.commit(

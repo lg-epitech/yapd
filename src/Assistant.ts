@@ -174,10 +174,12 @@ export const make = (options: {
   readonly lastHeard: Effect.Effect<Option.Option<{ readonly update: Conversation.Update; readonly at: number; readonly playing: boolean }>>
   /** Something is about to be said, so the speaker can get ready while it's worked out. */
   readonly coming: Effect.Effect<void>
-  /** An answer is on its way, so nothing but answers is said until it `arrived`, or for a while at most. */
-  readonly awaiting: Effect.Effect<void>
-  /** The answer longest on its way was queued, or won't come. */
-  readonly arrived: Effect.Effect<void>
+  /**
+   * An answer is on its way, so nothing but answers is said until what this
+   * gives back is run, once it's queued or won't come, or for a while after
+   * he stops dictating at most.
+   */
+  readonly awaiting: Effect.Effect<Effect.Effect<void>>
   /** Whether these words are waiting to be said, like an update or an answer a dictation cut off. */
   readonly queued: (spoken: string) => Effect.Effect<boolean>
 }) =>
@@ -202,6 +204,8 @@ export const make = (options: {
     let answered: { readonly subject: Subject; readonly at: number } | undefined
     /** What "it" meant when the shortcut was pressed, before the dictation stopped what was playing. */
     let pressed: Subject | undefined
+    /** For each press not yet dictated, oldest first: what lets updates be said again once its answer is queued. */
+    const presses: Array<Effect.Effect<void>> = []
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
@@ -751,8 +755,7 @@ export const make = (options: {
         const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: Option.none() }, [{ speaker: "yapd", text: open.asked }])
         if (thought.source === "fast" && thought.decision.act === "resume") return Option.none()
         return Option.some(
-          Effect.zipRight(
-            options.awaiting,
+          Effect.flatMap(options.awaiting, (arrived) =>
             background(
               turn.withPermits(1)(
                 Effect.gen(function* () {
@@ -761,7 +764,7 @@ export const make = (options: {
                   yield* note(thought, outcome, at)
                   yield* deliver(outcome, utterance)
                 }),
-              ).pipe(Effect.ensuring(options.arrived), Effect.annotateLogs({ utterance: utterance.id })),
+              ).pipe(Effect.ensuring(arrived), Effect.annotateLogs({ utterance: utterance.id })),
             ),
           ),
         )
@@ -836,58 +839,63 @@ export const make = (options: {
         yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
       })
 
-    const heard = (input: Omit<Utterance, "id">) => {
-      const utterance: Utterance = { ...input, id: mint(input.at, "u") }
-      // A dictation's answer was awaited from when the shortcut was pressed.
-      return Effect.zipRight(
-        Effect.zipRight(input.via === "shortcut" ? Effect.void : options.awaiting, hold),
-        Effect.gen(function* () {
-          yield* Effect.logInfo(`Heard: ${utterance.heard}`)
-          // Whatever comes of it is said, so the speaker gets ready while it's worked out.
-          yield* options.coming
-          const began = yield* Clock.currentTimeMillis
-          const about = utterance.via === "shortcut" && pressed !== undefined ? pressed : yield* subject
-          pressed = undefined
-          const glanced = yield* glance(utterance, about, [])
-          let ahead: Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>> | undefined
-          let thought: Thought
-          if (glanced.quick !== undefined) thought = worked(glanced, utterance, about, glanced.quick, "fast")
-          else {
-            // In case it's new work, or names the project asked about, the prompt is written while the model works out which.
-            const asked = Option.filter(glanced.situation.open, ({ kind }) => kind === "project")
-            const lines: ReadonlyArray<Line> = Option.match(asked, {
-              onNone: () => [{ speaker: "user", text: utterance.heard }],
-              onSome: (open) => [
-                { speaker: "yapd", text: open.asked },
-                { speaker: "user", text: utterance.heard },
-              ],
-            })
-            ahead = yield* drafts.begin(lines, Option.getOrUndefined(Option.flatMap(asked, ({ material }) => material))).pipe(Effect.forkIn(scope))
-            writing.set(utterance.id, ahead)
-            thought = yield* decide(glanced, utterance, about)
-            const { act, pending } = thought.decision
-            // Kept only for what it was written for: new work, or the answer to which project.
-            const answering = Option.isSome(asked) && pending === "answers"
-            if (!(answering || (act === "start" && Option.isNone(asked)))) {
-              writing.delete(utterance.id)
-              yield* Fiber.interruptFork(ahead)
-            }
+    /** Works out what he said and acts on it, then says what came of it, one request at a time. */
+    const respond = (utterance: Utterance) =>
+      Effect.gen(function* () {
+        yield* Effect.logInfo(`Heard: ${utterance.heard}`)
+        // Whatever comes of it is said, so the speaker gets ready while it's worked out.
+        yield* options.coming
+        const began = yield* Clock.currentTimeMillis
+        const about = utterance.via === "shortcut" && pressed !== undefined ? pressed : yield* subject
+        pressed = undefined
+        const glanced = yield* glance(utterance, about, [])
+        let ahead: Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>> | undefined
+        let thought: Thought
+        if (glanced.quick !== undefined) thought = worked(glanced, utterance, about, glanced.quick, "fast")
+        else {
+          // In case it's new work, or names the project asked about, the prompt is written while the model works out which.
+          const asked = Option.filter(glanced.situation.open, ({ kind }) => kind === "project")
+          const lines: ReadonlyArray<Line> = Option.match(asked, {
+            onNone: () => [{ speaker: "user", text: utterance.heard }],
+            onSome: (open) => [
+              { speaker: "yapd", text: open.asked },
+              { speaker: "user", text: utterance.heard },
+            ],
+          })
+          ahead = yield* drafts.begin(lines, Option.getOrUndefined(Option.flatMap(asked, ({ material }) => material))).pipe(Effect.forkIn(scope))
+          writing.set(utterance.id, ahead)
+          thought = yield* decide(glanced, utterance, about)
+          const { act, pending } = thought.decision
+          // Kept only for what it was written for: new work, or the answer to which project.
+          const answering = Option.isSome(asked) && pending === "answers"
+          if (!(answering || (act === "start" && Option.isNone(asked)))) {
+            writing.delete(utterance.id)
+            yield* Fiber.interruptFork(ahead)
           }
-          yield* Effect.logInfo(`Routed: ${routed(thought, (yield* Clock.currentTimeMillis) - began)}`)
-          const outcome = yield* acting(thought).pipe(
-            Effect.ensuring(
-              Effect.suspend(() => {
-                writing.delete(utterance.id)
-                return ahead === undefined ? Effect.void : Fiber.interruptFork(ahead)
-              }),
-            ),
-          )
-          yield* note(thought, outcome, began)
-          yield* deliver(outcome, utterance)
-          return utterance.id
-        }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id })),
-      ).pipe(Effect.ensuring(options.arrived))
-    }
+        }
+        yield* Effect.logInfo(`Routed: ${routed(thought, (yield* Clock.currentTimeMillis) - began)}`)
+        const outcome = yield* acting(thought).pipe(
+          Effect.ensuring(
+            Effect.suspend(() => {
+              writing.delete(utterance.id)
+              return ahead === undefined ? Effect.void : Fiber.interruptFork(ahead)
+            }),
+          ),
+        )
+        yield* note(thought, outcome, began)
+        yield* deliver(outcome, utterance)
+        return utterance.id
+      }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
+
+    const heard = (input: Omit<Utterance, "id">) =>
+      Effect.suspend(() => {
+        const utterance: Utterance = { ...input, id: mint(input.at, "u") }
+        // A dictation's answer was awaited from when the shortcut was pressed, and dictations end in the order they began.
+        const press = input.via === "shortcut" ? presses.shift() : undefined
+        return Effect.flatMap(press === undefined ? options.awaiting : Effect.succeed(press), (arrived) =>
+          Effect.zipRight(hold, respond(utterance)).pipe(Effect.ensuring(arrived)),
+        )
+      })
 
     return {
       think,
@@ -895,20 +903,22 @@ export const make = (options: {
       heard,
       prepare: Effect.gen(function* () {
         // What's dictated is answered before anything else is said.
-        yield* options.awaiting
+        presses.push(yield* options.awaiting)
         yield* hold
         pressed = yield* subject
         const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
         yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
         yield* Effect.forkIn(threads.refreshUsage, scope)
       }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
-      nothing: Effect.zipRight(release, options.arrived),
+      nothing: Effect.zipRight(release, Effect.suspend(() => presses.shift() ?? Effect.void)),
       // Not one he hasn't heard yet, which what he said can't have been about.
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),
       drop: Effect.gen(function* () {
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
         pressed = undefined
+        // No answer is on its way any more, and the dictations they were for are dropped too.
+        yield* Effect.all(presses.splice(0), { discard: true })
         yield* Effect.forEach([...writing.values(), ...jobs], Fiber.interruptFork, { discard: true })
       }),
     } satisfies Assistant["Type"]
