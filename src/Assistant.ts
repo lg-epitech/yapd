@@ -241,6 +241,12 @@ export const make = (options: {
      * updates be said again once its answer is queued.
      */
     const presses = new Map<number, { readonly subject: Subject; readonly arrived: Effect.Effect<void> }>()
+    /**
+     * Presses whose dictation has ended, from the last one got ready for on:
+     * getting ready for one can take until after it's over, or only begin
+     * then, and must hold nothing once it is.
+     */
+    const over = new Set<number>()
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
@@ -960,8 +966,15 @@ export const make = (options: {
       })
 
     /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
-    const respond = (utterance: Utterance, pressed: Subject | undefined) =>
-      Effect.gen(function* () {
+    const respond = (utterance: Utterance, pressed: Subject | undefined) => {
+      /** The prompt being written in case it's new work, if it is being. */
+      let ahead: Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>> | undefined
+      /** Stops writing it, unless it was kept for what it was written for, which takes it from here. */
+      const letGo = Effect.suspend(() => {
+        writing.delete(utterance.id)
+        return ahead === undefined ? Effect.void : Fiber.interruptFork(ahead)
+      })
+      return Effect.gen(function* () {
         // Checked again once it's its turn: yapd may have been turned off and on while it waited behind another.
         if (yield* outdated(utterance.turns)) {
           yield* Effect.logInfo(`Not worked out, since yapd was turned off after it was said: ${utterance.heard}`)
@@ -973,7 +986,6 @@ export const make = (options: {
         const began = yield* Clock.currentTimeMillis
         const about = pressed ?? (yield* subject)
         const glanced = yield* glance(utterance, about, [])
-        let ahead: Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>> | undefined
         let thought: Thought
         if (glanced.quick !== undefined) thought = worked(glanced, utterance, about, glanced.quick, "fast")
         else {
@@ -986,35 +998,37 @@ export const make = (options: {
               { speaker: "user", text: utterance.heard },
             ],
           })
-          ahead = yield* drafts.begin(lines, Option.getOrUndefined(Option.flatMap(asked, ({ material }) => material))).pipe(Effect.forkIn(scope))
-          writing.set(utterance.id, ahead)
+          // Noted as it's begun, so it's stopped however this ends, even stopped while the model works it out.
+          yield* drafts.begin(lines, Option.getOrUndefined(Option.flatMap(asked, ({ material }) => material))).pipe(
+            Effect.interruptible,
+            Effect.forkIn(scope),
+            Effect.tap((fiber) =>
+              Effect.sync(() => {
+                ahead = fiber
+                writing.set(utterance.id, fiber)
+              }),
+            ),
+            Effect.uninterruptible,
+          )
           thought = yield* decide(glanced, utterance, about)
           const { act, pending } = thought.decision
           // Kept only for what it was written for: new work, or the answer to which project.
           const answering = Option.isSome(asked) && pending === "answers"
-          if (!(answering || (act === "start" && Option.isNone(asked)))) {
-            writing.delete(utterance.id)
-            yield* Fiber.interruptFork(ahead)
-          }
+          if (!(answering || (act === "start" && Option.isNone(asked)))) yield* letGo
         }
         yield* Effect.logInfo(`Routed: ${routed(thought, (yield* Clock.currentTimeMillis) - began)}`)
-        const outcome = yield* acting(thought).pipe(
-          Effect.ensuring(
-            Effect.suspend(() => {
-              writing.delete(utterance.id)
-              return ahead === undefined ? Effect.void : Fiber.interruptFork(ahead)
-            }),
-          ),
-        )
+        const outcome = yield* acting(thought).pipe(Effect.ensuring(letGo))
         yield* note(thought, outcome, began)
         yield* deliver(outcome, utterance)
         return Option.some(utterance.id)
-      }).pipe(turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
+      }).pipe(Effect.ensuring(letGo), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
+    }
 
     /** The dictation a press began has ended, however long it took: what was kept for it, let go of. */
     const ended = (press: number | undefined) =>
       Effect.sync(() => {
         if (press === undefined) return undefined
+        over.add(press)
         const kept = presses.get(press)
         presses.delete(press)
         return kept
@@ -1043,6 +1057,8 @@ export const make = (options: {
       prepare: (press, turns) =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
+          // Presses are got ready for one at a time, in order, so none before this one will be again.
+          for (const before of over) if (before < press) over.delete(before)
           // Pressed before yapd was turned off, however late it's handed on, there's nothing to get ready for.
           if (yield* outdated(turns)) return
           // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
@@ -1050,6 +1066,8 @@ export const make = (options: {
           const arrived = yield* options.awaiting
           // Turned off and on while that was found out: dropping cleared what was kept, so this keeps and holds nothing.
           if (yield* outdated(turns)) return yield* arrived
+          // Its dictation is over already, dealt with or come to nothing, so there's nothing left to keep or hold for it.
+          if (over.has(press)) return yield* arrived
           presses.set(press, { subject: about, arrived })
           yield* hold(`press:${press}`, at)
           const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)

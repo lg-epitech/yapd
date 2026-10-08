@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Layer, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Deferred, Effect, Fiber, Layer, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
@@ -170,6 +170,10 @@ const assistant = (
     readonly coming?: Effect.Effect<void>
     /** How updates are held for an answer, which can take a while to set up. */
     readonly awaiting?: Effect.Effect<Effect.Effect<void>>
+    /** How long the model takes to work out what was said, on top of answering. */
+    readonly deciding?: Effect.Effect<void>
+    /** Told when writing a prompt begins, and when it stops, however it ends. */
+    readonly writer?: { readonly begun: Effect.Effect<void>; readonly stopped: Effect.Effect<void> }
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -227,7 +231,12 @@ const assistant = (
       recent: Effect.succeed([]),
     }).pipe(
       Effect.provideService(Writer, {
-        decide: (material) => Effect.sleep(`${given.writing ?? 0} seconds`).pipe(Effect.zipRight(Effect.sync(() => write(material)))),
+        decide: (material) =>
+          (given.writer?.begun ?? Effect.void).pipe(
+            Effect.zipRight(Effect.sleep(`${given.writing ?? 0} seconds`)),
+            Effect.zipRight(Effect.sync(() => write(material))),
+            Effect.ensuring(given.writer?.stopped ?? Effect.void),
+          ),
         research: () =>
           Effect.sleep(`${given.researching ?? 0} seconds`).pipe(Effect.as({ action: "start" as const, why: "It's in the loader.", prompt: "Fix the loader.", spoken: "" })),
         prepare: Effect.void,
@@ -258,7 +267,10 @@ const assistant = (
               Effect.suspend(() => {
                 seen.push(situation)
                 const decided = model(situation)
-                return decided === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(decided)
+                return Effect.zipRight(
+                  given.deciding ?? Effect.void,
+                  decided === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(decided),
+                )
               }),
           }),
           Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines) }),
@@ -501,6 +513,51 @@ describe("Assistant", () => {
     )
     // The question asked since was never held by it, so it's asked once more.
     expect(result).toBe(2)
+  })
+
+  test("a press whose dictation is over before it's got ready for holds no question", async () => {
+    let awaited = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, prepare, nothing, unanswered, wait, questions } = yield* assistant(
+          (situation) => Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          undefined,
+          // Holding updates for the press takes a while to set up, and its dictation comes to nothing meanwhile.
+          { awaiting: Effect.suspend(() => (++awaited === 2 ? Effect.sleep("2 seconds").pipe(Effect.as(Effect.void)) : Effect.succeed(Effect.void))) },
+        )
+        yield* dictate("Which migration is running?")
+        yield* unanswered()
+        const preparing = yield* Effect.fork(prepare(1, 1))
+        yield* wait(0)
+        yield* nothing(1)
+        yield* wait(3)
+        yield* Fiber.join(preparing)
+        yield* wait(61)
+        return questions().length
+      }),
+    )
+    // Nothing holds it once the press is over, so it's asked once more.
+    expect(result).toBe(2)
+  })
+
+  test("a request stopped while the model works it out stops writing the prompt begun in case it was new work", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const begun = yield* Deferred.make<void>()
+        let stopped = false
+        const { heard, flush } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "It's in the loader." }), undefined, {
+          writing: 600,
+          deciding: Effect.never,
+          writer: { begun: Deferred.complete(begun, Effect.void).pipe(Effect.asVoid), stopped: Effect.sync(() => void (stopped = true)) },
+        })
+        const request = yield* Effect.fork(heard({ heard: "Tell me about the loader.", via: "typed", at: now, voiced: 3, turns: 1 }))
+        yield* Deferred.await(begun)
+        yield* Fiber.interrupt(request)
+        yield* flush
+        return stopped
+      }),
+    )
+    expect(result).toBe(true)
   })
 
   test("starting new work that mentions an existing thread starts new work", async () => {
