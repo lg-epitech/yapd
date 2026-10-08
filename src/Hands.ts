@@ -1,8 +1,10 @@
 import { Clock, Context, Duration, Effect, Either, Option, Schema } from "effect"
 import * as Brain from "./Brain.ts"
+import * as Launcher from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as T3Actions from "./T3Actions.ts"
+import * as T3CodeLauncher from "./T3CodeLauncher.ts"
 import type * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import type * as Threads from "./Threads.ts"
@@ -70,9 +72,10 @@ export interface Reconciled {
   readonly undelivered: ReadonlyArray<Ledger.Row>
   /**
    * Steps it couldn't confirm, like a stop, new work, or a message too long
-   * ago to send again or that it couldn't look for, and a stop or a queue let
-   * go of that went when what was to follow never did, each with why, to be
-   * said once, and never done again.
+   * ago to send again or that it couldn't look for, new work that didn't
+   * start, as "failed", and a stop or a queue let go of that went when what
+   * was to follow never did, each with why, to be said once, and never done
+   * again.
    */
   readonly unconfirmed: ReadonlyArray<Ledger.Row>
 }
@@ -130,6 +133,8 @@ const resumable = "10 minutes"
 const recent = 15 * 60_000
 /** Why a step a restart looked for can't be confirmed, when the thread doesn't show it. */
 export const unconfirmable = "I couldn't tell whether it went through before I restarted."
+/** Why new work a restart looked for can't be confirmed, when T3 Code is still getting it ready as long after it was asked for as a launch waits. */
+export const gettingReady = "T3 Code is still getting it ready."
 /** Why a message that may not have got there isn't offered to go again. */
 export const tooLong = "It's too long ago to send it again now."
 /** What a stop is noted with once it's been let carry on, so it's never let carry on twice. */
@@ -172,6 +177,9 @@ const Body = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("Cancel"), runId: Schema.String, messageId: Schema.optionalWith(Schema.String, { exact: true }) }),
 )
 const command = Schema.decodeUnknownOption(Body)
+
+/** New work in the ledger as it was asked for. */
+const request = Schema.decodeUnknownOption(Launcher.Request)
 
 /** A message in the ledger as it went, or was to: its words, and when it was to go in. */
 export const went = (row: Pick<Ledger.Row, "body">) =>
@@ -862,10 +870,20 @@ export const make = (options: {
           yield* unverified(`I can't reach the threads on ${row.machine} right now.`)
           continue
         }
+        // New work, by the checks a launch waits on, and waited for while T3 Code is still getting it ready, as long after it was asked for
+        // as a launch would be: a thread made for it doesn't say it started.
         if (row.kind === "start") {
-          const thread = yield* threads.find(refOf(row))
-          if (Option.isSome(thread)) yield* ledger.settle(row.commandId, "sent", { from })
-          else yield* unverified(unconfirmable)
+          const thread = yield* T3CodeLauncher.readied(threads.find(refOf(row)), row.at + Duration.toMillis(T3CodeLauncher.preparation))
+          const now = Option.map(thread, T3CodeLauncher.progress)
+          if (Option.contains(now, "begun")) {
+            yield* ledger.settle(row.commandId, "sent", { from })
+            yield* Effect.logInfo(`Found ${row.commandId} started after restarting`)
+          } else if (Option.contains(now, "unstarted")) {
+            const reason = T3CodeLauncher.unready(Option.exists(request(row.body), ({ worktree }) => worktree === true))
+            yield* ledger.settle(row.commandId, "failed", { reason, from })
+            yield* Effect.logWarning(`${row.commandId} didn't start before restarting: ${reason}`)
+            unconfirmed.push({ ...row, state: "failed", reason })
+          } else yield* unverified(Option.isSome(now) ? gettingReady : unconfirmable)
           continue
         }
         const found = yield* Effect.either(landed(row, actions.value))
@@ -1018,12 +1036,19 @@ export const read = (lines: Lines, called: Option.Option<string>) => `${readAlre
 
 /**
  * Said after a restart, for a step other than a message that couldn't be
- * confirmed, which isn't done again, with why when it's more than that; or
- * for a stop, or a queue let go of, that went, when what was to follow never did.
+ * confirmed, which isn't done again, with why when it's more than that; for
+ * new work found not to have started, with why; or for a stop, or a queue let
+ * go of, that went, when what was to follow never did.
  */
-export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, called: Option.Option<string>, why: string = unconfirmable) => {
+export const unsure = (
+  row: Pick<Ledger.Row, "kind" | "body"> & { readonly state?: Ledger.State },
+  lines: Lines,
+  called: Option.Option<string>,
+  why: string = unconfirmable,
+) => {
   const name = Option.getOrUndefined(called)
   const sent = command(row.body)
+  if (row.kind === "start" && row.state === "failed") return `Before I restarted, I asked for new work${addressed(lines)}, but ${after(why)}`
   if (why === unfollowed) {
     return row.kind === "stop"
       ? `Before I restarted, I stopped ${name ?? "the work"}${addressed(lines)}, but didn't get to tell it what to do instead.`

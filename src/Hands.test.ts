@@ -657,6 +657,55 @@ describe("Hands", () => {
     expect(result.dispatched).toBe(0)
   })
 
+  test("a restart takes new work as started only once T3 Code shows it begun, waiting while it's being got ready as long after it was asked for as a launch would, and says what didn't start or can't be told yet", async () => {
+    const preparing = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "preparing", status: "preparing" }
+    const begun = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "running", status: "running", latestRunStartedAt: "2026-10-08T22:02:00.000Z" }
+    const unbegun = { latestRunId: "run-1", status: "failed", lastError: "Workspace preparation failed.", latestRunCompletedAt: "2026-10-08T22:02:00.000Z" }
+    const restarted = (first: Record<string, unknown>, then?: Record<string, unknown>) =>
+      run(
+        Effect.gen(function* () {
+          const { ledger, becomes, restarted, dispatched } = yield* hands({ thread: thread(tezos.id, first) })
+          const { commandId } = yield* ledger.prepare({
+            utterance: "u1",
+            step: 0,
+            kind: "start",
+            machine: "Rosie",
+            thread: tezos.id,
+            body: ({ commandId, messageId }) => ({ project: "/code/yapd", prompt: "Fix the loader.", worktree: true, ids: { thread: tezos.id, message: messageId, command: commandId } }),
+            message: true,
+          })
+          yield* ledger.settle(commandId, "unknown", { reason: "T3 Code is taking too long, so I don't know if it started." })
+          // yapd restarted a minute after asking for it, and T3 Code has made its thread.
+          yield* TestClock.adjust("1 minute")
+          const looking = yield* Effect.fork(restarted(now + 30_000).reconcile)
+          yield* TestClock.adjust("2 minutes")
+          if (then !== undefined) becomes(thread(tezos.id, then))
+          yield* TestClock.adjust("4 minutes")
+          const { unconfirmed } = yield* Fiber.join(looking)
+          return {
+            state: Option.getOrNull(Option.map(yield* ledger.get(commandId), ({ state }) => state)),
+            said: unconfirmed.map((row) => Hands.unsure(row, lines, Option.none(), row.reason ?? undefined)),
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    const didnt = "Before I restarted, I asked for new work, sir, but T3 Code couldn't make the worktree, so the thread it made didn't start."
+    expect(await restarted(preparing, begun)).toEqual({ state: "sent", said: [], dispatched: 0 })
+    // A turn that began and has ended since, however, began.
+    expect(await restarted({ ...begun, activeRunId: null, activityRunStatus: null, status: "failed", latestRunCompletedAt: "2026-10-08T22:02:30.000Z" })).toEqual({
+      state: "sent",
+      said: [],
+      dispatched: 0,
+    })
+    expect(await restarted(unbegun)).toEqual({ state: "failed", said: [didnt], dispatched: 0 })
+    expect(await restarted(preparing, unbegun)).toEqual({ state: "failed", said: [didnt], dispatched: 0 })
+    expect(await restarted(preparing)).toEqual({
+      state: "abandoned",
+      said: ["Before I restarted, I couldn't confirm the new work you asked for started, sir. T3 Code is still getting it ready."],
+      dispatched: 0,
+    })
+  })
+
   test("a restart's look that comes back only once he's said yes to sending it again, and it went, leaves it sent, never offered again", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -1,10 +1,11 @@
-import { Effect, Either, type Redacted, Schema } from "effect"
+import { Clock, Effect, Either, Option, type Redacted, Schema } from "effect"
 import { realpath } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
 import { type Catalog, type Launcher, LaunchError, type Request, type Started } from "./Launcher.ts"
 import { run } from "./Process.ts"
 import * as Server from "./T3CodeServer.ts"
+import type * as T3Live from "./T3Live.ts"
 
 // Starts a thread the way T3 Code's app does when the user sends the first
 // message of a new one: a single launch that creates the thread and has the
@@ -288,11 +289,47 @@ export const launch = (plan: Plan, fresh: Fresh) => ({
   initialMessage: { messageId: fresh.message, text: plan.prompt, attachments: [] },
 })
 
-/** Whether T3 Code is still getting the workspace ready, before the first turn can start. */
-const preparing = ({ projection }: Launched) => projection.runs.at(-1)?.status === "preparing"
+/** How long T3 Code has to get new work ready, from when it's asked for: fetching and checking out a worktree can take minutes. */
+export const preparation = "6 minutes"
 
-/** Whether the first turn ended before it began, like when the worktree couldn't be made. */
-const failed = ({ projection }: Launched) => ["failed", "cancelled", "interrupted"].includes(projection.runs.at(-1)?.status ?? "")
+/** Whether T3 Code is still getting a run's workspace ready, before its turn can start. */
+const preparing = (status: string | null | undefined) => status === "preparing"
+
+/** Whether a run ended short, which as its workspace is got ready means its turn never began, like when the worktree couldn't be made. */
+const short = (status: string | null | undefined) => ["failed", "cancelled", "interrupted"].includes(status ?? "")
+
+/** How a launched thread's first turn is getting on, its only run so far. */
+const first = ({ projection }: Launched) => projection.runs.at(-1)?.status
+
+/**
+ * How new work is getting on, as T3 Code shows its thread, by the checks a
+ * launch waits on: still being got ready, with its first message not in yet,
+ * so with no run, which T3 Code shows as idle, or its workspace being
+ * prepared; ended before its turn began; or begun. Looked at later than a
+ * launch would, a turn that began and ended since is begun all the same.
+ */
+export const progress = (thread: Pick<T3Live.Thread, "status" | "latestRunStartedAt">): "preparing" | "unstarted" | "begun" =>
+  thread.status === "idle" || preparing(thread.status) ? "preparing" : short(thread.status) && thread.latestRunStartedAt === null ? "unstarted" : "begun"
+
+/**
+ * New work's thread as `look` shows it once it's no longer being got ready,
+ * or as it last did at `until`, in ms, looked at every second meanwhile, as a
+ * launch looks: none if there's no thread for it.
+ */
+export const readied = (look: Effect.Effect<Option.Option<T3Live.Thread>>, until: number) =>
+  Effect.gen(function* () {
+    let now = yield* look
+    while (Option.exists(now, (thread) => progress(thread) === "preparing") && (yield* Clock.currentTimeMillis) < until) {
+      yield* Effect.sleep("1 second")
+      const next = yield* look
+      if (Option.isSome(next)) now = next
+    }
+    return now
+  })
+
+/** Why new work T3 Code made a thread for didn't start: it couldn't get its workspace ready. */
+export const unready = (worktree: boolean, project = "the project") =>
+  `T3 Code ${worktree ? "couldn't make the worktree" : `couldn't get ${project} ready`}, so the thread it made didn't start.`
 
 /** Why T3 Code wouldn't start it, to be read out. */
 export const reason = (error: Server.Trouble | Server.Refusal) =>
@@ -437,13 +474,13 @@ export const launcher = (
         let launched = yield* call("orchestration.launchThread", launch(decided, started), Launched, "30 seconds")
         asked = true
         // T3 Code gets the workspace ready after answering. Fetching and checking out can take minutes.
-        while (preparing(launched)) {
+        while (preparing(first(launched))) {
           yield* Effect.sleep("1 second")
           launched = yield* api(`/api/orchestration/threads/${encodeURIComponent(started.thread)}/bounded`, Launched)
         }
         return launched
       }).pipe(
-        Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new Server.Trouble({ reason: "T3 Code is taking too long." }) }),
+        Effect.timeoutFail({ duration: preparation, onTimeout: () => new Server.Trouble({ reason: "T3 Code is taking too long." }) }),
         Effect.mapError((error) =>
           error._tag !== "Trouble"
             ? error
@@ -454,10 +491,7 @@ export const launcher = (
                 : error,
         ),
       )
-      if (failed(prepared)) {
-        const why = decided.worktree ? "couldn't make the worktree" : `couldn't get ${project.title} ready`
-        return yield* new LaunchError({ reason: `T3 Code ${why}, so the thread it made didn't start.` })
-      }
+      if (short(first(prepared))) return yield* new LaunchError({ reason: unready(decided.worktree, project.title) })
       const { thread } = prepared.projection
       const level = effort(thread.modelSelection)
       return {
