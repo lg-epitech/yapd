@@ -318,13 +318,16 @@ export const make = (options: {
      * when whatever waits for it is.
      */
     const stoppable = (request: Effect.Effect<Option.Option<string>>, utterance: Utterance) =>
-      Effect.gen(function* () {
-        const fiber = yield* job(request, utterance.turns)
-        const exit = yield* Fiber.await(fiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)))
-        if (Exit.isSuccess(exit) || !Cause.isInterruptedOnly(exit.cause)) return yield* exit
-        yield* Effect.logInfo("Stopped working on it, since yapd was turned off").pipe(Effect.annotateLogs({ utterance: utterance.id }))
-        return Option.none<string>()
-      })
+      // Begun and among the jobs before anything can stop whatever waits for it, so it's never left running on its own.
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const fiber = yield* job(request, utterance.turns)
+          const exit = yield* restore(Fiber.await(fiber)).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)))
+          if (Exit.isSuccess(exit) || !Cause.isInterruptedOnly(exit.cause)) return yield* exit
+          yield* Effect.logInfo("Stopped working on it, since yapd was turned off").pipe(Effect.annotateLogs({ utterance: utterance.id }))
+          return Option.none<string>()
+        }),
+      )
 
     /** The open question, unless it's been open so long it no longer counts. */
     const current = (now: number) =>
