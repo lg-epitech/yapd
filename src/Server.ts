@@ -1,5 +1,6 @@
-import { Data, Effect, FiberSet, Option, Schema, Stream } from "effect"
+import { Data, Effect, FiberSet, Option, Schema, type Scope, Stream } from "effect"
 import type { Doing } from "./Audio.ts"
+import { type Kind, kinds } from "./Journal.ts"
 import { Origin } from "./Origin.ts"
 import { Agent, Payload } from "./Payload.ts"
 
@@ -29,6 +30,73 @@ export interface State {
     /** ISO 8601, when the agent's turn ended. */
     readonly at: string
   }>
+  /** The card yapd is showing, or null. */
+  readonly showing?: Showing | null
+}
+
+/** A card as `/state` points at it. */
+export interface Showing {
+  readonly id: string
+  readonly kind: string
+  readonly title: string
+  /** ISO 8601, when it was put up. */
+  readonly at: string
+}
+
+/** What `/cards/{id}` returns. */
+export interface Card extends Showing {
+  readonly markdown: string
+  /** Only ever an https address from T3 Code. */
+  readonly url?: string
+  /** What yapd said with it. */
+  readonly caption?: string
+}
+
+/** A machine's threads, as `/threads` lists them. */
+export interface Machine {
+  readonly machine: string
+  /** Why its threads can't be seen right now. */
+  readonly reason?: string
+  readonly threads: ReadonlyArray<{
+    readonly id: string
+    readonly project: string
+    readonly title: string
+    readonly state: string
+    /** ISO 8601, when it got to that state. */
+    readonly since: string
+    readonly pr?: {
+      readonly number: number
+      /** Only ever an https address from T3 Code. */
+      readonly url?: string
+      readonly state?: string
+      readonly checks?: string
+      readonly review?: string
+      readonly mergeability?: string
+    }
+  }>
+}
+
+/** A journal entry, as `/journal` returns it. */
+export interface Entry {
+  readonly id: number
+  /** ISO 8601. */
+  readonly at: string
+  readonly kind: Kind
+  readonly machine?: string
+  readonly project?: string
+  readonly thread?: string
+  readonly said?: string
+  readonly text?: string
+  readonly utterance?: string
+  /** ISO 8601, when the user heard it through. */
+  readonly heard?: string
+}
+
+/** Which of the journal's entries `/journal` returns. */
+export interface Page {
+  readonly most: number
+  readonly before?: number
+  readonly kinds: ReadonlyArray<Kind>
 }
 
 /** What hooks and UIs can do. */
@@ -40,10 +108,44 @@ export interface Api {
   readonly replay: (id: string) => Effect.Effect<"queued" | "off" | "unknown", unknown>
   /** Takes what the user typed as if they'd said it, and gives its id once it's worked out. None while yapd is off. */
   readonly utter: (text: string) => Effect.Effect<Option.Option<string>, unknown>
+  /** One of the cards shown lately. */
+  readonly card: (id: string) => Effect.Effect<Option.Option<Card>>
+  /** Takes the card down. */
+  readonly hide: Effect.Effect<void>
+  /** Puts one of the cards shown lately back up, and says whether there was one. */
+  readonly back: (id: string) => Effect.Effect<boolean>
+  readonly threads: Effect.Effect<ReadonlyArray<Machine>>
+  readonly journal: (page: Page) => Effect.Effect<ReadonlyArray<Entry>>
+  /** Counts a UI that follows the state and shows cards as watching for as long as the scope lasts, so yapd knows what it shows is seen. */
+  readonly watch: Effect.Effect<void, never, Scope.Scope>
 }
 
 const decodeTurn = Schema.decodeUnknown(Schema.Struct({ on: Schema.Boolean }))
 const decodeUtterance = Schema.decodeUnknown(Schema.Struct({ text: Schema.String }))
+const decodeCard = Schema.decodeUnknown(Schema.Struct({ id: Schema.String }))
+
+/** How many journal entries a page has unless asked for fewer, and at most. */
+const pages = { usual: 50, most: 200 }
+
+/** The page of the journal a query asks for, or why it can't be read. */
+export const paging = (query: URLSearchParams): Page | string => {
+  const whole = (name: string) => {
+    const given = query.get(name)
+    if (given === null || given === "") return undefined
+    return /^[1-9]\d*$/.test(given) && Number.isSafeInteger(Number(given)) ? Number(given) : Number.NaN
+  }
+  const before = whole("before")
+  const limit = whole("limit")
+  if (Number.isNaN(before)) return "before is the id of an entry."
+  if (Number.isNaN(limit) || (limit !== undefined && limit > pages.most)) return `limit is a number from 1 to ${pages.most}.`
+  const asked = (query.get("kind") ?? "").split(",").map((kind) => kind.trim()).filter((kind) => kind !== "")
+  const unknown = asked.find((kind) => !(kinds as ReadonlyArray<string>).includes(kind))
+  if (unknown !== undefined) return `There's no kind ${unknown}: it's one of ${kinds.join(", ")}.`
+  return { most: limit ?? pages.usual, ...(before === undefined ? {} : { before }), kinds: asked as ReadonlyArray<Kind> }
+}
+
+/** A part of a path as it was meant, or nothing when it can't be decoded, which no card's or update's id is. */
+const decoded = Option.liftThrowable(decodeURIComponent)
 
 /** Names for this machine, so a web page can't reach the API through a DNS name of its own that points here. */
 const local = new Set(["127.0.0.1", "localhost", "[::1]"])
@@ -79,9 +181,11 @@ export const serve = (port: number, api: Api) =>
         if (route === "POST /events") return yield* event(request, url, server)
         if (route === "GET /state") return Response.json(yield* current)
         if (route === "GET /state/stream") {
-          // Open for as long as whoever watches wants it.
+          // Open for as long as whoever watches wants it. Only one that shows cards, like the menu bar app, is counted as
+          // watching until it goes: a status bar module, or a menu bar app from before cards, shows none of them.
           server.timeout(request, 0)
-          const events = api.state.pipe(
+          const watching = url.searchParams.has("cards") ? Stream.unwrapScoped(Effect.as(api.watch, api.state)) : api.state
+          const events = watching.pipe(
             Stream.map((state) => `data: ${JSON.stringify(state)}\n\n`),
             Stream.encodeText,
           )
@@ -119,11 +223,33 @@ export const serve = (port: number, api: Api) =>
             Effect.catchAll(failed("take what you typed")),
           )
         }
+        if (route === "DELETE /cards/current") return yield* Effect.as(api.hide, new Response(null, { status: 204 }))
+        if (route === "PUT /cards/current") {
+          const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.flatMap(decodeCard), Effect.option)
+          if (Option.isNone(body)) return new Response('Send {"id": "the card\'s id"}.', { status: 400 })
+          return (yield* api.back(body.value.id)) ? new Response(null, { status: 204 }) : new Response("No such card.", { status: 404 })
+        }
+        const card = request.method === "GET" ? /^\/cards\/([^/]+)$/.exec(url.pathname) : null
+        if (card !== null) {
+          const found = yield* Option.match(decoded(card[1]!), { onNone: () => Effect.succeed(Option.none<Card>()), onSome: api.card })
+          return Option.match(found, {
+            onNone: () => new Response("No such card.", { status: 404 }),
+            onSome: (card) => Response.json(card),
+          })
+        }
+        if (route === "GET /threads") return Response.json(yield* api.threads)
+        if (route === "GET /journal") {
+          const asked = paging(url.searchParams)
+          if (typeof asked === "string") return new Response(asked, { status: 400 })
+          return Response.json(yield* api.journal(asked))
+        }
         const replay = request.method === "POST" ? /^\/updates\/([^/]+)\/replay$/.exec(url.pathname) : null
         if (replay !== null) {
+          const id = decoded(replay[1]!)
+          if (Option.isNone(id)) return new Response("No such update.", { status: 404 })
           // Rendering waits its turn, and for the voice to load.
           server.timeout(request, 0)
-          return yield* api.replay(decodeURIComponent(replay[1]!)).pipe(
+          return yield* api.replay(id.value).pipe(
             Effect.map((result) =>
               result === "queued"
                 ? new Response(null, { status: 202 })

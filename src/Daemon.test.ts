@@ -13,6 +13,7 @@ import { RelayError, Relays, type Thread } from "./Relay.ts"
 import { key } from "./Payload.ts"
 import { Responder } from "./Responder.ts"
 import type { Handle } from "./Server.ts"
+import * as Show from "./Show.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad, VadError } from "./Vad.ts"
 import * as Hands from "./Hands.ts"
@@ -309,6 +310,7 @@ const assisted = (
       drafts,
       hands: Hands.make({ threads, ledger }),
       ledger,
+      show: yield* Show.make(threads.detail, () => Effect.void),
       tell: made.tell,
       power: made.power,
       lastHeard: made.lastHeard,

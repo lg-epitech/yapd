@@ -24,6 +24,27 @@ describe("Journal", () => {
     expect(kept.latest.map(({ at }) => at)).toEqual([30])
   })
 
+  test("pages through what it kept, newest written first, each page picking up where the last left off", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        // Written in this order, though what the last is about happened first.
+        for (const [at, kind] of [[10, "update"], [20, "answer"], [30, "update"], [40, "dictation"], [50, "answer"], [60, "update"], [5, "update"]] as const) {
+          yield* journal.write({ at, kind, said: `At ${at}.` })
+        }
+        const first = yield* journal.page({ most: 3 })
+        const second = yield* journal.page({ most: 3, before: first.at(-1)!.id })
+        const third = yield* journal.page({ most: 3, before: second.at(-1)!.id })
+        return {
+          pages: [first, second, third].map((page) => page.map(({ at }) => at)),
+          answers: (yield* journal.page({ most: 10, kinds: ["answer", "dictation"] })).map(({ at }) => at),
+        }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept.pages).toEqual([[5, 60, 50], [40, 30, 20], [10]])
+    expect(kept.answers).toEqual([50, 40, 20])
+  })
+
   test("a key is kept once, however often it's claimed", async () => {
     const kept = await Effect.runPromise(
       Effect.gen(function* () {

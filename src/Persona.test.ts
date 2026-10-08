@@ -18,6 +18,7 @@ const jarvis: Persona.Lines = {
   stopped: "Stopped, sir.",
   again: "Shall I send it again?",
   carrying: "Carrying on, sir.",
+  onScreen: "It's on your screen, sir.",
   address: "sir",
 }
 
@@ -85,6 +86,15 @@ describe("Persona", () => {
     expect(result.lines.again).toBe("Send it again?")
     expect(result.stored.again).toBe("Send it again?")
     expect(result.lines.stopped).toBe("Stopped, sir.")
+  })
+
+  test("'it's on your screen' never asks either, since nothing waits on an answer to it", async () => {
+    const result = await persona(undefined, { ...jarvis, onScreen: "It's on your screen, sir. Shall I walk you through it?" })
+    expect(result.lines.onScreen).toBe("It's on your screen, sir.")
+    expect(result.stored.onScreen).toBe("It's on your screen, sir.")
+    const kept = await persona({ ...jarvis, onScreen: "Shall I put it on your screen, sir?" }, jarvis)
+    expect(kept.asked).toBe(1)
+    expect(kept.lines.onScreen).toBe("It's on your screen, sir.")
   })
 
   test("how he's addressed is kept without marks, so a line said in its place doesn't ask, and isn't written again at the next start", async () => {

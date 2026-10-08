@@ -28,6 +28,8 @@ export const Lines = Schema.Struct({
   again: Schema.String,
   /** The work they stopped is going again. */
   carrying: Schema.String,
+  /** What they asked to see is on their screen, said only while an app is there to show it. */
+  onScreen: Schema.String,
   /** How the user is addressed, like "sir", or nothing. Lines made up on the spot use it too. */
   address: Schema.String,
 })
@@ -43,6 +45,7 @@ export const plain: Lines = {
   stopped: "Stopped.",
   again: "Send it again?",
   carrying: "Carrying on.",
+  onScreen: "It's on your screen.",
   address: "",
 }
 
@@ -66,7 +69,7 @@ export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim(
  * yapd isn't waiting on. Not "misheard", which may well ask him to say it
  * again, nor "again", which asks whether to send something once more.
  */
-const telling = ["onIt", "queued", "checking", "leaving", "cantTell", "stopped", "carrying"] as const
+const telling = ["onIt", "queued", "checking", "leaving", "cantTell", "stopped", "carrying", "onScreen"] as const
 
 /** Whether none of the lines that tell asks something, nor how he's addressed, which goes into lines of every kind, and the one that asks does. */
 const tells = (lines: Lines) => !lines.address.includes("?") && telling.every((key) => !lines[key].includes("?")) && lines.again.includes("?")
@@ -120,6 +123,7 @@ export const prompt = (style: string) =>
     `- "stopped": that the work they asked you to stop has stopped, like "${plain.stopped}"`,
     `- "again": asking whether to send something once more, like "${plain.again}" A question. It comes right after a sentence that addressed them already and said it may not have got there, so it has no address of its own.`,
     `- "carrying": that the work they had stopped is going again, like "${plain.carrying}"`,
+    `- "onScreen": that what they asked to see is on their screen now, like "${plain.onScreen}" It's said as it goes up, so don't ask.`,
     `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")
 

@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until it comes back with nothing to fix, then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before its first migration, to `~/.yapd/yapd.before-jarvis.sqlite`, and again before the assistant went live, to `~/.yapd/yapd.before-m1.sqlite`.
 
-Live on `dev` now: everything below except doing things to threads by voice (message, steer, stop, carry on), which is merged here and waits on its live check. Being built: showing what you ask for on screen.
+Live on `dev` now: everything below except doing things to threads by voice (message, steer, stop, carry on) and Show me, which are merged here and wait on their live checks.
 
 ## Talk to it (the shortcut)
 
@@ -19,6 +19,11 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 - Answers come before any update waiting to be read.
 - "Stop", "skip" or "enough" over an update skips it. "What did I miss?" leaves out what's about to be read anyway, and says how many are coming up.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
+
+## Show me
+
+- "Show me what's running", "show me that PR", "show me my usage" or "what I missed" puts a card in a panel under the menu bar icon as yapd says it; "hide that" takes it down, and "open that PR" opens it in your browser, https only. A thread waiting on a command that can't be read aloud gets its card with the answer, and "say that again" puts it back up.
+- The API gains `/cards`, `/threads` and `/journal` to read from.
 
 ## Faster
 

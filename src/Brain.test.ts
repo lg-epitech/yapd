@@ -181,6 +181,69 @@ describe("Brain", () => {
     expect(between._tag === "Ask" ? between.open.kind : between).toBe("which")
   })
 
+  test("'show me that' shows what was just talked about without the model, and 'hide that' only takes a card down while one is up", () => {
+    const subject: Assistant.Subject = { _tag: "Answer", said: "The Tezos migration is comparing fee tables, sir.", about: Option.some(ref(tezos)) }
+    const shown = (heard: string, overrides: Partial<Brain.Situation> = {}) => {
+      const decided = Brain.fast(situation(heard, { subject, ...overrides }), lines)
+      return decided === undefined ? undefined : { act: decided.act, how: decided.how, target: decided.target }
+    }
+    const tezosHandle = desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
+    expect(shown("Show me that.")).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me that P.R.")).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    // Opening it is the same, at once even when the model is slow or down.
+    for (const heard of ["Open that PR.", "Open that P.R.", "Open the pull request."]) expect(shown(heard)).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    // Its pull request while that's open, which opens it in the browser too, and the thread once it's merged.
+    const pulled = (state: string): Threads.Desk => ({
+      ...desk(),
+      threads: desk().threads.map((listed) =>
+        listed.ref.id !== tezos.id
+          ? listed
+          : {
+              ...listed,
+              thread: Schema.decodeUnknownSync(T3Live.Thread)({
+                ...listed.thread,
+                pullRequests: [{ number: 412, url: "https://github.com/lg-epitech/integration/pull/412", repository: "lg-epitech/integration", snapshot: { state, title: "Migrate Tezos" } }],
+              }),
+            },
+      ),
+    })
+    expect(shown("Show me that.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    expect(shown("Show me that.", { desk: pulled("MERGED") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    // Asked for by name, the thread is what's shown, never its pull request opened in its place.
+    expect(shown("Show me the thread.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me that thread.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me what's running.")).toEqual({ act: "show", how: "threads", target: "" })
+    // Nothing "that" could be, so which thread is the model's to work out.
+    expect(shown("Show me that.", { subject: { _tag: "Nothing" } })).toBeUndefined()
+    // With nothing up, "hide that" could be about a thread.
+    expect(shown("Hide that.")).toBeUndefined()
+    expect(shown("Hide that.", { showing: "What's going on" })).toEqual({ act: "show", how: "hide", target: "" })
+  })
+
+  test("showing a thread or its pull request asks between those it can't tell apart, and says why when no thread can be seen", () => {
+    const checked = (decided: Brain.Decision, overrides: Partial<Brain.Situation> = {}) => Brain.check(decided, situation("Show me the migration PR.", overrides), lines)
+    const [tezosHandle = "", minaHandle = ""] = [tezos, mina].map((thread) => desk().threads.find(({ ref }) => ref.id === thread.id)!.handle)
+    // Its pull request opens in his browser, so a low guess between two, or none at all, is asked about first.
+    expect(checked(Brain.decision({ act: "show", how: "pr", target: tezosHandle, others: minaHandle, sure: "low" }))._tag).toBe("Ask")
+    expect(checked(Brain.decision({ act: "show", how: "pr", others: `${tezosHandle}, ${minaHandle}` }))._tag).toBe("Ask")
+    expect(checked(Brain.decision({ act: "show", how: "pr", target: tezosHandle, others: minaHandle, sure: "medium" }))._tag).toBe("Do")
+    expect(checked(Brain.decision({ act: "show", how: "thread" }))).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    // With T3 Code down, there's no thread it could have told apart.
+    const blind: Threads.Desk = {
+      threads: [],
+      away: [
+        { machine: "Rosie", reason: "T3 Code isn't running, so I can't see your threads." },
+        { machine: "rig", reason: "I can't see rig's threads yet." },
+      ],
+    }
+    for (const how of ["thread", "pr"]) {
+      expect(checked(Brain.decision({ act: "show", how }), { desk: blind })).toEqual({
+        _tag: "Say",
+        spoken: "T3 Code isn't running, so I can't see your threads, sir. I can't see rig's threads yet.",
+      })
+    }
+  })
+
   test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {
     const rig = (decided: Brain.Decision) => Brain.check(decided, situation("What's the rig relay fix doing?"), lines)
     const here = rig(Brain.decision({ act: "look", target: "t2", machine: "rig", sure: "high" }))

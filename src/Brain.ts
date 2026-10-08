@@ -29,7 +29,7 @@ export const Act = Schema.Literal(
 export type Act = typeof Act.Type
 
 /** What it can do so far. The rest are understood, and answered with "not yet". */
-export const enabled: ReadonlySet<Act> = new Set<Act>(["dismiss", "resume", "answer", "look", "find", "again", "clarify", "start", "send", "stop", "undo"])
+export const enabled: ReadonlySet<Act> = new Set<Act>(["dismiss", "resume", "answer", "look", "find", "again", "clarify", "start", "send", "stop", "undo", "show"])
 
 /** Acts that only read, which go ahead on a fair guess and say which thread they took. */
 const reads: ReadonlySet<Act> = new Set<Act>(["answer", "look", "find", "show"])
@@ -64,7 +64,7 @@ export const Decision = Schema.Struct({
   pending: Schema.Literal("answers", "replaces", ""),
   /** answer: missed · send: now|after|restart · decide: accept|session|decline · again: same|more · find: threads|journal
    *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind: at|finished|asked|checks|merged
-   *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|memories */
+   *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|said|hide|memories */
   how: Schema.String,
   /** ISO 8601 with offset, for remind/snooze/mode until; "" otherwise. */
   when: Schema.String,
@@ -113,6 +113,8 @@ export interface Situation {
   /** What yapd last did for him in the last two minutes, whatever it was, which "scratch that" means. */
   readonly acted: Option.Option<Ledger.Row>
   readonly now: number
+  /** The title of the card on his screen, while an app is there to show it. */
+  readonly showing?: string
 }
 
 /** What to do, once it's checked: the decision, and the thread it's about if any. */
@@ -140,10 +142,11 @@ export class Brain extends Context.Tag("yapd/Brain")<
 
 // ---------------------------------------------------------------- templates
 
-const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
+/** The first letter capitalized, to start a sentence. */
+export const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
 /** Small counts as words, the way they're said. */
-const count = (n: number) =>
+export const count = (n: number) =>
   ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"][n] ?? String(n)
 
 /** "A", "A or B", "A, B or C". */
@@ -151,11 +154,11 @@ const either = (names: ReadonlyArray<string>) =>
   names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`
 
 /** "A", "A and B", "A, B and C". */
-const both = (parts: ReadonlyArray<string>) =>
+export const both = (parts: ReadonlyArray<string>) =>
   parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`
 
 /** A time of day as it's said, like "4:10 PM". */
-const time = (at: number) => new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+export const time = (at: number) => new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
 
 /** What a thread is doing, in a few words that tell it from one called the same. */
 const telling: Readonly<Record<Threads.State, string>> = {
@@ -315,7 +318,7 @@ export const needing = (desk: Threads.Desk, lines: Lines, now: number) => {
  * with the day further off, like "Monday at 9:00 AM", since a weekly window
  * can be days from resetting.
  */
-const clock = (iso: string, now: number) => {
+export const clock = (iso: string, now: number) => {
   const at = Date.parse(iso)
   if (Number.isNaN(at)) return undefined
   if (at - now < 20 * 60 * 60_000) return `at ${time(at)}`
@@ -336,7 +339,7 @@ const lasting = (minutes: number) =>
  * as a "session", and with the model it's for when it's only one, like
  * "Weekly · Fable", which is Fable's weekly window.
  */
-const windowed = ({ kind, label, minutes }: T3Actions.Window) => {
+export const windowed = ({ kind, label, minutes }: T3Actions.Window) => {
   const [first = "", ...rest] = label.split(/\s*[·•|]\s*/)
   const owner = rest.join(" ").trim()
   const name =
@@ -472,6 +475,48 @@ const stopping: ReadonlySet<string> = new Set([
 /** Taking back what yapd just did. */
 const scratching: ReadonlySet<string> = new Set(["scratch that", "cancel that", "undo that", "take that back"])
 
+/** What "show me" shows, said as a whole, when it isn't about one thread. */
+const shows: ReadonlyMap<string, string> = new Map([
+  ...[
+    "show me what's running", "show me what is running", "show me what's going on", "show me what is going on", "show me my threads",
+    "show me the threads", "show my threads", "show me all my threads", "show me everything",
+  ].map((phrase) => [phrase, "threads"] as const),
+  ...["show me my usage", "show me the usage", "show my usage", "show me my limits", "show me the limits"].map((phrase) => [phrase, "usage"] as const),
+  ...["show me what i missed", "show me what i've missed", "show what i missed"].map((phrase) => [phrase, "missed"] as const),
+  ...["show me what you said", "show me what you just said", "show me that line"].map((phrase) => [phrase, "said"] as const),
+])
+
+/** Showing what "it" means: its thread's pull request when it has one open, else the thread. */
+const showing: ReadonlySet<string> = new Set(["show me that", "show me", "show that", "show it", "show me it", "show me this", "show me that one"])
+
+/** Showing the thread "it" means itself, never its pull request: there's no other way to see a thread. */
+const threading: ReadonlySet<string> = new Set(["show me the thread", "show me that thread", "show me this thread", "show the thread", "show that thread"])
+
+/** Showing the pull request of the thread "it" means, which opens it too. */
+const pulling: ReadonlySet<string> = new Set([
+  "show me that pr", "show me the pr", "show me its pr", "show that pr", "show the pr", "open that pr", "open the pr", "open its pr",
+  "show me that pull request", "show me the pull request", "open that pull request", "open the pull request",
+])
+
+/** Taking the card off his screen, said while one is there. */
+const hiding: ReadonlySet<string> = new Set([
+  "hide that", "hide it", "hide this", "hide the card", "hide the panel", "close that", "close it", "close this", "close the card",
+  "close the panel", "take that away", "take it away", "take that down", "take it down", "clear that", "clear the screen",
+])
+
+/** Whether a thread's latest pull request is still open, as far as T3 Code knows. */
+const unmerged = (thread: Threads.Listed["thread"]) => {
+  const latest = thread.pullRequests.filter(({ source }) => source !== "stack-dismissed").at(-1)
+  if (latest === undefined) return thread.branchPullRequest !== null
+  return latest.snapshot === null || latest.snapshot.state.toLowerCase() === "open"
+}
+
+/** Why no thread he names can be found, when none can be seen at all: what keeps each machine from view, addressing him once. */
+export const unseen = (desk: Threads.Desk, lines: Pick<Lines, "address">) =>
+  desk.threads.length > 0 || desk.away.length === 0
+    ? undefined
+    : desk.away.map(({ reason }, index) => (index === 0 ? `${reason.replace(/\.$/, "")}${addressed(lines)}.` : reason)).join(" ")
+
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
 
@@ -488,9 +533,9 @@ const stoppable = (listed: Threads.Listed) => ["running", "finishing", "approval
 /**
  * What needs no model to work out, from what he said as a whole, never a
  * word in it: ignoring what nobody said, saying something again, who needs
- * him, his usage, and answering the open question by position, by a name only
- * one of its choices has, or with a no. It only ever accepts: anything else
- * goes to the model.
+ * him, his usage, showing him something or hiding it, and answering the open
+ * question by position, by a name only one of its choices has, or with a no.
+ * It only ever accepts: anything else goes to the model.
  */
 export const fast = (situation: Situation, lines: Lines): Decision | undefined => {
   const { utterance, open, desk, subject } = situation
@@ -512,16 +557,29 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   if (usage.has(said) || askingUsage(said, situation.usage)) {
     return decision({ act: "answer", spoken: used(situation.usage, said, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   }
+  const replacing = Option.isSome(open) ? "replaces" : ""
   // Said of the work he's hearing about while it's at it, it can only mean stopping that.
   const on = focused(situation)
   if (stopping.has(said) && Option.isSome(on) && stoppable(on.value)) {
-    return decision({ act: "stop", target: on.value.handle, pending: Option.isSome(open) ? "replaces" : "" })
+    return decision({ act: "stop", target: on.value.handle, pending: replacing })
   }
   // With a question open, "cancel that" is a no to it.
   if (scratching.has(said) && Option.isNone(open) && Option.isSome(situation.acted)) {
     const acted = situation.acted.value
     const listed = desk.threads.find(({ ref }) => ref.machine === acted.machine && ref.id === acted.thread)
     return decision({ act: "undo", target: listed?.handle ?? "", how: acted.kind === "stop" ? "carry" : "" })
+  }
+  if (hiding.has(said) && situation.showing !== undefined) return decision({ act: "show", how: "hide", pending: replacing })
+  const shown = shows.get(said)
+  if (shown !== undefined) return decision({ act: "show", how: shown, pending: replacing })
+  // "P.R." comes out of the gist as two letters.
+  const pr = said.replace(/\bp r\b/g, "pr")
+  if (showing.has(said) || threading.has(said) || pulling.has(pr)) {
+    // Without a thread "it" means, which one is the model's to work out.
+    if (Option.isSome(on)) {
+      const how = pulling.has(pr) || (showing.has(said) && unmerged(on.value.thread)) ? "pr" : "thread"
+      return decision({ act: "show", how, target: on.value.handle, pending: replacing })
+    }
   }
   if (Option.isSome(open)) {
     const question = open.value
@@ -533,8 +591,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
         ? undefined
         : decision({
             ...question.decision,
-            // Whatever was asked about it, it's read now that it's known which one.
-            act: reads.has(question.decision.act) || question.decision.act === "clarify" ? "look" : question.decision.act,
+            // Whatever was asked about it, it's read now that it's known which one, or shown when that's what he asked.
+            act: question.decision.act !== "show" && (reads.has(question.decision.act) || question.decision.act === "clarify") ? "look" : question.decision.act,
             target: listed.handle,
             sure: "high",
             spoken: "",
@@ -642,6 +700,24 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
     case "stop":
     case "undo":
       return writing(choice, target, candidates, situation, lines, ask)
+    case "show":
+      switch (choice.how) {
+        case "thread":
+        case "pr":
+          // Like a look: it goes ahead on a fair guess, and only asks between a few it can't tell apart.
+          // With no thread to be seen at all, why not is what he's told, rather than that it couldn't tell which.
+          if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: unseen(desk, lines) ?? lines.cantTell }
+          if (choice.sure === "low" && candidates.length >= 2) return ask(candidates)
+          return doing({ decision: choice, target })
+        case "threads":
+        case "usage":
+        case "missed":
+        case "said":
+        case "hide":
+          return doing({ decision: choice, target })
+        default:
+          return { _tag: "Say", spoken: notYet(lines) }
+      }
     default:
       return { _tag: "Say", spoken: notYet(lines) }
   }
@@ -774,7 +850,8 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "undo": take back what you just did for him, as LATELY shows it. "how" is "carry" when he wants a thread you stopped to carry on, "" to withdraw the message you just sent, like "scratch that". "target" is the thread, when he names one.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
-- These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "decide" on what a thread waits for him to allow; "reply" to a thread's question; "mode" to change when you talk; "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it; "show" something on his screen.`
+- "show": he wants to see something on his screen, or to stop seeing it. "how" is "threads" for what's going on across his threads, "thread" for one thread, "pr" for a thread's pull request, which opens it in his browser too, "usage" for his limits, "missed" for what he hasn't heard, "said" for what you said last, or "hide" to take down what's on his screen. "target" is the thread for "thread" and "pr". yapd says what's on it.
+- These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "decide" on what a thread waits for him to allow; "reply" to a thread's question; "mode" to change when you talk; "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it.`
 
 const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
 
@@ -809,7 +886,7 @@ const safety = `Safety:
 
 const speaking = `"spoken", for answer, look, find and again only. He's listening, not reading.
 ${aloud}
-- Empty for clarify, dismiss, resume, start, send, stop, undo and every act you can't do yet: yapd says what came of those itself.
+- Empty for clarify, dismiss, resume, start, send, stop, undo, show and every act you can't do yet: yapd says what came of those itself.
 - Never ask him anything or offer to do something, like "Shall I…?" or "Want me to…?": yapd asks its own questions.
 - Never a handle like t4: say what the thread is about.`
 
@@ -1037,7 +1114,9 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
   return [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
-    `NOW: ${date.toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}.\nMACHINES: ${machines || "none seen"}${desk.away.map(({ machine, reason }) => `; ${machine} is away: ${reason}`).join("")}`,
+    `NOW: ${date.toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}.\nMACHINES: ${machines || "none seen"}${desk.away.map(({ machine, reason }) => `; ${machine} is away: ${reason}`).join("")}${
+      situation.showing === undefined ? "" : `\nON HIS SCREEN: ${fenced(situation.showing, 90)}`
+    }`,
     `USAGE:\n${usageLines(situation.usage, now)}`,
     `THREADS, the likeliest first:\n${desk.threads.length === 0 ? "None that you can see." : desk.threads.filter(({ brief }) => !brief).map((listed) => line(listed, now)).join("\n")}`,
     ...(desk.threads.some(({ brief }) => brief)
