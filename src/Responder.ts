@@ -107,12 +107,15 @@ const agreed = new Set([
 const question = /\?\s*["')\]]*\s*$/
 
 /**
- * Whether the update ended on a question, as the agent wrote it or as yapd
- * said it in full, which is what makes "yes" an answer rather than a nod.
+ * Whether what they're answering is a question they heard in full: the first
+ * thing said back to an update that asked something, as the agent wrote it or
+ * as yapd said it. Once there's been an exchange, or yapd was cut off before
+ * the end, "yes" could mean anything, so it's left to the model.
  */
 const asked = ({ needsYou, turn, lines }: Interruption) => {
+  if (!needsYou || lines.some(({ speaker }) => speaker === "user")) return false
   const said = lines.findLast(({ speaker }) => speaker === "yapd")?.text.trim() ?? ""
-  return needsYou && (question.test(turn.message.trim()) || (!said.endsWith("…") && question.test(said)))
+  return said !== "" && !said.endsWith("…") && (question.test(said) || question.test(turn.message.trim()))
 }
 
 /** What they said, as they'd have typed it. */

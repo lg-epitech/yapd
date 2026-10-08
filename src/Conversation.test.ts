@@ -551,8 +551,9 @@ describe("quick replies", () => {
     )
 
   test("goes ahead at once when the agent asked", () => {
-    expect(reply("Yeah, go ahead.")).toEqual({ intent: "send", spoken: "On it, sir.", message: "Yeah, go ahead." })
-    expect(reply("yes please")).toEqual({ intent: "send", spoken: "On it, sir.", message: "Yes please." })
+    const heard = "The PR is up. Should I merge it?"
+    expect(reply("Yeah, go ahead.", heard, true, heard)).toEqual({ intent: "send", spoken: "On it, sir.", message: "Yeah, go ahead." })
+    expect(reply("yes please", heard, true, heard)).toEqual({ intent: "send", spoken: "On it, sir.", message: "Yes please." })
     // As yapd said it, when the agent buried its question.
     expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's done. Shall I merge it?")?.intent).toBe("send")
   })
@@ -564,6 +565,25 @@ describe("quick replies", () => {
     // A yes to something that asked nothing, or a question cut off before it was asked.
     expect(reply("Yes.", "The PR is up.", false)).toBeUndefined()
     expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's…")).toBeUndefined()
+    // Once it's been answered, another yes could mean anything.
+    expect(
+      Responder.quick(
+        {
+          project: "yapd",
+          turn: { prompt: Option.none(), message: "The PR is up. Should I merge it?" },
+          needsYou: true,
+          lines: [
+            { speaker: "yapd", text: "The PR is up. Should I merge it?" },
+            { speaker: "user", text: "Yes." },
+            { speaker: "yapd", text: "On it, sir." },
+          ],
+          heard: "Yes.",
+        },
+        "On it, sir.",
+      ),
+    ).toBeUndefined()
+    // Cut off before the question was heard.
+    expect(reply("Yes.", "The PR is up. Should I merge it?", true, "The PR…")).toBeUndefined()
   })
 
   test("takes a nod as enough when nothing was asked", () => {
