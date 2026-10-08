@@ -247,13 +247,13 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
   if (run === undefined && item === undefined && !projection.messages.some(({ id }) => id === messageId)) return Option.none()
   const intent = item?.inputIntent
   return Option.some({
-    // One still in the queue may have no turn item yet, but its run says so.
+    // One with no turn item yet still has its run to say: one it started is a turn of its own, unless it waits in the queue or was taken out of it.
     intent:
       intent !== undefined && intents.includes(intent)
         ? Option.some(intent as Intent)
-        : run?.status === "queued"
-          ? Option.some("queued_turn" as const)
-          : Option.none(),
+        : run === undefined || run.status === "cancelled"
+          ? Option.none()
+          : Option.some(run.status === "queued" ? ("queued_turn" as const) : ("turn_start" as const)),
     run: Option.map(Option.fromNullable(run), ({ id, status }) => ({ id, status })),
   })
 }

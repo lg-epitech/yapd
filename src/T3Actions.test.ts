@@ -111,7 +111,8 @@ describe("T3Actions", () => {
       Effect.runPromise(Effect.map(actions.message("t1", messageId), Option.map(({ intent, run }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run) }))))
     expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued" } }))
     expect(await found("m-4")).toEqual(Option.some({ intent: "steer", run: null }))
-    expect(await found("m-2")).toEqual(Option.some({ intent: null, run: { id: "run-2", status: "running" } }))
+    // A run it started that has no turn item yet, as right after it went in: a turn of its own.
+    expect(await found("m-2")).toEqual(Option.some({ intent: "turn_start", run: { id: "run-2", status: "running" } }))
     expect(await Effect.runPromise(actions.has("t1", "m-9"))).toBe(false)
   })
 
