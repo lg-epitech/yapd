@@ -123,6 +123,8 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
     readonly twin: (machine: string, thread: string, digest: string, since: number) => Effect.Effect<Option.Option<Row>>
     /** The latest step within this long, of those the filter lets through. */
     readonly latest: (within: Duration.DurationInput, filter?: Filter) => Effect.Effect<Option.Option<Row>>
+    /** The steps since `at`, of those the filter lets through, oldest first. */
+    readonly steps: (since: number, filter?: Filter) => Effect.Effect<ReadonlyArray<Row>>
     /** Steps since `at` that never said what came of them, or may not have got through, and haven't been left be, oldest first: what a restart checks. */
     readonly open: (since: number) => Effect.Effect<ReadonlyArray<Row>>
     readonly get: (commandId: string) => Effect.Effect<Option.Option<Row>>
@@ -173,6 +175,23 @@ const row = (stored: Stored): Row => ({
 
 const one = (database: Database, commandId: string) =>
   Option.map(Option.fromNullable(database.query<Stored, [string]>("select * from actions where command_id = ?").get(commandId)), row)
+
+/** Where a step falls among those since `at` that the filter lets through, and what to ask that with. */
+const among = (at: number, filter: Filter): readonly [string, Array<string | number>] => {
+  const kinds = filter.kinds ?? []
+  const states = filter.states ?? []
+  const where = [
+    "at >= ?",
+    ...(kinds.length === 0 ? [] : [`kind in (${kinds.map(() => "?").join(", ")})`]),
+    ...(states.length === 0 ? [] : [`state in (${states.map(() => "?").join(", ")})`]),
+    ...(filter.machine === undefined ? [] : ["machine = ?"]),
+    ...(filter.thread === undefined ? [] : ["thread = ?"]),
+  ].join(" and ")
+  return [
+    where,
+    [at, ...kinds, ...states, ...(filter.machine === undefined ? [] : [filter.machine]), ...(filter.thread === undefined ? [] : [filter.thread])],
+  ]
+}
 
 /** What's read back, as nothing when it can't be: what reads it goes on as if there were none. */
 const reading = <A>(effect: Effect.Effect<Option.Option<A>, Store.StoreError>) =>
@@ -260,28 +279,19 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
     reading(
       Effect.flatMap(Clock.currentTimeMillis, (now) =>
         store.transaction((database: Database) => {
-          const kinds = filter.kinds ?? []
-          const states = filter.states ?? []
-          const where = [
-            "at >= ?",
-            ...(kinds.length === 0 ? [] : [`kind in (${kinds.map(() => "?").join(", ")})`]),
-            ...(states.length === 0 ? [] : [`state in (${states.map(() => "?").join(", ")})`]),
-            ...(filter.machine === undefined ? [] : ["machine = ?"]),
-            ...(filter.thread === undefined ? [] : ["thread = ?"]),
-          ].join(" and ")
-          const found = database
-            .query<Stored, Array<string | number>>(`select * from actions where ${where} order by at desc, step desc, rowid desc limit 1`)
-            .get(
-              now - Duration.toMillis(Duration.decode(within)),
-              ...kinds,
-              ...states,
-              ...(filter.machine === undefined ? [] : [filter.machine]),
-              ...(filter.thread === undefined ? [] : [filter.thread]),
-            )
+          const [where, values] = among(now - Duration.toMillis(Duration.decode(within)), filter)
+          const found = database.query<Stored, Array<string | number>>(`select * from actions where ${where} order by at desc, step desc, rowid desc limit 1`).get(...values)
           return Option.map(Option.fromNullable(found), row)
         }),
       ),
     ),
+  steps: (since, filter = {}) =>
+    store
+      .transaction((database: Database) => {
+        const [where, values] = among(since, filter)
+        return database.query<Stored, Array<string | number>>(`select * from actions where ${where} order by at, step, rowid`).all(...values).map(row)
+      })
+      .pipe(Effect.catchAll((error) => Effect.logWarning("Could not read what I did to your threads", error).pipe(Effect.as<ReadonlyArray<Row>>([])))),
   open: (since) =>
     store
       .transaction((database: Database) =>

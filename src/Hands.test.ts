@@ -95,14 +95,11 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
           : Effect.die(`not expected: ${method}`)) as Server.Transport["call"],
     })
     const actions = T3Actions.make(reach)
-    const made = Hands.make({
-      threads: {
-        find: (ref) => Effect.sync(() => (ref.id === current.id ? Option.some(current) : Option.none())),
-        actions: (machine) => (machine === "Rosie" ? Option.some(actions) : Option.none()),
-      },
-      ledger,
-      ...(given.started === undefined ? {} : { started: given.started }),
-    })
+    const threads: Parameters<typeof Hands.make>[0]["threads"] = {
+      find: (ref) => Effect.sync(() => (ref.id === current.id ? Option.some(current) : Option.none())),
+      actions: (machine) => (machine === "Rosie" ? Option.some(actions) : Option.none()),
+    }
+    const made = Hands.make({ threads, ledger, ...(given.started === undefined ? {} : { started: given.started }) })
     const send = (utterance: string, text: string, how: T3Actions.When = "now", twice = false) =>
       made.run({ utterance, step: 0 }, { _tag: "Message", to: tezos, text, how }, { twice })
     return {
@@ -123,6 +120,8 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
       },
       /** The ids each dispatch went under. */
       ids: () => dispatched.map(({ commandId, messageId }) => [commandId, messageId]),
+      /** Hands as yapd has them once it's restarted at `at`, over the same ledger and T3 Code. */
+      restarted: (at: number) => Hands.make({ threads, ledger, started: at }),
     }
   })
 
@@ -502,6 +501,72 @@ describe("Hands", () => {
     // The old message stays as it may be, so the same words said again are asked about, but it isn't looked at again.
     expect(result.states).toEqual(["unknown", "sent", "unknown", "abandoned"])
     expect(result.restart).toEqual(["yapd:u2:0"])
+  })
+
+  test("a turn stopped to be told something in its place, or let go of its queue to be asked to carry on, that yapd restarted before telling is said once after the restart, and never told", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { send, run: act, answering, becomes, ledger, dispatched, restarted } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        answering((payload, bounded) => {
+          if (payload.type !== "run.interrupt") return takes()(payload, bounded)
+          bounded.runs[0]!.status = "interrupted"
+          return Effect.succeed({ sequence: 7 })
+        })
+        // yapd stops while it waits for the stop to show.
+        const sending = yield* Effect.fork(send("u1", "Drop that and fix the loader instead.", "restart"))
+        yield* TestClock.adjust("2 seconds")
+        yield* Fiber.interrupt(sending)
+        becomes(thread(tezos.id, { status: "interrupted" }))
+        // Then, back, it stops once the queue is let go of, before asking it to carry on.
+        const carrying = yield* Effect.fork(act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true }, { wanted: Effect.never }))
+        yield* TestClock.adjust("1 second")
+        yield* Fiber.interrupt(carrying)
+        // Neither a plain stop, nor one whose message went, is anything to say.
+        for (const [utterance, then] of [["u3", undefined], ["u4", "Use the fee table."]] as const) {
+          yield* ledger.prepare({ utterance, step: 0, kind: "stop", machine: "Rosie", thread: tezos.id, body: () => ({ _tag: "Stop", ...(then === undefined ? {} : { then }) }), message: false })
+          yield* ledger.settle(`yapd:${utterance}:0`, "sent")
+        }
+        yield* ledger.prepare({
+          utterance: "u4",
+          step: 1,
+          kind: "message",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        yield* ledger.settle("yapd:u4:1", "sent")
+        // Nor is one that wasn't asked to carry on since yapd was turned off meanwhile, which was said then.
+        const off = yield* act({ utterance: "u5", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true }, { wanted: Effect.succeed(false) })
+        yield* TestClock.adjust("1 minute")
+        const back = restarted(now + 3 * 60_000)
+        const first = yield* back.reconcile
+        const second = yield* back.reconcile
+        const called = Option.some("Migrate Tezos Integration")
+        return {
+          said: first.unconfirmed.map((row) => [row.commandId, Hands.unsure(row, lines, called, row.reason ?? undefined)]),
+          undelivered: first.undelivered.length,
+          again: second.unconfirmed.length,
+          off: off._tag === "NotSent" ? off.reason : off._tag,
+          dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      said: [
+        ["yapd:u1:0", "Before I restarted, I stopped Migrate Tezos Integration, sir, but didn't get to tell it what to do instead."],
+        ["yapd:u2:0", "Before I restarted, I let Migrate Tezos Integration go again, sir, but didn't get to ask it to carry on."],
+      ],
+      undelivered: 0,
+      again: 0,
+      off: Hands.switchedOff,
+      dispatched: [
+        ["run.interrupt", "yapd:u1:0"],
+        ["queue.resume", "yapd:u2:0"],
+        ["queue.resume", "yapd:u5:0"],
+      ],
+    })
   })
 
   test("a restart says what it couldn't look for, on a machine it can't reach or a thread it can't read, and new work it can't find, and sends nothing", async () => {

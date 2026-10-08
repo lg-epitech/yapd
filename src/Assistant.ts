@@ -1541,8 +1541,8 @@ export const make = (options: {
         }
         const { row, offer } = next
         const kept = yield* ledger.get(row.commandId)
-        // Sent again or taken back since it was found, there's nothing to offer or say.
-        if (offer ? !Option.exists(kept, Ledger.offerable) : Option.exists(kept, ({ state }) => state === "sent")) {
+        // Sent again or taken back since it was found, or found to have gone after all, there's nothing to offer or say.
+        if (offer ? !Option.exists(kept, Ledger.offerable) : row.state !== "sent" && Option.exists(kept, ({ state }) => state === "sent")) {
           yield* Effect.logInfo(`Not saying anything of ${row.commandId}, since something came of it meanwhile`)
           continue
         }

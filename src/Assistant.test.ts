@@ -2527,6 +2527,33 @@ describe("Assistant", () => {
     expect(result.kept).toEqual([["Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir.", "I couldn't tell whether it went through before I restarted."]])
   })
 
+  test("a turn stopped to be told something in its place that a restart found never was told is said so once, with why, and never told", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { unconfirmed, spoken, dispatched, ledger, journal } = yield* assistant(() => undefined)
+        const row = yield* ledger.prepare({
+          utterance: "u-old",
+          step: 0,
+          kind: "stop",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: () => ({ _tag: "Stop", then: "Fix the loader instead." }),
+          message: false,
+        })
+        // The stop went; yapd restarted before the message did.
+        yield* ledger.settle(row.commandId, "sent", { reason: Hands.unfollowed })
+        yield* unconfirmed([{ ...row, state: "sent", reason: Hands.unfollowed }])
+        const kept = yield* journal.since(0, { kinds: ["action"] })
+        return { spoken: spoken(), dispatched: dispatched.length, reasons: kept.map(({ detail }) => (detail as { reason?: string }).reason) }
+      }),
+    )
+    expect(result).toEqual({
+      spoken: ["Before I restarted, I stopped Migrate Tezos Integration, sir, but didn't get to tell it what to do instead."],
+      dispatched: 0,
+      reasons: [Hands.unfollowed],
+    })
+  })
+
   test("the first step is said at once when the rest takes longer than a second to work out, and the rest is said only if it doesn't go", async () => {
     const twoSteps = (refusing: boolean) =>
       run(

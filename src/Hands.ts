@@ -70,8 +70,9 @@ export interface Reconciled {
   readonly undelivered: ReadonlyArray<Ledger.Row>
   /**
    * Steps it couldn't confirm, like a stop, new work, or a message too long
-   * ago to send again or that it couldn't look for, each with why, to be said
-   * once, and never done again.
+   * ago to send again or that it couldn't look for, and a stop or a queue let
+   * go of that went when what was to follow never did, each with why, to be
+   * said once, and never done again.
    */
   readonly unconfirmed: ReadonlyArray<Ledger.Row>
 }
@@ -132,6 +133,10 @@ export const unconfirmable = "I couldn't tell whether it went through before I r
 export const tooLong = "It's too long ago to send it again now."
 /** What a stop is noted with once it's been let carry on, so it's never let carry on twice. */
 const carried = "Carried on since."
+/** Why what was to follow a step that went, like telling a turn yapd stopped what to do instead, never did: yapd restarted between the two. */
+export const unfollowed = "I restarted before I could do what came next."
+/** How long ago a step that went can have been for a restart to say what was to follow it never did. */
+const followed = 24 * 60 * 60_000
 /** Why "carry on" does nothing to a thread let carry on already. */
 const carriedOn = "It's already carried on since I stopped it."
 /** Why "carry on" does nothing to a thread going again by his hand. */
@@ -149,11 +154,16 @@ export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
 export const ignore = (text: string) => `Please ignore my last message ("${text.trim()}") and carry on as you were.`
 
-/** The commands kept in the ledger, read back to send again. */
+/**
+ * The commands kept in the ledger, read back to send again. A stop to tell a
+ * turn something in its place, and letting go of a queue to ask it to carry
+ * on, keep what it's to be told next, which T3 Code isn't sent, so a restart
+ * between the two can say it never was.
+ */
 const Body = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("Send"), text: Schema.String, messageId: Schema.String, how: Schema.Literal("now", "after", "restart") }),
-  Schema.Struct({ _tag: Schema.Literal("Stop") }),
-  Schema.Struct({ _tag: Schema.Literal("Resume") }),
+  Schema.Struct({ _tag: Schema.Literal("Stop"), then: Schema.optionalWith(Schema.String, { exact: true }) }),
+  Schema.Struct({ _tag: Schema.Literal("Resume"), then: Schema.optionalWith(Schema.String, { exact: true }) }),
   Schema.Struct({ _tag: Schema.Literal("Cancel"), runId: Schema.String, messageId: Schema.optionalWith(Schema.String, { exact: true }) }),
 )
 const command = Schema.decodeUnknownOption(Body)
@@ -427,7 +437,7 @@ export const make = (options: {
     step: Step,
     kind: Ledger.Kind,
     to: Threads.Ref,
-    body: (ids: { readonly commandId: string; readonly messageId: string | null }) => T3Actions.Command,
+    body: (ids: { readonly commandId: string; readonly messageId: string | null }) => typeof Body.Type,
     reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread },
     digest?: string,
   ) =>
@@ -570,7 +580,7 @@ export const make = (options: {
         })
       if (!busy(reached.thread)) return yield* send(step)
       yield* Effect.logInfo(`Stopping its turn, which is ${reached.thread.activityRunStatus ?? "busy"}, to tell it something in its place`)
-      const stopped = yield* once(step, "stop", to, () => ({ _tag: "Stop" }), reached)
+      const stopped = yield* once(step, "stop", to, () => ({ _tag: "Stop", then: text }), reached)
       const next = { ...step, step: step.step + 1 }
       if (stopped._tag === "Refused" && idle(stopped.reason)) {
         if (!(yield* wanted)) return yield* notTold(switchedOff, "ended")
@@ -633,14 +643,18 @@ export const make = (options: {
       // Told something in its place that waits in the queue the stop held, carrying on is letting that go, never asking it to pick up what it was told to drop.
       const then = yield* ledger.get(Ledger.ids(stopped.value.utterance, stopped.value.step + 1, true).commandId)
       const instead = Option.exists(then, (row) => row.kind === "message" && row.machine === ref.machine && row.thread === ref.id && row.state === "sent" && row.how === "queued")
-      const resumed = yield* once(step, "undo", ref, () => ({ _tag: "Resume" }), reached.right)
+      const resumed = yield* once(step, "undo", ref, () => (instead ? { _tag: "Resume" } : { _tag: "Resume", then: carryOn }), reached.right)
       if (instead) {
         if (resumed._tag === "Done") yield* ledger.settle(stopped.value.commandId, "abandoned", { reason: carried, from: ["sent"] })
         return resumed
       }
       // Nothing held is nothing to let go of, which doesn't stop it carrying on.
       if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
-      if (!(yield* wanted)) return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, "ask it to carry on")
+      if (!(yield* wanted)) {
+        // Noted with the queue let go of, so a restart doesn't say it again.
+        yield* ledger.settle(Ledger.ids(step.utterance, step.step, false).commandId, "sent", { reason: switchedOff, from: ["sent"] })
+        return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, "ask it to carry on")
+      }
       const told = yield* once(
         { ...step, step: step.step + 1 },
         "message",
@@ -799,6 +813,16 @@ export const make = (options: {
           undelivered.push(row)
         }
       }
+      // A turn stopped to be told something in its place, or let go of its queue to be asked to carry on, that yapd restarted before
+      // telling: it's never told now, only said, once.
+      for (const row of yield* ledger.steps(now - followed, { kinds: ["stop", "undo"], states: ["sent"] })) {
+        const next = Option.flatMap(command(row.body), (body) => (body._tag === "Stop" || body._tag === "Resume" ? Option.fromNullable(body.then) : Option.none()))
+        if (row.at >= started || row.reason !== null || Option.isNone(next)) continue
+        if (Option.isSome(yield* ledger.get(Ledger.ids(row.utterance, row.step + 1, true).commandId))) continue
+        yield* ledger.settle(row.commandId, "sent", { reason: unfollowed, from: ["sent"] })
+        yield* Effect.logWarning(`${row.commandId} went, but I restarted before I could do what came next: ${next.value}`)
+        unconfirmed.push({ ...row, reason: unfollowed })
+      }
       return { undelivered, unconfirmed } satisfies Reconciled
     }),
   }
@@ -917,10 +941,19 @@ export const readAlready = (lines: Lines, called: Option.Option<string>) =>
 /** Offered when a message he wants back was read already. */
 export const read = (lines: Lines, called: Option.Option<string>) => `${readAlready(lines, called)} Shall I tell it to ignore that?`
 
-/** Said after a restart, for a step other than a message that couldn't be confirmed, which isn't done again, with why when it's more than that. */
+/**
+ * Said after a restart, for a step other than a message that couldn't be
+ * confirmed, which isn't done again, with why when it's more than that; or
+ * for a stop, or a queue let go of, that went, when what was to follow never did.
+ */
 export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, called: Option.Option<string>, why: string = unconfirmable) => {
   const name = Option.getOrUndefined(called)
   const sent = command(row.body)
+  if (why === unfollowed) {
+    return row.kind === "stop"
+      ? `Before I restarted, I stopped ${name ?? "the work"}${addressed(lines)}, but didn't get to tell it what to do instead.`
+      : `Before I restarted, I let ${name ?? "the work"} go again${addressed(lines)}, but didn't get to ask it to carry on.`
+  }
   const what =
     row.kind === "stop"
       ? `${name ?? "the work"} stopped`
