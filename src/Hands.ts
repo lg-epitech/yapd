@@ -340,18 +340,21 @@ export const make = (options: {
       )
     })
 
-  /** Withdraws the message just sent while it's still in the queue; once it's been read, it can only be told to ignore it. */
+  /**
+   * Withdraws the message just sent while it's still in the queue; once it's
+   * been read, it can only be told to ignore it. It's only ever the last thing
+   * done, never anything before it.
+   */
   const withdraw = (step: Step, to: Option.Option<Threads.Ref>) =>
     Effect.gen(function* () {
-      const sent = yield* ledger.latest(scratch, {
-        kinds: ["message"],
-        states: ["sent", "unknown"],
-        ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-      })
-      if (Option.isNone(sent) || sent.value.messageId === null) {
-        return yield* failing({ _tag: "Refused", reason: "I haven't sent anything in the last couple of minutes." } satisfies Outcome, "take a message back")
-      }
-      const row = sent.value
+      const last = yield* ledger.latest(scratch, Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }))
+      const refused = (reason: string) => failing({ _tag: "Refused", reason } satisfies Outcome, "take it back")
+      if (Option.isNone(last)) return yield* refused("I haven't done anything in the last couple of minutes.")
+      const row = last.value
+      if (row.kind === "stop") return yield* refused("It was a stop, which carrying on takes back.")
+      if (row.kind === "start") return yield* refused("Starting work can't be taken back yet.")
+      if (row.kind !== "message" || row.messageId === null) return yield* refused("There's nothing more to take back.")
+      if (row.state !== "sent" && row.state !== "unknown") return yield* refused("It never went, so there's nothing to take back.")
       const ref = refOf(row)
       const reached = yield* reach(ref)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, "take a message back")

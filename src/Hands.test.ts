@@ -478,6 +478,24 @@ describe("Hands", () => {
     expect(unsure.dispatched).toBe(1)
   })
 
+  test("scratch that is about the last thing done, never a message before it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { send, run: act, ledger, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* send("u1", "When it's done, open a PR.", "after")
+        yield* TestClock.adjust("30 seconds")
+        // New work started since, which is what he means.
+        yield* ledger.prepare({ utterance: "u2", step: 0, kind: "start", machine: "Rosie", thread: "t-new", body: () => ({}), message: true })
+        yield* ledger.settle("yapd:u2:0", "sent")
+        const scratched = yield* act({ utterance: "u3", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+        return { scratched: scratched._tag === "Refused" ? scratched.reason : scratched._tag, dispatched: dispatched.map(({ type }) => type) }
+      }),
+    )
+    expect(result.scratched).toBe("Starting work can't be taken back yet.")
+    expect(result.dispatched).toEqual(["message.dispatch"])
+  })
+
   test("carry on lets go of the queue the stop held, then asks it to pick up where it left off", async () => {
     const result = await run(
       Effect.gen(function* () {

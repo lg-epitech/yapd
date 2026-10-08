@@ -289,7 +289,8 @@ export const make = (options: {
           journal.since(now - day, { most: 1, kinds: ["dictation", "reply"] }),
           threads.usage,
           askedLately,
-          ledger.latest(scratchable, { kinds: ["message", "stop"], states: ["sent", "unknown"] }),
+          // The last thing done, whatever it was, so "scratch that" never reaches past it to something before.
+          ledger.latest(scratchable),
         ])
         const missed = yield* journal.unheard(spoke.at(-1)?.at ?? now - day, unheard)
         // What was done, like a stop, but not the bookkeeping of questions closed, which says nothing.
@@ -709,9 +710,14 @@ export const make = (options: {
       return `${first} ${sir !== "" && first.includes(sir) ? then.replace(sir, "") : then}`.trim()
     }
 
-    /** What a decision to change a thread asks of the hands, if it says enough to do it. */
-    const acted = (decision: Brain.Decision, target: Option.Option<Threads.Listed>, heard: string): Hands.Act | undefined => {
+    /** What a decision to change a thread asks of the hands, if it says enough to do it. `last` is the last thing done, which taking back means. */
+    const acted = (decision: Brain.Decision, target: Option.Option<Threads.Listed>, heard: string, last: Option.Option<Ledger.Row>): Hands.Act | undefined => {
       const to = Option.map(target, ({ ref }) => ref)
+      // Taking back a stop is letting it carry on.
+      const stopped = Option.exists(
+        last,
+        (row) => row.kind === "stop" && row.state === "sent" && Option.match(to, { onNone: () => true, onSome: ({ machine, id }) => row.machine === machine && row.thread === id }),
+      )
       switch (decision.act) {
         case "send":
           return Option.isNone(to)
@@ -720,7 +726,7 @@ export const make = (options: {
         case "stop":
           return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
         case "undo":
-          return { _tag: "Undo", to, carry: decision.how === "carry" }
+          return { _tag: "Undo", to, carry: decision.how === "carry" || stopped }
         default:
           return undefined
       }
@@ -839,7 +845,7 @@ export const make = (options: {
           yield* Effect.logInfo("Not doing it, since yapd was turned off after it was said")
           return quiet(thought.subject)
         }
-        const act = acted(plan.decision, plan.target, utterance.heard)
+        const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted)
         if (act === undefined) return reply(said.cantTell, thought.subject)
         const outcome = yield* hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice })
         return yield* told(act, outcome, thought, said, { step: at.step, commandId: Ledger.ids(utterance.id, at.step, false).commandId, rest: true })

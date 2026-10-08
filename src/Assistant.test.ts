@@ -1090,6 +1090,30 @@ describe("Assistant", () => {
     expect(result.restart).toEqual([])
   })
 
+  test("scratch that right after starting new work leaves the message sent before it alone, and says why", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, wait, spoken, questions, dispatched, started } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("When")
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "after" })
+              : Brain.decision({ act: "start", text: situation.utterance.heard }),
+          () => written({ spoken: "Started in yapd, on Opus, without a worktree." }),
+        )
+        yield* dictate("When it's done, tell the Tesla's migration to open a PR.")
+        yield* wait(30)
+        yield* dictate("Start a thread in yapd to fix the loader.")
+        yield* wait(5)
+        yield* dictate("Scratch that.")
+        return { spoken: spoken(), questions: questions().length, dispatched: dispatched.map(({ type }) => type), started: started.length }
+      }),
+    )
+    expect(result.started).toBe(1)
+    expect(result.dispatched).toEqual(["message.dispatch"])
+    expect(result.questions).toBe(0)
+    expect(result.spoken.at(-1)).toBe("I couldn't take that back, sir: starting work can't be taken back yet.")
+  })
+
   test("a message that may not have got there, turned down for sending again, is asked about again under its own ids when it's said again", async () => {
     let lost = true
     const result = await run(

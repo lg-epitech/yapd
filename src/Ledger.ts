@@ -248,7 +248,7 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
             ...(filter.thread === undefined ? [] : ["thread = ?"]),
           ].join(" and ")
           const found = database
-            .query<Stored, Array<string | number>>(`select * from actions where ${where} order by at desc, step desc limit 1`)
+            .query<Stored, Array<string | number>>(`select * from actions where ${where} order by at desc, step desc, rowid desc limit 1`)
             .get(
               now - Duration.toMillis(Duration.decode(within)),
               ...kinds,

@@ -103,7 +103,7 @@ export interface Situation {
   readonly second: Option.Option<{ readonly ref: Threads.Ref; readonly detail: T3Actions.Detail } | { readonly found: ReadonlyArray<string> }>
   /** Questions yapd asked in the last ten minutes, so none is asked in the same words again. */
   readonly asked: ReadonlyArray<string>
-  /** What yapd last did to a thread for him in the last two minutes, which "scratch that" takes back. */
+  /** What yapd last did for him in the last two minutes, whatever it was, which "scratch that" means. */
   readonly acted: Option.Option<Ledger.Row>
   readonly now: number
 }
