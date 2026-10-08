@@ -3061,15 +3061,19 @@ describe("Assistant", () => {
           )
           const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
           yield* until(() => dispatched.length > 0)
-          yield* wait(15)
+          // Still waited on a second short of the fifteen it has to show stopped, with nothing said.
+          yield* wait(14)
+          const waited = Option.isNone(yield* Fiber.poll(going)) && spoken().length === 0
+          yield* wait(1)
           yield* Fiber.join(going)
           yield* dictate("What's the Mina one doing?")
           const kept = yield* journal.since(0, { kinds: ["sent", "action"] })
-          return { spoken: spoken(), dispatched: dispatched.map(({ type }) => type), kept: kept.map(({ kind, detail }) => [kind, (detail as { reason?: string }).reason]) }
+          return { waited, spoken: spoken(), dispatched: dispatched.map(({ type }) => type), kept: kept.map(({ kind, detail }) => [kind, (detail as { reason?: string }).reason]) }
         }),
       )
     for (const turn of [tezos, waiting]) {
       expect(await unshown(turn)).toEqual({
+        waited: true,
         spoken: [
           "I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: it was still winding down fifteen seconds later.",
           "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",

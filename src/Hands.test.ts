@@ -944,8 +944,8 @@ describe("Hands", () => {
   test("a message in place of the turn under way stops it, holding its queue, then tells it at once once the live view shows it stopped, whatever the turn was doing, and never asks T3 Code to restart it", async () => {
     const at = (status: string, overrides: Record<string, unknown> = {}) =>
       thread(tezos.id, { activeRunId: status === "waiting" ? null : "run-1", activityRunStatus: status, status, ...overrides })
-    /** The stop shows in the live view two seconds after T3 Code takes it, unless `shows` is false; `answer` is how it takes the message. */
-    const restarting = (first: T3Live.Thread, shows = true, answer: Answer = takes()) =>
+    /** The stop shows in the live view `shows` seconds after T3 Code takes it, or never; `answer` is how it takes the message. */
+    const restarting = (first: T3Live.Thread, shows: number | "never" = 2, answer: Answer = takes()) =>
       run(
         Effect.gen(function* () {
           const going = first.activityRunStatus !== undefined
@@ -956,9 +956,10 @@ describe("Hands", () => {
             return Effect.succeed({ sequence: 7 })
           })
           const sending = yield* Effect.fork(send("u1", "Drop that and fix the loader instead.", "restart"))
-          yield* TestClock.adjust("2 seconds")
-          if (shows) becomes(thread(tezos.id, { status: "interrupted" }))
-          yield* TestClock.adjust("14 seconds")
+          const after = shows === "never" ? 2 : shows
+          yield* TestClock.adjust(`${after} seconds`)
+          if (shows !== "never") becomes(thread(tezos.id, { status: "interrupted" }))
+          yield* TestClock.adjust(`${16 - after} seconds`)
           const outcome = yield* Fiber.join(sending)
           const act: Hands.Act = { _tag: "Message", to: tezos, text: "", how: "restart" }
           return {
@@ -977,10 +978,18 @@ describe("Hands", () => {
         ],
       })
     }
+    // Shown stopped only twelve seconds on, it's still within the fifteen it has, so it's told.
+    expect(await restarting(at("running"), 12)).toEqual({
+      said: "Stopped it, sir, and told it.",
+      dispatched: [
+        ["run.interrupt", "yapd:u1:0", true],
+        ["message.dispatch", "yapd:u1:1", "auto"],
+      ],
+    })
     // Doing nothing, it's just told.
     expect(await restarting(thread(tezos.id))).toEqual({ said: "On it, sir.", dispatched: [["message.dispatch", "yapd:u1:0", "auto"]] })
     // Still busy fifteen seconds on, it isn't told, since it could still take it into the turn being stopped, or hold it in the queue.
-    expect(await restarting(at("running"), false)).toEqual({
+    expect(await restarting(at("running"), "never")).toEqual({
       said: "I stopped it, sir, but couldn't tell it yet: it was still winding down fifteen seconds later.",
       dispatched: [["run.interrupt", "yapd:u1:0", true]],
     })
@@ -990,7 +999,7 @@ describe("Hands", () => {
         bounded.runs.push({ id: "run-2", status: "queued", ordinal: 2, userMessageId: String(payload.messageId) })
         return { sequence: 8 }
       })
-    expect((await restarting(at("running"), true, queues)).said).toBe("Stopped it, sir, but that's held in its queue till you say carry on.")
+    expect((await restarting(at("running"), 2, queues)).said).toBe("Stopped it, sir, but that's held in its queue till you say carry on.")
   })
 
   test("a message in place of the turn under way worked out again is the stop and the message it was, whatever came of them, and nothing goes twice", async () => {
