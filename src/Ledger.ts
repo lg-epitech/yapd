@@ -110,6 +110,12 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
      */
     readonly resending: (commandId: string) => Effect.Effect<Option.Option<Row>>
     /**
+     * Changes what a step goes out as, only while it never left yapd: T3 Code
+     * never saw its ids, so nothing it holds under them can differ. Whether it
+     * did: one that may have got there only ever goes as it first went.
+     */
+    readonly amend: (commandId: string, body: unknown) => Effect.Effect<boolean>
+    /**
      * The latest message with these words to this thread since `at`, unless
      * it was turned down or withdrawn, neither of which reached it: one given
      * up on otherwise may still have got there.
@@ -227,6 +233,13 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
         }),
       ),
     ),
+  amend: (commandId, body) =>
+    store
+      .transaction(
+        (database: Database) =>
+          database.query("update actions set body = ? where command_id = ? and state = 'failed'").run(JSON.stringify(body ?? null), commandId).changes > 0,
+      )
+      .pipe(Effect.catchAll((error) => Effect.logWarning(`Could not change what ${commandId} goes as`, error).pipe(Effect.as(false)))),
   twin: (machine, thread, digest, since) =>
     reading(
       store.transaction((database: Database) =>

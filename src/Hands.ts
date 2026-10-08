@@ -57,8 +57,13 @@ export class Hands extends Context.Tag("yapd/Hands")<
   {
     /** Does it, once. `twice` when he said yes to sending the same words again, which isn't asked about a second time. */
     readonly run: (step: Step, act: Act, options?: { readonly twice?: boolean }) => Effect.Effect<Outcome>
-    /** His yes to sending it again: the same step once more, under the same ids, and never after that (I2). */
-    readonly again: (commandId: string) => Effect.Effect<Outcome>
+    /**
+     * His yes to sending it again: the same step once more, under the same
+     * ids, and never after that (I2). At another time than it first went,
+     * `how`, only if it never left yapd: one that may have got there can only
+     * go as it first went, so it's left, and he's told why.
+     */
+    readonly again: (commandId: string, options?: { readonly how?: T3Actions.When }) => Effect.Effect<Outcome>
     /**
      * He didn't take up sending it again: it's never offered again on its own,
      * but it stays as it was, so the same words said again find it, and are
@@ -92,6 +97,12 @@ const carriedOn = "It's already carried on since I stopped it."
 const backAtWork = "It's already back at work."
 /** Why the same words aren't sent again once they've been sent once more already and still can't be confirmed. */
 const thirdTime = "I couldn't confirm either of the last two got there, so I won't risk sending it a third time."
+/** When a message goes in, as it's said. */
+const timing: Readonly<Record<T3Actions.When, string>> = { now: "at once", after: "once the turn under way is done", restart: "in place of the turn under way" }
+/** How the reason a message that may have got there can't go again at another time starts. */
+const mayHave = "It may have got there already"
+/** Why a message that may have got there can't go again at another time than it first went. */
+const unchanged = (how: T3Actions.When) => `${mayHave}, so it can only go again as it first went, ${timing[how]}.`
 /** What a stopped thread is told when it's let carry on. */
 export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
@@ -246,6 +257,27 @@ export const make = (options: {
       ledger.settle(row.commandId, row.state === "failed" ? "failed" : "unknown", { reason, from: ["abandoned"] }),
       ledger.leave(row.commandId, "Sending it again never left yapd."),
     )
+
+  /**
+   * The time he wants a message sent once more to go in at, when it isn't the
+   * time it first went: put down, for one that never left yapd, since T3 Code
+   * never saw its ids; otherwise it's left, never offered again on its own,
+   * and why is what comes of it, since T3 Code may hold it as it first went.
+   */
+  const retime = (commandId: string, how: T3Actions.When | undefined) =>
+    Effect.gen(function* () {
+      const row = yield* ledger.get(commandId)
+      const first = Option.flatMap(row, (row) => Option.flatMap(command(row.body), (sent) => (sent._tag === "Send" ? Option.some(sent) : Option.none())))
+      if (how === undefined || Option.isNone(row) || Option.isNone(first) || first.value.how === how) return Option.none<Outcome>()
+      if (yield* ledger.amend(commandId, { ...first.value, how })) {
+        yield* Effect.logInfo(`Sending ${commandId} ${how} rather than ${first.value.how}, since it never left`)
+        return Option.none<Outcome>()
+      }
+      // Sent, turned down or given up on, what came of it stands.
+      if (row.value.state !== "prepared" && row.value.state !== "unknown") return Option.none<Outcome>()
+      yield* ledger.leave(commandId, "He wanted it at another time than it first went.")
+      return Option.some<Outcome>(yield* failing({ _tag: "Refused", reason: unchanged(first.value.how) } satisfies Outcome, `${doing.message} ${how}`))
+    })
 
   /**
    * Sends a step written in the ledger and notes what came of it. When it
@@ -487,9 +519,11 @@ export const make = (options: {
       }
     },
     // Taken to send again, it's seen through, as a step is once written.
-    again: (commandId) =>
+    again: (commandId, options = {}) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
+          const retimed = yield* retime(commandId, options.how)
+          if (Option.isSome(retimed)) return retimed.value
           const taken = yield* ledger.resending(commandId)
           if (Option.isNone(taken)) {
             // Sent again already, or it's come to something since: that stands.
@@ -605,6 +639,8 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
   const asking = "again" in outcome && Option.isSome(outcome.again) ? ` ${unaddressed(lines.again, lines)}` : ""
   switch (act._tag) {
     case "Message":
+      // Not sent again at another time, it's left, which isn't something that went wrong.
+      if (outcome._tag === "Refused" && outcome.reason.startsWith(mayHave)) return `I left ${name === undefined ? "it" : `your message to ${name}`}${sir}: ${reason}`
       return outcome._tag === "Refused"
         ? `${name === undefined ? "That didn't go through" : `That didn't go to ${name}`}${sir}: ${reason}`
         : outcome._tag === "NotSent"

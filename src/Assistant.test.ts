@@ -1208,6 +1208,49 @@ describe("Assistant", () => {
     expect(result.ids[1]).toEqual(result.ids[0])
   })
 
+  test("yes, but once it's done, to sending again goes after the turn under way if it never left, and is left, saying why, if it may have got there", async () => {
+    const later = (left: boolean) => {
+      let down = true
+      return run(
+        Effect.gen(function* () {
+          const { dictate, answer, spoken, dispatched, ledger } = yield* assistant(
+            (situation) => (situation.utterance.via === "reply" ? Brain.decision({ act: "send", how: "after", pending: "answers" }) : tezosMessage("high")(situation)),
+            undefined,
+            {
+              answer: () => (payload, bounded) =>
+                down
+                  ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code isn't answering.", ...(left ? { sent: true } : {}) }))
+                  : Effect.sync(() => {
+                      // Behind the turn under way, as T3 Code queues it.
+                      bounded.messages.push({ id: String(payload.messageId), role: "user", text: String(payload.text), createdAt: "x" })
+                      bounded.runs.push({ id: "run-4", status: "queued", ordinal: 4, userMessageId: String(payload.messageId) })
+                      return { sequence: 2 }
+                    }),
+            },
+          )
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          down = false
+          yield* answer("Yes, but once it's done.")
+          return {
+            spoken: spoken().slice(1),
+            sent: dispatched.map(({ commandId, messageId, dispatchMode }) => [commandId, messageId, (dispatchMode as { type: string }).type]),
+            restart: yield* ledger.open(0),
+          }
+        }),
+      )
+    }
+    // It never left, so T3 Code never saw its ids: it goes under them, after the turn under way.
+    const unsent = await later(false)
+    expect(unsent.spoken).toEqual(["Noted. I'll get to it once the current task is done."])
+    expect(unsent.sent).toHaveLength(2)
+    expect(unsent.sent[1]).toEqual([unsent.sent[0]![0], unsent.sent[0]![1], "queue_after_active"])
+    // It may be in the thread as it first went, at once, which is all it can go again as.
+    const unsure = await later(true)
+    expect(unsure.spoken).toEqual(["I left it, sir: it may have got there already, so it can only go again as it first went, at once."])
+    expect(unsure.sent).toHaveLength(1)
+    expect(unsure.restart).toEqual([])
+  })
+
   test("a yes or a pick too faint to be his sends nothing, and leaves the question open to be asked again", async () => {
     const faintly = (model: (situation: Brain.Situation) => Brain.Decision, said: string, failing: boolean) =>
       run(

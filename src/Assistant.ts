@@ -193,6 +193,9 @@ const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard">
   rest: decision.rest.trim() || open.decision.rest,
 })
 
+/** When a message goes in, as the brain's `how` says it: an empty one is at once. */
+const when = (how: string): T3Actions.When => (how === "after" || how === "restart" ? how : "now")
+
 /** A desk with nothing on it, for words worked out against one that's gone, whose handles name nothing now. */
 const nowhere: Threads.Desk = { threads: [], away: [] }
 
@@ -781,7 +784,7 @@ export const make = (options: {
         case "send":
           return Option.isNone(to)
             ? undefined
-            : { _tag: "Message", to: to.value, text: decision.text.trim() || heard, how: decision.how === "after" || decision.how === "restart" ? decision.how : "now" }
+            : { _tag: "Message", to: to.value, text: decision.text.trim() || heard, how: when(decision.how) }
         case "stop":
           return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
         case "undo":
@@ -970,7 +973,8 @@ export const make = (options: {
      * second time, with anything he added done after it. To sending again,
      * it's the same step under the same ids, once; a yes that doesn't stand
      * lets it go for good. The same words to the same thread at another time,
-     * like "yes, but once it's done", are still a yes to sending them. A no
+     * like "yes, but once it's done", are still a yes to sending them, at that
+     * time, which sending again takes only when it never left yapd. A no
      * with something else instead, like another thread or other words, is
      * that something else, and what was asked about isn't done.
      */
@@ -1020,12 +1024,11 @@ export const make = (options: {
         if (Option.isSome(resend) && Option.isSome(target)) {
           const power = yield* options.power
           if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
-          // Under the same ids it goes exactly as it went before, whenever he now says.
-          if (decision.how !== open.decision.how) yield* Effect.logInfo("Sending it again as it was first asked, since it goes under the same ids")
-          const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: decision.text, how: "now" }
+          // Under the same ids, at the time he says now, which only one that never left can take.
+          const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: decision.text, how: when(decision.how) }
           const commandId = resend.value
           return yield* Effect.uninterruptibleMask((free) =>
-            Effect.flatMap(hands.again(commandId), (outcome) => told(act, outcome, { ...thought, decision }, said, { step: 0, commandId }, free)),
+            Effect.flatMap(hands.again(commandId, { how: act.how }), (outcome) => told(act, outcome, { ...thought, decision }, said, { step: 0, commandId }, free)),
           )
         }
         return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: true })
@@ -1281,7 +1284,8 @@ export const make = (options: {
           yield* Effect.logInfo(`Not offering ${row.commandId} again, since something came of it meanwhile`)
           continue
         }
-        const sent = typeof row.body === "object" && row.body !== null && "text" in row.body ? String(row.body.text) : ""
+        const went = Hands.went(row)
+        const sent = Option.match(went, { onNone: () => "", onSome: ({ text }) => text })
         const ref = { machine: row.machine, id: row.thread }
         const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
         const why = Option.isNone(yield* hands.still(row.commandId))
@@ -1313,7 +1317,8 @@ export const make = (options: {
             kind: "resend",
             utterance: row.utterance,
             heard: sent,
-            decision: Brain.decision({ act: "send", text: sent, how: "now" }),
+            // As it went, so a plain yes sends it as it was.
+            decision: Brain.decision({ act: "send", text: sent, how: Option.match(went, { onNone: () => "now", onSome: ({ how }) => how }) }),
             candidates: [ref],
             asked: Hands.lost(said, Option.some(listed.called)),
             about: `send that to ${listed.called} again`,
