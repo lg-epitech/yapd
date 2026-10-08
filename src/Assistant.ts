@@ -709,23 +709,24 @@ export const make = (options: {
     /** Acting on it, with the turn already held. */
     const acting = (thought: Thought): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
+        const { utterance } = thought
+        const off = Effect.map(options.power, (power) => !power.on || power.turns !== utterance.turns)
+        const stopped = Effect.as(Effect.logInfo("Not acting on it, since yapd was turned off after it was said"), quiet(thought.subject))
+        // Turned off since, nothing is done for it, not even working it out again.
+        if (yield* off) return yield* stopped
         let decided = thought
         if (decided.version !== version) {
           yield* Effect.logInfo("Working it out again, since the open question changed meanwhile")
-          decided = yield* think(decided.utterance, decided.subject, decided.situation.lines)
+          decided = yield* think(utterance, decided.subject, decided.situation.lines)
+          if (yield* off) return yield* stopped
         }
-        const { utterance, decision } = decided
-        const power = yield* options.power
-        if (!power.on || power.turns !== utterance.turns) {
-          yield* Effect.logInfo("Not acting on it, since yapd was turned off after it was said")
-          return quiet(decided.subject)
-        }
+        const { decision } = decided
         // Nothing was really said, like words Whisper hears in silence: a question stays open.
         if (decided.source === "fast" && decision.act === "resume") return quiet(decided.subject)
         const said = yield* persona.lines
-        // Nothing was made of it, so that's all that's said: what he missed isn't marked heard, and a question stays open, to be asked again.
+        // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
         if (decided.source === "failed") {
-          if (asking !== undefined) yield* later(asking.open.id)
+          if (asking?.said === true) yield* close(asking.open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
           return reply(decision.spoken, decided.subject)
         }
         const now = yield* Clock.currentTimeMillis

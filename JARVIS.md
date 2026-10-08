@@ -27,7 +27,7 @@ A running list of what this branch changed and what yapd can do now, for review.
 - What yapd says when it holds a reply back talks about the work, never a session: "You've moved on from that since, so I held it back."
 - A question isn't said or asked again while you dictate. If the dictation comes to nothing, like when you cancel it, it's asked again a minute later. Mumbled over it, it's let go rather than asked again, and it's let go by naming what it was about.
 - "No, no, no" is no, not Whisper repeating itself on noise, and a "Thank you." Whisper hears in a cough over a question is ignored.
-- When the model can't be reached, yapd says so and changes nothing: what you missed stays unheard, and a question stays open. "What did I miss", however you put it, marks what it told you as heard.
+- When the model can't be reached, yapd says so and changes nothing else: what you missed stays unheard. A question you'd heard is closed all the same, since you'd moved on, so it isn't asked again a minute later. "What did I miss", however you put it, marks what it told you as heard.
 - Weekly limits are said with the day they reset ("resetting Monday at 9:00 AM"), and "sir" comes once.
 - Threads with the same spoken name are told apart by what they're doing or when they last did something. A machine the work is about doesn't count as where it runs, and answers never end in an offer that nothing would listen to.
 - Paths, links and hashes in an answer are said as "a file", "a link" and "a commit", and "the Codex agent" becomes the work, so a sentence still holds.

@@ -686,7 +686,7 @@ describe("Assistant", () => {
     expect(result.started).toEqual([])
   })
 
-  test("when the model can't be asked, what he missed stays unheard and the question stays open", async () => {
+  test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { dictate, wait, spoken, open, journal } = yield* assistant((situation) =>
@@ -699,17 +699,16 @@ describe("Assistant", () => {
         yield* dictate("What did I miss?")
         const missed = (yield* journal.unheard(0, 12)).length
         const kept = Option.isSome(yield* open)
-        // Asked again a minute later, as when it goes unanswered.
-        yield* wait(60)
+        // He's moved on, so it isn't asked again a minute later.
+        yield* wait(120)
         return { missed, kept, spoken: spoken() }
       }),
     )
     expect(result.missed).toBe(1)
-    expect(result.kept).toBe(true)
+    expect(result.kept).toBe(false)
     expect(result.spoken).toEqual([
       "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
       "I couldn't work that out just now, sir. What you said is in my log.",
-      "Which one, sir: Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?",
     ])
   })
 })
