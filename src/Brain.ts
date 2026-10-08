@@ -304,28 +304,47 @@ const flags = String.raw`(?:-\S+\s+)*`
  */
 const risky = new RegExp(
   [
-    // Deleting a tree, its flags together or apart, in either order, or a bucket's.
-    String.raw`\brm\s+${flags}(?:-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|-[a-z]*r[a-z]*\s+${flags}-[a-z]*f|-[a-z]*f[a-z]*\s+${flags}-[a-z]*r|--recursive\s+${flags}--force|--force\s+${flags}--recursive)`,
+    // Deleting a tree, forced or not, its flags together or apart, but not only from git's index; a bucket's; what find finds; a file for good.
+    String.raw`\brm\s+(?![^\n;|&]*--cached)${flags}(?:-[a-z]*r|--recursive)`,
     String.raw`\b(?:s3|gsutil)\s+(?:rm|rb)\b`,
-    // Forcing what git keeps, wherever the flag goes: a push, a reset, a clean, a rewrite, or skipping its checks.
-    String.raw`\bpush\b[^\n;|&]*(?:\s-f\b|\s--force\b|\s\+\S)`,
+    String.raw`\s-delete\b`,
+    String.raw`\bshred\b`,
+    // Forcing what git keeps, wherever the flag goes: a push, or one that deletes a branch, a reset, a clean, a rewrite, or skipping its checks.
+    String.raw`\bpush\b[^\n;|&]*(?:\s-f\b|\s--force\b|\s\+\S|\s--delete\b|\s-d\b|\s:\S)`,
     String.raw`--force-with-lease`,
     String.raw`reset\s+--hard`,
     String.raw`\bclean\s+${flags}-[a-z]*f`,
     String.raw`git\s+filter-(?:branch|repo)`,
     String.raw`--no-verify`,
+    // Throwing away work not yet committed: changes checked out or restored over, a stash dropped.
+    String.raw`\bgit\s+checkout\s+(?:${flags}--\s|\.(?:\s|$))`,
+    String.raw`\bgit\s+restore\b(?:(?![^\n;|&]*--staged)|(?=[^\n;|&]*--worktree))`,
+    String.raw`\bstash\s+(?:drop|clear)\b`,
+    // Publishing, merging, and deleting what's hosted.
+    String.raw`\b(?:npm|yarn|pnpm|bun|cargo|poetry)\s+publish\b`,
+    String.raw`\bgh\s+pr\s+merge\b`,
+    String.raw`\bgh\s+[\w-]+\s+delete\b`,
+    String.raw`-X\s*DELETE\b|--request\s+DELETE\b`,
     // Data and infrastructure.
     String.raw`drop\s+(?:table|database|schema)`,
+    String.raw`\bdropdb\b`,
     String.raw`truncate\s+table`,
-    String.raw`delete\s+from\s+\w+\s*(?:;|$)`,
+    String.raw`\bdelete\s+from\b`,
     String.raw`terraform\s+(?:apply|destroy)`,
     String.raw`kubectl\s+delete`,
+    String.raw`\baws\s+[\w-]+\s+(?:delete|terminate|remove|deregister)-[\w-]+`,
+    String.raw`\b(?:gcloud|az)\b[^\n;|&]*\sdelete\b`,
+    String.raw`\b(?:docker|podman)\s+(?:[\w-]+\s+)?prune\b`,
     String.raw`\bprod(?:uction)?\b`,
     String.raw`\bdeploy\w*`,
     String.raw`chmod\s+-R\s+777`,
     String.raw`mkfs`,
     String.raw`dd\s+if=`,
-    // Credentials, read or set.
+    String.raw`\b(?:shutdown|reboot)\b`,
+    // Running whatever a download says.
+    String.raw`\|\s*(?:sudo\s+)?(?:ba|z)?sh\b`,
+    // Credentials, read or set, keys to sign in with among them.
+    String.raw`\.ssh/|\bid_(?:rsa|ed25519|ecdsa|dsa)\b`,
     String.raw`\bcredentials?\b`,
     String.raw`(?:\b|_)(?:api|secret|private|access)[_-]?keys?\b`,
     String.raw`\w+_(?:token|secret|password)\b`,
@@ -343,10 +362,14 @@ const forced = /\bbranch\s+(?:-\S+\s+)*(?:-[a-zA-Z]*D\b|--delete\s+--force|--for
 /** Whether what a thread wants to do is risky, by what it says it would run or change. */
 export const dangerous = (text: string) => risky.test(text) || forced.test(text)
 
-/** Whether he allowed it in so many words, like "yes, approve it", "allow it" or "confirm", and didn't say not to. */
+/**
+ * Whether he allowed it in so many words, like "yes, approve it", "allow it"
+ * or "confirm", and said nothing against it, like "wouldn't", "no" or "never",
+ * however the apostrophe was written.
+ */
 export const approving = (heard: string) => {
-  const said = gist(heard)
-  return /\b(approve[ds]?|allow (it|that)|confirm(ed)?)\b/.test(said) && !/\b(don't|dont|do not|never|not)\b/.test(said)
+  const said = gist(heard.replace(/[’‘`]/g, "'"))
+  return /\b(approve[ds]?|allow (it|that)|confirm(ed)?)\b/.test(said) && !/n't\b|\b(not|never|no|nope|dont|cant|wont|wouldnt|shouldnt|couldnt|didnt)\b/.test(said)
 }
 
 /** "Say that again", with nothing said lately. */
