@@ -2922,37 +2922,40 @@ describe("Assistant", () => {
     }
   })
 
-  test("turned off and on while a turn stopped to be told something in its place is still showing as busy, it isn't told once it shows stopped, and why is noted, with nothing said", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const others = [tezos]
-        const { dictate, toggle, wait, until, spoken, dispatched, journal } = yield* assistant(
-          (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
-          undefined,
-          { others },
-        )
-        const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
-        yield* until(() => dispatched.length > 0)
-        yield* wait(2)
-        yield* toggle(false)
-        yield* toggle(true)
-        // It shows stopped a moment later, which would have had it told.
-        others[0] = thread(tezos.id, tezos.title, "integration")
-        yield* wait(1)
-        // Let go of at once, rather than once the fifteen seconds are up.
-        const over = Option.isSome(yield* Fiber.poll(going))
-        yield* wait(15)
-        yield* Fiber.join(going)
-        const kept = yield* journal.since(0, { kinds: ["sent"] })
-        return { over, dispatched: dispatched.map(({ type }) => type), spoken: spoken(), kept: kept.map(({ said, detail }) => [said, (detail as { reason?: string }).reason]) }
-      }),
-    )
-    expect(result).toEqual({
-      over: true,
-      dispatched: ["run.interrupt"],
-      spoken: [],
-      kept: [["I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could.", Hands.switchedOff]],
-    })
+  test("turned off and on while a turn stopped to be told something in its place is still showing as busy, it's let go of at once, never told even once it shows stopped, and why is noted, with nothing said", async () => {
+    const toggled = (shows: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const others = [tezos]
+          const { dictate, toggle, wait, until, spoken, dispatched, journal } = yield* assistant(
+            (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
+            undefined,
+            { others },
+          )
+          const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
+          yield* until(() => dispatched.length > 0)
+          yield* wait(2)
+          yield* toggle(false)
+          yield* toggle(true)
+          // It shows stopped a moment later, which would have had it told, or it goes on showing busy, which only being turned off ends the wait for.
+          if (shows) others[0] = thread(tezos.id, tezos.title, "integration")
+          yield* wait(1)
+          // Let go of at once, rather than once the fifteen seconds are up.
+          const over = Option.isSome(yield* Fiber.poll(going))
+          yield* wait(15)
+          yield* Fiber.join(going)
+          const kept = yield* journal.since(0, { kinds: ["sent"] })
+          return { over, dispatched: dispatched.map(({ type }) => type), spoken: spoken(), kept: kept.map(({ said, detail }) => [said, (detail as { reason?: string }).reason]) }
+        }),
+      )
+    for (const shows of [true, false]) {
+      expect(await toggled(shows)).toEqual({
+        over: true,
+        dispatched: ["run.interrupt"],
+        spoken: [],
+        kept: [["I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could.", Hands.switchedOff]],
+      })
+    }
   })
 
   test("turned off and on while a thread yapd stopped is let go of its queue, it isn't asked to carry on, and why is noted", async () => {

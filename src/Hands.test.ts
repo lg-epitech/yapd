@@ -946,6 +946,30 @@ describe("Hands", () => {
     })
   })
 
+  test("a turn that ended just before it was stopped to be told something in its place isn't told once yapd was turned off since he said it, and why is said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const finishing = thread(tezos.id, { activeRunId: null, activityRunStatus: "waiting", status: "waiting" })
+        const { run: act, answering, dispatched } = yield* hands({ thread: finishing, runs: [{ id: "run-1", status: "waiting", ordinal: 1 }] })
+        let on = true
+        // yapd is turned off and on as T3 Code finds the run ended just before the stop.
+        answering((payload, bounded) => {
+          if (payload.type !== "run.interrupt") return takes()(payload, bounded)
+          on = false
+          bounded.runs[0]!.status = "completed"
+          return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "Run run-1 is not interruptible." }))
+        })
+        const message: Hands.Act = { _tag: "Message", to: tezos, text: "Drop that and fix the loader instead.", how: "restart" }
+        const outcome = yield* act({ utterance: "u1", step: 0 }, message, { wanted: Effect.sync(() => on) })
+        return {
+          outcome: outcome._tag === "NotSent" ? [outcome.reason, outcome.stopped] : outcome._tag,
+          dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
+        }
+      }),
+    )
+    expect(result).toEqual({ outcome: [Hands.switchedOff, "ended"], dispatched: [["run.interrupt", "yapd:u1:0"]] })
+  })
+
   test("scratch that withdraws a message still in the queue, and only offers to have one already read ignored", async () => {
     const result = await run(
       Effect.gen(function* () {
