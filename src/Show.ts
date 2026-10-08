@@ -438,20 +438,25 @@ export const pr = (listed: Threads.Listed): Option.Option<Draft> =>
     }
   })
 
-/** What a pull request comes to in a line, like "Checks pass and it's waiting for a review." */
-export const verdict = (listed: Threads.Listed, address: string) =>
+/**
+ * What a pull request comes to in a line, like "Checks pass and it's waiting
+ * for a review." `named`, it says whose it is first, like "The Tezos
+ * migration: checks pass…", so a thread taken on a guess is heard.
+ */
+export const verdict = (listed: Threads.Listed, address: string, named = false) =>
   Option.match(pullRequest(listed.thread), {
     onNone: () => `${Brain.capital(listed.called)} has no pull request${address}.`,
     onSome: ({ number, snapshot }) => {
-      if (snapshot === null) return `That's pull request ${number}${address}.`
+      const line = (said: string) => `${named ? `${Brain.capital(listed.called)}: ${said.charAt(0).toLowerCase()}${said.slice(1)}` : said}${address}.`
+      if (snapshot === null) return line(`That's pull request ${number}`)
       const { state, checks, review, mergeability } = facts(snapshot)
-      if (state !== "open") return `It's ${state}${address}.`
+      if (state !== "open") return line(`It's ${state}`)
       const parts = [
         ...(checks === "passing" ? ["checks pass"] : checks === "failing" ? ["checks are failing"] : checks === "pending" ? ["checks are still running"] : []),
         ...(review === "approved" ? ["it's approved"] : review === "changes-requested" ? ["changes were requested"] : review === "review-required" ? ["it's waiting for a review"] : []),
         ...(mergeability === "conflicting" ? ["it has conflicts"] : []),
       ]
-      return parts.length === 0 ? `It's open${address}.` : `${Brain.capital(Brain.both(parts))}${address}.`
+      return line(parts.length === 0 ? "It's open" : Brain.capital(Brain.both(parts)))
     },
   })
 
@@ -669,7 +674,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
               const draft = pr(listed)
               if (Option.isNone(draft)) return { say: verdict(listed, addressed(lines)), card: Option.none(), about }
               yield* opening(listed.thread)
-              return yield* shown((address) => verdict(listed, address), draft.value, lines, about)
+              // Unless it's the thread just talked about, whose it is comes first, since the browser opens it whether or not he's looking.
+              const named = !Option.exists(Brain.focused(situation), ({ ref }) => ref.machine === listed.ref.machine && ref.id === listed.ref.id)
+              return yield* shown((address) => verdict(listed, address, named), draft.value, lines, about)
             }
             // What it says is there either way, so a T3 Code that's slow to answer only leaves its messages off the card.
             const detail = yield* read(listed.ref, listed.thread.pendingRuntimeRequest?.id).pipe(

@@ -1355,10 +1355,32 @@ describe("Assistant", () => {
         return { safe, cards, opened, said: spoken() }
       }),
     )
-    expect(result.safe).toEqual({ opened: ["https://github.com/lg-epitech/yapd/pull/7"], said: "Checks pass and it's waiting for a review, sir." })
+    expect(result.safe).toEqual({ opened: ["https://github.com/lg-epitech/yapd/pull/7"], said: "Fix the loader: checks pass and it's waiting for a review, sir." })
     // Each still shows, without an address to follow.
     expect(result.cards).toEqual(unsafe.map(() => Option.some({ url: undefined, link: false })))
     expect(result.opened).toEqual(["https://github.com/lg-epitech/yapd/pull/7"])
     expect(result.said.join(" ")).not.toMatch(/evil|https?:|javascript|file:|f0000000/)
+  })
+
+  test("a pull request opened for any thread but the one just talked about is said with whose it is", async () => {
+    const url = "https://github.com/lg-epitech/yapd/pull/7"
+    const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader", "yapd", {
+      pullRequests: [{ number: 7, url, repository: "lg-epitech/yapd", snapshot: { state: "open", title: "Fix the loader", checksState: "passing", reviewDecision: "review-required" } }],
+      updatedAt: new Date(now - 30 * 60_000).toISOString(),
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        // Taken on a fair guess, as reads are, and opened in the browser whether or not he's looking.
+        const { dictate, spoken, opened } = yield* assistant((situation) => Brain.decision({ act: "show", how: "pr", target: handle(situation, loader), sure: "medium" }), undefined, {
+          others: [loader],
+        })
+        yield* dictate("Open the PR for the loader.")
+        // Now it's the one "that" means.
+        yield* dictate("Show me that PR.")
+        return { said: spoken(), opened }
+      }),
+    )
+    expect(result.said).toEqual(["Fix the loader: checks pass and it's waiting for a review, sir.", "Checks pass and it's waiting for a review, sir."])
+    expect(result.opened).toEqual([url, url])
   })
 })

@@ -436,7 +436,7 @@ const unmerged = (thread: Threads.Listed["thread"]) => {
 }
 
 /** The thread "it" means, when it's on the desk. */
-const focused = (situation: Situation) => {
+export const focused = (situation: Situation) => {
   const { subject, desk } = situation
   const ref = subject._tag === "Thread" ? Option.some(subject.ref) : subject._tag === "Answer" ? subject.about : Option.none<Threads.Ref>()
   return Option.flatMap(ref, (ref) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, ref))))
