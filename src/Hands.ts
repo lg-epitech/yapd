@@ -828,11 +828,13 @@ export const make = (options: {
    * waits on, and waited for while T3 Code is still getting it ready, as long
    * after it was asked for as a launch would be, since a thread made for it
    * doesn't say it started: unless it began, it's given back with why, to say.
+   * One T3 Code still hasn't put the work in by then is taken as not found,
+   * since it may yet put it in.
    */
   const launched = (row: Ledger.Row) =>
     Effect.gen(function* () {
       const from = [row.state]
-      const thread = yield* T3CodeLauncher.readied(threads.find(refOf(row)), row.at + Duration.toMillis(T3CodeLauncher.preparation))
+      const thread = yield* T3CodeLauncher.readied(threads.find(refOf(row)), row.at)
       const ended = Option.flatMap(thread, (thread) => T3CodeLauncher.unstarted(thread, Option.exists(request(row.body), ({ worktree }) => worktree === true)))
       if (Option.exists(thread, (thread) => T3CodeLauncher.progress(thread) === "begun")) {
         yield* ledger.settle(row.commandId, "sent", { from })
