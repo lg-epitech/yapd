@@ -574,12 +574,20 @@ export const said = (line: string, heard: Option.Option<string>): Draft => ({
   markdown: [`### I said\n\n${plainly(line)}`, ...Option.match(heard, { onNone: () => [], onSome: (heard) => [`### I heard you say\n\n${plainly(heard)}`] })].join("\n\n"),
 })
 
-/** A line said with a card, without "it's on your screen", which is only true while an app shows it: what's said of it again. */
-export const offScreen = (line: string, lines: Lines) =>
-  [lines.onScreen, unaddressed(lines.onScreen, lines)]
-    .reduce((rest, phrase) => (phrase.trim() === "" ? rest : rest.replace(phrase, "")), line)
+/**
+ * A line said with a card, without "it's on your screen", which is only true
+ * while an app shows it: what's said of it again. However it's written, and
+ * whether it addresses him or not, since the model's line is compared with
+ * the questions asked lately without it.
+ */
+export const offScreen = (line: string, lines: Lines) => {
+  const plain = unaddressed(lines.onScreen, lines)
+  // Addressing him first, or only the words before the address would go.
+  return [`${plain} ${lines.address}`, lines.onScreen, plain]
+    .reduce((rest, phrase) => Brain.without(rest, phrase), line)
     .replace(/\s+/g, " ")
     .trim()
+}
 
 /**
  * What yapd said last, when there's anything to say again: what "it" means,

@@ -4103,7 +4103,7 @@ describe("Assistant", () => {
     expect(await said("update")).toBe("The loader is fixed.")
   })
 
-  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation, or with 'it's on your screen' before it", async () => {
+  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation, or with 'it's on your screen' before it, however that's written", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const echoed = (echo: string) =>
       run(
@@ -4120,7 +4120,9 @@ describe("Assistant", () => {
           return spoken().at(-1)
         }),
       )
-    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, `It's on your screen. ${choices}, sir?`])
+    // However the model writes it: in capitals, with other marks or spacing, a curly apostrophe, or addressing him.
+    const screens = ["It's on your screen.", "IT'S ON YOUR SCREEN.", "It's on your screen!", "It\u2019s on your screen.", "it's  on your screen,", "It's on your screen, sir."]
+    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, ...screens.map((screen) => `${screen} ${choices}, sir?`)])
       expect(await echoed(echo)).toBe("The loader is fixed.")
   })
 

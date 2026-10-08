@@ -214,6 +214,13 @@ describe("Show", () => {
     expect(targets(cards[0]!.markdown)).toEqual(["https://ok.example/notes"])
   })
 
+  test("a line said again loses 'it's on your screen' however it's written, addressing him or not, and nothing else", () => {
+    const lines = { ...Persona.plain, address: "sir" }
+    const written = ["It's on your screen. One running.", "IT'S ON YOUR SCREEN! One running.", "It\u2019s  on your screen, sir. One running.", "One running. it's on your screen"]
+    expect(written.map((line) => Show.offScreen(line, lines))).toEqual(written.map(() => "One running."))
+    expect(Show.offScreen("Is it on your screen yet? One running.", lines)).toBe("Is it on your screen yet? One running.")
+  })
+
   test("points at the card that's up, and serves a card and a journal entry, as the API documents them", () => {
     const card: Show.Card = {
       id: "c1",

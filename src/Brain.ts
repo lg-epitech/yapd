@@ -191,11 +191,25 @@ const named = (listed: Threads.Listed, among: ReadonlyArray<Threads.Listed>) => 
   return `${listed.called}${elsewhere ? ` in ${listed.project}` : ""}${apart}${listed.here ? "" : ` on ${listed.ref.machine}`}`
 }
 
+/** What's between two words, which comparing words leaves out: spacing and punctuation, apostrophes straight or curly. */
+const between = "[^\\p{L}\\p{N}]+"
+
 /** How a question compares with another: the same words, whatever the punctuation. */
-const words = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+const words = (text: string) => text.toLowerCase().replace(new RegExp(between, "gu"), " ").trim()
 
 /** Whether a question was asked before in the same words. */
 export const repeated = (question: string, before: ReadonlyArray<string>) => before.some((asked) => words(asked) === words(question))
+
+/**
+ * A line without a phrase in it, wherever it is and however it's written, as
+ * words compare: in any case, spacing or punctuation, like "IT’S ON YOUR
+ * SCREEN!" for "It's on your screen.", with the marks right after it.
+ */
+export const without = (line: string, phrase: string) => {
+  const said = words(phrase)
+  if (said === "") return line
+  return line.replace(new RegExp(`(?<![\\p{L}\\p{N}])${said.split(" ").join(between)}(?![\\p{L}\\p{N}])[^\\p{L}\\p{N}\\s]*`, "giu"), "")
+}
 
 /** The threads a question chooses between, as they're named in it: "A or B". */
 export const choices = (candidates: ReadonlyArray<Threads.Listed>) => either(candidates.slice(0, 3).map((listed) => named(listed, candidates)))
