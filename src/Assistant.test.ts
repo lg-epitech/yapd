@@ -614,24 +614,26 @@ describe("Assistant", () => {
   })
 
   test("nothing is started for what was said before yapd was turned off and on", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { heard, toggle, wait, flush, started, spoken } = yield* assistant(
-          () => Brain.decision({ act: "start", text: "Fix the loader." }),
-          () => written({}),
-          { writing: 5 },
-        )
-        const dictated = yield* Effect.fork(heard({ heard: "Fix the loader.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
-        yield* flush
-        // Off and on again while its prompt is still being written.
-        yield* toggle(false)
-        yield* toggle(true)
-        yield* wait(5)
-        yield* Fiber.join(dictated)
-        return { started: [...started], spoken: spoken() }
-      }),
-    )
-    expect(result).toEqual({ started: [], spoken: [] })
+    const starting = (toggled: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { heard, toggle, wait, flush, started, spoken } = yield* assistant(
+            () => Brain.decision({ act: "start", text: "Fix the loader in yapd." }),
+            () => written({}),
+            { writing: 5 },
+          )
+          const dictated = yield* Effect.fork(heard({ heard: "Fix the loader in yapd.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+          yield* flush
+          // Off and on again while its prompt is still being written.
+          if (toggled) yield* Effect.zipRight(toggle(false), toggle(true))
+          yield* wait(5)
+          yield* Fiber.join(dictated)
+          return { started: started.map(({ project }) => project), spoken: spoken().length }
+        }),
+      )
+    // Left alone, it starts, so it's the off and on that stops it.
+    expect(await starting(false)).toEqual({ started: ["/code/yapd"], spoken: 1 })
+    expect(await starting(true)).toEqual({ started: [], spoken: 0 })
   })
 
   test("still starts what was being started when yapd was turned off, and notes it, without a word", async () => {
