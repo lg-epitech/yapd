@@ -54,15 +54,22 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //          queued-run.cancel for it, likewise. Then it waits for idle again.
 //       9. message.dispatch, start_immediately with deliveryIntent auto, as
 //          before: the slow message again, to have a turn under way.
-//      10. message.dispatch, start_immediately with deliveryIntent restart,
-//          as "stop that and tell it X instead" sends it, once 9's run is
-//          running, which is the only kind T3 Code restarts, never while it's
-//          still starting: "This is a test from yapd, please ignore it: stop
-//          that and reply with just OK instead." It's sent only if 9's run
-//          gets to running within 30 seconds. It reports whether a run
-//          started by this message's own id shows up, and how 9's run ended,
-//          which yapd's check for the same words said twice counts on. Then
-//          it waits up to two minutes for the thread to be idle.
+//      10. run.interrupt with 9's run and holdQueue true, as "stop that and
+//          tell it X instead" sends it first, once 9's run is going, whatever
+//          it's doing: only if it gets going within 30 seconds. yapd never
+//          uses T3 Code's own restart, which it turned down live for a turn
+//          busy only in the background.
+//      11. message.dispatch, start_immediately with deliveryIntent auto, as
+//          yapd tells the turn it stopped: "This is a test from yapd, please
+//          ignore it: stop that and reply with just OK instead." It's sent
+//          only once 9's run shows stopped, within fifteen seconds, as yapd
+//          waits for its live view to. It reports how long the stop took to
+//          show, whether a run started by this message's own id shows up, and
+//          whether that run waits in the queue the stop held, which would
+//          leave it untold. Then it waits up to two minutes for the thread to
+//          be idle.
+//      12. Only if 11's run is still waiting in the queue then:
+//          queued-run.cancel for it, so nothing is left behind.
 //     Right after each message.dispatch it reads the thread once, as yapd
 //     does to say whether a message was steered or queued, and to look for one
 //     whose answer was lost. Otherwise it only reads the thread's bounded
@@ -74,19 +81,19 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //     queue.resume is refused or doesn't let go of what the stop held, "carry
 //     on" becomes a plain message, as the spec says. A stop with nothing
 //     queued behind it proves nothing either way, and is reported as
-//     inconclusive. If a restart message doesn't start a run under its own
-//     id, yapd's check for the same words said twice needs another way to
-//     tell its answer for restart messages. The thread it started is left for
-//     Laurent to look at or archive.
+//     inconclusive. If the message after a stop waits in the queue instead of
+//     starting a turn of its own, yapd has to let go of the queue too, or say
+//     it waits. The thread it started is left for Laurent to look at or
+//     archive.
 //   bun scripts/m2-probe.ts --send --thread <the id of a thread it started>
-//     Steps 9 and 10 alone, again, on a thread the probe started before, to
-//     check a restart once more without starting another thread. It reads
-//     the whole thread once first, and refuses, sending nothing, unless its
-//     first message is the probe's own opening above, so it can never touch
-//     another thread. It waits up to two minutes for that thread to be idle
-//     first, and stops if it isn't. It ends by printing the same report's
-//     restart check. Without --send, it prints those two steps and sends
-//     nothing.
+//     Steps 9 to 12 alone, again, on a thread the probe started before, to
+//     check "stop that and do this instead" once more without starting
+//     another thread. It reads the whole thread once first, and refuses,
+//     sending nothing, unless its first message is the probe's own opening
+//     above, so it can never touch another thread. It waits up to two minutes
+//     for that thread to be idle first, and stops if it isn't. It ends by
+//     printing the same report's restart check. Without --send, it prints
+//     those steps and sends nothing.
 
 const option = (name: string) => {
   const at = process.argv.indexOf(`--${name}`)
@@ -136,7 +143,7 @@ const runOf = (projection: Projection, messageId: string) => projection.runs.fin
 const commands = (
   thread: string,
   stamp: string,
-  runs: { readonly first: string; readonly queued: string; readonly held: string; readonly idle: string },
+  runs: { readonly first: string; readonly queued: string; readonly held: string; readonly idle: string; readonly busy: string; readonly instead: string },
 ) => {
   const id = (step: number) => `yapd:${stamp}:${step}`
   const send = (step: number, text: string, how: T3Actions.When) =>
@@ -152,14 +159,16 @@ const commands = (
     idle: send(7, quick, "after"),
     tidy: T3Actions.command(thread, { _tag: "Cancel", runId: runs.idle }, undefined, id(8)),
     busy: send(9, slow, "now"),
-    restart: send(10, instead, "restart"),
+    stop: T3Actions.command(thread, { _tag: "Stop" }, runs.busy, id(10)),
+    instead: send(11, instead, "now"),
+    leftover: T3Actions.command(thread, { _tag: "Cancel", runId: runs.instead }, undefined, id(12)),
     /** The messages' own ids, to find them by. */
-    messages: { first: `${id(0)}:m`, queued: `${id(1)}:m`, held: `${id(2)}:m`, idle: `${id(7)}:m`, busy: `${id(9)}:m`, restart: `${id(10)}:m` },
+    messages: { first: `${id(0)}:m`, queued: `${id(1)}:m`, held: `${id(2)}:m`, idle: `${id(7)}:m`, busy: `${id(9)}:m`, instead: `${id(11)}:m` },
   }
 }
 
 /** None standing in for a run not known yet. */
-const unknown = { first: "", queued: "", held: "", idle: "" }
+const unknown = { first: "", queued: "", held: "", idle: "", busy: "", instead: "" }
 
 /** yapd's own settings, as the daemon reads them from its .env, after the environment. */
 const provider = Effect.gen(function* () {
@@ -232,29 +241,38 @@ const session = (thread: string, connection: Effect.Effect.Success<typeof connec
 }
 
 /**
- * Steps 9 and 10: a turn under way, then, once it's running, a message that
- * restarts it, under an id of its own. What came of it, for the report.
+ * Steps 9 to 12: a turn under way, then "stop that and do this instead" as
+ * yapd does it: the stop, holding the queue, once the turn is going, then,
+ * once the thread shows it stopped, the message at once, under an id of its
+ * own. What came of it, for the report.
  */
 const restarting = (thread: string, stamp: string, connection: Effect.Effect.Success<typeof connected>, use: ReturnType<typeof session>) =>
   Effect.gen(function* () {
     const planned = commands(thread, stamp, unknown)
-    yield* use.sending("message.dispatch now, for a turn to restart", planned.busy, planned.messages.busy)
     const busyId = planned.messages.busy
-    const restartId = planned.messages.restart
-    // T3 Code restarts only a turn that's running: one still preparing or starting is turned down.
-    const underWay = yield* use.until((projection) => runOf(projection, busyId)?.status === "running")
-    const restarted = Option.isNone(underWay) ? undefined : yield* use.sending("message.dispatch restart, while it runs", planned.restart, restartId)
-    const ownRun =
-      restarted === undefined ? undefined : runOf(Option.getOrUndefined(yield* use.until((projection) => runOf(projection, restartId) !== undefined)) ?? (yield* use.read), restartId)
-    const replaced = restarted === undefined ? undefined : runOf(yield* use.read, busyId)
+    const insteadId = planned.messages.instead
+    yield* use.sending("message.dispatch now, for a turn to stop", planned.busy, busyId)
+    const underWay = runOf(Option.getOrUndefined(yield* use.until((projection) => going.includes(runOf(projection, busyId)?.status ?? ""))) ?? (yield* use.read), busyId)
+    const stop =
+      underWay === undefined || !going.includes(underWay.status)
+        ? undefined
+        : yield* use.dispatch("run.interrupt, holding the queue, to tell it something in its place", commands(thread, stamp, { ...unknown, busy: underWay.id }).stop)
+    // Told only once the thread shows it stopped, as yapd waits for its live view to, for at most fifteen seconds.
+    const began = Date.now()
+    const shown = stop === undefined || Either.isLeft(stop) ? Option.none() : yield* use.until((projection) => !going.includes(runOf(projection, busyId)?.status ?? ""), 15)
+    const told = Option.isNone(shown) ? undefined : yield* use.sending("message.dispatch now, once it shows stopped", planned.instead, insteadId)
+    const own = told === undefined ? undefined : runOf(Option.getOrUndefined(yield* use.until((projection) => runOf(projection, insteadId) !== undefined)) ?? (yield* use.read), insteadId)
+    // Nothing left waiting behind it: one the stop's held queue kept is taken out.
+    if (own?.status === "queued") yield* use.dispatch("queued-run.cancel, tidying up what was held", commands(thread, stamp, { ...unknown, instead: own.id }).leftover)
     yield* use.until(idle, 120)
-    const found = yield* Effect.orElseSucceed(connection.actions.message(thread, restartId), () => Option.none<T3Actions.Found>())
-    // yapd counts a restart message answered only once a run under its own id has: none here means that needs another way.
     return {
-      answer: restarted === undefined ? "not sent: the turn to restart never got to running in 30 seconds" : Either.isRight(restarted),
-      ownRun: ownRun === undefined ? null : { id: ownRun.id, status: ownRun.status },
-      intent: said(found),
-      restartedRunStatus: replaced?.status ?? null,
+      stop: stop === undefined ? "not sent: the turn to stop never got going in 30 seconds" : Either.isRight(stop),
+      stoppedRunStatus: Option.match(shown, { onNone: () => null, onSome: (projection) => runOf(projection, busyId)?.status ?? null }),
+      shownStoppedAfterSeconds: Option.isNone(shown) ? null : Math.round((Date.now() - began) / 1000),
+      told: told === undefined ? "not sent: it didn't show stopped within fifteen seconds" : Either.isRight(told),
+      // A run of its own, started at once, is what yapd counts on; one waiting in the queue the stop held would leave it untold.
+      ownRun: own === undefined ? null : { id: own.id, status: own.status, queueHeld: own.queueHeld ?? null },
+      intent: { right: use.firsts[insteadId] ?? "not read", later: said(yield* Effect.orElseSucceed(connection.actions.message(thread, insteadId), () => Option.none<T3Actions.Found>())) },
     }
   })
 
@@ -410,17 +428,20 @@ if (!process.argv.includes("--send")) {
     queued: "<the first queued message's run>",
     held: "<the held message's run>",
     idle: "<the message sent after on the idle thread's run>",
+    busy: "<the run of the turn to stop>",
+    instead: "<the run of the message in its place>",
   })
   const { messages: _, ...sent } = planned
+  const stopThenTell = "the stop only once the turn before it is going, the message in its place only once that turn shows stopped within fifteen seconds, and its cancel only if it's still queued"
   if (thread !== undefined) {
     console.log(`Nothing is sent without --send. With --send --thread ${thread}, once it's made sure the probe started that thread, it sends it, in order:`)
-    for (const name of ["busy", "restart"] as const) console.log(`${name}: ${JSON.stringify(sent[name])}`)
-    console.log("(the restart only once the turn before it is running)")
+    for (const name of ["busy", "stop", "instead", "leftover"] as const) console.log(`${name}: ${JSON.stringify(sent[name])}`)
+    console.log(`(${stopThenTell})`)
   } else {
     console.log("Nothing is sent without --send. With --send --project <name or path>, it first starts a thread of its own there, then sends it, in order:")
     for (const [name, payload] of Object.entries(sent)) console.log(`${name}: ${JSON.stringify(payload)}`)
     console.log(
-      "(the first is sent twice, resume only after its own interrupt was taken and held the queue, the cancels after it only for what's still queued then, and the restart only once the turn before it is running)",
+      `(the first is sent twice, resume only after its own interrupt was taken and held the queue, the cancels after it only for what's still queued then, ${stopThenTell})`,
     )
   }
 } else if (thread !== undefined) {
