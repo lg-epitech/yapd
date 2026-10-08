@@ -76,6 +76,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       moved: () => Effect.succeed(false),
       send: (update, message) => Context.get(context, Relays).send(update.thread, message).pipe(Effect.as("sent" as const)),
       late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
+      replied: Effect.void,
     }).pipe(Effect.provide(context))
     const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.

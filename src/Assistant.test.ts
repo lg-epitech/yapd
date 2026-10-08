@@ -211,7 +211,7 @@ const assistant = (model: (situation: Brain.Situation) => Brain.Decision, write:
       /** Said over or right after the question, as the conversation takes it: worked out, then acted on. */
       answer: (heard: string, to = questions().at(-1)) =>
         Effect.gen(function* () {
-          const taken = yield* to!.question!.answer(heard)
+          const taken = yield* to!.question!.answer(heard, 1)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)

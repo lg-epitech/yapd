@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, FiberMap, Option, STM, SubscriptionRef, TRef } from "effect"
+import { Cause, Clock, Effect, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -100,6 +100,8 @@ export const make = Effect.gen(function* () {
   const coming = yield* STM.commit(TRef.make(false))
   const soon = STM.commit(TRef.set(coming, true))
   const state = yield* SubscriptionRef.make<State>({ on: true, heard: [] })
+  /** Each time something said over an update is taken in. */
+  const replied = yield* PubSub.unbounded<void>()
 
   /** Queues something to say, unless yapd is off or was turned off and on since `turns`, and returns whether it did. */
   const enqueue = (entry: Inbox.Entry, turns: number) =>
@@ -257,6 +259,7 @@ export const make = Effect.gen(function* () {
       return "sent" as const
     }),
     late,
+    replied: PubSub.publish(replied, undefined),
   })
 
   const fallback = (project: string): Summary => ({
@@ -467,8 +470,8 @@ export const make = Effect.gen(function* () {
         yield* playback.finished
         return yield* dealtWith
       }
-      const answer = (heard: string) =>
-        question.answer(heard).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
+      const answer = (heard: string, voiced: number) =>
+        question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
       const answered = yield* conversation.ask({ audio: said.audio, answer })
       if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))
     }).pipe(Effect.scoped)
@@ -689,5 +692,7 @@ export const make = Effect.gen(function* () {
     lastHeard: Effect.sync(() => Option.fromNullable(latest)),
     /** Something is about to be said, like an answer being worked out, so the speaker gets ready meanwhile. */
     coming: soon,
+    /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
+    replies: Stream.fromPubSub(replied),
   }
 })
