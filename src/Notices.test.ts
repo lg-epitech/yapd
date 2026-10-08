@@ -187,14 +187,21 @@ describe("Notices", () => {
   })
 
   test("a run that finished with no hook is spoken after the grace, and one whose hook was skipped as quick is not", async () => {
-    // Claude's hook for the Tezos turn came, and was skipped as quick; nothing has hooks for the loader's agent.
+    // Claude's hook for the Tezos turn came, and was skipped as quick by its own measure, though T3 Code's run is long enough to be
+    // said; the Mina run failed, and its hook came too; nothing has hooks for the loader's agent.
     const tezos = thread("tezos", "Migrate Tezos Integration", { latestRunId: "run-1" })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { status: "failed", latestRunId: "run-3", lastErrorClass: "provider_error" })
     const loader = thread("loader", "Fix the loader", { latestRunId: "run-2", modelSelection: { instanceId: "opencode", model: "kimi-k3" } })
     const bounded = {
       tezos: {
-        runs: [{ id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(0.5), userMessageId: "m1" }],
+        runs: [{ id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), userMessageId: "m1" }],
         messages: [{ id: "a1", runId: "run-1", role: "assistant", text: "Done, the fee table is in.", createdAt: minutes(0) }],
         sessions: ["s-tezos"],
+      },
+      mina: {
+        runs: [{ id: "run-3", status: "failed", ordinal: 1, startedAt: minutes(5) }],
+        turnItems: [failure("run-3", "provider_error", "API Error: 500 Internal server error")],
+        sessions: ["s-mina"],
       },
       loader: {
         // Its checkpoint isn't taken yet, which is how a turn that went well first ends.
@@ -208,16 +215,25 @@ describe("Notices", () => {
     }
     const result = await run(
       Effect.gen(function* () {
-        const { hear, wait, finished } = yield* notices({ view: [tezos, loader], bounded, stops: new Map([["s-tezos", now - 2_000]]) })
-        yield* hear(ended(tezos, "run-1"), ended(loader, "run-2"))
+        const { hear, wait, finished, told } = yield* notices({
+          view: [tezos, mina, loader],
+          bounded,
+          stops: new Map([
+            ["s-tezos", now - 2_000],
+            ["s-mina", now - 1_000],
+          ]),
+        })
+        yield* hear(ended(tezos, "run-1"), ended(mina, "run-3"), ended(loader, "run-2"))
         yield* wait(19)
         const early = [...finished]
         yield* wait(1)
-        return { early, finished }
+        return { early, finished, told }
       }),
     )
     expect(result.early).toEqual([])
     expect(result.finished).toEqual([{ key: "done:Rosie:run-2", message: "The loader is fixed." }])
+    // The failure its hook told of isn't said again.
+    expect(result.told).toEqual([])
   })
 
   test("a turn no hook told of isn't said once its thread started again or went, as a hook's update isn't once the next prompt comes", async () => {
