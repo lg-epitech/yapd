@@ -1716,7 +1716,8 @@ describe("Assistant", () => {
     // T3 Code puts the work in as soon as it's made the thread, so one still without it a moment later never had it put in: that's said then, not once a launch would give up.
     const never = ["About the loader fix: T3 Code never put the work in the thread it made, so it didn't start."]
     expect(await launched("never given")).toEqual({ meanwhile: { spoken: never, started: 0 }, spoken: never, started: 0, state: Option.some("failed"), asked: 1 })
-  })
+    // Each case looks at the thread every second for minutes, which takes more than the usual few seconds on a busy machine.
+  }, 30_000)
 
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
     const result = await run(

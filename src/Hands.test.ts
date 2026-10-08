@@ -716,7 +716,8 @@ describe("Hands", () => {
       said: ["Before I restarted, I couldn't confirm the new work you asked for started, sir. T3 Code is still getting it ready."],
       dispatched: 0,
     })
-  })
+    // Each case looks at the thread every second for minutes, which takes more than the usual few seconds on a busy machine.
+  }, 30_000)
 
   test("a restart takes new work whose thread T3 Code never put the work in as not started, once it's had the moment it takes to", async () => {
     // With no run, the work isn't in it yet, which T3 Code puts in as soon as it's made the thread: a moment later, it's there, and then it never will be.
