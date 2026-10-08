@@ -13,6 +13,7 @@ Live on `dev` now: everything below. Being built: doing things to threads by voi
 - At most one question at a time, always naming what it's choosing between, never in the same words twice. Whatever you say next answers it or replaces it. Left unanswered, it's asked once more a minute later in other words, then let go with a word (your rule).
 - "It" means what you were just listening to. Work it started in the last half hour isn't started twice.
 - Answers come before any update waiting to be read.
+- "Stop", "skip" or "enough" over an update skips it. "What did I miss?" leaves out what's about to be read anyway, and says how many are coming up.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
 
 ## Faster
