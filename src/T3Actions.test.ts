@@ -109,13 +109,52 @@ describe("T3Actions", () => {
       ["Provide the connection string for Postgres", "connection string"],
       ["What's the database URL, with its user and pass?", "database URL"],
       ["What's the webhook signing secret?", "secret"],
+      ["Enter the code sent to your phone.", "code"],
+      ["What's the SMS code?", "SMS code"],
+      ["What's the wallet's recovery phrase?", "recovery phrase"],
+      ["Give me the 12 words for the test wallet", "12 words"],
+      ["Paste the Slack webhook URL.", "webhook URL"],
+      ["Paste the Slack webhook.", "webhook"],
+      ["Stripe live key?", "key"],
+      ["What's the bearer for the API?", "bearer"],
+      ["What's the DB connection URI?", "connection URI"],
+      ["What's the admin login for the staging dashboard?", "login"],
+      ["Paste the contents of service-account.json", "service-account"],
+      ["What should I put in the Authorization header?", "Authorization header"],
+      ["I need the value for SENTRY_AUTH so I can upload source maps", "SENTRY_AUTH"],
+      ["What's GOOGLE_APPLICATION_CREDENTIALS?", "GOOGLE_APPLICATION_CREDENTIALS"],
+      ["What's REDIS_URL?", "REDIS_URL"],
     ] as const) {
       expect(typed("Question", asked)).toEqual(Option.some(label))
     }
     // A token or a key he's asked to pick, like a coin, is a question.
     expect(typed("Question", "Which token should the indexer track first?")).toEqual(Option.some("Question"))
+    expect(typed("Question", "Should I sort by the date key or the name key?")).toEqual(Option.some("Question"))
     expect(typed("Question", "What should the new branch be called?")).toEqual(Option.some("Question"))
     expect(typed("Keys", "Keep the API keys in the vault?", [{ label: "Yes", description: "Yes" }, { label: "No", description: "No" }])).toEqual(Option.some("Question"))
+  })
+
+  test("takes what he'd send for a secret when it looks like one, however the question it answers was worded", () => {
+    for (const said of [
+      "Four two seven one nine three.",
+      "4 2 7 1 9 3",
+      "4-2-7-1-9-3",
+      "427193",
+      "The PIN is 4271.",
+      "sk proj one two three",
+      "sk-proj-abc123",
+      "ghp_abcdef123",
+      "xoxb-1234-abcd",
+      "AKIAIOSFODNN7EXAMPLE",
+      "The key is hunter2.",
+      "a8f3k2l9x0q7w5e1r4",
+    ]) {
+      expect([said, T3Actions.revealing(said)]).toEqual([said, true])
+    }
+    // A port, a year, a PR number, a version or a name isn't.
+    for (const said of ["No.", "Use port 8080.", "Target the 2026 release.", "PR 4271 please", "Yes, bump it to 1.2.3.", "Call it fee-tables-v2", "Two or three of them."]) {
+      expect([said, T3Actions.revealing(said)]).toEqual([said, false])
+    }
   })
 
   test("gives back a thread's last messages, its plan and what it waits on", async () => {

@@ -151,6 +151,8 @@ export interface Outcome {
   readonly missed?: ReadonlyArray<number>
   /** What was decided on a second look, at a thread or at what was found, which the answer is. */
   readonly second?: Brain.Decision
+  /** What he said looked like a secret, so it wasn't sent, and isn't kept in the journal either. */
+  readonly withheld?: boolean
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -1141,6 +1143,8 @@ export const make = (options: {
         const name = (ref === undefined ? undefined : situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called) ?? "it"
         const subject: Subject = { _tag: "Answer", said: "", about: Option.fromNullable(ref) }
         const now = yield* Clock.currentTimeMillis
+        // Held back since it could give a secret away, his words aren't kept, here or with what he said.
+        const withheld = Hands.guarded(outcome)
         /**
          * The entry it's noted in: what went, or didn't and why, and what's
          * said of it. Only a message that went is noted as sent; what didn't
@@ -1155,7 +1159,7 @@ export const make = (options: {
               at: now,
               kind: act._tag === "Message" && outcome._tag === "Done" ? "sent" : "action",
               ...(ref === undefined ? {} : { machine: ref.machine, thread: ref.id }),
-              ...(act._tag === "Message" ? { text: act.text } : {}),
+              ...(act._tag === "Message" && !withheld ? { text: act.text } : {}),
               ...(line === undefined || unsaid ? {} : { said: line }),
               utterance: utterance.id,
               detail: { commandId: at.commandId, act: act._tag, outcome: outcome._tag, ...(unsaid ? { unsaid: line } : {}), ...detail },
@@ -1229,7 +1233,7 @@ export const make = (options: {
             if (Option.isSome(onceMore) && act._tag === "Undo" && act.carry) {
               return yield* asking({ ...base, kind: "resend", decision: resending(Hands.carryOn, "now"), asked: line, about: `ask ${name} to carry on`, resend: onceMore, news })
             }
-            return unfinished({ say: line, subject: { ...subject, said: line }, kind: "done" }, decision.rest, said, situation.desk)
+            return unfinished({ say: line, subject: { ...subject, said: line }, kind: "done", ...(withheld ? { withheld } : {}) }, decision.rest, said, situation.desk)
           }
         }
       })
@@ -1766,19 +1770,20 @@ export const make = (options: {
         )
       })
 
-    /** Notes what he said and what was made of it, at once and on a second look. */
+    /** Notes what he said and what was made of it, at once and on a second look: not his words, when they looked like a secret. */
     const note = (thought: Thought, outcome: Outcome, began: number) =>
       Effect.gen(function* () {
-        const { utterance, decision } = thought
-        const { second } = outcome
+        const { utterance } = thought
+        const { second, withheld = false } = outcome
+        const decision = withheld ? { ...thought.decision, text: "", rest: "" } : thought.decision
         const ms = (yield* Clock.currentTimeMillis) - began
         // What was said back has an entry of its own.
         yield* journal.write({
           at: utterance.at,
           kind: utterance.via === "reply" ? "reply" : "dictation",
-          text: utterance.heard,
+          ...(withheld ? {} : { text: utterance.heard }),
           utterance: utterance.id,
-          detail: { via: utterance.via, source: thought.source, decision, ...(second === undefined ? {} : { second }), ms, outcome: outcome.kind },
+          detail: { via: utterance.via, source: thought.source, decision, ...(second === undefined ? {} : { second }), ms, outcome: outcome.kind, ...(withheld ? { withheld } : {}) },
         })
         yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
       })

@@ -212,34 +212,82 @@ const credentials = new RegExp(
     String.raw`pass(?:word|phrase|code)s?|passwd`,
     String.raw`(?:api|access|secret|private|ssh|signing|deploy|license|encryption|master)[ _-]?keys?`,
     String.raw`(?:api|access|auth|bearer|refresh|personal access|github|gitlab|npm|pypi|session|id)[ _-]?tokens?`,
-    String.raw`secrets?|credentials?|seed phrase|mnemonic|otp|jwt|dsn|\.env`,
-    String.raw`(?:one[ -]time|verification|auth(?:entication|orization)?|2fa|mfa|security|recovery|backup|login|sign[ -]?in) (?:codes?|passwords?)`,
-    String.raw`connection strings?|(?:database|db)[ _-]?url`,
+    String.raw`(?:one[ -]time|verification|auth(?:entication|orization)?|2fa|mfa|sms|security|recovery|backup|login|sign[ -]?in) (?:codes?|passwords?)`,
+    // A code he's sent, like "the code sent to your phone", or "the code we texted you".
+    String.raw`codes?(?= (?:\w+ )?(?:sent|texted|emailed|messaged)\b)`,
+    // What gives a wallet away: its phrase, or its words.
+    String.raw`(?:recovery|seed|wallet|backup) (?:phrases?|words)|(?:12|24|twelve|twenty[ -]four) words`,
+    String.raw`webhooks? urls?|auth(?:orization)? headers?`,
+    String.raw`connection (?:strings?|ur[il]s?)|(?:database|db)[ _-]?ur[il]`,
+    String.raw`secrets?|credentials?|mnemonic|otp|jwt|dsn|\.env|bearer|logins?|service[ _-]?accounts?`,
   ].join("|")})(?![a-z0-9])`,
   "i",
 )
 
-/** One named as it's written in code, in capitals, like OPENAI_API_KEY or HF_TOKEN, or that's only ever one in capitals, like a PAT or a PIN. */
-const capitals = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|PAT|DSN)S?\b|\b(?:DATABASE|DB)_URL\b|\b(?:PAT|PIN)s?\b/
+/** One named as it's written in code, in capitals, like OPENAI_API_KEY, HF_TOKEN or SENTRY_AUTH, or that's only ever one in capitals, like a PAT or a PIN. */
+const capitals = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|PAT|DSN|AUTH|CREDENTIALS?|URL|URI)S?\b|\b(?:PAT|PIN)s?\b/
 
-/** What names one only when he's asked to give it, since a token or a key is often something else, like a coin or a field. */
-const bare = /(?<![a-z0-9])(?:keys?|tokens?|pwd|cookies?|pin (?:code|number)s?)(?![a-z0-9])/i
+/** What names one only when he's asked to give it, or isn't asked to pick, since a token or a key is often something else, like a coin or a field. */
+const bare = /(?<![a-z0-9])(?:keys?|tokens?|pwd|cookies?|webhooks?|pin (?:code|number)s?)(?![a-z0-9])/i
 
 /** Asking him to give something, rather than to pick or say which. */
-const giving = /\b(?:your|paste|enter|provide|give|share|send|type|supply|need|set)\b|\bwhat(?:'s|’s| is) the\b/i
+const giving = /\b(?:your|paste|enter|provide|give|share|send|type|supply|need|set|copy)\b|\bwhat(?:'s|’s| is) the\b/i
+
+/** Asking him to pick, or say which, which a token or a key may well be, like a coin to track or a field to sort by. */
+const picking = /\b(?:which|choose|pick|select|prefer|rather|should|or)\b/i
 
 /** The credential a question names, if it names one. */
-const named = (text: string) => capitals.exec(text)?.[0] ?? credentials.exec(text)?.[0] ?? (giving.test(text) ? bare.exec(text)?.[0] : undefined)
+const named = (text: string) =>
+  capitals.exec(text)?.[0] ?? credentials.exec(text)?.[0] ?? (giving.test(text) || !picking.test(text) ? bare.exec(text)?.[0] : undefined)
+
+/** A number word, as a digit said on its own is heard. */
+const digits: ReadonlySet<string> = new Set(["zero", "oh", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"])
+
+/** What gives a secret away as it's written: a key's own prefix, like sk-, ghp_, xoxb- or AKIA, or "the key is …". */
+const giveaway = new RegExp(
+  [
+    String.raw`\b(?:sk|pk|rk)(?:[ _-]+(?:live|test|proj|ant))?[_-][a-z0-9]`,
+    String.raw`\b(?:sk|pk|rk)[ _-]+(?:live|test|proj|ant)\b`,
+    String.raw`\b(?:ghp|gho|ghs|ghu|github_pat|glpat|xox[abposr]|npm)_[a-z0-9]|\bxox[abposr]-|\bAKIA[0-9A-Z]{8,}`,
+    String.raw`\b(?:key|token|code|password|passphrase|pin|secret|phrase)\s+(?:is|=)\s+\S`,
+  ].join("|"),
+  "i",
+)
+
+/**
+ * Whether what he'd send gives a secret away, however the question it
+ * answers was worded: four digits or more said one by one, or a code written
+ * as one, like a one-time code or a PIN; a key's own prefix; letters and
+ * digits run together as a token is; or "the key is …". Taken for one
+ * whenever it could be, since it then goes only by T3 Code.
+ */
+export const revealing = (text: string) => {
+  if (giveaway.test(text)) return true
+  let run = 0
+  for (const word of text.toLowerCase().split(/[\s,;:]+|(?<=\d)-(?=\d)/)) {
+    const bare = word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")
+    // A code written as one, six digits or more, as a port, a year or a PR number isn't.
+    if (/^\d{6,}$/.test(bare)) return true
+    // Letters and digits run together, like a token or a key, longer than any word or name.
+    if (/^[\p{L}\p{N}_-]{16,}$/u.test(bare) && /\d/.test(bare) && /\p{L}/u.test(bare)) return true
+    run = /^\d$/.test(bare) || digits.has(bare) ? run + 1 : 0
+    if (run >= 4) return true
+  }
+  return false
+}
 
 /**
  * What a question asks him to type in that's a secret, if one does: one with
  * nothing to pick from that names a credential, like a Codex question marked
  * secret, which T3 Code passes on as any other. Taken for one whenever it
- * could be, since it's then only told. None for a question with options,
+ * could be, since it's then only told, by what the question names, or
+ * else its header, like "GitHub token". None for a question with options,
  * whose answer is one of them.
  */
 const credential = (questions: ReadonlyArray<typeof Question.Type>) =>
-  questions.flatMap(({ header, question, options }) => (options.length > 0 ? [] : Option.toArray(Option.fromNullable(named(`${header} ${question}`))))).at(0)
+  questions
+    .flatMap(({ header, question, options }) => (options.length > 0 ? [] : Option.toArray(Option.fromNullable(named(question) ?? named(`${header} ${question}`)))))
+    .at(0)
 
 /**
  * Reads what a thread waits on out of its turn items, by the request's id. A

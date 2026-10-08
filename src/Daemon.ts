@@ -311,6 +311,8 @@ export const make = (
       })
       const lines = yield* persona.lines
       const settled = yield* Clock.currentTimeMillis
+      // Held back since it could give a secret away, the words aren't kept.
+      const withheld = Hands.guarded(outcome)
       const noted = (detail: Record<string, unknown>) =>
         journal.write({
           at: settled,
@@ -319,7 +321,7 @@ export const make = (
           thread: about.id,
           project: update.project,
           directory: update.thread.cwd,
-          text: message,
+          ...(withheld ? {} : { text: message }),
           utterance,
           detail: { commandId: Ledger.ids(utterance, 0, false).commandId, outcome: outcome._tag, ...detail },
         })

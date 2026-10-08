@@ -1063,9 +1063,17 @@ describe("Assistant", () => {
     expect(result.dispatched).toBe(0)
   })
 
-  test("a question that names a key as code does, or asks him for a token or a key, is only told, and nothing he dictates to its thread is sent", async () => {
+  test("a question that names a key as code does, or asks him for a token, a key, a code he's sent or a wallet's phrase, is only told, and nothing he dictates to its thread is sent", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
-    for (const question of ["Please provide OPENAI_API_KEY so I can run the evals.", "What's your OpenAI key?", "Enter the token for the registry."]) {
+    for (const question of [
+      "Please provide OPENAI_API_KEY so I can run the evals.",
+      "What's your OpenAI key?",
+      "Enter the token for the registry.",
+      "Enter the code sent to your phone.",
+      "What's the wallet's recovery phrase?",
+      "Paste the Slack webhook URL.",
+      "Stripe live key?",
+    ]) {
       const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question }] }]
       const result = await run(
         Effect.gen(function* () {
@@ -1088,11 +1096,50 @@ describe("Assistant", () => {
       )
       expect(result.worded).toBe("Tell")
       expect(result.spoken).toEqual([
-        expect.stringMatching(/^Cloud deployment discovery needs (a secret|the key|the token) from you, sir, which I never take by voice/),
+        expect.stringMatching(/^Cloud deployment discovery needs (a secret|the key|the token|the code|the recovery phrase|the webhook URL) from you, sir, which I never take by voice/),
         "That didn't go through, sir: it's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
       ])
       expect(result.dispatched).toBe(0)
     }
+  })
+
+  test("an answer in his own words that looks like a secret, like a code he reads out, is never sent, however the question was worded, nor kept in the journal", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    // Nothing in how it's worded says it's for a secret.
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "shown", header: "Question", question: "What does the dialog show?" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        let act: "reply" | "send" = "reply"
+        const made = yield* assistant(
+          (situation) =>
+            act === "reply"
+              ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "four two seven one nine three", pending: "answers" })
+              : Brain.decision({ act: "send", target: handle(situation, cloud), text: "It shows 4 2 7 1 9 3.", how: "now" }),
+          undefined,
+          { others: [cloud], items },
+        )
+        yield* asked(made, cloud)
+        yield* made.answer("Four two seven one nine three.")
+        // Nor told to it as a message while it waits on that.
+        act = "send"
+        yield* made.dictate("Tell the cloud one it shows 4 2 7 1 9 3.")
+        const kept = yield* made.journal.since(0)
+        return {
+          spoken: made.spoken(),
+          dispatched: made.dispatched.length,
+          steps: (yield* made.ledger.steps(0)).length,
+          kept: kept.filter((entry) => /4 2 7|four two seven/i.test(JSON.stringify(entry))).length,
+        }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery asks which network to start with, sir. What shall I tell it?",
+      "I couldn't get your answer to it, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
+      "That didn't go through, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
+    ])
+    expect(result.dispatched).toBe(0)
+    expect(result.steps).toBe(0)
+    expect(result.kept).toBe(0)
   })
 
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {
