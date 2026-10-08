@@ -36,6 +36,8 @@ const make = (says?: string, options: {
   readonly waitingHooks?: boolean
   readonly onHookOpen?: () => Effect.Effect<void>
   readonly trivialMessages?: ReadonlyArray<string>
+  /** A microphone, even when the user says nothing. */
+  readonly microphone?: boolean
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -54,6 +56,7 @@ const make = (says?: string, options: {
     }
   })
   const microphone = yield* Queue.unbounded<Float32Array>()
+  const listening = says !== undefined || options.microphone === true
   const transcripts = [...options.transcripts ?? []]
   const waiting = options.waitingHooks ? yield* Waiting.pipe(Effect.provide(WaitingLive)) : undefined
   let handle: Handle
@@ -92,7 +95,7 @@ const make = (says?: string, options: {
             volume: () => Effect.void,
           }
         }),
-      microphone: Effect.succeed(says === undefined ? Option.none() : Option.some(microphone)),
+      microphone: Effect.succeed(listening ? Option.some(microphone) : Option.none()),
       rest: Effect.sync(() => void rests++),
       warm: Effect.sync(() => void warms++),
     }),
@@ -105,7 +108,7 @@ const make = (says?: string, options: {
     } : { ...waiting, open: (session) => waiting.open(session).pipe(Effect.tap(() => options.onHookOpen?.() ?? Effect.void)) }),
     Layer.succeed(Vad, {
       // Each frame holds the probability that it's speech.
-      make: says === undefined ? Effect.fail(new VadError({ cause: "no microphone" })) : Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)),
+      make: listening ? Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) : Effect.fail(new VadError({ cause: "no microphone" })),
     }),
     Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? says ?? "") }),
     Layer.succeed(Responder, {
@@ -1059,6 +1062,35 @@ describe("Daemon", () => {
     )
     expect(result.answers).toEqual({ dropped: "off", asked: "queued" })
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
+  })
+
+  test("an update read to the end is heard at once, so asked about in the time left for a reply, it isn't read again after the answer", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, notice, awaiting, lastHeard, played, journal } = yield* make(undefined, { microphone: true })
+        yield* finish("a", "The PR is ready.")
+        // Read to the end, and listening a moment for a reply, when he presses the shortcut to ask about it.
+        yield* wait(10)
+        yield* wait(1)
+        const lingering = (yield* journal.unheard(0, 12)).length
+        const subject = yield* lastHeard
+        const arrived = yield* awaiting
+        const dictation = yield* dictate
+        const dictating = (yield* journal.unheard(0, 12)).length
+        yield* wait(3)
+        yield* Scope.close(dictation, Exit.void)
+        yield* notice("answer", "It changes the parser.", { answer: true })
+        yield* arrived
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { lingering, dictating, subject: Option.map(subject, ({ said, playing }) => ({ said, playing })), played: [...played] }
+      }),
+    )
+    expect(result).toEqual({
+      lingering: 0,
+      dictating: 0,
+      subject: Option.some({ said: "yapd. The PR is ready.", playing: true }),
+      played: ["yapd. The PR is ready.", "It changes the parser."],
+    })
   })
 
   test.each(["Stop.", "Skip.", "Enough.", "Next.", "Shut up.", "Stop, stop."])("told \"%s\" by the shortcut over an update, doesn't read it again, and counts it heard", async (said) => {

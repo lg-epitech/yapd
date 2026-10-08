@@ -481,23 +481,25 @@ export const make = Effect.gen(function* () {
 
   /**
    * Puts back what a dictation cut off, to be said again from the start: an
-   * update unless the session has moved on or been answered since, even by a
-   * follow-up that's still on its way, and a notice unless it has been dealt
-   * with. Never a question yapd asked: what's dictated is the answer to it, or
-   * takes its place. Nor an answer: talking over it, the user moved on, and
-   * "say that again" still has it. What came of something they asked to be
-   * done, like work that started, they still need to hear, but after whatever
-   * the dictation brings, so it goes back as a notice of yapd's own.
+   * update unless it was read to the end, like when the dictation only cut
+   * off the wait for a reply, or the session has moved on or been answered
+   * since, even by a follow-up that's still on its way; and a notice unless it
+   * has been dealt with. Never a question yapd asked: what's dictated is the
+   * answer to it, or takes its place. Nor an answer: talking over it, the user
+   * moved on, and "say that again" still has it. What came of something they
+   * asked to be done, like work that started, they still need to hear, but
+   * after whatever the dictation brings, so it goes back as a notice of yapd's own.
    */
-  const keep = (ready: Inbox.Entry, dealtWith: boolean, turns: number) =>
+  const keep = (ready: Inbox.Entry, done: boolean, turns: number) =>
     Effect.gen(function* () {
       // An update's own session, since one heard again waits under another key.
       const over =
-        "update" in ready
+        done ||
+        ("update" in ready
           ? activity.get(ready.update.session) !== generations.get(ready.update) ||
             followed.get(ready.update.session)?.current !== undefined ||
             (yield* conversation.sending(ready.update.session, ready.update))
-          : dealtWith || ready.notice.open !== undefined || ready.notice.kind === "answer"
+          : ready.notice.open !== undefined || ready.notice.kind === "answer")
       if (over) return false
       const now = yield* Clock.currentTimeMillis
       const again: Inbox.Entry =
@@ -624,11 +626,19 @@ export const make = Effect.gen(function* () {
     }
     let kept = false
     let dealtWith = false
-    /** Played to the end, or answered: the user heard it. */
+    /** An update read to the end, or answered: the user heard it. */
     let through = false
+    /** Noted at once, even while the microphone stays open for a reply, so a dictation then neither puts it back nor finds it missed. */
+    const heard = (update: Conversation.Update) =>
+      Effect.suspend(() => {
+        if (through) return Effect.void
+        through = true
+        const row = rows.get(update)
+        return row === undefined ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([row], at))
+      }).pipe(Effect.uninterruptible)
     const reading =
       "update" in ready
-        ? conversation.converse(ready.update)
+        ? conversation.converse(ready.update, heard(ready.update)).pipe(Effect.zipRight(heard(ready.update)))
         : say(
             ready,
             Effect.sync(() => {
@@ -636,9 +646,6 @@ export const make = Effect.gen(function* () {
             }),
           )
     yield* reading.pipe(
-      Effect.tap(() => {
-        through = true
-      }),
       Effect.catchAllCause((cause) =>
         Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not speak update", cause),
       ),
@@ -647,7 +654,7 @@ export const make = Effect.gen(function* () {
         Effect.zipRight(
           dictationStarted,
           Effect.map(
-            Effect.suspend(() => keep(ready, dealtWith, turns)),
+            Effect.suspend(() => keep(ready, dealtWith || through, turns)),
             (again) => {
               kept = again
             },
@@ -672,8 +679,6 @@ export const make = Effect.gen(function* () {
           if (!("update" in ready)) return
           const at = yield* Clock.currentTimeMillis
           if (latest?.update === ready.update) latest = { ...latest, at, playing: false }
-          const row = rows.get(ready.update)
-          if (through && row !== undefined) yield* journal.markHeard([row], at)
         }),
       ),
     )

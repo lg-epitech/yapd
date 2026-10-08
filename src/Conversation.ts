@@ -186,18 +186,30 @@ export const make = (options: {
       )
     }
 
-    const speak = (path: string, from: number, ear: Effect.Effect<Ear | undefined>, wait = linger) =>
+    /**
+     * Plays a line from `from` seconds, listening if there's an ear, then
+     * `wait` longer for a reply. `through` runs once it has played to the end,
+     * before that wait: the user has heard it, whatever they say after.
+     */
+    const speak = (
+      path: string,
+      from: number,
+      ear: Effect.Effect<Ear | undefined>,
+      given: { readonly wait?: Duration.DurationInput; readonly through?: Effect.Effect<void> } = {},
+    ) =>
       Effect.gen(function* () {
+        const { wait = linger, through = Effect.void } = given
         const playback = yield* audio.play(path, from)
         const listening = yield* ear
         if (listening === undefined || listening.deaf) {
           yield* playback.finished
+          yield* through
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* listen(playback, listening, wait)
+        return yield* listen(playback, listening, wait, through)
       }).pipe(Effect.scoped)
 
-    const listen = (playback: Playback, ear: Ear, wait: Duration.DurationInput) =>
+    const listen = (playback: Playback, ear: Ear, wait: Duration.DurationInput, through: Effect.Effect<void>) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
@@ -270,6 +282,7 @@ export const make = (options: {
               // Also arrives for a playback the user stopped, which is already dealt with.
               if (signal.id !== id || !playing) break
               playing = false
+              yield* through
               if (deaf) return { _tag: "Finished" } satisfies Outcome
               if (!speaking) yield* startLingering
               break
@@ -424,7 +437,12 @@ export const make = (options: {
         Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))),
       )
 
-    const converse = (update: Update) =>
+    /**
+     * Reads an update out and talks it over. `through` runs as soon as the
+     * update itself has been read to the end, even with the microphone still
+     * open for a reply, since the user has heard it by then.
+     */
+    const converse = (update: Update, through: Effect.Effect<void> = Effect.void) =>
       Effect.suspend(() => {
         const rendered: Array<string> = []
         return Effect.gen(function* () {
@@ -436,7 +454,9 @@ export const make = (options: {
           let missed = 0
 
           while (true) {
-            const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined))
+            const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined), {
+              through: path === update.audio ? through : Effect.void,
+            })
             if (outcome._tag === "Finished") return
             // Replying to something yapd had finished saying: there's nothing to go back to.
             const after = outcome.at >= outcome.duration
@@ -525,7 +545,7 @@ export const make = (options: {
         let from = 0
         let missed = 0
         while (true) {
-          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), pondering)
+          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), { wait: pondering })
           if (outcome._tag === "Finished") return false
           const first = yield* transcribe(outcome.audio)
           const answer = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, transcribe, question.answer)).reply
