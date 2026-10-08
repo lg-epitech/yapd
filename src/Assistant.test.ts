@@ -2255,14 +2255,16 @@ describe("Assistant", () => {
     let told = 0
     const endless = await run(
       Effect.gen(function* () {
-        const { dictate, dispatched } = yield* assistant((situation) =>
+        const { dictate, spoken, dispatched } = yield* assistant((situation) =>
           Brain.decision({ act: "send", target: handle(situation, tezos), text: `Step ${++told}.`, how: "now", rest: "and tell it once more" }),
         )
         yield* dictate("Tell the Tesla's migration to keep going, and tell it once more.")
-        return dispatched.length
+        return { dispatched: dispatched.length, said: spoken().at(-1) }
       }),
     )
-    expect(endless).toBe(4)
+    // What's left once it stops is said to be left, never dropped without a word.
+    expect(endless.dispatched).toBe(4)
+    expect(endless.said?.endsWith("I left the rest: and tell it once more.")).toBe(true)
   })
 
   test("scratch that right after starting new work leaves the message sent before it alone, and says why", async () => {

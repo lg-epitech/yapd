@@ -1103,9 +1103,17 @@ export const make = (options: {
         }
       })
 
-    /** Once a step has gone as asked, the rest of its request, if there's any, as the next step. */
+    /**
+     * Once a step has gone as asked, the rest of its request, if there's any,
+     * as the next step. Once the request has taken as many steps as one takes,
+     * what's left of it is said to be left, never dropped without a word.
+     */
     const onward = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, next: number, said: Lines): Effect.Effect<Outcome> =>
-      thought.decision.rest.trim() !== "" && next < steps ? rest(thought, first, on, next, said) : Effect.succeed(first)
+      thought.decision.rest.trim() === ""
+        ? Effect.succeed(first)
+        : next < steps
+          ? rest(thought, first, on, next, said)
+          : Effect.succeed(unfinished(first, thought.decision.rest, said, thought.situation.desk))
 
     /**
      * The rest of a request with several steps, worked out again now that the
