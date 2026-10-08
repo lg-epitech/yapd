@@ -331,6 +331,12 @@ describe("Notices", () => {
     expect(result.overtaken).toEqual(["loader", "loader"])
   })
 
+  /** The Tezos one's approval to push, with the command it's for, as T3 Code shows them. */
+  const pushing = [
+    { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: git push origin tezos", nativeItemRef: { nativeId: "toolu_1" } },
+    { type: "command_execution", status: "running", input: "git push origin tezos", nativeItemRef: { nativeId: "toolu_1" } },
+  ]
+
   test("a pending request is announced once after a restart, and not at all if it was already said", async () => {
     const tezos = thread("tezos", "Migrate Tezos Integration", {
       activeRunId: "run-1",
@@ -341,7 +347,7 @@ describe("Notices", () => {
       pendingRuntimeRequest: { id: "r2", kind: "user_input", createdAt: minutes(60) },
     })
     const bounded = {
-      tezos: { turnItems: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: git push origin tezos" }] },
+      tezos: { turnItems: pushing },
       mina: { turnItems: [{ type: "user_input_request", status: "waiting", requestId: "r2", questions: [{ id: "q", question: "Which database?" }] }] },
     }
     const result = await run(
@@ -369,7 +375,7 @@ describe("Notices", () => {
       activeRunId: "run-1",
       pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: minutes(60) },
     })
-    const bounded = { tezos: { turnItems: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: git push origin tezos" }] } }
+    const bounded = { tezos: { turnItems: pushing } }
     const result = await run(
       Effect.gen(function* () {
         const store = yield* Store.make(":memory:")

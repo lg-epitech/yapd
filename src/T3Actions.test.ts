@@ -77,6 +77,13 @@ describe("T3Actions", () => {
     expect(Option.map(pushing, (found) => (found._tag === "Approval" ? [found.what, found.command] : []))).toEqual(
       Option.some(["Push the branch", "git push --force origin main"]),
     )
+    // Cut short to be said, a long one is still kept whole, to tell by all of it whether it's risky; one the thread doesn't show has neither.
+    const long = `echo '${"a".repeat(650)}'; rm -rf /tmp/example-data`
+    const cleaning = T3Actions.request([{ ...command, input: long }, { ...approval, nativeItemRef: { nativeId: "toolu_1" } }], "r1")
+    expect(Option.map(cleaning, (found) => (found._tag === "Approval" ? [found.command?.length, found.whole] : []))).toEqual(Option.some([600, long]))
+    expect(Option.map(T3Actions.request([approval], "r1"), (found) => (found._tag === "Approval" ? [found.command, found.whole] : []))).toEqual(
+      Option.some([undefined, undefined]),
+    )
     // A secret goes by its own item's id, which is what the thread says it waits on.
     const secret = { type: "secret_request", id: "turn-item:secret-request:t1:deploy", status: "waiting", label: "Deploy key", reason: "To deploy", secretStatus: "pending" }
     expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(

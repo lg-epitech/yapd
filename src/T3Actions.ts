@@ -119,8 +119,14 @@ export type Request =
       readonly kind: string
       /** The decisions it takes, like accept or decline. Every decision when the agent didn't say. */
       readonly decisions: ReadonlyArray<{ readonly decision: string; readonly label: string }>
-      /** The command it would run, the file it would change or the tool it would call, when the thread shows it. */
+      /** The command it would run, the file it would change or the tool it would call, when the thread shows it, cut short to be said. */
       readonly command?: string
+      /**
+       * All of what it would run, change or call, when the thread shows it,
+       * which is what tells whether it's risky: what's said of it, or T3
+       * Code's own words for it, may be cut short before the risky part.
+       */
+      readonly whole?: string
     }
   | {
       readonly _tag: "Question"
@@ -179,10 +185,10 @@ export const waitingOn = (projection: Pick<(typeof Bounded.Type)["projection"], 
     .flatMap(({ type, id, requestId }) => Option.toArray(Option.fromNullable(type === "secret_request" ? id : requestId)))
 }
 
-/** How much of a command or a tool's input is kept: enough to tell what it does. */
+/** How much of a command or a tool's input is kept to be said: enough to tell what it does. */
 const commandLength = 600
 
-/** What an approval is for, from the item it shares the agent's id with: the command, the file it changes, or the tool and what it's given. */
+/** What an approval is for, all of it, from the item it shares the agent's id with: the command, the file it changes, or the tool and what it's given. */
 const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.Type) => {
   const native = approval.nativeItemRef?.nativeId
   if (native === null || native === undefined) return undefined
@@ -199,7 +205,7 @@ const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.
         return undefined
     }
   })()
-  return text === undefined || text.trim() === "" ? undefined : text.trim().slice(0, commandLength)
+  return text === undefined || text.trim() === "" ? undefined : text.trim()
 }
 
 /**
@@ -305,14 +311,15 @@ export const request = (items: ReadonlyArray<unknown>, id: string): Option.Optio
       return Option.some(named === undefined ? { _tag: "Question", id, questions: found.questions } : { _tag: "Secret", id, label: named })
     }
     if (found.type === "approval_request") {
-      const runs = wouldRun(decoded, found)
+      const whole = wouldRun(decoded, found)
+      const command = whole?.slice(0, commandLength)
       return Option.some({
         _tag: "Approval",
         id,
-        what: found.prompt ?? found.title ?? runs ?? "something it needs your permission for",
+        what: found.prompt ?? found.title ?? command ?? "something it needs your permission for",
         kind: found.requestKind ?? "permission",
         decisions: found.options !== undefined && found.options.length > 0 ? found.options : every,
-        ...(runs === undefined ? {} : { command: runs }),
+        ...(whole === undefined || command === undefined ? {} : { command, whole }),
       })
     }
   }

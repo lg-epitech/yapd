@@ -865,6 +865,40 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.none())
   })
 
+  test("an approval is risky by all of what it would run, however long, and one whose command can't be read needs 'approve' too", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    // Something harmless long enough to be cut short before what's risky, under T3 Code's own harmless words for it.
+    const long = `echo '${"a".repeat(650)}'; rm -rf /tmp/example-data`
+    const items = [
+      ...approval("r1", long).map((item) => (item.type === "approval_request" ? { ...item, prompt: "run a maintenance check" } : item)),
+      // One with nothing to say what it would run.
+      { type: "approval_request", status: "waiting", requestId: "r2", requestKind: "command", prompt: "run a maintenance check" },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Yes.")
+        yield* made.answer("Yes.")
+        const unread = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(unread)
+        yield* asked(made, unread)
+        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+      "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+      "Cloud deployment discovery wants to run a maintenance check, but I couldn't read all of what it would run, so say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r2 accept"])
+  })
+
   test("'approve' allows a dangerous approval first time", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

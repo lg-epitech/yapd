@@ -185,10 +185,10 @@ const option = (label: string) => {
 /**
  * What a thread waits on him for, worded from what the model made of it,
  * `what`, which follows the thread's name: asked, as an approval, which
- * needs "approve" when it's risky by the model's word or by what it would
- * run, and says so; or as a question with one part and a few options that
- * can be said, or none, when any answer will do. Anything else is only
- * told, as it's answered in T3 Code.
+ * needs "approve" when it's risky by the model's word or by all of what it
+ * would run, or when that couldn't be read in full, and says so; or as a
+ * question with one part and a few options that can be said, or none, when
+ * any answer will do. Anything else is only told, as it's answered in T3 Code.
  */
 export const asking = (
   input: {
@@ -221,10 +221,18 @@ export const asking = (
     return { _tag: "Tell", spoken, entry: entry(spoken) }
   }
   if (request._tag === "Approval") {
-    const dangerous = risk === "high" || Brain.dangerous(`${request.what}\n${request.command ?? ""}`)
+    // By all of what it would run, never what's cut short to be said, which can leave out the risky part.
+    const risky = risk === "high" || Brain.dangerous(`${request.what}\n${request.whole ?? ""}`)
+    // Not shown in full, what it would run could be anything, so it's taken for risky too.
+    const unread = request.whole === undefined
+    const dangerous = risky || unread
     const doing = /^wants to /i.test(what) ? what.replace(/^wants to /i, "") : undefined
     const about = doing === undefined ? `give ${called} your go-ahead` : `allow ${called} to ${doing}`
-    const asked = dangerous ? `${capital(called)} ${what}, which can't be undone, so say 'approve' if you want it${sir}.` : `${capital(called)} ${what}. Allow it${sir}?`
+    const asked = risky
+      ? `${capital(called)} ${what}, which can't be undone, so say 'approve' if you want it${sir}.`
+      : unread
+        ? `${capital(called)} ${what}, but I couldn't read all of what it would run, so say 'approve' if you want it${sir}.`
+        : `${capital(called)} ${what}. Allow it${sir}?`
     const rewordings = dangerous
       ? [`Shall I still ${about}${sir}? Only 'approve' will do.`, `Do you still want me to ${about}${sir}? Say 'approve' if you do.`]
       : [`Shall I still ${about}${sir}?`, `Do you still want me to ${about}${sir}?`]
