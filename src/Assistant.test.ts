@@ -1026,18 +1026,18 @@ describe("Assistant", () => {
       Effect.gen(function* () {
         const { dictate, spoken, dispatched } = yield* assistant((situation) =>
           situation.utterance.heard.startsWith("Stop")
-            ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest: "tell it to use the Mina table instead" })
-            : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the Mina table instead.", how: "now" }),
+            ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest: "tell the Mina one to use its fee table" })
+            : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
         )
-        yield* dictate("Stop the Tezos one and tell it to use the Mina table instead.")
-        return { spoken: spoken(), sent: dispatched.map(({ type, commandId }) => [type, String(commandId).replace(/^yapd:u\w+:/, "")]) }
+        yield* dictate("Stop the Tezos one and tell the Mina one to use its fee table.")
+        return { spoken: spoken(), sent: dispatched.map(({ type, threadId, commandId }) => [type, threadId, String(commandId).replace(/^yapd:u\w+:/, "")]) }
       }),
     )
     expect(result.sent).toEqual([
-      ["run.interrupt", "0"],
-      ["message.dispatch", "1"],
+      ["run.interrupt", tezos.id, "0"],
+      ["message.dispatch", mina.id, "1"],
     ])
     // One line for the lot, and "sir" once.
-    expect(result.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration. On it."])
+    expect(result.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."])
   })
 })

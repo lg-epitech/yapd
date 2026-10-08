@@ -34,9 +34,6 @@ export const enabled: ReadonlySet<Act> = new Set<Act>(["dismiss", "resume", "ans
 /** Acts that only read, which go ahead on a fair guess and say which thread they took. */
 const reads: ReadonlySet<Act> = new Set<Act>(["answer", "look", "find", "show"])
 
-/** Acts that change a thread, which go ahead on a fair guess only about the thread he's on about. */
-export const writes: ReadonlySet<Act> = new Set<Act>(["send", "stop", "undo", "decide", "reply", "tidy"])
-
 /** Less speech than this said over something, a write is taken for talk or noise nearby, never acted on. */
 const faintest = 0.35
 
@@ -629,7 +626,7 @@ const writing = (
   // Said over something, too little speech is talk or noise nearby, never something to do.
   if (utterance.via === "reply" && utterance.voiced < faintest) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   // Taking back what was just done needs no thread named: it's what was just done.
-  if (choice.act === "undo" && choice.target === "") return { _tag: "Do", plan: { decision: choice, target } }
+  if (choice.act === "undo" && Option.isNone(target)) return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target } }
   if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
   const listed = target.value
   if (choice.act === "stop" && !stoppable(listed)) return { _tag: "Say", spoken: `${capital(listed.called)} isn't doing anything right now${addressed(lines)}.` }
@@ -746,7 +743,7 @@ const answering = `Answers:
 
 const messages = `A message for a thread, in "text": first person, as he'd type it. Keep his intent, his wording and every request in his order, including "when that's merged, do X". Spell out what he referred to, and repair words that were clearly misheard. Agreeing with what a thread already said, or telling it to leave something as it is, changes nothing: that's "dismiss". "how" is "after" only when he says after, once it's done or when it finishes. "Stop and tell it X instead" is one "send" with "how" "restart".
 
-Several things to do in one breath, like "stop the Tezos one and tell it to use the Mina table": decide the first, and put the rest in "rest", in his words, as he'd say them. You'll be asked about the rest once the first is done.`
+Several things to do in one breath, like "stop the Tezos one and tell the Mina one to use its fee table": decide the first, and put the rest in "rest", in his words, as he'd say them. You'll be asked about the rest once the first is done.`
 
 const safety = `Safety:
 - "stop", "quiet" or "enough" on their own mean stop talking: "dismiss". Stopping a thread needs him to say to stop the thread, the run or the work.
