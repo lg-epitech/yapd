@@ -375,7 +375,7 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
     inputIntent: (threadId: string, messageId: string) => Effect.map(message(threadId, messageId), Option.flatMap(({ intent }) => intent)),
 
     /** Whether a run is still going in the thread, which a stop ends. */
-    going: (threadId: string) => Effect.map(bounded(threadId), ({ projection }) => projection.runs.some(({ status }) => going.includes(status))),
+    running: (threadId: string) => Effect.map(bounded(threadId), ({ projection }) => projection.runs.some(({ status }) => going.includes(status))),
 
     search: (query: string) =>
       Effect.gen(function* () {

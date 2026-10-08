@@ -158,7 +158,7 @@ export const make = (options: {
   const landed = (row: Ledger.Row, actions: T3Actions.Actions): Effect.Effect<boolean, T3CodeServer.Trouble> => {
     const sent = command(row.body)
     if (row.messageId !== null && row.kind === "message") return actions.has(row.thread, row.messageId)
-    if (row.kind === "stop") return Effect.map(actions.going(row.thread), (going) => !going)
+    if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)
     if (Option.isSome(sent) && sent.value._tag === "Cancel") {
       const runId = sent.value.runId
       return Effect.map(actions.detail(row.thread), ({ runs }) => runs.some(({ id, status }) => id === runId && status !== "queued"))
