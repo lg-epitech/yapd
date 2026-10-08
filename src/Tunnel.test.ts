@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Clock, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Scope, TestClock, TestContext } from "effect"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ProcessError } from "./Process.ts"
@@ -81,7 +82,7 @@ const machine = (
         if (command.includes("exit") && current !== undefined && deaf.has(current)) return yield* Effect.never
         const forwards = current === undefined ? undefined : connections.get(current)
         if (current === undefined || forwards === undefined) {
-          return yield* fail(255, `Control socket connect(${command[2]}): No such file or directory`)
+          return yield* fail(255, `Control socket connect(${command[command.indexOf("-S") + 1]}): No such file or directory`)
         }
         // SSH answers these on stderr, which comes back with the rest.
         if (command.includes("check")) return `Master running (pid=${current})\r\n`
@@ -197,7 +198,7 @@ describe("Tunnel", () => {
         const before = yield* tunnel.locate
         expect(before.server.origin).toBe("http://127.0.0.1:50001")
         expect(Redacted.value(before.token)).toBe("token-1")
-        expect(rig.calls).toContain(`ssh -S ${folder}/ssh-rig.sock -O forward -L 127.0.0.1:50001:127.0.0.1:3774 -- me@rig.example.com`)
+        expect(rig.calls).toContain(`ssh -F /dev/null -S ${folder}/ssh-rig.sock -O forward -L 127.0.0.1:50001:127.0.0.1:3774 -- me@rig.example.com`)
 
         rig.drop()
         yield* TestClock.adjust("5 seconds")
@@ -310,6 +311,26 @@ describe("Tunnel", () => {
         expect((yield* tunnel.refresh).server.origin).toBe("http://127.0.0.1:50002")
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
+
+  test("carries no forward the user's SSH config sets for the machine", async () => {
+    const ssh = Bun.which("ssh")
+    if (ssh === null) return
+    const dir = await mkdtemp(join(tmpdir(), "yapd-tunnel-config-"))
+    try {
+      const config = join(dir, "config")
+      await Bun.write(config, "Host rig\n  LocalForward 9999 127.0.0.1:9999\n  DynamicForward 1080\n  RemoteForward 9998 127.0.0.1:9998\n")
+      // `ssh -G` says how SSH would connect, without connecting.
+      const resolved = (...options: ReadonlyArray<string>) =>
+        Bun.spawnSync([ssh, "-G", ...options, "rig"], { stderr: "ignore" }).stdout.toString()
+      expect(resolved("-F", config)).toContain("localforward")
+      const opened = resolved("-F", config, ...Tunnel.opening)
+      expect(opened).not.toMatch(/^(localforward|dynamicforward|remoteforward) /m)
+      // Told something through the connection, SSH reads no config at all.
+      expect(resolved("-F", "/dev/null")).not.toMatch(/^(localforward|dynamicforward|remoteforward) /m)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 
   test("an action on rig while it's down fails at once with a spoken reason", () =>
     Effect.runPromise(

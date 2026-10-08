@@ -89,6 +89,15 @@ export interface Tunnel {
  */
 const shell: Remote.Exec = (command, stdin) => run(command, { stdin, leave: command.includes("-M"), both: command.includes("-O") })
 
+/**
+ * How the connection is opened. Forwards the user's SSH config sets for the
+ * machine are cleared, so the connection only ever carries the one it's given.
+ */
+export const opening = [
+  "-o", "ControlPersist=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+  "-o", "ExitOnForwardFailure=yes", "-o", "ClearAllForwardings=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+]
+
 /** Kills a process here by its pid, for a connection that doesn't exit when asked. */
 const kill = (pid: number) =>
   Effect.sync(() => {
@@ -179,7 +188,8 @@ export const forward = (
      * connection as yapd stops: the timeout would wait on it otherwise.
      */
     const control = (...args: ReadonlyArray<string>) =>
-      Effect.interruptible(exec(["ssh", "-S", socket, ...args, "--", destination], "")).pipe(
+      // Without the user's SSH config, which could add a forward of its own to `-O forward`'s.
+      Effect.interruptible(exec(["ssh", "-F", "/dev/null", "-S", socket, ...args, "--", destination], "")).pipe(
         Effect.mapError((cause) => trouble(unreachable, cause)),
         Effect.timeoutFail({ duration: "5 seconds", onTimeout: () => trouble(unreachable) }),
       )
@@ -294,15 +304,7 @@ export const forward = (
       forget()
       // A socket left by a connection that's gone would keep the new one from listening.
       yield* Effect.ignore(Effect.tryPromise(() => rm(socket, { force: true })))
-      yield* exec(
-        [
-          "ssh", "-M", "-S", socket,
-          "-o", "ControlPersist=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-          "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-          "-N", "--", destination,
-        ],
-        "",
-      ).pipe(
+      yield* exec(["ssh", "-M", "-S", socket, ...opening, "-N", "--", destination], "").pipe(
         Effect.mapError((cause) => trouble(unreachable, cause)),
         Effect.timeoutFail({ duration: "20 seconds", onTimeout: () => trouble(unreachable) }),
       )

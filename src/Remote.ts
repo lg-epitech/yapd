@@ -107,7 +107,8 @@ export const ask = <E>(
       [
         "ssh",
         ...Option.match(socket, { onNone: () => [], onSome: (path) => ["-S", path] }),
-        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, `cd / && yapd ${command}`,
+        // Forwards the user's SSH config sets for the machine would be asked for again with each command, and clash.
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", destination, `cd / && yapd ${command}`,
       ],
       stdin,
     ),

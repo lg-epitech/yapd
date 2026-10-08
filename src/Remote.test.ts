@@ -41,7 +41,7 @@ describe("Remote", () => {
     await Effect.runPromise(relay.send(thread("Rig"), "Merge it; rm -rf ~"))
     expect(calls).toHaveLength(1)
     expect(calls[0]?.command).toEqual([
-      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd relay",
+      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", "me@rig.example.com", "cd / && yapd relay",
     ])
     expect(JSON.parse(calls[0]?.stdin ?? "")).toEqual({ thread: thread("Rig"), text: "Merge it; rm -rf ~" })
   })
@@ -131,7 +131,7 @@ describe("Remote launcher", () => {
     )
     expect(await Effect.runPromise(launcher.start(request))).toEqual(started)
     expect(calls[0]?.command).toEqual([
-      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd start",
+      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", "me@rig.example.com", "cd / && yapd start",
     ])
     expect(JSON.parse(calls[0]?.stdin ?? "")).toEqual(request)
     expect(await Effect.runPromise(launcher.catalog)).toEqual({ projects: [], models: [] })
@@ -200,8 +200,8 @@ describe("Remote launcher", () => {
     open = false
     await Effect.runPromise(launchers("Rig").start(request))
     expect(calls).toEqual([
-      ["ssh", "-S", "/home/me/.yapd/ssh-rig.sock", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd start"],
-      ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd start"],
+      ["ssh", "-S", "/home/me/.yapd/ssh-rig.sock", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", "me@rig.example.com", "cd / && yapd start"],
+      ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", "me@rig.example.com", "cd / && yapd start"],
     ])
   })
 })
