@@ -86,6 +86,10 @@ const resumable = "10 minutes"
 const recent = 15 * 60_000
 /** What a stop is noted with once it's been let carry on, so it's never let carry on twice. */
 const carried = "Carried on since."
+/** Why "carry on" does nothing to a thread let carry on already. */
+const carriedOn = "It's already carried on since I stopped it."
+/** Why "carry on" does nothing to a thread going again by his hand. */
+const backAtWork = "It's already back at work."
 /** What a stopped thread is told when it's let carry on. */
 export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
@@ -377,7 +381,7 @@ export const make = (options: {
         ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
       })
       if (Option.isSome(stopped) && stopped.value.reason === carried) {
-        return yield* failing({ _tag: "Refused", reason: "It's already carried on since I stopped it." } satisfies Outcome, "let it carry on")
+        return yield* failing({ _tag: "Refused", reason: carriedOn } satisfies Outcome, "let it carry on")
       }
       if (Option.isNone(stopped) || stopped.value.state !== "sent") {
         return yield* failing({ _tag: "Refused", reason: "I haven't stopped anything lately." } satisfies Outcome, "let it carry on")
@@ -386,7 +390,7 @@ export const make = (options: {
       const reached = yield* reach(ref)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, "let it carry on")
       // Going again already, by his hand or a carry on before, it's told nothing twice.
-      if (busy(reached.right.thread)) return yield* failing({ _tag: "Refused", reason: "It's already back at work." } satisfies Outcome, "let it carry on")
+      if (busy(reached.right.thread)) return yield* failing({ _tag: "Refused", reason: backAtWork } satisfies Outcome, "let it carry on")
       const resumed = yield* once(step, "undo", ref, () => ({ _tag: "Resume" }), reached.right)
       // Nothing held is nothing to let go of, which doesn't stop it carrying on.
       if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
@@ -589,6 +593,9 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
       return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} stopped${sir}.` : `I couldn't stop ${name ?? "it"}${sir}: ${reason}`
     case "Undo":
       if (act.carry) {
+        // Going already is what he wanted, not something that went wrong.
+        if (outcome.reason === carriedOn) return `I've already let ${name ?? "it"} carry on${sir}.`
+        if (outcome.reason === backAtWork) return `${name === undefined ? "It's" : `${capital(name)} is`} already back at work${sir}.`
         return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} is going again${sir}.` : `I couldn't get ${name ?? "it"} going again${sir}: ${reason}`
       }
       return outcome._tag === "Unknown" ? `I couldn't confirm it was withdrawn${sir}.` : `I couldn't take that back${sir}: ${reason}`

@@ -633,17 +633,19 @@ describe("Hands", () => {
         yield* TestClock.adjust("3 minutes")
         becomes(thread(tezos.id, { status: "completed" }))
         const twice = yield* act({ utterance: "u3", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true })
+        const carry = { _tag: "Undo", to: Option.none(), carry: true } as const
         return {
           stopped: stopped._tag,
           carried: carried._tag,
-          twice: twice._tag === "Refused" ? twice.reason : twice._tag,
+          twice: twice._tag === "Refused" ? Hands.failed(carry, twice, lines, Option.none()) : twice._tag,
           dispatched: dispatched.map(({ type, commandId, holdQueue, text }) => [type, commandId, holdQueue ?? text]),
         }
       }),
     )
     expect(result.stopped).toBe("Done")
     expect(result.carried).toBe("Done")
-    expect(result.twice).toBe("It's already carried on since I stopped it.")
+    // Said as what it is, never as something that went wrong.
+    expect(result.twice).toBe("I've already let it carry on, sir.")
     expect(result.dispatched).toEqual([
       ["run.interrupt", "yapd:u1:0", true],
       ["queue.resume", "yapd:u2:0", undefined],
@@ -689,11 +691,15 @@ describe("Hands", () => {
         const { run: act, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
         yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })
         // He set it going again himself before saying carry on.
-        const carried = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true })
-        return { carried: carried._tag === "Refused" ? carried.reason : carried._tag, dispatched: dispatched.map(({ type }) => type) }
+        const carry = { _tag: "Undo", to: Option.none(), carry: true } as const
+        const carried = yield* act({ utterance: "u2", step: 0 }, carry)
+        return {
+          carried: carried._tag === "Refused" ? Hands.failed(carry, carried, lines, Option.some("Migrate Tezos Integration")) : carried._tag,
+          dispatched: dispatched.map(({ type }) => type),
+        }
       }),
     )
-    expect(working).toEqual({ carried: "It's already back at work.", dispatched: ["run.interrupt"] })
+    expect(working).toEqual({ carried: "Migrate Tezos Integration is already back at work, sir.", dispatched: ["run.interrupt"] })
     const read = await run(
       Effect.gen(function* () {
         // Sent to an idle thread, it started a turn of its own at once.
