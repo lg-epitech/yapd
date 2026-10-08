@@ -69,6 +69,7 @@ const done = 90 * 24 * 60 * 60_000
 const catchingUp = "15 minutes"
 
 export const serve = Effect.gen(function* () {
+  const started = yield* Clock.currentTimeMillis
   const daemon = yield* Daemon.make
   const preferences = yield* Preferences.path
   const everywhere = yield* machines
@@ -96,7 +97,7 @@ export const serve = Effect.gen(function* () {
     journal,
     store: yield* Store.Store,
   })
-  const hands = Hands.make({ threads, ledger })
+  const hands = Hands.make({ threads, ledger, started })
   const assistant = yield* Assistant.make({
     threads,
     journal,

@@ -133,8 +133,10 @@ export const make = (options: {
   /** Where each thread is, and what reaches its machine. */
   readonly threads: Pick<Threads.Threads["Type"], "find" | "actions">
   readonly ledger: Ledger.Ledger["Type"]
+  /** When yapd started, in ms: what it did since is its own to settle, which a restart's look leaves alone. */
+  readonly started?: number
 }): Hands["Type"] => {
-  const { threads, ledger } = options
+  const { threads, ledger, started = Number.POSITIVE_INFINITY } = options
 
   /** Says why it didn't go, in the log too, as every failure is. */
   const failing = <O extends Extract<Outcome, { readonly reason: string }>>(outcome: O, what: string) =>
@@ -287,6 +289,8 @@ export const make = (options: {
       const ref = refOf(stopped.value)
       const reached = yield* reach(ref)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, "let it carry on")
+      // Going again already, by his hand or a carry on before, it's told nothing twice.
+      if (busy(reached.right.thread)) return yield* failing({ _tag: "Refused", reason: "It's already back at work." } satisfies Outcome, "let it carry on")
       const resumed = yield* once(step, "undo", ref, () => ({ _tag: "Resume" }), reached.right)
       // Nothing held is nothing to let go of, which doesn't stop it carrying on.
       if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
@@ -372,7 +376,8 @@ export const make = (options: {
       const now = yield* Clock.currentTimeMillis
       const open = yield* ledger.open(0)
       const undelivered: Array<Ledger.Row> = []
-      for (const row of open) {
+      // What this run did is settled, or offered again, as it happens.
+      for (const row of open.filter(({ at }) => at < started)) {
         if (now - row.at > recent) {
           yield* ledger.settle(row.commandId, "abandoned", { reason: row.reason ?? "Too long ago to check after a restart." })
           continue
