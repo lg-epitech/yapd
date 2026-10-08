@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Effect, Exit, Layer, Logger, Option, Redacted, TestClock, TestContext } from "effect"
+import { Clock, type Duration, Effect, Exit, Layer, Logger, Option, Redacted, TestClock, TestContext } from "effect"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ProcessError } from "./Process.ts"
@@ -17,7 +17,13 @@ const folder = join(tmpdir(), "yapd-tunnel-test-nothing-here")
  * `open` is for a connection an earlier yapd left open.
  */
 const machine = (
-  options: { readonly opens?: Array<boolean>; readonly answers?: Array<string | ProcessError>; readonly open?: boolean } = {},
+  options: {
+    readonly opens?: Array<boolean>
+    readonly answers?: Array<string | ProcessError>
+    readonly open?: boolean
+    /** How long connecting takes. */
+    readonly opening?: Duration.DurationInput
+  } = {},
 ) => {
   const opens = [...(options.opens ?? [])]
   const answers = [...(options.answers ?? [])]
@@ -42,6 +48,7 @@ const machine = (
       }
       if (command.includes("-M")) {
         tries.push(yield* Clock.currentTimeMillis)
+        if (options.opening !== undefined) yield* Effect.sleep(options.opening)
         alive = opens.shift() ?? true
         return alive ? "" : yield* fail(255, "ssh: connect to host rig port 22: Operation timed out")
       }
@@ -68,6 +75,16 @@ const ports = () => {
 
 /** Lets the tunnel's fibers catch up, since the clock only moves when told to. */
 const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)))
+
+/** What an effect gives within a second by the test's clock, or that it's still waiting. */
+const within = <A, E>(effect: Effect.Effect<A, E>) =>
+  Effect.gen(function* () {
+    const fiber = yield* Effect.fork(effect)
+    yield* TestClock.adjust("1 second")
+    yield* flush
+    const exit = Option.getOrUndefined(yield* fiber.poll)
+    return exit !== undefined && Exit.isSuccess(exit) ? exit.value : "still waiting"
+  })
 
 describe("yapd t3", () => {
   test("prints the origin and the token and nothing else, and why not when there's none", async () => {
@@ -134,7 +151,7 @@ describe("Tunnel", () => {
         ]
         for (const { rig, reason } of cases) {
           const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
-          yield* tunnel.status
+          yield* flush
           const asked = rig.calls.length
           const actions = T3Actions.make(Tunnel.transport(tunnel.locate))
           const sending = yield* Effect.fork(Effect.flip(actions.run("thread-1", { _tag: "Send", text: "Merge it.", steer: false })))
@@ -144,6 +161,19 @@ describe("Tunnel", () => {
           // Nothing was tried on its behalf: trying again is the tunnel's, in the background.
           expect(rig.calls.length).toBe(asked)
         }
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("right after yapd starts, says it's still connecting rather than wait for SSH", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine({ opening: "10 seconds" })
+        const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
+        expect(yield* within(tunnel.status)).toEqual({ _tag: "Down", reason: "I'm still connecting to rig.", outage: 0 })
+        expect(yield* within(Effect.map(Effect.flip(tunnel.locate), ({ reason }) => reason))).toBe("I'm still connecting to rig.")
+        yield* TestClock.adjust("8 seconds")
+        yield* flush
+        expect(yield* tunnel.status).toEqual({ _tag: "Up" })
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
@@ -187,6 +217,7 @@ describe("Tunnel", () => {
           ],
         })
         const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
+        yield* flush
         statuses.push(yield* tunnel.status)
         for (const wait of ["1 second", "2 seconds"] as const) {
           yield* TestClock.adjust(wait)

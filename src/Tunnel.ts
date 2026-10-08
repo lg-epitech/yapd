@@ -55,20 +55,27 @@ export const transport = (locate: Effect.Effect<Located, Server.Trouble>): Effec
 /**
  * Whether the machine's T3 Code can be reached now. While it can't, the reason
  * is to be said, and `outage` counts the times it went down, so that's said
- * once each time rather than on every try.
+ * once each time rather than on every try. It's 0 while yapd has just started
+ * and is still connecting, which isn't an outage.
  */
 export type Status = { readonly _tag: "Up" } | { readonly _tag: "Down"; readonly reason: string; readonly outage: number }
 
 /** Another machine's T3 Code, held open for as long as the scope lasts. */
 export interface Tunnel {
-  /** Where it answers, as of the last look. Fails at once, with the reason to say, while it can't be reached. */
+  /**
+   * Where it answers, as of the last look. Fails at once, with the reason to
+   * say, while it can't be reached, and after a second at most while yapd has
+   * just started and is still connecting.
+   */
   readonly locate: Effect.Effect<Located, Server.Trouble>
   /**
    * Asks the machine again where its T3 Code listens and for the token, for
    * when what `locate` gave stopped working, like after T3 Code restarted there.
+   * Right after yapd starts, it waits for the first try however long that
+   * takes, which suits what follows T3 Code in the background, not an action.
    */
   readonly refresh: Effect.Effect<Located, Server.Trouble>
-  /** Whether it can be reached now. Like `locate`, it waits for the first try when yapd has just started. */
+  /** Whether it can be reached now, as of the last try. It never waits for one. */
   readonly status: Effect.Effect<Status>
   /** The open connection's socket, for other yapd commands to that machine to go through. */
   readonly master: Remote.Master
@@ -131,7 +138,7 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
     let open = false
     let forwarded: { readonly local: number; readonly remote: number } | undefined
     let located: Located | undefined
-    /** Unset until the first try is over, which `locate` waits for, so starting up isn't taken for an outage. */
+    /** Unset until the first try is over, so starting up isn't taken for an outage. */
     let status: Status | undefined
     let outages = 0
     const first = yield* Deferred.make<void>()
@@ -278,10 +285,13 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
     yield* Effect.addFinalizer(() => Effect.exit(control("-O", "exit")))
     yield* Effect.forkScoped(loop)
 
-    const reason = () => (status?._tag === "Down" ? status.reason : unreachable)
+    /** How it stands while yapd has just started and the first try isn't over. */
+    const connecting = { _tag: "Down", reason: `I'm still connecting to ${host}.`, outage: 0 } as const
+    const reason = () => (status === undefined ? connecting.reason : status._tag === "Down" ? status.reason : unreachable)
     return {
       locate: Effect.gen(function* () {
-        yield* Deferred.await(first)
+        // The first try gets a moment, rather than an action failing just before it's done, but no more: it can take a while to give up.
+        yield* Effect.ignore(Effect.timeout(Deferred.await(first), "1 second"))
         return status?._tag === "Up" && located !== undefined ? located : yield* trouble(reason())
       }),
       refresh: Effect.gen(function* () {
@@ -291,10 +301,7 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
         // The connection may have gone since it was last checked on, with the forward, while SSH still reaches the machine on its own.
         return yield* settle(Effect.zipRight(still, look))
       }),
-      status: Effect.zipRight(
-        Deferred.await(first),
-        Effect.sync((): Status => status ?? { _tag: "Down", reason: unreachable, outage: outages }),
-      ),
+      status: Effect.sync((): Status => status ?? connecting),
       master: Effect.sync(() => (open ? Option.some(socket) : Option.none())),
     } satisfies Tunnel
   })
