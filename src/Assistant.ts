@@ -154,6 +154,8 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly unconfirmed: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
     /** yapd was turned on: what a restart found while it was off is said, or offered, now. */
     readonly back: Effect.Effect<void>
+    /** yapd starts saying something of its own accord about a thread, like that it failed, which "it" then means. */
+    readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
   }
 >() {}
 
@@ -429,8 +431,7 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         // One he hasn't heard yet can't be what he's answering, nor one asked after he said this.
         const open = Option.filter(current(now), () => before(utterance)?.said === true)
-        const focus =
-          about._tag === "Thread" ? Option.some(about.ref) : about._tag === "Answer" ? about.about : Option.none<Threads.Ref>()
+        const focus = Brain.about(about)
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
@@ -1760,5 +1761,11 @@ export const make = (options: {
         }),
       // In its turn, so turning yapd on never waits for it.
       back: Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)),
+      mention: (ref, said) =>
+        Effect.flatMap(Clock.currentTimeMillis, (at) =>
+          Effect.sync(() => {
+            answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at }
+          }),
+        ),
     } satisfies Assistant["Type"]
   })

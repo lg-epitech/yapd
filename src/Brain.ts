@@ -475,11 +475,24 @@ const scratching: ReadonlySet<string> = new Set(["scratch that", "cancel that", 
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
 
+/** The thread what he heard last is about, if it's one: an update's when its hook was tied to the thread. */
+export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> => {
+  switch (subject._tag) {
+    case "Thread":
+      return Option.some(subject.ref)
+    case "Answer":
+      return subject.about
+    case "Session":
+      return Option.fromNullable(subject.update.about)
+    case "Nothing":
+      return Option.none()
+  }
+}
+
 /** The thread he's on about: what he heard about last, when it's on the desk. */
 export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
   const { subject, desk } = situation
-  const ref = subject._tag === "Thread" ? Option.some(subject.ref) : subject._tag === "Answer" ? subject.about : Option.none<Threads.Ref>()
-  return Option.flatMap(ref, (ref) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, ref))))
+  return Option.flatMap(about(subject), (ref) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, ref))))
 }
 
 /** Whether there's a run to stop: one going, finishing, or waiting on him. */
@@ -946,8 +959,11 @@ const focus = (situation: Situation) => {
     }
     case "Session": {
       const { update } = subject
+      const handle = update.about === undefined ? undefined : handleOf(desk, update.about.machine, update.about.id)
       return [
-        `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`,
+        handle === undefined
+          ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
+          : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
         // Like an answer to what he asked over it, which is what he heard last.
         ...(subject.said === update.spoken ? [] : [`What you said last, over it: ${fenced(subject.said, 400)}`]),
         ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${fenced(prompt, 300)}`] }),
