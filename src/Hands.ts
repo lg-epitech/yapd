@@ -329,7 +329,9 @@ export const make = (options: {
     Effect.gen(function* () {
       const look = twin.messageId === null ? Either.right(Option.none<T3Actions.Found>()) : yield* Effect.either(reached.actions.message(twin.thread, twin.messageId))
       const found = Either.getOrElse(look, () => Option.none<T3Actions.Found>())
-      const own = Option.flatMap(found, ({ run }) => run)
+      // Steered in, even from the queue by his hand in T3 Code's app, which cancels the run it waited in, it's in the turn under way.
+      const steered = Option.exists(found, ({ intent }) => Option.exists(intent, (intent) => intent === "steer" || intent === "promoted_queued_to_steer"))
+      const own = steered ? Option.none<{ readonly status: string }>() : Option.flatMap(found, ({ run }) => run)
       if (Option.exists(own, ({ status }) => status === "cancelled")) return Option.none<Outcome>()
       let row = twin
       if (row.state !== "sent" && Option.isSome(found)) {

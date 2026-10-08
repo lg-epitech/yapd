@@ -532,6 +532,23 @@ describe("Hands", () => {
     ).toEqual({ again: "Twin", dispatched: 1 })
   })
 
+  test("a queued message he promoted to steer in T3 Code's app is still the message that went, so the same words are asked about", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { send, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* send("u1", "When it's done, open a PR.", "after")
+        // He pressed Steer on it: T3 Code cancels the run it waited in, and steers it into the turn under way.
+        bounded.runs[1]!.status = "cancelled"
+        bounded.turnItems.push({ type: "user_message", messageId: "yapd:u1:0:m", inputIntent: "promoted_queued_to_steer" })
+        yield* TestClock.adjust("1 minute")
+        const again = yield* send("u2", "When it's done, open a PR.", "after")
+        return { again: again._tag, dispatched: dispatched.length }
+      }),
+    )
+    expect(result).toEqual({ again: "Twin", dispatched: 1 })
+  })
+
   test("a message to a busy thread says whether it was steered or queued, as T3 Code did", async () => {
     const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
     const sent = (intent: "steer" | "queued_turn") =>
