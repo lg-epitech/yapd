@@ -229,7 +229,10 @@ export const make = (options: {
      * it in its own time. It's never made uninterruptible, since then its own
      * time limits couldn't end it, and a launch that never answered would go
      * on for good. As a step of a request, it's written down first under the
-     * ids it's asked for with, so it's asked for once.
+     * ids it's asked for with, so it's asked for once; and once it's written
+     * down, nothing comes between that and asking for it, not even turning
+     * yapd off, which would leave it as if it may have started when it never
+     * was asked for.
      */
     const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string, step?: Step) =>
       Effect.gen(function* () {
@@ -299,7 +302,7 @@ export const make = (options: {
           return begun
         }).pipe(Effect.interruptible, Effect.forkIn(scope))
         return { _tag: "Launching", about, project: project.name, machine, then: Fiber.join(launching) } satisfies Outcome
-      })
+      }).pipe(Effect.uninterruptible)
 
     /** Reads through the project before writing the prompt, for a request that leans on something in it. */
     const look = (material: Material, resolved: Resolved, decision: Decision, noted: Noted, step?: Step): Effect.Effect<Outcome> =>

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Either, Option, type Scope, TestClock, TestContext } from "effect"
+import { Effect, Either, Fiber, Option, type Scope, TestClock, TestContext } from "effect"
 import * as Drafts from "./Drafts.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
@@ -67,8 +67,8 @@ const drafts = (
     readonly written?: Written
     readonly refuse?: string
     readonly rigDown?: boolean
-    /** Whether what's started is written down first, in a ledger of its own. */
-    readonly ledger?: boolean
+    /** Whether what's started is written down first, in a ledger of its own, and whether writing it down takes a second. */
+    readonly ledger?: boolean | "slow"
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -99,6 +99,8 @@ const drafts = (
       available: true,
       research: ({ directory }) => Effect.sync(() => void researched.push({ machine, directory })).pipe(Effect.as({})),
     })
+    const kept = Ledger.fromStore(yield* Store.make(":memory:"))
+    const ledger: Ledger.Ledger["Type"] = options.ledger === "slow" ? { ...kept, prepare: (step) => Effect.zipLeft(kept.prepare(step), Effect.sleep("1 second")) } : kept
     const made = yield* Drafts.make({
       machines: [
         { name: "rosie", here: true, hosts: ["Rosie.local"], launcher: launcher("rosie", rosie), researcher: researcher("rosie") },
@@ -106,7 +108,7 @@ const drafts = (
       ],
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
       recent: Effect.succeed([]),
-      ...(options.ledger === true ? { ledger: Ledger.fromStore(yield* Store.make(":memory:")) } : {}),
+      ...(options.ledger === undefined || options.ledger === false ? {} : { ledger }),
     }).pipe(
       Effect.provideService(Writer, {
         decide: (material) =>
@@ -170,6 +172,7 @@ const drafts = (
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       started,
       said,
+      ledger,
       spoken: () => said.map(({ spoken }) => spoken),
       asked,
       researched,
@@ -426,6 +429,21 @@ describe("Drafts", () => {
     )
     expect(result.started).toEqual(["yapd:u1:0", "yapd:u2:0"])
     expect(result.said[1]).toEqual({ spoken: "I've already asked for that to start.", came: "Said" })
+  })
+
+  test("new work written down is asked for even when yapd is turned off just then, never left as if it may have started", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, started, ledger, flush, wait } = yield* drafts(() => decision({}), { ledger: "slow" })
+        const going = yield* Effect.fork(dictate("Fix the loader in yapd.", { utterance: "u1", step: 0 }))
+        yield* flush
+        // Turned off as it's written down, before it's asked for.
+        yield* Fiber.interruptFork(going)
+        yield* wait(1)
+        return { started: started.map(({ request }) => request.ids?.command), state: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state) }
+      }),
+    )
+    expect(result).toEqual({ started: ["yapd:u1:0"], state: Option.some("sent") })
   })
 
   test("asks every machine what it can start as the shortcut is pressed, and goes on without one that can't say", async () => {
