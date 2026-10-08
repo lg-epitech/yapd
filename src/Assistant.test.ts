@@ -1032,6 +1032,61 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a yes or no that says more, like when it goes, what to do next or what to do instead, is about the thread that was asked about", async () => {
+    const replying = (reply: string, answered: (situation: Brain.Situation) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, answer, spoken, questions, dispatched } = yield* assistant((situation) =>
+            situation.utterance.via === "reply" ? answered(situation) : tezosMessage("high")(situation),
+          )
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          yield* answer(reply)
+          return {
+            spoken: spoken(),
+            questions: questions().length,
+            sent: dispatched.map(({ type, threadId, dispatchMode }) => [type, threadId, (dispatchMode as { type?: string } | undefined)?.type]),
+          }
+        }),
+      )
+    // "I sent that a minute ago, sir. Again?", and yes, only later: it's queued, and not asked about again.
+    const later = await replying("Yes, but once it's done.", () => Brain.decision({ act: "send", how: "after", pending: "answers" }))
+    expect(later.questions).toBe(1)
+    expect(later.sent).toEqual([
+      ["message.dispatch", tezos.id, "start_immediately"],
+      ["message.dispatch", tezos.id, "queue_after_active"],
+    ])
+    // No, and stop it instead: "it" is the thread asked about.
+    const stopped = await replying("No, stop it instead.", () => Brain.decision({ act: "stop", pending: "answers" }))
+    expect(stopped.sent).toEqual([
+      ["message.dispatch", tezos.id, "start_immediately"],
+      ["run.interrupt", tezos.id, undefined],
+    ])
+    // "Stop Migrate Tezos Integration, sir?", and yes, then something to tell it: both, in order.
+    const then = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, spoken, dispatched } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing fee tables, sir." })
+            : situation.utterance.heard.startsWith("Yes")
+              ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest: "tell it to write up why it stopped", pending: "answers" })
+              : situation.utterance.heard.startsWith("tell")
+                ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Write up why you stopped.", how: "now" })
+                : Brain.decision({ act: "stop", target: handle(situation, tezos), sure: "medium" }),
+        )
+        yield* dictate("What's the Tezos one doing?")
+        yield* dictate("Stop it.")
+        yield* answer("Yes, and then tell it to write up why it stopped.")
+        return { spoken: spoken().at(-1), sent: dispatched.map(({ type, text, commandId }) => [type, text, String(commandId).replace(/^yapd:u\w+:/, "")]) }
+      }),
+    )
+    expect(then.sent).toEqual([
+      ["run.interrupt", undefined, "0"],
+      ["message.dispatch", "Write up why you stopped.", "1"],
+    ])
+    expect(then.spoken).toBe("Stopped, sir. On it.")
+  })
+
   test("a message whose words the model left out goes in the words of his request, never those of his answer to a question about it", async () => {
     const request = "Tell the migration one to rebase on master."
     const unworded = (answered: (situation: Brain.Situation) => Brain.Decision | undefined, reply: string) =>

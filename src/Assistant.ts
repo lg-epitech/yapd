@@ -182,14 +182,16 @@ const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>
   Brain.yesNo(open.kind) ? Option.fromNullable(open.candidates[0]) : Option.none<Threads.Ref>()
 
 /**
- * An answer to a question about a message, with the words it left out taken
- * from what was asked about, or failing those from the request itself: never
- * the answer's own, like "The first." or "Yes.", which aren't for the thread.
+ * An answer to a question, with what it left out taken from what was asked
+ * about: the rest of the request, and a message's words, or failing those the
+ * request's own, never the answer's, like "The first." or "Yes.", which
+ * aren't for the thread.
  */
-const worded = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard">): Brain.Decision =>
-  decision.act === "send" && decision.text.trim() === "" && open.decision.act === "send"
-    ? { ...decision, text: open.decision.text.trim() || open.heard }
-    : decision
+const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard">): Brain.Decision => ({
+  ...decision,
+  text: decision.act === "send" && decision.text.trim() === "" && open.decision.act === "send" ? open.decision.text.trim() || open.heard : decision.text,
+  rest: decision.rest.trim() || open.decision.rest,
+})
 
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
@@ -926,18 +928,35 @@ export const make = (options: {
     /**
      * A yes to doing what was asked about: the same thing on the same thread,
      * as it's known now, checked as anything done is, and never asked about a
-     * second time. To sending again, it's the same step under the same ids,
-     * once; a yes that doesn't stand lets it go for good. A no with something
-     * else instead, like another thread or other words, is that something else,
-     * and what was asked about isn't done.
+     * second time, with anything he added done after it. To sending again,
+     * it's the same step under the same ids, once; a yes that doesn't stand
+     * lets it go for good. The same words to the same thread at another time,
+     * like "yes, but once it's done", are still a yes to sending them. A no
+     * with something else instead, like another thread or other words, is
+     * that something else, and what was asked about isn't done.
      */
     const agreeing = (open: Open, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
         const { utterance, situation } = thought
-        if (!Brain.agrees(open, thought.decision, situation.desk)) {
+        const target = Option.fromNullable(open.candidates[0]).pipe(
+          Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
+        )
+        const handle = Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle })
+        // What he left out is what was asked about: its words, as for "no, the Mina one", and its thread, as for "no, stop it instead".
+        const answered = filled(thought.decision, open)
+        const instead =
+          answered.target === "" && handle !== "" && (answered.act === "send" || answered.act === "stop")
+            ? { ...answered, target: handle, sure: "high" as const, others: "" }
+            : answered
+        const timed =
+          instead.act === "send" &&
+          open.decision.act === "send" &&
+          handle !== "" &&
+          instead.target === handle &&
+          Ledger.digest(instead.text) === Ledger.digest(open.decision.text)
+        const agreed = Brain.agrees(open, thought.decision, situation.desk)
+        if (!agreed && !timed) {
           yield* forgo(open, "He asked for something else instead.")
-          // Words left out are the ones asked about, as for "no, the Mina one".
-          const instead = worded(thought.decision, open)
           const checked = Brain.check(instead, situation, said)
           if (checked._tag === "Ask") {
             yield* Effect.logInfo("Leaving it, rather than ask again")
@@ -946,19 +965,12 @@ export const make = (options: {
           yield* Effect.logInfo("Doing what he asked instead of what I asked about")
           return yield* follow(checked, { ...thought, decision: instead }, said)
         }
-        const target = Option.fromNullable(open.candidates[0]).pipe(
-          Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
-        )
-        const decision = worded(
-          Brain.decision({
-            ...open.decision,
-            target: Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle }),
-            sure: "high",
-            others: "",
-            pending: "answers",
-          }),
-          open,
-        )
+        const decision = !agreed
+          ? instead
+          : filled(
+              Brain.decision({ ...open.decision, target: handle, sure: "high", others: "", pending: "answers", rest: thought.decision.rest }),
+              open,
+            )
         const checked = Brain.check(decision, situation, said)
         const resend = Option.filter(open.resend, () => checked._tag === "Do" && checked.plan.decision.act === "send" && Option.isSome(target))
         if (Option.isNone(resend)) yield* forgo(open, "His yes didn't stand.")
@@ -969,6 +981,8 @@ export const make = (options: {
         if (Option.isSome(resend) && Option.isSome(target)) {
           const power = yield* options.power
           if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
+          // Under the same ids it goes exactly as it went before, whenever he now says.
+          if (decision.how !== open.decision.how) yield* Effect.logInfo("Sending it again as it was first asked, since it goes under the same ids")
           const outcome = yield* hands.again(resend.value)
           const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: decision.text, how: "now" }
           return yield* told(act, outcome, { ...thought, decision }, said, { step: 0, commandId: resend.value })
@@ -1077,7 +1091,7 @@ export const make = (options: {
         }
         if (open.kind === "project") return yield* project(open, decided, said)
         if (open.kind !== "which") return yield* agreeing(open, decided, said)
-        const picked = worded(decision, open)
+        const picked = filled(decision, open)
         const checked = Brain.check(picked, decided.situation, said)
         // At most one question: one the answer doesn't settle is let go.
         if (checked._tag === "Ask") {
