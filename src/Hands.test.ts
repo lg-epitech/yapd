@@ -775,6 +775,46 @@ describe("Hands", () => {
     expect(unsure.dispatched).toBe(1)
   })
 
+  test("a message taken out of the queue is gone from the thread, as T3 Code drops it: scratch that whose answer was lost is withdrawn, and one he took out himself goes again as new", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    /** T3 Code taking a message out of the queue: neither it nor the run it waited in shows any more. */
+    const drops = (bounded: Bounded, messageId: string) => {
+      bounded.runs = bounded.runs.filter(({ userMessageId }) => userMessageId !== messageId)
+      bounded.messages = bounded.messages.filter(({ id }) => id !== messageId)
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, run: act, answering, bounded, ledger, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* send("u1", "When it's done, open a PR.", "after")
+        // Done, but the answer to the cancel was lost.
+        answering((_, bounded) =>
+          Effect.suspend(() => {
+            drops(bounded, "yapd:u1:0:m")
+            return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+          }),
+        )
+        const scratched = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+        const message = yield* ledger.get("yapd:u1:0")
+        answering(takes())
+        // Then one he took out of the queue himself, in T3 Code's app.
+        yield* send("u3", "Also add a changelog entry.", "after")
+        drops(bounded, "yapd:u3:0:m")
+        yield* TestClock.adjust("1 minute")
+        const again = yield* send("u4", "Also add a changelog entry.", "after")
+        return {
+          scratched: scratched._tag,
+          message: Option.map(message, ({ state, reason }) => [state, reason]),
+          again: again._tag,
+          dispatched: dispatched.map(({ type }) => type),
+        }
+      }),
+    )
+    expect(result.scratched).toBe("Done")
+    expect(result.message).toEqual(Option.some(["abandoned", Ledger.withdrawn]))
+    expect(result.again).toBe("Done")
+    expect(result.dispatched).toEqual(["message.dispatch", "queued-run.cancel", "message.dispatch", "message.dispatch"])
+  })
+
   test("scratch that is about the last thing done, never a message before it", async () => {
     const result = await run(
       Effect.gen(function* () {
