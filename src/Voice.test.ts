@@ -119,6 +119,58 @@ describe("early", () => {
     ))
 })
 
+describe("startRender", () => {
+  const run = <A>(test: (dir: string) => Effect.Effect<A, unknown>) => {
+    const dir = mkdtempSync(Path.join(tmpdir(), "yapd-start-render-"))
+    return Effect.runPromise(test(dir)).finally(() => rmSync(dir, { recursive: true, force: true }))
+  }
+  const text = "The tests pass. Nothing needs you."
+
+  test("abandons a render whose starter was stopped while it started, as nobody else could", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const lifetime = yield* Scope.make()
+        const asked = yield* Deferred.make<void>()
+        const gate = yield* Deferred.make<void>()
+        const givenUp = yield* Deferred.make<void>()
+        const voice: Voice["Type"] = {
+          render: () => Effect.die("Rendered with no first part"),
+          // Slow to start, and with both its files there by the time it has.
+          renderFirst: (_, path) =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() => Deferred.succeed(givenUp, undefined))
+              yield* Deferred.succeed(asked, undefined)
+              yield* Deferred.await(gate)
+              yield* Effect.promise(() => Promise.all([Bun.write(`${path}.first.wav`, "part"), Bun.write(path, "audio")]))
+              return { first: Effect.succeed(`${path}.first.wav`), whole: Effect.void }
+            }),
+        }
+        const starting = yield* Effect.fork(startRender(voice, text, `${dir}/out.wav`, lifetime))
+        yield* Deferred.await(asked)
+        const stopping = yield* Effect.fork(Fiber.interrupt(starting))
+        yield* Effect.promise(() => Bun.sleep(10))
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(stopping)
+        expect(yield* Deferred.isDone(givenUp)).toBe(true)
+        expect(readdirSync(dir)).toEqual([])
+        yield* Scope.close(lifetime, Exit.void)
+      }),
+    ))
+
+  test("removes a render's files when its lifetime ends before anyone abandoned it", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const lifetime = yield* Scope.make()
+        const voice: Voice["Type"] = { render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid) }
+        // Like one handed on to play, whose player stopped along with yapd.
+        const started = yield* startRender(voice, text, `${dir}/out.wav`, lifetime)
+        yield* started.whole
+        yield* Scope.close(lifetime, Exit.void)
+        expect(readdirSync(dir)).toEqual([])
+      }),
+    ))
+})
+
 describe("withFallback", () => {
   test("uses say only until a first part is out, since its whole wouldn't carry on from that part", () =>
     Effect.runPromise(

@@ -84,21 +84,31 @@ export interface Started extends Rendering {
  * Starts a render like `early`, in a scope of its own, so it carries on with
  * the rest once whoever started it has handed it on, like to the inbox to play.
  * It lasts until abandoned, which whoever doesn't hand it on, like when yapd was
- * turned off meanwhile, does at once, or `lifetime` ends. All in one step, so
- * an interruption can't leave one running that nothing will abandon.
+ * turned off meanwhile, does at once, or `lifetime` ends, which removes its
+ * files too. All in one step, so an interruption can't leave one running that
+ * nothing will abandon: one stopped while it starts abandons it itself.
  */
 export const startRender = (voice: Voice["Type"], text: string, path: string, lifetime: Scope.Scope): Effect.Effect<Started> =>
-  Effect.gen(function* () {
-    const scope = yield* Scope.fork(lifetime, ExecutionStrategy.sequential)
-    const rendering = yield* early(voice, text, path).pipe(Scope.extend(scope))
-    const abandon = Effect.gen(function* () {
-      yield* Scope.close(scope, Exit.void)
-      // Settled once the scope is closed: its first part's file, or a failure, when there's none to remove.
-      const first = yield* Effect.option(rendering.first)
-      yield* Effect.promise(() => Promise.all([path, ...Option.toArray(first)].map((file) => rm(file, { force: true }))))
-    }).pipe(Effect.uninterruptible)
-    return { ...rendering, abandon }
-  }).pipe(Effect.uninterruptible)
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.fork(lifetime, ExecutionStrategy.sequential)
+      let first: Effect.Effect<string, unknown> | undefined
+      // Before the render's own, so it runs after them, once the render is given up and its first part settled:
+      // its file, or a failure, when there's none to remove.
+      yield* Scope.addFinalizer(
+        scope,
+        Effect.gen(function* () {
+          const part = first === undefined ? Option.none() : yield* Effect.option(first)
+          yield* Effect.promise(() => Promise.all([path, ...Option.toArray(part)].map((file) => rm(file, { force: true }))))
+        }),
+      )
+      const rendering = yield* early(voice, text, path).pipe(Scope.extend(scope))
+      first = rendering.first
+      const started: Started = { ...rendering, abandon: Effect.uninterruptible(Scope.close(scope, Exit.void)) }
+      // A stop that came while it started would otherwise take effect on the way out, losing the only way to abandon it.
+      return yield* restore(Effect.succeed(started)).pipe(Effect.onInterrupt(() => started.abandon))
+    }),
+  )
 
 /** Where Kokoro's model and voices come from. */
 export const kokoroRepo = "onnx-community/Kokoro-82M-v1.0-ONNX"
