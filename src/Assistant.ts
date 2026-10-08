@@ -1,4 +1,4 @@
-import { Cause, Clock, Context, type Duration, Effect, Either, Fiber, FiberSet, Option } from "effect"
+import { Cause, Clock, Context, type Duration, Effect, Either, Exit, Fiber, FiberSet, Option } from "effect"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
@@ -127,7 +127,8 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
      * A dictation, begun with the shortcut `press`, or a typed request: worked
      * out and acted on, then what came of it said ahead of anything else. None
      * when yapd is off or was turned off since it was said, however late it's
-     * handed on: then nothing is done for it at all.
+     * handed on: then nothing is done for it at all. Turned off while it's
+     * worked out or acted on, it stops there, and is none too.
      */
     readonly heard: (utterance: Omit<Utterance, "id">, press?: number) => Effect.Effect<Option.Option<string>>
     /** The shortcut was pressed to start a dictation, when yapd had been turned on or off `turns` times: the open question waits for what's dictated. */
@@ -137,7 +138,7 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
     readonly replied: Effect.Effect<void>
     readonly open: Effect.Effect<Option.Option<Open>>
-    /** yapd was turned off: the open question is closed, and what was being written up stops. */
+    /** yapd was turned off: the open question is closed, and whatever was being worked out, written up or done for a request stops. */
     readonly drop: Effect.Effect<void>
   }
 >() {}
@@ -263,7 +264,7 @@ export const make = (options: {
     const over = new Set<number>()
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
-    /** What's under way in the background for a request, stopped when yapd is turned off. */
+    /** What's under way for a request, being worked out or in the background, stopped when yapd is turned off. */
     const jobs = yield* FiberSet.make()
     /** How many times yapd had been turned on or off when it was last turned off, so what's begun after for a request heard by then is stopped too. */
     let dropped = Number.NEGATIVE_INFINITY
@@ -281,21 +282,43 @@ export const make = (options: {
     const outdated = (turns: number) => Effect.map(options.power, (power) => !power.on || power.turns !== turns)
 
     /**
-     * In the background for a request heard when yapd had been turned on or
-     * off `turns` times, and stoppable even when begun from what can't be
+     * Under way for a request heard when yapd had been turned on or off
+     * `turns` times, and stoppable even when begun from what can't be
      * stopped, like an answer being taken in. It's among the jobs from when
      * it's begun, not from when it starts running, so turning yapd off just
      * after can't miss it; and begun as yapd is being turned off, it's
      * stopped like the rest.
      */
-    const background = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
+    const job = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
       Effect.gen(function* () {
-        const job = yield* effect.pipe(
-          Effect.catchAllCause((cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Something went wrong", cause))),
-          Effect.interruptible,
-          FiberSet.run(jobs),
-        )
-        if (turns <= dropped) yield* Fiber.interruptFork(job)
+        const fiber = yield* effect.pipe(Effect.interruptible, FiberSet.run(jobs))
+        if (turns <= dropped) yield* Fiber.interruptFork(fiber)
+        return fiber
+      })
+
+    /** In the background for a request, which nothing waits for. */
+    const background = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
+      Effect.asVoid(
+        job(
+          Effect.catchAllCause(effect, (cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Something went wrong", cause))),
+          turns,
+        ),
+      )
+
+    /**
+     * A request being worked out and acted on, which turning yapd off stops
+     * like what's in the background for it, from the model to the prompt
+     * being written: then nothing comes of it, as if it had been said before,
+     * and what's asked once yapd is on again doesn't wait for it. Stopped too
+     * when whatever waits for it is.
+     */
+    const stoppable = (request: Effect.Effect<Option.Option<string>>, utterance: Utterance) =>
+      Effect.gen(function* () {
+        const fiber = yield* job(request, utterance.turns)
+        const exit = yield* Fiber.await(fiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)))
+        if (Exit.isSuccess(exit) || !Cause.isInterruptedOnly(exit.cause)) return yield* exit
+        yield* Effect.logInfo("Stopped working on it, since yapd was turned off").pipe(Effect.annotateLogs({ utterance: utterance.id }))
+        return Option.none<string>()
       })
 
     /** The open question, unless it's been open so long it no longer counts. */
@@ -1080,7 +1103,7 @@ export const make = (options: {
           // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
           if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
           const arrived = kept?.arrived ?? (yield* options.awaiting)
-          return yield* Effect.zipRight(hold(holding), respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived))
+          return yield* Effect.zipRight(hold(holding), stoppable(respond(utterance, kept?.subject), utterance)).pipe(Effect.ensuring(arrived))
         }).pipe(Effect.ensuring(release(holding)))
       })
 
