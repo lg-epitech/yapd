@@ -136,6 +136,8 @@ const drafts = (
           case "Looking":
             said.push({ spoken: outcome.spoken, came: "Looking" })
             return yield* told(yield* outcome.then)
+          case "Launching":
+            return yield* told(yield* outcome.then)
         }
       })
     const carry = (lines: ReadonlyArray<Line>, answering?: Material) =>

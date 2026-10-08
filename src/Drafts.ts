@@ -132,6 +132,8 @@ export type Outcome =
   | { readonly _tag: "Asked"; readonly question: string; readonly about: string; readonly material: Material }
   /** The project is being read through first, which takes a while: `then` is what comes of it. */
   | { readonly _tag: "Looking"; readonly spoken: string; readonly about: string; readonly then: Effect.Effect<Outcome> }
+  /** It was asked for, and T3 Code is getting it ready, which takes minutes for a worktree: `then` is what comes of it. */
+  | { readonly _tag: "Launching"; readonly about: string; readonly project: string; readonly machine: Machine; readonly then: Effect.Effect<Outcome> }
   /** Nothing started, and this says why, or that there was nothing to start. */
   | { readonly _tag: "Said"; readonly spoken: string; readonly failed: boolean }
 
@@ -191,9 +193,10 @@ export const make = (options: {
      * Starts it, and says what started, or why nothing did. Once it's asked
      * for, it's started and noted whatever happens meanwhile, like yapd being
      * turned off: cut off halfway, a launch could leave a thread half made. So
-     * it goes on by itself, and whoever asked for it only waits for it. It's
-     * never made uninterruptible, since then its own time limits couldn't end
-     * it, and a launch that never answered would hold everything up for good.
+     * it goes on by itself, and whoever asked for it waits for what comes of
+     * it in its own time. It's never made uninterruptible, since then its own
+     * time limits couldn't end it, and a launch that never answered would go
+     * on for good.
      */
     const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string) =>
       Effect.gen(function* () {
@@ -224,7 +227,7 @@ export const make = (options: {
           yield* noted(begun)
           return begun
         }).pipe(Effect.interruptible, Effect.forkIn(scope))
-        return yield* Fiber.join(launching)
+        return { _tag: "Launching", about, project: project.name, machine, then: Fiber.join(launching) } satisfies Outcome
       })
 
     /** Reads through the project before writing the prompt, for a request that leans on something in it. */

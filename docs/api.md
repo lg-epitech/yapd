@@ -63,7 +63,7 @@ Turning it off stops whatever yapd is saying at once, and drops whatever hasn't 
 
 ## Asking yapd something
 
-`POST /utterances` with `{"text": "who needs me?"}` as JSON takes what you typed as if you'd said it by the shortcut: yapd works out what you meant, does it, and says what came of it ahead of anything else. It answers once yapd has done it, with the request's id, the same one its log lines carry. That's a few seconds of the model for most requests, but new work answers once it has started, which takes about ten seconds and longer in a worktree, and a request waits for one still being acted on, so give it a generous timeout.
+`POST /utterances` with `{"text": "who needs me?"}` as JSON takes what you typed as if you'd said it by the shortcut: yapd works out what you meant, does it, and says what came of it ahead of anything else. It answers once yapd has acted on it, with the request's id, the same one its log lines carry. That's a few seconds of the model for most requests. New work answers once it's been asked of T3 Code, and whether it started is said when T3 Code has it ready, which can take minutes in a worktree. A request waits for one still being worked out, so give it a generous timeout.
 
 ```sh
 curl -X POST -H 'Content-Type: application/json' -d '{"text": "what is going on?"}' http://127.0.0.1:4747/utterances

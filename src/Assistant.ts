@@ -210,6 +210,8 @@ export const make = (options: {
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
     const jobs = new Set<Fiber.RuntimeFiber<unknown, unknown>>()
+    /** Work being started, which the journal only has once T3 Code has it ready, so the model knows not to start it again meanwhile. */
+    const starting = new Set<Kept>()
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
@@ -278,7 +280,7 @@ export const make = (options: {
           lines,
           open,
           desk: shortlist,
-          lately: recent,
+          lately: [...recent, ...starting].toSorted((one, other) => one.at - other.at),
           unheard: missed,
           usage,
           second: Option.none(),
@@ -577,6 +579,29 @@ export const make = (options: {
               },
               utterance,
             )
+          }
+          case "Launching": {
+            // T3 Code can take minutes to get a worktree ready, so what comes of it is said when it's ready, and nothing else waits for it meanwhile.
+            const arrived = yield* options.awaiting
+            const under: Kept = {
+              id: 0,
+              at: yield* Clock.currentTimeMillis,
+              kind: "started",
+              machine: outcome.machine.name,
+              project: outcome.project,
+              said: `Starting ${outcome.about || "it"}, which T3 Code is still getting ready.`,
+              utterance: utterance.id,
+            }
+            starting.add(under)
+            yield* background(
+              outcome.then.pipe(
+                Effect.flatMap((after) => begun(after, utterance, said, asked)),
+                Effect.flatMap((told) => deliver(told, utterance)),
+                Effect.ensuring(Effect.zipRight(Effect.sync(() => starting.delete(under)), arrived)),
+                Effect.annotateLogs({ utterance: utterance.id }),
+              ),
+            )
+            return quiet({ _tag: "Nothing" })
           }
           case "Looking": {
             // Reading the project takes a while, so what comes of it is said when it's ready.

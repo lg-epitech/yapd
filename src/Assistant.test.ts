@@ -659,25 +659,30 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?"])
   })
 
-  test("a launch that never answers is given up on with its reason, and what's asked next is still answered", async () => {
+  test("a launch that never answers holds nothing up, isn't started again meanwhile, and is given up on with its reason", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { heard, wait, spoken, started } = yield* assistant(() => Brain.decision({ act: "start", text: "Fix the loader in yapd." }), () => written({}), {
-          hanging: true,
-        })
-        const dictated = yield* Effect.fork(heard({ heard: "Fix the loader in yapd.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+        const { heard, dictate, wait, spoken, started, seen } = yield* assistant(
+          (situation) =>
+            situation.lately.some(({ kind }) => kind === "started")
+              ? Brain.decision({ act: "answer", spoken: "The loader fix is already under way, sir." })
+              : Brain.decision({ act: "start", text: "Fix the loader in yapd." }),
+          () => written({}),
+          { hanging: true },
+        )
+        yield* dictate("Fix the loader in yapd.")
         yield* wait(1)
-        const typed = yield* Effect.fork(heard({ heard: "Who needs me?", via: "typed", at: now, voiced: 3, turns: 1 }))
-        yield* wait(60)
+        yield* heard({ heard: "Who needs me?", via: "typed", at: now, voiced: 3, turns: 1 })
+        // Said again while T3 Code is still getting the first one ready.
+        yield* dictate("Fix the loader in yapd.")
         const meanwhile = spoken()
-        yield* wait(5 * 60)
-        yield* Fiber.join(dictated)
-        yield* Fiber.join(typed)
-        return { meanwhile, spoken: spoken(), started: [...started] }
+        yield* wait(6 * 60)
+        return { meanwhile, spoken: spoken(), started: [...started], told: seen.at(-1)!.lately.map(({ kind, said }) => [kind, said]) }
       }),
     )
-    expect(result.meanwhile).toEqual([])
-    expect(result.spoken).toEqual(["About the loader fix: T3 Code is taking too long, so I don't know if it started.", "Nothing needs you right now, sir."])
+    expect(result.meanwhile).toEqual(["Nothing needs you right now, sir.", "The loader fix is already under way, sir."])
+    expect(result.told).toContainEqual(["started", "Starting the loader fix, which T3 Code is still getting ready."])
+    expect(result.spoken).toEqual([...result.meanwhile, "About the loader fix: T3 Code is taking too long, so I don't know if it started."])
     expect(result.started).toEqual([])
   })
 
