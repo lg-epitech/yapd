@@ -568,9 +568,12 @@ describe("Daemon", () => {
   test("says an update again as it was said, only one it said and only while on", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { finish, wait, toggle, played, condensed, heard, replay } = yield* daemon
+        const { finish, wait, toggle, played, condensed, heard, replay, journal } = yield* daemon
         yield* finish("a", "The PR is ready.")
+        // What he missed is what he hasn't heard through yet.
+        const playing = (yield* journal.unheard(0, 12)).length
         yield* wait(11)
+        const through = (yield* journal.unheard(0, 12)).length
         const [id] = yield* heard
         const unknown = yield* replay("nope")
         const queued = yield* replay(id!)
@@ -579,10 +582,10 @@ describe("Daemon", () => {
         const after = yield* heard
         yield* toggle(false)
         const off = yield* replay(id!)
-        return { unknown, queued, off, after, id, played: [...played], condensed: condensed.length }
+        return { unknown, queued, off, after, id, played: [...played], condensed: condensed.length, playing, through }
       }),
     )
-    expect(result).toMatchObject({ unknown: "unknown", queued: "queued", off: "off", after: [result.id], condensed: 1 })
+    expect(result).toMatchObject({ unknown: "unknown", queued: "queued", off: "off", after: [result.id], condensed: 1, playing: 1, through: 0 })
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
   })
 
