@@ -88,7 +88,33 @@ describe("T3Actions", () => {
     expect(typed("Question", "Paste your OpenAI API key.")).toEqual(Option.some("API key"))
     expect(typed("Login", "What's the database password?")).toEqual(Option.some("password"))
     expect(typed("GitHub token", "So I can open the PR.")).toEqual(Option.some("GitHub token"))
+    // However it's written: as code names it, in a word that's only one when he's asked to give it, or as a code he's sent.
+    for (const [asked, label] of [
+      ["Please provide OPENAI_API_KEY so I can run the evals.", "OPENAI_API_KEY"],
+      ["What is the value of STRIPE_SECRET_KEY?", "STRIPE_SECRET_KEY"],
+      ["Provide your AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"],
+      ["Enter the HF_TOKEN", "HF_TOKEN"],
+      ["Please provide the DATABASE_URL", "DATABASE_URL"],
+      ["What's your OpenAI key?", "key"],
+      ["Enter your Stripe key", "key"],
+      ["Please provide your Hugging Face token", "token"],
+      ["Enter the token for the registry", "token"],
+      ["What is your GitHub PAT?", "PAT"],
+      ["What's your PIN?", "PIN"],
+      ["What is your sudo pwd?", "pwd"],
+      ["Paste the session cookie", "cookie"],
+      ["What's your npm OTP?", "OTP"],
+      ["Provide the JWT", "JWT"],
+      ["Enter the verification code sent to your phone", "verification code"],
+      ["Provide the connection string for Postgres", "connection string"],
+      ["What's the database URL, with its user and pass?", "database URL"],
+      ["What's the webhook signing secret?", "secret"],
+    ] as const) {
+      expect(typed("Question", asked)).toEqual(Option.some(label))
+    }
+    // A token or a key he's asked to pick, like a coin, is a question.
     expect(typed("Question", "Which token should the indexer track first?")).toEqual(Option.some("Question"))
+    expect(typed("Question", "What should the new branch be called?")).toEqual(Option.some("Question"))
     expect(typed("Keys", "Keep the API keys in the vault?", [{ label: "Yes", description: "Yes" }, { label: "No", description: "No" }])).toEqual(Option.some("Question"))
   })
 

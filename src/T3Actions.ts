@@ -202,18 +202,44 @@ const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.
   return text === undefined || text.trim() === "" ? undefined : text.trim().slice(0, commandLength)
 }
 
-/** What names something only he should type in, like a password, a key or a token to sign in with. */
-const credentials =
-  /\b(?:pass(?:word|phrase|code)s?|(?:api|access|secret|private|ssh|signing|deploy|license)[ _-]?keys?|(?:api|access|auth|bearer|refresh|personal access|github|npm)[ _-]?tokens?|secrets?|credentials?|seed phrase|mnemonic|one[ -]time (?:code|password)|2fa code)\b/i
+/**
+ * What names something only he should type in, like a password, a key or a
+ * token to sign in with, as words of its own, where "_" parts words as a
+ * space does, as in "api_key".
+ */
+const credentials = new RegExp(
+  String.raw`(?<![a-z0-9])(?:${[
+    String.raw`pass(?:word|phrase|code)s?|passwd`,
+    String.raw`(?:api|access|secret|private|ssh|signing|deploy|license|encryption|master)[ _-]?keys?`,
+    String.raw`(?:api|access|auth|bearer|refresh|personal access|github|gitlab|npm|pypi|session|id)[ _-]?tokens?`,
+    String.raw`secrets?|credentials?|seed phrase|mnemonic|otp|jwt|dsn|\.env`,
+    String.raw`(?:one[ -]time|verification|auth(?:entication|orization)?|2fa|mfa|security|recovery|backup|login|sign[ -]?in) (?:codes?|passwords?)`,
+    String.raw`connection strings?|(?:database|db)[ _-]?url`,
+  ].join("|")})(?![a-z0-9])`,
+  "i",
+)
+
+/** One named as it's written in code, in capitals, like OPENAI_API_KEY or HF_TOKEN, or that's only ever one in capitals, like a PAT or a PIN. */
+const capitals = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|PAT|DSN)S?\b|\b(?:DATABASE|DB)_URL\b|\b(?:PAT|PIN)s?\b/
+
+/** What names one only when he's asked to give it, since a token or a key is often something else, like a coin or a field. */
+const bare = /(?<![a-z0-9])(?:keys?|tokens?|pwd|cookies?|pin (?:code|number)s?)(?![a-z0-9])/i
+
+/** Asking him to give something, rather than to pick or say which. */
+const giving = /\b(?:your|paste|enter|provide|give|share|send|type|supply|need|set)\b|\bwhat(?:'s|’s| is) the\b/i
+
+/** The credential a question names, if it names one. */
+const named = (text: string) => capitals.exec(text)?.[0] ?? credentials.exec(text)?.[0] ?? (giving.test(text) ? bare.exec(text)?.[0] : undefined)
 
 /**
  * What a question asks him to type in that's a secret, if one does: one with
  * nothing to pick from that names a credential, like a Codex question marked
- * secret, which T3 Code passes on as any other. None for a question with
- * options, whose answer is one of them.
+ * secret, which T3 Code passes on as any other. Taken for one whenever it
+ * could be, since it's then only told. None for a question with options,
+ * whose answer is one of them.
  */
 const credential = (questions: ReadonlyArray<typeof Question.Type>) =>
-  questions.flatMap(({ header, question, options }) => (options.length > 0 ? [] : Option.toArray(Option.fromNullable(credentials.exec(`${header} ${question}`)?.[0])))).at(0)
+  questions.flatMap(({ header, question, options }) => (options.length > 0 ? [] : Option.toArray(Option.fromNullable(named(`${header} ${question}`))))).at(0)
 
 /**
  * Reads what a thread waits on out of its turn items, by the request's id. A

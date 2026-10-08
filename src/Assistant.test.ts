@@ -925,6 +925,38 @@ describe("Assistant", () => {
     expect(result.dispatched).toBe(0)
   })
 
+  test("a question that names a key as code does, or asks him for a token or a key, is only told, and nothing he dictates to its thread is sent", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    for (const question of ["Please provide OPENAI_API_KEY so I can run the evals.", "What's your OpenAI key?", "Enter the token for the registry."]) {
+      const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question }] }]
+      const result = await run(
+        Effect.gen(function* () {
+          let act: "reply" | "send" = "reply"
+          const made = yield* assistant(
+            (situation) =>
+              act === "reply"
+                ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "sk proj one two three" })
+                : Brain.decision({ act: "send", target: handle(situation, cloud), text: "The key is sk proj one two three.", how: "now" }),
+            undefined,
+            { others: [cloud], items },
+          )
+          const worded = Option.getOrThrow(yield* made.compose(cloud))
+          // Answered as such, and told as a message.
+          yield* made.dictate("Tell the cloud one it's sk proj one two three.")
+          act = "send"
+          yield* made.dictate("Tell the cloud one the key is sk proj one two three.")
+          return { question, worded: worded._tag, spoken: made.spoken(), dispatched: made.dispatched.length }
+        }),
+      )
+      expect(result.worded).toBe("Tell")
+      expect(result.spoken).toEqual([
+        expect.stringMatching(/^Cloud deployment discovery needs (a secret|the key|the token) from you, sir, which I never take by voice/),
+        "That didn't go through, sir: it's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+      ])
+      expect(result.dispatched).toBe(0)
+    }
+  })
+
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {
     const result = await run(
       Effect.gen(function* () {
