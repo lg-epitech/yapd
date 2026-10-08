@@ -811,14 +811,21 @@ export const make = (options: {
         const { utterance, situation } = thought
         // A question about it is about the words that went, or were to, which an answer can't stand in for.
         const decision = act._tag === "Message" ? { ...thought.decision, text: act.text } : thought.decision
+        /** Sending again a message other than the one asked for now, like the word to carry on: as it went, with the rest of the request after it. */
+        const resending = (text: string, how: string) => Brain.decision({ act: "send", text, how, rest: thought.decision.rest })
+        const onceMore = "again" in outcome ? outcome.again : Option.none<string>()
+        // What may go again is about the thread it was for, which "carry on" needn't name.
+        const kept = Option.isSome(onceMore) ? yield* ledger.get(onceMore.value) : Option.none<Ledger.Row>()
         const ref =
           outcome._tag === "Done"
             ? outcome.to
             : outcome._tag === "Twin" || outcome._tag === "Read"
               ? { machine: outcome.row.machine, id: outcome.row.thread }
-              : act._tag === "Undo"
-                ? Option.getOrUndefined(act.to)
-                : act.to
+              : Option.isSome(kept)
+                ? { machine: kept.value.machine, id: kept.value.thread }
+                : act._tag === "Undo"
+                  ? Option.getOrUndefined(act.to)
+                  : act.to
         const called = ref === undefined ? Option.none<string>() : naming(ref, situation)
         // In a question it's always named, since the question has to say what it's about.
         const name = (ref === undefined ? undefined : situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called) ?? "it"
@@ -849,12 +856,14 @@ export const make = (options: {
           case "Twin": {
             // One that may not have got there is offered again under its own ids; one that did, to a thread that hasn't answered since, is asked about.
             const doing = `send that to ${name} again`
+            // Twinned by an earlier word to carry on, that's what a yes sends.
+            const twin = act._tag === "Message" ? decision : Option.match(Hands.went(outcome.row), { onNone: () => decision, onSome: ({ text, how }) => resending(text, how) })
             yield* noting(undefined, { twin: outcome.row.commandId }, false)
             if (outcome.row.state !== "sent") {
               const asked = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}. ${unaddressed(said.again, said)}`
-              return yield* asking({ ...base, kind: "resend", decision, asked, about: doing, resend: Option.some(outcome.row.commandId) })
+              return yield* asking({ ...base, kind: "resend", decision: twin, asked, about: doing, resend: Option.some(outcome.row.commandId) })
             }
-            return yield* asking({ ...base, kind: "confirm", decision, asked: Hands.twice(outcome.row.at, now, said, called), about: doing, resend: Option.none() })
+            return yield* asking({ ...base, kind: "confirm", decision: twin, asked: Hands.twice(outcome.row.at, now, said, called), about: doing, resend: Option.none() })
           }
           case "Read": {
             const text = typeof outcome.row.body === "object" && outcome.row.body !== null && "text" in outcome.row.body ? String(outcome.row.body.text) : ""
@@ -871,9 +880,12 @@ export const make = (options: {
           default: {
             const line = Hands.failed(act, outcome, said, called)
             yield* noting(line, { reason: outcome.reason })
-            const again = "again" in outcome ? outcome.again : Option.none<string>()
-            if (Option.isSome(again) && act._tag === "Message") {
-              return yield* asking({ ...base, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: again })
+            if (Option.isSome(onceMore) && act._tag === "Message") {
+              return yield* asking({ ...base, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: onceMore })
+            }
+            // The word to carry on, after letting go of the queue, is offered again the same way.
+            if (Option.isSome(onceMore) && act._tag === "Undo" && act.carry) {
+              return yield* asking({ ...base, kind: "resend", decision: resending(Hands.carryOn, "now"), asked: line, about: `ask ${name} to carry on`, resend: onceMore })
             }
             return unfinished({ say: line, subject: { ...subject, said: line }, kind: "done" }, decision.rest, said, situation.desk)
           }

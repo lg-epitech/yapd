@@ -773,6 +773,47 @@ describe("Hands", () => {
     ])
   })
 
+  test("carry on said again once the word to carry on may not have got there sends nothing under new ids, and offers it again under its own", async () => {
+    const carry = { _tag: "Undo", to: Option.none(), carry: true } as const
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { run: act, again, answering, becomes, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })
+        bounded.runs[0]!.status = "interrupted"
+        becomes(thread(tezos.id, { status: "interrupted" }))
+        // The queue is let go of, and the word to carry on goes, but T3 Code doesn't answer for it, and it isn't in the thread.
+        answering((payload, bounded) =>
+          payload.type === "message.dispatch" ? Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes()(payload, bounded),
+        )
+        const first = yield* act({ utterance: "u2", step: 0 }, carry)
+        yield* TestClock.adjust("30 seconds")
+        answering(takes())
+        const second = yield* act({ utterance: "u3", step: 0 }, carry)
+        const yes = second._tag === "Twin" ? yield* again(second.row.commandId) : second
+        // Once it's carrying on, saying so again is nothing to do.
+        const third = yield* act({ utterance: "u4", step: 0 }, carry)
+        return {
+          first: first._tag === "Unknown" ? Hands.failed(carry, first, lines, Option.none()) : first._tag,
+          second: second._tag === "Twin" ? second.row.commandId : second._tag,
+          yes: yes._tag,
+          third: third._tag === "Refused" ? Hands.failed(carry, third, lines, Option.none()) : third._tag,
+          dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
+        }
+      }),
+    )
+    expect(result.first).toBe("I couldn't confirm it got the word to carry on, sir. Send it again?")
+    expect(result.second).toBe("yapd:u2:1")
+    expect(result.yes).toBe("Done")
+    expect(result.third).toBe("I've already let it carry on, sir.")
+    expect(result.dispatched).toEqual([
+      ["run.interrupt", "yapd:u1:0"],
+      ["queue.resume", "yapd:u2:0"],
+      ["message.dispatch", "yapd:u2:1"],
+      ["message.dispatch", "yapd:u2:1"],
+    ])
+  })
+
   test("guards: a restart leaves what this run did alone, an archived thread is sent nothing, a busy one isn't told to carry on, and a read message isn't cancelled", async () => {
     const restarted = await run(
       Effect.gen(function* () {

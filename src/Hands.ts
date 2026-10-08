@@ -90,6 +90,8 @@ const carried = "Carried on since."
 const carriedOn = "It's already carried on since I stopped it."
 /** Why "carry on" does nothing to a thread going again by his hand. */
 const backAtWork = "It's already back at work."
+/** Why the same words aren't sent again once they've been sent once more already and still can't be confirmed. */
+const thirdTime = "I couldn't confirm either of the last two got there, so I won't risk sending it a third time."
 /** What a stopped thread is told when it's let carry on. */
 export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
@@ -103,6 +105,10 @@ const Body = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("Cancel"), runId: Schema.String }),
 )
 const command = Schema.decodeUnknownOption(Body)
+
+/** A message in the ledger as it went, or was to: its words, and when it was to go in. */
+export const went = (row: Pick<Ledger.Row, "body">) =>
+  Option.flatMap(command(row.body), (sent) => (sent._tag === "Send" ? Option.some({ text: sent.text, how: sent.how }) : Option.none()))
 
 /** A word that's an id, quoted or not: letters and digits run together with _ or :, or long and mostly digits. */
 const id = String.raw`['"‘“]?(?=[\w:.-]*\d)(?:[\w.-]*[_:][\w:.-]*|(?=(?:[a-z-]*\d){4})[\w-]{8,})['"’”]?`
@@ -342,10 +348,7 @@ export const make = (options: {
       // Since it went in, by T3 Code's clock as the thread's turns are: sent once more, or late, that's after it was written down.
       const since = Option.getOrElse(Option.flatMap(found, ({ at }) => at), () => row.at)
       if (row.state === "sent" && Either.isRight(look) && answered(reached.thread, since, own)) return Option.none<Outcome>()
-      if (row.state === "abandoned") {
-        const reason = "I couldn't confirm either of the last two got there, so I won't risk sending it a third time."
-        return Option.some<Outcome>(yield* failing({ _tag: "Refused", reason } satisfies Outcome, doing.message))
-      }
+      if (row.state === "abandoned") return Option.some<Outcome>(yield* failing({ _tag: "Refused", reason: thirdTime } satisfies Outcome, doing.message))
       yield* Effect.logInfo(`The same words went to it at ${new Date(row.at).toISOString()} as ${row.commandId}, so asking first`)
       return Option.some<Outcome>({ _tag: "Twin", row })
     })
@@ -395,6 +398,22 @@ export const make = (options: {
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, "let it carry on")
       // Going again already, by his hand or a carry on before, it's told nothing twice.
       if (busy(reached.right.thread)) return yield* failing({ _tag: "Refused", reason: backAtWork } satisfies Outcome, "let it carry on")
+      // Told to carry on since the stop already, it's never told again under new ids: there, it's carrying on; maybe not, it's offered again under its own.
+      const before = yield* ledger.twin(ref.machine, ref.id, Ledger.digest(carryOn), stopped.value.at)
+      if (Option.isSome(before)) {
+        const told = before.value
+        const there =
+          told.state === "sent" ||
+          (told.messageId !== null && Either.getOrElse(yield* Effect.either(reached.right.actions.has(told.thread, told.messageId)), () => false))
+        if (there) {
+          if (told.state !== "sent") yield* ledger.settle(told.commandId, "sent", { from: [told.state] })
+          yield* ledger.settle(stopped.value.commandId, "abandoned", { reason: carried, from: ["sent"] })
+          return yield* failing({ _tag: "Refused", reason: carriedOn } satisfies Outcome, "let it carry on")
+        }
+        if (told.state === "abandoned") return yield* failing({ _tag: "Refused", reason: thirdTime } satisfies Outcome, "let it carry on")
+        yield* Effect.logInfo(`It was told to carry on as ${told.commandId}, which isn't confirmed, so asking first`)
+        return { _tag: "Twin", row: told } satisfies Outcome
+      }
       const resumed = yield* once(step, "undo", ref, () => ({ _tag: "Resume" }), reached.right)
       // Nothing held is nothing to let go of, which doesn't stop it carrying on.
       if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
@@ -600,7 +619,9 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
         // Going already is what he wanted, not something that went wrong.
         if (outcome.reason === carriedOn) return `I've already let ${name ?? "it"} carry on${sir}.`
         if (outcome.reason === backAtWork) return `${name === undefined ? "It's" : `${capital(name)} is`} already back at work${sir}.`
-        return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} is going again${sir}.` : `I couldn't get ${name ?? "it"} going again${sir}: ${reason}`
+        return outcome._tag === "Unknown"
+          ? `I couldn't confirm ${name ?? "it"} got the word to carry on${sir}.${asking}`
+          : `I couldn't get ${name ?? "it"} going again${sir}: ${reason}${asking}`
       }
       return outcome._tag === "Unknown" ? `I couldn't confirm it was withdrawn${sir}.` : `I couldn't take that back${sir}: ${reason}`
   }
