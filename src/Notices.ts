@@ -351,7 +351,9 @@ export const make = (options: {
     /**
      * Queues a notice about a thread, kept under its key in the journal as
      * it's about to be said, unless it was ever said before or `still` says
-     * it no longer holds; noted as heard once it's said to the end.
+     * it no longer holds; noted as heard once it's said to the end. `kept` is
+     * the entry it was kept under already and never heard, as when yapd
+     * restarted while saying it, which it's said under again.
      */
     const notify = (
       ref: Threads.Ref,
@@ -361,8 +363,9 @@ export const make = (options: {
       at: number,
       turns: number,
       id = `t3:${ref.machine}:${ref.id}`,
+      kept?: number,
     ) => {
-      let claimed: Option.Option<Option.Option<number>> | undefined
+      let claimed: Option.Option<Option.Option<number>> | undefined = kept === undefined ? undefined : Option.some(Option.some(kept))
       return options.tell(
         {
           id,
@@ -389,15 +392,18 @@ export const make = (options: {
       )
     }
 
-    /** Says what a thread waits on him for: once, ever, as news, since it's answered in T3 Code. */
-    const asked = (ref: Threads.Ref, requestId: string, at: number) =>
+    /**
+     * Says what a thread waits on him for: once, ever, until he's heard it,
+     * under `kept`, the entry it was kept under already when he never did.
+     */
+    const asked = (ref: Threads.Ref, requestId: string, at: number, kept?: number) =>
       Effect.suspend(() => {
         if (wording.has(requestId)) return Effect.void
         wording.add(requestId)
-        return ask(ref, requestId, at).pipe(Effect.ensuring(Effect.sync(() => wording.delete(requestId))))
+        return ask(ref, requestId, at, kept).pipe(Effect.ensuring(Effect.sync(() => wording.delete(requestId))))
       })
 
-    const ask = (ref: Threads.Ref, requestId: string, at: number) =>
+    const ask = (ref: Threads.Ref, requestId: string, at: number, kept?: number) =>
       Effect.gen(function* () {
         const worded = yield* compose(ref, requestId, at)
         if (Option.isNone(worded)) return
@@ -405,8 +411,8 @@ export const make = (options: {
         const { on, turns } = yield* options.power
         if (!on) return
         // Asked as the one question open, for him to answer by voice.
-        if (worded.value._tag === "Ask") return yield* options.ask(worded.value.asking)
-        yield* notify(ref, worded.value.spoken, worded.value.entry, threads.waiting(ref, requestId), at, turns)
+        if (worded.value._tag === "Ask") return yield* options.ask(kept === undefined ? worded.value.asking : { ...worded.value.asking, kept })
+        yield* notify(ref, worded.value.spoken, worded.value.entry, threads.waiting(ref, requestId), at, turns, undefined, kept)
       })
 
     /**
@@ -536,21 +542,25 @@ export const make = (options: {
       /** Follows what happens to the threads, for as long as yapd runs. */
       follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
       /**
-       * What's waiting on him, which nothing said yet: run once T3 Code has
-       * caught up after a start, and each time yapd is turned on. Nothing while
-       * it's off.
+       * What's waiting on him that he hasn't heard: run once T3 Code has
+       * caught up after a start, and each time yapd is turned on. One begun
+       * and never heard to the end, as when yapd was turned off or restarted
+       * while saying it, is said again, under the entry it was kept under.
+       * Nothing while it's off.
        */
       reconcile: Effect.gen(function* () {
         const { on } = yield* options.power
         if (!on) return
         const now = yield* Clock.currentTimeMillis
-        const said = new Set((yield* journal.since(now - pending, { kinds: ["notice"], most: 1000 })).flatMap(({ key }) => (key === undefined ? [] : [key])))
+        const said = new Map((yield* journal.since(now - pending, { kinds: ["notice"], most: 1000 })).flatMap((kept) => (kept.key === undefined ? [] : [[kept.key, kept] as const])))
         const desk = yield* threads.desk(Option.none(), [], 1000)
         for (const { ref, thread } of desk.threads) {
           const request = thread.pendingRuntimeRequest
           const created = request === null ? Number.NaN : Date.parse(request.createdAt)
-          if (request === null || Number.isNaN(created) || now - created > pending || said.has(key.asked(ref.machine, request.id))) continue
-          yield* FiberSet.run(running, asked(ref, request.id, now).pipe(trouble, Effect.annotateLogs({ thread: thread.title })))
+          if (request === null || Number.isNaN(created) || now - created > pending) continue
+          const before = said.get(key.asked(ref.machine, request.id))
+          if (before?.heardAt !== undefined) continue
+          yield* FiberSet.run(running, asked(ref, request.id, now, before?.id).pipe(trouble, Effect.annotateLogs({ thread: thread.title })))
         }
       }),
     }

@@ -68,6 +68,8 @@ export interface Asking {
   readonly rewordings: ReadonlyArray<string>
   /** What it's kept as in the journal, under the key it's said once under, ever. */
   readonly entry: Entry & { readonly key: string }
+  /** The entry it was kept under already, and he never heard, as when yapd restarted while asking it: it's asked under that one. */
+  readonly kept?: number
 }
 
 /** What a thread waits on him for, worded: to be asked, or only told, when it isn't answered by voice, like a secret. */
@@ -601,8 +603,12 @@ export const make = (options: {
       Effect.gen(function* () {
         if (asking?.open.id !== open.id) return
         const { repeat, whole, from } = asking
-        // What a thread waits on him for, cut off before he heard all of it by something new, or what made no sense, is asked once more, after.
-        if (from !== undefined && !from.again && !whole && (how === "replaced" || how === "dropped: unclear")) asked.unshift({ ...from, again: true })
+        // What a thread waits on him for, cut off before he heard all of it by something new, or what made no sense, is asked once more,
+        // after; cut off by turning yapd off, it's asked once it's on again, since it still waits on him, and that's no asking of his.
+        if (from !== undefined && !whole) {
+          if (how === "dropped: off") asked.unshift(from)
+          else if (!from.again && (how === "replaced" || how === "dropped: unclear")) asked.unshift({ ...from, again: true })
+        }
         asking = undefined
         version++
         if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
@@ -2077,7 +2083,10 @@ export const make = (options: {
           const { requestId } = waiting.asks
           // Heard of twice, as on starting and from T3 Code at once, it's asked the once.
           if (asked.some(({ asking: queued }) => queued.asks.requestId === requestId) || (asking !== undefined && requestOf(asking.open) === requestId)) return Effect.void
-          asked.push({ asking: waiting, again: false })
+          // Found unheard as yapd was turned on, it may have been heard since, asked once more meanwhile: then it isn't again.
+          if (waiting.kept !== undefined && known.has(requestId)) return Effect.void
+          // Kept already and never heard, it's asked under that entry.
+          asked.push({ asking: waiting, again: false, ...(waiting.kept === undefined ? {} : { kept: Option.some(Option.some(waiting.kept)) }) })
           return Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope))
         }),
       settled: (requestId) =>

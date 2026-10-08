@@ -751,6 +751,43 @@ describe("Assistant", () => {
     expect(result.heard).toEqual([["ask:Rosie:r1", true]])
   })
 
+  test("an approval cut off by turning yapd off is asked again once it's on, under the entry it was kept under, and noted heard once he's heard it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        const first = made.questions().at(-1)!
+        // Its turn comes, and he turns yapd off as it starts, say for a call.
+        yield* first.stale
+        yield* made.cut(first)
+        yield* made.toggle(false)
+        const off = { open: Option.isSome(yield* made.open), spoken: made.spoken().length }
+        yield* made.toggle(true)
+        yield* made.back
+        yield* made.flush
+        const again = made.questions().at(-1)!
+        const stale = yield* again.stale
+        yield* made.play(again)
+        yield* made.answer("Yes.", again)
+        const kept = yield* made.journal.since(0, { kinds: ["notice"] })
+        return {
+          off,
+          stale,
+          spoken: made.spoken(),
+          kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]),
+          dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`),
+        }
+      }),
+    )
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?"
+    expect(result.off).toEqual({ open: false, spoken: 1 })
+    expect(result.stale).toBe(false)
+    expect(result.spoken).toEqual([allow, allow, "Approved, sir."])
+    expect(result.kept).toEqual([["ask:Rosie:r1", true]])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
   test("an approval asked again after something cut it off, or read back on his dictating it, is noted heard once he's heard it, so it's nothing he missed", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const unheard = (made: { readonly journal: Journal.Journal["Type"] }) =>

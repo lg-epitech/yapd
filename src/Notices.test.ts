@@ -101,7 +101,7 @@ const notices = (
       store,
     })
     const told: Array<string> = []
-    /** What was asked as the one question open, as the assistant asks it: once, ever, kept under its key. */
+    /** What was asked as the one question open, as the assistant asks it: kept under its key, or the entry it was kept under before, and heard to the end. */
     const asked: Array<string> = []
     const settled: Array<string> = []
     const finished: Array<{ readonly key: string; readonly message: string }> = []
@@ -123,7 +123,13 @@ const notices = (
       finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message })),
       overtaken: (ref) => Effect.sync(() => void overtaken.push(ref.id)),
       mention: () => Effect.void,
-      ask: (asking) => Effect.map(journal.claim(asking.entry), (kept) => void (Option.isSome(kept) && asked.push(asking.asked))),
+      ask: (asking) =>
+        Effect.gen(function* () {
+          const kept = asking.kept === undefined ? yield* journal.claim(asking.entry) : Option.some(Option.some(asking.kept))
+          if (Option.isNone(kept)) return
+          asked.push(asking.asked)
+          yield* journal.markHeard(Option.toArray(kept.value), now)
+        }),
       settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
       shortest: 60_000,
     }).pipe(Effect.provide(Layer.merge(persona, condenser)))
@@ -341,8 +347,9 @@ describe("Notices", () => {
     const result = await run(
       Effect.gen(function* () {
         const store = yield* Store.make(":memory:")
-        // The Mina question was said before the restart.
-        yield* Journal.fromStore(store).claim({ at: now - 3_000_000, kind: "notice", machine: "Rosie", thread: "mina", key: "ask:Rosie:r2", said: "It asks which database." })
+        // The Mina question was said before the restart, and heard.
+        const said = yield* Journal.fromStore(store).claim({ at: now - 3_000_000, kind: "notice", machine: "Rosie", thread: "mina", key: "ask:Rosie:r2", said: "It asks which database." })
+        yield* Journal.fromStore(store).markHeard(Option.toArray(Option.flatten(said)), now - 2_990_000)
         const first = yield* notices({ view: [tezos, mina], bounded, store })
         yield* first.reconcile
         yield* first.flush
@@ -354,6 +361,33 @@ describe("Notices", () => {
       }),
     )
     expect(result.first).toEqual(["Migrate Tezos Integration wants to push the branch. Allow it, sir?"])
+    expect(result.second).toEqual([])
+  })
+
+  test("a pending request begun before a restart and never heard to the end is asked again after it, under the entry it was kept under, once", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", {
+      activeRunId: "run-1",
+      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: minutes(60) },
+    })
+    const bounded = { tezos: { turnItems: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: git push origin tezos" }] } }
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* Store.make(":memory:")
+        // It was coming up to be asked, kept under its key, when yapd restarted.
+        yield* Journal.fromStore(store).claim({ at: now - 60_000, kind: "notice", machine: "Rosie", thread: "tezos", key: "ask:Rosie:r1", said: "It wants to push the branch." })
+        const first = yield* notices({ view: [tezos], bounded, store })
+        yield* first.reconcile
+        yield* first.flush
+        const kept = yield* first.journal.since(0, { kinds: ["notice"] })
+        // Heard this time, it isn't asked after another restart.
+        const second = yield* notices({ view: [tezos], bounded, store })
+        yield* second.reconcile
+        yield* second.flush
+        return { first: first.asked, kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]), second: second.asked }
+      }),
+    )
+    expect(result.first).toEqual(["Migrate Tezos Integration wants to push the branch. Allow it, sir?"])
+    expect(result.kept).toEqual([["ask:Rosie:r1", true]])
     expect(result.second).toEqual([])
   })
 
