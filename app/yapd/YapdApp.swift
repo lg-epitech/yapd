@@ -95,6 +95,8 @@ final class Yapd {
           await follow(status, connecting: first)
         }
       } catch {}
+      // Gone mid-line, yapd is no longer talking about its card, which fades as if it had finished.
+      panel.heard(speaking: false)
       state = nil
       try? await Task.sleep(for: .seconds(2))
     }
