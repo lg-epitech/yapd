@@ -68,6 +68,15 @@ describe("Persona", () => {
     expect(result.stored.cantTell).toBe("I couldn't tell which one you meant, sir.")
   })
 
+  test("how he's addressed is kept without marks, so a line said in its place doesn't ask, and isn't written again at the next start", async () => {
+    const first = await persona(undefined, { ...jarvis, address: "sir?", cantTell: "Which one, sir?" })
+    expect(first.lines.address).toBe("sir")
+    expect(first.lines.cantTell).toBe("I couldn't tell which one you meant, sir.")
+    const next = await persona(first.stored, Persona.plain)
+    expect(next.asked).toBe(0)
+    expect(next.lines).toEqual(first.lines)
+  })
+
   test("lines kept for the same style that ask nothing are used as they are, without asking the model again", async () => {
     const result = await persona({ ...jarvis, misheard: "Pardon, sir. Could you say that again?" }, Persona.plain)
     expect(result.asked).toBe(0)

@@ -49,16 +49,21 @@ export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim(
  */
 const telling = ["onIt", "queued", "checking", "leaving", "cantTell"] as const
 
-/** Whether none of the lines that tell asks something. */
-const tells = (lines: Lines) => telling.every((key) => !lines[key].includes("?"))
+/** Whether none of the lines that tell asks something, nor how he's addressed, which goes into lines of every kind. */
+const tells = (lines: Lines) => !lines.address.includes("?") && telling.every((key) => !lines[key].includes("?"))
 
-/** The lines, with the plain one, addressing him as the rest do, in place of any that should tell but asks. */
-const told = (lines: Lines): Lines =>
-  Object.assign(
-    {},
+/**
+ * The lines, addressing him without marks of their own, which would land in
+ * the middle of a sentence, and with the plain line, addressing him as the
+ * rest do, in place of any that should tell but asks.
+ */
+const told = (written: Lines): Lines => {
+  const lines = { ...written, address: written.address.replace(/[^\p{L}\p{N}' -]/gu, "").trim() }
+  return Object.assign(
     lines,
     ...telling.filter((key) => lines[key].includes("?")).map((key) => ({ [key]: plain[key].replace(/\.$/, `${addressed(lines)}.`) })),
   )
+}
 
 export class Persona extends Context.Tag("yapd/Persona")<
   Persona,
