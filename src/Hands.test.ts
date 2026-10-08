@@ -1060,6 +1060,42 @@ describe("Hands", () => {
     })
   })
 
+  test("a turn that ended just before it was stopped to be told something in its place isn't told once another started in its place, nor when that can't be looked at, and why is said", async () => {
+    const overtaken = (readable: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+          const { send, answering, reads, dispatched } = yield* hands({
+            thread: busy,
+            runs: [
+              { id: "run-1", status: "running", ordinal: 1 },
+              { id: "run-2", status: "queued", ordinal: 2, userMessageId: "his-own" },
+            ],
+          })
+          // The turn under way ends, and the message he queued behind it starts, just before the stop gets there.
+          answering((payload, bounded) => {
+            if (payload.type !== "run.interrupt") return takes()(payload, bounded)
+            bounded.runs[0]!.status = "completed"
+            bounded.runs[1]!.status = "running"
+            reads(readable)
+            return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "Run run-1 is not interruptible." }))
+          })
+          const what = (outcome: Hands.Outcome) =>
+            outcome._tag === "Refused" || outcome._tag === "NotSent" || outcome._tag === "Unknown"
+              ? Hands.failed({ _tag: "Message", to: tezos, text: "", how: "restart" }, outcome, lines, Option.none())
+              : outcome._tag
+          const first = what(yield* send("u1", "Drop that and fix the loader instead.", "restart"))
+          // Worked out again as he carried on talking, it's the same.
+          const again = what(yield* send("u1", "Drop that and fix the loader instead.", "restart"))
+          return { first, again, dispatched: dispatched.map(({ type, commandId }) => [type, commandId]) }
+        }),
+      )
+    const told = "I couldn't stop it to tell it that, sir: something else started on it just as I went to stop it."
+    expect(await overtaken(true)).toEqual({ first: told, again: told, dispatched: [["run.interrupt", "yapd:u1:0"]] })
+    const unlooked = "I couldn't stop it to tell it that, sir: it may have started on something else just as I went to stop it, and I couldn't check."
+    expect(await overtaken(false)).toEqual({ first: unlooked, again: unlooked, dispatched: [["run.interrupt", "yapd:u1:0"]] })
+  })
+
   test("a turn that ended just before it was stopped to be told something in its place isn't told once yapd was turned off since he said it, and why is said", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -252,6 +252,12 @@ const unwanted = (outcome: Outcome) => outcome._tag === "NotSent" && outcome.rea
 /** Why a turn stopped to be told something in its place wasn't told, when nothing noted why. */
 const untold = "I didn't get to tell it."
 
+/** Why a turn that ended just before it was stopped to be told something in its place wasn't told: another started in its place. */
+const overtaken = "Something else started on it just as I went to stop it."
+
+/** Why a turn that ended just before it was stopped to be told something in its place wasn't told: what's going on it couldn't be looked at again. */
+const unlooked = "It may have started on something else just as I went to stop it, and I couldn't check."
+
 /** Whether a stop was turned down since there was nothing to stop. */
 const idle = (reason: string) => /isn't doing anything/.test(reason)
 
@@ -574,7 +580,8 @@ export const make = (options: {
    * turn of its own rather than go into the turn being stopped or wait in the
    * queue the stop held. Still busy by then, or no longer `wanted`, it
    * isn't told, and why is noted. With nothing under way, or a turn that
-   * ended just before the stop got there, it's just told at once.
+   * ended just before the stop got there with nothing else started since,
+   * it's just told at once.
    */
   const restart = (
     step: Step,
@@ -594,6 +601,14 @@ export const make = (options: {
       const stopped = yield* once(step, "stop", to, () => ({ _tag: "Stop", then: text }), reached, wanted)
       const next = { ...step, step: step.step + 1 }
       if (stopped._tag === "Refused" && idle(stopped.reason)) {
+        // Turned down as ended, the turn may have ended for another to start in its place, like a message queued behind it, which is never
+        // told what was meant for the one stopped: what's going is looked at again first, and with anything going, or no telling, it isn't told.
+        const looked = yield* Effect.either(reached.actions.running(to.id))
+        if (Either.isLeft(looked) || looked.right) {
+          const reason = Either.isLeft(looked) ? unlooked : overtaken
+          yield* ledger.settle(Ledger.ids(step.utterance, step.step, false).commandId, "refused", { reason, from: ["refused"] })
+          return yield* failing({ _tag: "Refused", reason, stopped: false } satisfies Outcome, "tell it what to do instead")
+        }
         yield* Effect.logInfo("Its turn ended just before it was stopped, so telling it at once")
         return { ...(yield* send(next)), stopped: "ended" } satisfies Outcome
       }
