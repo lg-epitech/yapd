@@ -2848,7 +2848,7 @@ describe("Assistant", () => {
       )
     for (const turn of [tezos, waiting]) {
       expect(await instead(turn)).toEqual({
-        spoken: ["Stopped it, sir, and told it: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."],
+        spoken: ["Stopped Migrate Tezos Integration, sir, and told it. On it: Open Mina SSV2 Bug Tickets."],
         sent: [
           ["run.interrupt", tezos.id, "0", undefined],
           ["message.dispatch", tezos.id, "1", "auto"],

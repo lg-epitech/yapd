@@ -869,7 +869,8 @@ export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Opt
   const { waiting } = as
   // In place of the turn under way, done as a stop and then the message, which T3 Code may still have put in the queue the stop held, where it stays till he says.
   if (held({ how, ...as })) return `Stopped ${Option.getOrElse(called, () => "it")}${addressed(lines)}, but that's held in its queue till you say carry on.`
-  if (as.stopped === true) return naming(`Stopped it${addressed(lines)}, and told it.`, called)
+  // Named in the sentence, since a name after "told it" would sound like what it was told.
+  if (as.stopped === true) return `Stopped ${Option.getOrElse(called, () => "it")}${addressed(lines)}, and told it.`
   if (waiting !== undefined) {
     const it = Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} is` })
     return waiting === "asked"
