@@ -89,12 +89,23 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
       readonly message: boolean
       readonly digest?: string
     }) => Effect.Effect<Prepared, Store.StoreError>
-    /** Notes what came of a step, only while it's in one of `from` when that's given. Never fails: what can't be noted is only logged. */
+    /**
+     * Notes what came of a step, only while it's in one of `from` when that's
+     * given, and only while it's still as `as` was read, in the same state for
+     * the same reason, when that's given: what came of it since, like his no
+     * to sending it again, which only changes its reason, stands. Whether it
+     * was noted. Never fails: what can't be noted is only logged.
+     */
     readonly settle: (
       commandId: string,
       state: Exclude<State, "prepared">,
-      details?: { readonly reason?: string; readonly how?: How; readonly from?: ReadonlyArray<State> },
-    ) => Effect.Effect<void>
+      details?: {
+        readonly reason?: string
+        readonly how?: How
+        readonly from?: ReadonlyArray<State>
+        readonly as?: Pick<Row, "state" | "reason">
+      },
+    ) => Effect.Effect<boolean>
     /**
      * Leaves a step that didn't get through, may not have, or never said what
      * came of it, as it is, but never to be offered again on its own, noting
@@ -219,15 +230,18 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
       store.transaction((database: Database) => {
         const from = details.from ?? []
-        database
-          .query(
-            `update actions set state = ?, how = coalesce(?, how), reason = ?, settled_at = ? where command_id = ?${
-              from.length === 0 ? "" : ` and state in (${from.map(() => "?").join(", ")})`
-            }`,
-          )
-          .run(state, details.how ?? null, details.reason ?? null, at, commandId, ...from)
+        const as = details.as === undefined ? [] : [details.as.state, details.as.reason]
+        return (
+          database
+            .query(
+              `update actions set state = ?, how = coalesce(?, how), reason = ?, settled_at = ? where command_id = ?${
+                from.length === 0 ? "" : ` and state in (${from.map(() => "?").join(", ")})`
+              }${as.length === 0 ? "" : " and state = ? and reason is ?"}`,
+            )
+            .run(state, details.how ?? null, details.reason ?? null, at, commandId, ...from, ...as).changes > 0
+        )
       }),
-    ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note what came of ${commandId}`, error))),
+    ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note what came of ${commandId}`, error).pipe(Effect.as(false)))),
   leave: (commandId, why) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
       store.transaction((database: Database) => {

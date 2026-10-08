@@ -175,6 +175,65 @@ const restartOn = (
     }),
   )
 
+/**
+ * A restart's look at a message that may not have got there, which reads the
+ * thread as it was then, without the message, or `fails` to, and is slow to
+ * answer: it only does once `meanwhile` is done, with T3 Code answering
+ * commands as `answer` says. What `meanwhile` came to, where the step stands
+ * after, how many the look gave back to offer or to say it couldn't confirm,
+ * and whether it's still to be offered.
+ */
+const lookedLate = (
+  meanwhile: (hands: Hands.Hands["Type"], commandId: string) => Effect.Effect<string>,
+  { answer = takes(), fails = false }: { readonly answer?: Answer; readonly fails?: boolean } = {},
+) =>
+  run(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
+      const { commandId } = yield* ledger.prepare({
+        utterance: "u1",
+        step: 0,
+        kind: "message",
+        machine: "Rosie",
+        thread: tezos.id,
+        body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+        message: true,
+      })
+      yield* ledger.settle(commandId, "unknown")
+      const bounded: Bounded = { runs: [], messages: [], turnItems: [] }
+      const reading = yield* Deferred.make<void>()
+      const done = yield* Deferred.make<void>()
+      let reads = 0
+      const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
+        api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
+          Effect.suspend(() => {
+            const seen = structuredClone(bounded)
+            const first = ++reads === 1
+            const slow = first ? Effect.zipRight(Deferred.succeed(reading, undefined), Deferred.await(done)) : Effect.void
+            const read = first && fails ? Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." })) : Schema.decodeUnknown(schema)({ projection: seen }).pipe(Effect.orDie)
+            return Effect.zipRight(slow, read)
+          })) as Server.Transport["api"],
+        call: (<A, I>(_: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
+          answer(payload, bounded).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(Effect.orDie)))) as Server.Transport["call"],
+      })
+      const actions = T3Actions.make(reach)
+      const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions) } })
+      const looking = yield* Effect.fork(back.reconcile)
+      yield* Deferred.await(reading)
+      const came = yield* meanwhile(back, commandId)
+      yield* Deferred.succeed(done, undefined)
+      const { undelivered, unconfirmed } = yield* Fiber.join(looking)
+      return {
+        meanwhile: came,
+        state: Option.map(yield* ledger.get(commandId), ({ state }) => state),
+        undelivered: undelivered.length,
+        unconfirmed: unconfirmed.length,
+        offered: Option.isSome(yield* back.still(commandId)),
+      }
+    }),
+  )
+
 describe("Hands", () => {
   test("a step settled three times by settle is dispatched once", async () => {
     const result = await run(
@@ -801,51 +860,22 @@ describe("Hands", () => {
   })
 
   test("a restart's look that comes back only once he's said yes to sending it again, and it went, leaves it sent, never offered again", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        yield* TestClock.setTime(now)
-        const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
-        const { commandId } = yield* ledger.prepare({
-          utterance: "u1",
-          step: 0,
-          kind: "message",
-          machine: "Rosie",
-          thread: tezos.id,
-          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
-          message: true,
-        })
-        yield* ledger.settle(commandId, "unknown")
-        const bounded: Bounded = { runs: [], messages: [], turnItems: [] }
-        const reading = yield* Deferred.make<void>()
-        const resent = yield* Deferred.make<void>()
-        let reads = 0
-        // The restart's look reads the thread as it is, without the message, and is slow to answer: it only does once he's said yes and it went.
-        const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
-          api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
-            Effect.suspend(() => {
-              const seen = structuredClone(bounded)
-              const slow = ++reads === 1 ? Effect.zipRight(Deferred.succeed(reading, undefined), Deferred.await(resent)) : Effect.void
-              return Effect.zipRight(slow, Schema.decodeUnknown(schema)({ projection: seen }).pipe(Effect.orDie))
-            })) as Server.Transport["api"],
-          call: (<A, I>(_: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
-            takes()(payload, bounded).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value)), Effect.orDie)) as Server.Transport["call"],
-        })
-        const actions = T3Actions.make(reach)
-        const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions) } })
-        const looking = yield* Effect.fork(back.reconcile)
-        yield* Deferred.await(reading)
-        const yes = yield* back.again(commandId)
-        yield* Deferred.succeed(resent, undefined)
-        yield* Fiber.join(looking)
-        return {
-          yes: yes._tag,
-          state: Option.map(yield* ledger.get(commandId), ({ state }) => state),
-          offered: Option.isSome(yield* back.still(commandId)),
-        }
-      }),
-    )
+    const result = await lookedLate((hands, commandId) => Effect.map(hands.again(commandId), ({ _tag }) => _tag))
     // What it found, from before it went, never takes it back to may not have got there, which would offer it again.
-    expect(result).toEqual({ yes: "Done", state: Option.some("sent"), offered: false })
+    expect(result).toEqual({ meanwhile: "Done", state: Option.some("sent"), undelivered: 0, unconfirmed: 0, offered: false })
+  })
+
+  test("a restart's look that comes back only once he's said no to sending it again, or yes, whatever came of that, stands by what he heard then", async () => {
+    const yes = (hands: Hands.Hands["Type"], commandId: string) => Effect.map(hands.again(commandId), ({ _tag }) => _tag)
+    const no = (hands: Hands.Hands["Type"], commandId: string) => Effect.as(hands.leave(commandId, "He said no."), "Left")
+    // Sending it again never left yapd.
+    const offline = { answer: () => Effect.fail(new Server.Trouble({ reason: "T3 Code is offline." })) }
+    // What it found, from before either, never takes back that it's not to be offered again, so it isn't.
+    expect(await lookedLate(no)).toEqual({ meanwhile: "Left", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    expect(await lookedLate(yes, offline)).toEqual({ meanwhile: "NotSent", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    // Nor is a look that failed said as one that couldn't confirm it, once what came of it was said already.
+    expect(await lookedLate(no, { fails: true })).toEqual({ meanwhile: "Left", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    expect(await lookedLate(yes, { fails: true })).toEqual({ meanwhile: "Done", state: Option.some("sent"), undelivered: 0, unconfirmed: 0, offered: false })
   })
 
   test("a different message to the same thread goes straight through", async () => {

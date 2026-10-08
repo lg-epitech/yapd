@@ -810,17 +810,15 @@ export const make = (options: {
    * Not confirmed after a restart, it's said once, with why, and never done
    * again. A message stays as it may be, never offered again on its own, so
    * the same words said again find it, and are offered under its own ids.
-   * Only from where it was, in case something came of it since it was read.
+   * Only while it's as it was read: what came of it since, like his yes or no
+   * to sending it again, stands, and was said then, so nothing is given back.
    */
   const unverified = (row: Ledger.Row, reason: string) =>
     Effect.gen(function* () {
-      const from = [row.state]
-      if (row.kind === "message") {
-        yield* ledger.settle(row.commandId, "unknown", { reason, from })
-        yield* ledger.leave(row.commandId, reason)
-      } else yield* ledger.settle(row.commandId, "abandoned", { reason, from })
+      if (!(yield* ledger.settle(row.commandId, row.kind === "message" ? "unknown" : "abandoned", { reason, as: row }))) return Option.none<Ledger.Row>()
+      if (row.kind === "message") yield* ledger.leave(row.commandId, reason)
       yield* Effect.logWarning(`Couldn't confirm ${row.commandId} went through before restarting: ${reason}`)
-      return { ...row, reason }
+      return Option.some<Ledger.Row>({ ...row, reason })
     })
 
   /**
@@ -841,7 +839,7 @@ export const make = (options: {
         yield* Effect.logInfo(`Found ${row.commandId} started after restarting`)
         return Option.none<Ledger.Row>()
       }
-      if (Option.isNone(ended)) return Option.some(yield* unverified(row, Option.isSome(thread) ? gettingReady : unconfirmable))
+      if (Option.isNone(ended)) return yield* unverified(row, Option.isSome(thread) ? gettingReady : unconfirmable)
       yield* ledger.settle(row.commandId, "failed", { reason: ended.value, from })
       yield* Effect.logWarning(`${row.commandId} didn't start before restarting: ${ended.value}`)
       return Option.some<Ledger.Row>({ ...row, state: "failed", reason: ended.value })
@@ -907,7 +905,7 @@ export const make = (options: {
         const from = [row.state]
         const actions = threads.actions(row.machine)
         if (Option.isNone(actions)) {
-          unconfirmed.push(yield* unverified(row, `I can't reach the threads on ${row.machine} right now.`))
+          unconfirmed.push(...Option.toArray(yield* unverified(row, `I can't reach the threads on ${row.machine} right now.`)))
           continue
         }
         // New work T3 Code is still getting ready is waited for on its own, so nothing else waits behind it, and what isn't is told now.
@@ -918,17 +916,18 @@ export const make = (options: {
         }
         const found = yield* Effect.either(landed(row, actions.value))
         if (Either.isLeft(found)) {
-          unconfirmed.push(yield* unverified(row, `I couldn't look for it just now: ${after(plainly(found.left.reason))}`))
+          unconfirmed.push(...Option.toArray(yield* unverified(row, `I couldn't look for it just now: ${after(plainly(found.left.reason))}`)))
           continue
         }
         if (found.right) {
           yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }), from })
           yield* Effect.logInfo(`Found ${row.commandId} after restarting: it got there`)
-        } else if (row.kind !== "message") unconfirmed.push(yield* unverified(row, unconfirmable))
+        } else if (row.kind !== "message") unconfirmed.push(...Option.toArray(yield* unverified(row, unconfirmable)))
         // Too long ago to send again, it's only said.
-        else if (now - row.at > recent) unconfirmed.push(yield* unverified(row, tooLong))
-        else {
-          yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", from })
+        else if (now - row.at > recent) unconfirmed.push(...Option.toArray(yield* unverified(row, tooLong)))
+        // Only while it's as it was read, since his no to sending it again, or a yes that never left yapd, only change its reason: that
+        // stands, so it's never offered again.
+        else if (yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", as: row })) {
           yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
           undelivered.push(row)
         }
