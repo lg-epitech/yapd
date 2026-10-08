@@ -5,66 +5,36 @@ import SwiftUI
 // lately, to hear again, and the card it's showing, in a panel under the icon.
 // It only uses the API in docs/api.md, so another UI can do all of this too.
 
-/// What `GET /state` returns.
-struct Status: Decodable {
-  struct Update: Decodable, Identifiable {
-    let id: String
-    let text: String
-  }
-
-  /// The card yapd is showing, as `/state` points at it.
-  struct Showing: Decodable, Equatable {
-    let id: String
-    /// ISO 8601, when yapd put it up.
-    let at: String
-
-    /// Whether it went up a moment ago, rather than before the app was watching.
-    var fresh: Bool {
-      let format = ISO8601DateFormatter()
-      format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-      guard let at = format.date(from: at) else { return false }
-      return Date().timeIntervalSince(at) < 30
-    }
-  }
-
-  let on: Bool
-  let activity: String
-  let updates: [Update]
-  /// None when no card is up, and from a yapd too old to show cards.
-  let showing: Showing?
-
-  private enum CodingKeys: String, CodingKey { case on, activity, updates, showing }
-
-  init(from decoder: Decoder) throws {
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    on = try container.decode(Bool.self, forKey: .on)
-    activity = try container.decode(String.self, forKey: .activity)
-    updates = try container.decode([Update].self, forKey: .updates)
-    // An older yapd doesn't send it at all.
-    showing = try container.decodeIfPresent(Showing.self, forKey: .showing)
-  }
-}
-
 @MainActor @Observable
 final class Yapd {
   /// None while yapd isn't running.
   private(set) var state: Status?
   /// The last card yapd showed, to show again.
   private(set) var last: String?
-  /// The card the panel follows, so it's put up once.
-  @ObservationIgnored private var shown: String?
-  @ObservationIgnored private let panel = Panel()
+  @ObservationIgnored private let panel: Panel
+  /// The card the panel shows, as it follows the one yapd points at.
+  @ObservationIgnored private let following: Following
   private let api: URL
 
   init() {
     // `defaults write dev.yapd.menu port 4848` for a yapd on another port.
     let port = UserDefaults.standard.integer(forKey: "port")
-    api = URL(string: "http://127.0.0.1:\(port == 0 ? 4747 : port)")!
+    let api = URL(string: "http://127.0.0.1:\(port == 0 ? 4747 : port)")!
+    let panel = Panel()
+    let following = Following(
+      Following.Doing(
+        fetch: { id in await Yapd.fetch(id, from: api) },
+        show: { card, talking in panel.show(card, talking: talking) },
+        hide: { panel.hide() },
+        takeDown: { Yapd.send("DELETE", "cards/current", to: api) },
+        wait: { delay in try? await Task.sleep(for: delay) }
+      )
+    )
     // Closed or faded, the card is no longer on screen, so yapd takes it down too, unless it's put up another since.
-    panel.closed = { [weak self] card in
-      guard let self, self.state?.showing?.id == card.id else { return }
-      self.send("DELETE", "cards/current")
-    }
+    panel.closed = { card in following.closed(card.id) }
+    self.api = api
+    self.panel = panel
+    self.following = following
     Task { await watch() }
   }
 
@@ -93,38 +63,26 @@ final class Yapd {
           let first = state == nil
           let status = try JSONDecoder().decode(Status.self, from: Data(line.dropFirst(6).utf8))
           state = status
-          await follow(status, connecting: first)
+          follow(status, connecting: first)
         }
       } catch {}
       // Gone mid-line, yapd is no longer talking about its card, which fades as if it had finished.
       panel.heard(speaking: false)
+      following.away()
       state = nil
       try? await Task.sleep(for: .seconds(2))
     }
   }
 
-  /// Puts up a card as yapd starts showing it and takes it away when yapd does. On connecting, only a card put up a moment ago is news.
-  private func follow(_ status: Status, connecting: Bool) async {
-    if status.showing?.id != shown {
-      shown = status.showing?.id
-      if let showing = status.showing {
-        last = showing.id
-        if connecting && !showing.fresh {
-          // Put up while the app wasn't there to show it, so it isn't on screen: yapd takes it down too, and it's kept to show again.
-          panel.hide()
-          send("DELETE", "cards/current")
-        } else if let card = await fetch(showing.id), shown == card.id {
-          panel.show(card, talking: true)
-        }
-      } else {
-        panel.hide()
-      }
-    }
+  /// Follows a state as it comes in: the panel, the card yapd points at, and whether yapd is talking about it.
+  private func follow(_ status: Status, connecting: Bool) {
+    if let showing = status.showing { last = showing.id }
+    following.follow(status.showing, connecting: connecting)
     panel.heard(speaking: status.activity == "speaking")
   }
 
   /// One of the cards yapd showed lately.
-  private func fetch(_ id: String) async -> Card? {
+  private static func fetch(_ id: String, from api: URL) async -> Card? {
     guard let fetched = try? await URLSession.shared.data(from: api.appending(path: "cards/\(id)")),
           (fetched.1 as? HTTPURLResponse)?.statusCode == 200
     else { return nil }
@@ -143,19 +101,23 @@ final class Yapd {
   func showLast() {
     guard let last else { return }
     Task {
-      guard let card = await fetch(last) else {
+      guard let card = await Yapd.fetch(last, from: api) else {
         // Gone, with a yapd that restarted since or after twenty more, so there's nothing to show again.
         if self.last == last { self.last = nil }
         return
       }
-      shown = card.id
-      panel.show(card, talking: false)
+      following.showAgain(card)
       send("PUT", "cards/current", body: try? JSONEncoder().encode(["id": card.id]))
     }
   }
 
   /// What comes of it shows in the state.
   private func send(_ method: String, _ path: String, body: Data? = nil) {
+    Yapd.send(method, path, body: body, to: api)
+  }
+
+  /// As `send`, to the API at `api`, for what's wired up before there's a Yapd to send it.
+  private static func send(_ method: String, _ path: String, body: Data? = nil, to api: URL) {
     var request = URLRequest(url: api.appending(path: path))
     request.httpMethod = method
     if let body {
