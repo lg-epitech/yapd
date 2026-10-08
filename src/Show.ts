@@ -53,6 +53,8 @@ export interface Shown {
   readonly about: Option.Option<Threads.Ref>
   /** Whether it took his card down, so none that was to go up before it does. */
   readonly hides?: boolean
+  /** What's said in place of `say` if no app is there to show its card by the time it's said: the line as it's said with none watching. */
+  readonly unseen?: string
 }
 
 /** Opens an address in the browser. */
@@ -88,9 +90,15 @@ export class Show extends Context.Tag("yapd/Show")<
     /**
      * A thread's card to go with an answer about it, when what it waits on
      * can't be read aloud, and the answer with "it's on your screen" while an
-     * app watches. None when it can all be said.
+     * app watches, with the answer alone to say in its place if none is by
+     * the time it's said. None when it can all be said.
      */
-    readonly aside: (target: Threads.Listed, detail: T3Actions.Detail, answer: string, lines: Lines) => Effect.Effect<Option.Option<{ readonly say: string; readonly card: Draft }>>
+    readonly aside: (
+      target: Threads.Listed,
+      detail: T3Actions.Detail,
+      answer: string,
+      lines: Lines,
+    ) => Effect.Effect<Option.Option<{ readonly say: string; readonly card: Draft; readonly unseen?: string }>>
     /**
      * A card to put up as `line` is said again, while an app watches to show
      * it: the one that went up with it, if one did, so it's on his screen as
@@ -725,12 +733,18 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     /** What's said after a pull request's verdict when it didn't open, so he isn't left waiting on a browser. */
     const unopened = { opened: "", unsafe: " Its address isn't a secure web page, so I haven't opened it.", failed: " I couldn't open it in your browser." }
 
-    /** A line said with a card: "it's on your screen" first while an app watches, and then without addressing him again. */
-    const told = (gist: (address: string) => string, lines: Lines) =>
-      Effect.map(watched, (watching) => (watching ? `${lines.onScreen} ${gist("")}` : gist(addressed(lines))))
-
+    /**
+     * A line said with a card: "it's on your screen" first while an app
+     * watches, and then without addressing him again, with the line as it's
+     * said with none watching to say in its place if none is by the time it's
+     * said.
+     */
     const shown = (gist: (address: string) => string, draft: Draft, lines: Lines, about: Option.Option<Threads.Ref> = Option.none()) =>
-      Effect.map(told(gist, lines), (say): Shown => ({ say, card: Option.some({ ...draft, caption: gist(addressed(lines)) }), about }))
+      Effect.map(watched, (watching): Shown => {
+        const plain = gist(addressed(lines))
+        const card = Option.some({ ...draft, caption: plain })
+        return watching ? { say: `${lines.onScreen} ${gist("")}`, card, about, unseen: plain } : { say: plain, card, about }
+      })
 
     const present = (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines): Effect.Effect<Shown> =>
       Effect.gen(function* () {
@@ -829,9 +843,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
                 : request.questions.flatMap(({ question, options }) => [question, ...options.map(({ label }) => label)])
           if (words.every(readable)) return Option.none()
           const now = yield* Clock.currentTimeMillis
+          const card = { ...thread(target, Option.some(detail), now), caption: answer }
           // The answer addressed him already.
-          const say = (yield* watched) ? `${answer} ${unaddressed(lines.onScreen, lines)}` : answer
-          return Option.some({ say, card: { ...thread(target, Option.some(detail), now), caption: answer } })
+          return Option.some((yield* watched) ? { say: `${answer} ${unaddressed(lines.onScreen, lines)}`, card, unseen: answer } : { say: answer, card })
         }),
       caption: (line, situation) =>
         Effect.gen(function* () {

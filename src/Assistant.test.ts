@@ -3584,9 +3584,28 @@ describe("Assistant", () => {
       }),
     )
     expect(result.told).toEqual(["It's on your screen. One running and one needs you.", "One moment.", `${answer} It's on your screen.`, "It's on your screen. One running and one needs you."])
-    expect(result.said).toEqual(["One running and one needs you.", answer, "It's on your screen. One running and one needs you."])
+    // As it's said with no app watching, addressing him.
+    expect(result.said).toEqual(["One running and one needs you, sir.", answer, "It's on your screen. One running and one needs you."])
     // Its card goes up all the same, for an app that comes back, but isn't taken to be on his screen.
     expect(result.gone).toEqual({ watched: false, seen: Option.none(), up: Option.some("thread") })
+  })
+
+  test("a request in steps whose card goes up as it's said, played once no app is there to show it, is said as it is with none watching", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // It waits its turn behind something else being said, until the test plays it.
+        const { dictate, play, spoken, aloud, show } = yield* assistant(() => Brain.decision({ act: "show", how: "threads", rest: "Show me my usage." }), undefined, {
+          waiting: true,
+        })
+        // The app goes away before its turn comes.
+        yield* Effect.scoped(Effect.zipRight(show.watch, dictate("Show me what's running, then my usage.")))
+        yield* play()
+        return { told: spoken(), said: aloud() }
+      }),
+    )
+    expect(result.told).toEqual(["One running. It's on your screen. I can't read your usage right now."])
+    // Each step as it's said with none watching, addressing him once.
+    expect(result.said).toEqual(["One running, sir. I can't read your usage right now."])
   })
 
   test("a thread's card that goes up with its answer still goes up when the rest of the request is said with it", async () => {
@@ -3982,7 +4001,7 @@ describe("Assistant", () => {
       }).pipe(Effect.scoped),
     )
     expect(result.told).toEqual(["It's on your screen. One running."])
-    expect(result.said).toEqual(["One running."])
+    expect(result.said).toEqual(["One running, sir."])
     expect(result.up).toEqual(Option.none())
   })
 
@@ -4026,7 +4045,7 @@ describe("Assistant", () => {
       "It's on your screen. One running.",
     ])
     // "That" was the card of what's running, never the one he asked for after.
-    expect(result.said).toEqual(["One running.", "It's on your screen. I can't read your usage right now.", "One running."])
+    expect(result.said).toEqual(["One running, sir.", "It's on your screen. I can't read your usage right now.", "One running, sir."])
     expect(result.first).toEqual(Option.none())
     expect(result.then).toEqual(Option.some("usage"))
     expect(result.alone).toEqual(Option.none())
