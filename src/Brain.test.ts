@@ -147,6 +147,8 @@ describe("Brain", () => {
     const tezosHandle = desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
     expect(shown("Show me that.")).toEqual({ act: "show", how: "thread", target: tezosHandle })
     expect(shown("Show me that P.R.")).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    // Opening it is the same, at once even when the model is slow or down.
+    for (const heard of ["Open that PR.", "Open that P.R.", "Open the pull request."]) expect(shown(heard)).toEqual({ act: "show", how: "pr", target: tezosHandle })
     // Its pull request while that's open, which opens it in the browser too, and the thread once it's merged.
     const pulled = (state: string): Threads.Desk => ({
       ...desk(),
