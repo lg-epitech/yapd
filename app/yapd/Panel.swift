@@ -55,18 +55,20 @@ final class Panel {
       hosting.rootView = CardView(card: card, tallest: most - 120, close: { [weak self] in self?.close() })
       size = hosting.fittingSize
     }
-    let effect = NSVisualEffectView()
+    // Sized once here, so the card doesn't resize the panel as it lays itself out.
+    hosting.sizingOptions = []
+    panel.setFrame(place(height: size.height).frame, display: false)
+    let effect = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
     effect.material = .popover
     effect.blendingMode = .behindWindow
     effect.state = .active
     effect.wantsLayer = true
     effect.layer?.cornerRadius = 12
     effect.layer?.masksToBounds = true
-    hosting.frame = NSRect(origin: .zero, size: size)
+    hosting.frame = effect.bounds
     hosting.autoresizingMask = [.width, .height]
     effect.addSubview(hosting)
     panel.contentView = effect
-    panel.setFrame(place(height: size.height).frame, display: true)
     panel.alphaValue = 1
     panel.orderFrontRegardless()
     talk = talking ? .coming : .done
