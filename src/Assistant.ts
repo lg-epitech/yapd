@@ -1024,16 +1024,25 @@ export const make = (options: {
         const name = (ref === undefined ? undefined : situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called) ?? "it"
         const subject: Subject = { _tag: "Answer", said: "", about: Option.fromNullable(ref) }
         const now = yield* Clock.currentTimeMillis
-        /** The entry it's noted in: what went, or didn't and why, and what's said of it. What only asks first sent nothing. */
-        const noting = (line: string | undefined, detail: Record<string, unknown>, sent = true) =>
-          journal.write({
-            at: now,
-            kind: act._tag === "Message" && sent ? "sent" : "action",
-            ...(ref === undefined ? {} : { machine: ref.machine, thread: ref.id }),
-            ...(act._tag === "Message" ? { text: act.text } : {}),
-            ...(line === undefined ? {} : { said: line }),
-            utterance: utterance.id,
-            detail: { commandId: at.commandId, act: act._tag, outcome: outcome._tag, ...detail },
+        /**
+         * The entry it's noted in: what went, or didn't and why, and what's
+         * said of it. Only a message that went is noted as sent; what didn't
+         * go, or only asks first, is something done or said. Once yapd was
+         * turned off since he said it, nothing is said of it, so nothing is
+         * noted as said: what would have been is kept aside.
+         */
+        const noting = (line: string | undefined, detail: Record<string, unknown>) =>
+          Effect.gen(function* () {
+            const unsaid = line !== undefined && (yield* outdated(utterance.turns))
+            yield* journal.write({
+              at: now,
+              kind: act._tag === "Message" && outcome._tag === "Done" ? "sent" : "action",
+              ...(ref === undefined ? {} : { machine: ref.machine, thread: ref.id }),
+              ...(act._tag === "Message" ? { text: act.text } : {}),
+              ...(line === undefined || unsaid ? {} : { said: line }),
+              utterance: utterance.id,
+              detail: { commandId: at.commandId, act: act._tag, outcome: outcome._tag, ...(unsaid ? { unsaid: line } : {}), ...detail },
+            })
           })
         const asking = (open: Omit<Open, "id" | "version" | "at">) => free(opening(open, utterance))
         const base = { utterance: utterance.id, heard: utterance.heard, material: Option.none(), candidates: ref === undefined ? [] : [ref] }
@@ -1055,7 +1064,7 @@ export const make = (options: {
             const doing = `send that to ${name} again`
             // Twinned by an earlier word to carry on, that's what a yes sends.
             const twin = act._tag === "Message" ? decision : Option.match(Hands.went(outcome.row), { onNone: () => decision, onSome: ({ text, how }) => resending(text, how) })
-            yield* noting(undefined, { twin: outcome.row.commandId }, false)
+            yield* noting(undefined, { twin: outcome.row.commandId })
             if (outcome.row.state !== "sent") {
               const news = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}.`
               const asked = `${news} ${unaddressed(said.again, said)}`
@@ -1075,7 +1084,7 @@ export const make = (options: {
           }
           case "Read": {
             const text = typeof outcome.row.body === "object" && outcome.row.body !== null && "text" in outcome.row.body ? String(outcome.row.body.text) : ""
-            yield* noting(undefined, { read: outcome.row.commandId }, false)
+            yield* noting(undefined, { read: outcome.row.commandId })
             return yield* asking({
               ...base,
               kind: "offer",

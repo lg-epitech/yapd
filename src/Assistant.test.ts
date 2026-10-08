@@ -2002,13 +2002,14 @@ describe("Assistant", () => {
           answer: () => () => Effect.fail(new T3CodeServer.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "The provider is offline." })),
         })
         yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
-        const kept = yield* journal.since(0, { kinds: ["sent"] })
-        return { spoken: spoken(), questions: questions().length, reasons: kept.map(({ detail }) => (detail as { reason?: string }).reason) }
+        const kept = yield* journal.since(0, { kinds: ["sent", "action"] })
+        return { spoken: spoken(), questions: questions().length, kept: kept.map(({ kind, said, detail }) => [kind, said, (detail as { reason?: string }).reason]) }
       }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
     )
     expect(result.spoken).toEqual(["That didn't go to Migrate Tezos Integration, sir: the provider is offline."])
     expect(result.questions).toBe(0)
-    expect(result.reasons).toEqual(["The provider is offline."])
+    // Noted as what was said of it, never as a message sent.
+    expect(result.kept).toEqual([["action", "That didn't go to Migrate Tezos Integration, sir: the provider is offline.", "The provider is offline."]])
     expect(warned.some((line) => line.includes("The provider is offline."))).toBe(true)
   })
 
@@ -2940,8 +2941,8 @@ describe("Assistant", () => {
           yield* wait(15)
           yield* Fiber.join(going)
           yield* dictate("What's the Mina one doing?")
-          const kept = yield* journal.since(0, { kinds: ["sent"] })
-          return { spoken: spoken(), dispatched: dispatched.map(({ type }) => type), kept: kept.map(({ detail }) => (detail as { reason?: string }).reason) }
+          const kept = yield* journal.since(0, { kinds: ["sent", "action"] })
+          return { spoken: spoken(), dispatched: dispatched.map(({ type }) => type), kept: kept.map(({ kind, detail }) => [kind, (detail as { reason?: string }).reason]) }
         }),
       )
     for (const turn of [tezos, waiting]) {
@@ -2951,7 +2952,7 @@ describe("Assistant", () => {
           "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
         ],
         dispatched: ["run.interrupt"],
-        kept: ["It was still winding down fifteen seconds later."],
+        kept: [["action", "It was still winding down fifteen seconds later."]],
       })
     }
   })
@@ -2978,8 +2979,13 @@ describe("Assistant", () => {
           const over = Option.isSome(yield* Fiber.poll(going))
           yield* wait(15)
           yield* Fiber.join(going)
-          const kept = yield* journal.since(0, { kinds: ["sent"] })
-          return { over, dispatched: dispatched.map(({ type }) => type), spoken: spoken(), kept: kept.map(({ said, detail }) => [said, (detail as { reason?: string }).reason]) }
+          const kept = yield* journal.since(0, { kinds: ["sent", "action"] })
+          return {
+            over,
+            dispatched: dispatched.map(({ type }) => type),
+            spoken: spoken(),
+            kept: kept.map(({ kind, said, detail }) => [kind, said, (detail as { reason?: string }).reason, (detail as { unsaid?: string }).unsaid]),
+          }
         }),
       )
     for (const shows of [true, false]) {
@@ -2987,7 +2993,8 @@ describe("Assistant", () => {
         over: true,
         dispatched: ["run.interrupt"],
         spoken: [],
-        kept: [["I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could.", Hands.switchedOff]],
+        // Never noted as sent, nor as said, since it wasn't: what would have been said is kept aside.
+        kept: [["action", undefined, Hands.switchedOff, "I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could."]],
       })
     }
   })
