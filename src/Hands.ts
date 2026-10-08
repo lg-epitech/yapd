@@ -709,6 +709,9 @@ export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, cal
 export const unoffered = (lines: Lines, called: Option.Option<string>, why: string) =>
   `Before I restarted, I couldn't confirm your message${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} got there${addressed(lines)}, and ${after(why).replace(/[.!?]+$/, "")}.`
 
+/** Said after a restart, for a message that wasn't found where it went, before offering to send it again. */
+export const missing = (lines: Lines, called: Option.Option<string>) =>
+  `Before I restarted, I couldn't confirm your message${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} got there${addressed(lines)}.`
+
 /** Offered after a restart, for a message that wasn't found where it went. */
-export const lost = (lines: Lines, called: Option.Option<string>) =>
-  `Before I restarted, I couldn't confirm your message${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} got there${addressed(lines)}. ${unaddressed(lines.again, lines)}`
+export const lost = (lines: Lines, called: Option.Option<string>) => `${missing(lines, called)} ${unaddressed(lines.again, lines)}`

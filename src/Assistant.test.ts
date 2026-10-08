@@ -1697,6 +1697,36 @@ describe("Assistant", () => {
     expect(begun.dispatched).toBe(0)
   })
 
+  test("when the question a request's first step raised is replaced, what was left of it is said, and an unheard offer to send again still says what didn't go and why", async () => {
+    const rest = "tell the Mina one to use its fee table"
+    const replaced = (waiting: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, spoken, dispatched } = yield* assistant(
+            (situation) => (situation.utterance.heard.startsWith("What") ? minaStatus(situation) : { ...tezosMessage("high")(situation), rest }),
+            undefined,
+            { waiting, answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code isn't answering." })) },
+          )
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work, and tell the Mina one to use its fee table.")
+          // Asked whether to send it again, he asks about something else.
+          yield* dictate("What's the Mina one doing?")
+          return { spoken: spoken().slice(1), dispatched: dispatched.length }
+        }),
+      )
+    expect(await replaced(false)).toEqual({
+      spoken: ["I left the rest, sir: tell the Mina one to use its fee table. The Mina SSV2 tickets are filed: four bugs, and fee rounding is the worst."],
+      dispatched: 1,
+    })
+    // He pressed again before the question was said, so he never heard it, nor why it was asked.
+    expect(await replaced(true)).toEqual({
+      spoken: [
+        "That didn't get to Migrate Tezos Integration, sir: T3 Code isn't answering. I didn't ask about sending it again, since you'd moved on. I left the rest: tell the Mina one to use its fee table.",
+        "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+      ],
+      dispatched: 1,
+    })
+  })
+
   test("what's left of a request is said when its first step doesn't go, and done after a thanks", async () => {
     const twoSteps = (heard: string, model: (situation: Brain.Situation) => Brain.Decision, refusing = false) =>
       run(
