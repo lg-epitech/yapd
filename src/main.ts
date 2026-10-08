@@ -18,6 +18,7 @@ import * as Research from "./Research.ts"
 import * as Service from "./Service.ts"
 import * as Setup from "./Setup.ts"
 import * as T3Code from "./T3Code.ts"
+import * as Tunnel from "./Tunnel.ts"
 
 /**
  * What `yapd relay` sends through, on the machine the session runs on. The
@@ -56,6 +57,11 @@ const research = Effect.gen(function* () {
   console.log(yield* Research.serve(yield* researcher, input))
 })
 
+/** What `yapd t3` tells the machine that speaks, which reaches this one's T3 Code through an SSH tunnel. */
+const t3 = Effect.gen(function* () {
+  console.log(yield* Tunnel.serve(yield* Config.t3codeToken))
+})
+
 const runMain = (effect: Effect.Effect<void, unknown>) => {
   const fiber = Effect.runFork(effect)
   const interrupt = () => Effect.runFork(Fiber.interrupt(fiber))
@@ -73,7 +79,7 @@ const runMain = (effect: Effect.Effect<void, unknown>) => {
 const [command, argument] = process.argv.slice(2)
 
 /** Commands that read the user's settings. Hooks don't, and start wherever the agent runs. */
-const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "research", "mind"]
+const settled = ["serve", "setup", "doctor", "install", "uninstall", "relay", "start", "catalog", "research", "mind", "t3"]
 
 /** The environment a bun started with `env` in this folder ends up with, .env files and all. */
 const probe = (env: Record<string, string | undefined>): Record<string, string | undefined> =>
@@ -171,8 +177,10 @@ if ((command === "serve" || command === "install" || (command === "uninstall" &&
   runMain(Minder.mind(argument))
 } else if (command === "relay" || command === "start" || command === "catalog" || command === "research") {
   runMain(command === "relay" ? relay : command === "start" ? start(argument) : command === "catalog" ? catalog(argument) : research)
+} else if (command === "t3") {
+  runMain(t3)
 } else {
-  console.error("usage: yapd setup | yapd doctor | yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd research")
+  console.error("usage: yapd setup | yapd doctor | yapd serve | yapd install | yapd uninstall | yapd hook <claude|codex> [--wait] | yapd relay | yapd start [machine] | yapd catalog [machine] | yapd research | yapd t3")
   // Not 2: Claude Code treats exit code 2 from a Stop hook as "keep going".
   process.exit(1)
 }
