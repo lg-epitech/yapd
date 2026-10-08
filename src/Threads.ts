@@ -247,14 +247,14 @@ const stem = (word: string) => {
 }
 
 /** Words too short or too common to say which thread a title is. */
-const filler: ReadonlySet<string> = new Set(["the", "and", "for", "you", "can", "tel", "status", "on", "with", "from", "into", "add", "new"])
+const filler: ReadonlySet<string> = new Set(["the", "and", "for", "you", "can", "tell", "status", "on", "with", "from", "into", "add", "new"])
 
 const stems = (text: string) =>
   new Set(
     text
       .split(/[^\p{L}\p{N}]+/u)
       .map(stem)
-      .filter((word) => word.length >= 3 && !filler.has(word) && !common.has(word)),
+      .filter((word) => word.length >= 3 && !ignored.has(word)),
   )
 
 /** Threads put among the likeliest by their titles at most. */
@@ -288,6 +288,9 @@ const common: ReadonlySet<string> = new Set([
   "where", "which", "will", "been", "were", "then", "than", "also", "it's", "thing", "things", "today", "right", "know",
   "need", "needs", "want", "start", "make", "does", "done", "still", "much", "many", "more",
 ])
+
+/** Those words and the filler as they're compared with a title's: by then "status" is "statu" and "still" is "stil". */
+const ignored: ReadonlySet<string> = new Set([...filler, ...common].map(stem))
 
 /** The words in what he said that tell threads apart: none too short or too common. */
 export const distinctive = (text: string) =>
