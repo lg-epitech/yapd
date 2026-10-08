@@ -61,7 +61,7 @@ export class Show extends Context.Tag("yapd/Show")<
     readonly card: (id: string) => Effect.Effect<Option.Option<Card>>
     /** The card that's up, then each time that changes. */
     readonly showing: Stream.Stream<Option.Option<Card>>
-    /** The card on his screen: the one that's up, while an app is there to show it. */
+    /** The card on his screen: the one that's up, if it went up while an app was there to show it and one still is. */
     readonly seen: Effect.Effect<Option.Option<Card>>
     /** Whether an app follows yapd's state, so what's put up is seen. */
     readonly watched: Effect.Effect<boolean>
@@ -613,6 +613,8 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     const up = yield* SubscriptionRef.make(Option.none<Card>())
     const recent = new Map<string, Card>()
     let watching = 0
+    // Whether the card that's up went up while an app was there to show it: one put up before isn't on his screen, even once an app is.
+    let shownTo = false
 
     const put = (draft: Draft) =>
       Effect.gen(function* () {
@@ -620,6 +622,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         const card: Card = { ...draft, id: `c${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`, at }
         recent.set(card.id, card)
         for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) recent.delete(id)
+        shownTo = watching > 0
         yield* SubscriptionRef.set(up, Option.some(card))
         yield* Effect.logInfo(`Showing ${card.kind}: ${card.title}`)
         return card
@@ -710,7 +713,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
       hide,
       card: (id) => Effect.sync(() => Option.fromNullable(recent.get(id))),
       showing: up.changes,
-      seen: Effect.flatMap(watched, (watching) => (watching ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>()))),
+      seen: Effect.flatMap(watched, (watching) => (watching && shownTo ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>()))),
       watched,
       watch: Effect.acquireRelease(
         Effect.sync(() => {

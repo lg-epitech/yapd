@@ -96,6 +96,24 @@ describe("Show", () => {
     expect(tamed("```js\nconst link = [x](javascript:1)\n```\nThen [y](javascript:2)")).toBe("```js\nconst link = [x](javascript:1)\n```\nThen y")
   })
 
+  test("a card put up while no app watched isn't taken to be on his screen once one does", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+        yield* show.put(Show.said("One running.", Option.none()))
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* show.watch
+            const before = yield* show.seen
+            yield* show.put(Show.said("Two running.", Option.none()))
+            return { before, after: Option.map(yield* show.seen, ({ markdown }) => markdown.includes("Two running.")) }
+          }),
+        )
+      }),
+    )
+    expect(result).toEqual({ before: Option.none(), after: Option.some(true) })
+  })
+
   test("a message made to trip a pattern up is tamed at once", () => {
     const started = performance.now()
     for (const message of ["[](<".repeat(625), "[](".repeat(833), "![](".repeat(625)]) Show.tamed(message)
