@@ -547,12 +547,15 @@ export const make = (options: {
           yield* Effect.logInfo(`Leaving it, rather than ask in place of a question asked since: ${open.asked}`)
           yield* forgo(open, "Another question was asked before it could be.")
           const said = yield* persona.lines
+          const waiting = "since I'm waiting on your answer to something else"
           const left =
             open.kind === "which"
               ? said.cantTell
-              : open.news === undefined
-                ? unasked(open.about, said)
-                : `${open.news} I didn't ask about sending it again, since I'd asked you something else meanwhile.`
+              : open.news !== undefined
+                ? `${open.news} I didn't ask about sending it again, ${waiting}.`
+                : Brain.yesNo(open.kind)
+                  ? `I didn't ask whether to ${open.about}, ${waiting}${addressed(said)}.`
+                  : unasked(open.about, said)
           return unfinished(reply(left, { _tag: "Nothing" }), open.decision.rest, said)
         }
         if (asking !== undefined) yield* close(asking.open, "replaced")

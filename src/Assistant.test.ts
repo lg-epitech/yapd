@@ -2608,6 +2608,30 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["Stopped it, sir, and told it: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."])
   })
 
+  test("a request said before a question asked since never asks in its place: the same words again aren't sent, and he's told why", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, heard, wait, spoken, open, dispatched } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+            : tezosMessage("high")(situation),
+        )
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* wait(60)
+        const said = yield* TestClock.currentTimeMillis
+        yield* wait(5)
+        // Asked about something else, then the same words, said before that was asked, are handed on.
+        yield* dictate("What's it doing?")
+        const asked = Option.map(yield* open, ({ asked }) => asked)
+        yield* heard({ heard: "Tell the Tesla's migration to use the fee table from the Mina work.", via: "shortcut", at: said, voiced: 3, turns: 1 })
+        return { asked, kept: Option.map(yield* open, ({ asked }) => asked), last: spoken().at(-1), dispatched: dispatched.length }
+      }),
+    )
+    expect(result.kept).toEqual(result.asked)
+    expect(result.last).toBe("I didn't ask whether to send that to Migrate Tezos Integration again, since I'm waiting on your answer to something else, sir.")
+    expect(result.dispatched).toBe(1)
+  })
+
   test("turning yapd off while a restart waits for its turn to get going sends nothing, then or later", async () => {
     const starting = thread(tezos.id, tezos.title, "integration", { activeRunId: "run-3", activityRunStatus: "starting", status: "starting" })
     const result = await run(
