@@ -3424,6 +3424,49 @@ describe("Assistant", () => {
     expect(result.pending).toBe("answers")
   })
 
+  test("a question closed with nothing said, however it was, is told as what it asked when he asks to hear or see it again, and shown as it was, never asked again", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const closed = (closing: string, asks: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          // Taken for something else in its place, or for nothing said.
+          const { dictate, wait, spoken, questions, show, open } = yield* assistant((situation) =>
+            situation.utterance.heard === "Thanks."
+              ? Brain.decision({ act: "dismiss", pending: "replaces" })
+              : situation.utterance.heard === "Carry on."
+                ? Brain.decision({ act: "resume", pending: "replaces" })
+                : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          )
+          yield* show.watch
+          // With a card up, "hide that" needs no model.
+          yield* dictate("Show me what's running.")
+          yield* dictate("Which migration was that?")
+          const told = spoken().length
+          // Or let go of, unanswered for so long it no longer counts.
+          if (closing === "Ten minutes on.") yield* wait(11 * 60)
+          else yield* dictate(closing)
+          for (const asked of asks) yield* dictate(asked)
+          const up = Option.map(yield* show.seen, ({ markdown }) => markdown.includes(`### I said\n\n${choices}, sir?`))
+          return { said: spoken().slice(told), up, open: yield* open, questions: questions().length }
+        }).pipe(Effect.scoped),
+      )
+    const told = `I asked whether you meant ${choices}, sir.`
+    for (const closing of ["Hide that.", "Thanks.", "Carry on.", "Ten minutes on."]) {
+      expect(await closed(closing, ["Show me what you said.", "Say that again."])).toEqual({
+        said: [`It's on your screen. ${told}`, told],
+        up: Option.some(true),
+        open: Option.none(),
+        questions: 1,
+      })
+      expect(await closed(closing, ["Say that again.", "Show me what you said."])).toEqual({
+        said: [told, `It's on your screen. ${told}`],
+        up: Option.some(true),
+        open: Option.none(),
+        questions: 1,
+      })
+    }
+  })
+
   test("only an https address that came from T3 Code is opened", async () => {
     const linked = (id: string, title: string, url: string) =>
       thread(id, title, "yapd", {

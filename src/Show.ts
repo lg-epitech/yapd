@@ -756,7 +756,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           case "said": {
             const line = Option.filter(Option.map(lastSaid(situation), (line) => offScreen(line, lines)), (line) => line !== "")
             if (Option.isNone(line)) return { say: Brain.nothingSaid(lines), card: Option.none(), about: Option.none() }
-            const draft = said(line.value, lastHeard(situation))
+            // A question closed since is shown in the words it was asked in, but said as what it asked, so it's never asked again.
+            const asked = situation.subject._tag === "Answer" ? situation.subject.asked : undefined
+            const draft = said(asked === undefined ? line.value : offScreen(asked, lines), lastHeard(situation))
             return yield* shown(() => line.value, draft, lines)
           }
           case "thread":

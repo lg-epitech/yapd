@@ -5,7 +5,7 @@ import * as Config from "./Config.ts"
 import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
 import { Model } from "./Model.ts"
-import { addressed, type Lines } from "./Persona.ts"
+import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import { agreed, enough, gist, type Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -276,6 +276,21 @@ export const left = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines)
     : yesNo(open.kind)
       ? `I didn't ask whether to ${open.about}, since you'd moved on${addressed(lines)}.`
       : `I left ${open.about || "what you dictated"}, since you'd moved on${addressed(lines)}.`
+
+/**
+ * A question that's closed, said or shown again: what it asked, told rather
+ * than asked, after any news it followed, whatever came of it, so a closed
+ * question is never asked again (I4).
+ */
+export const recalled = (open: Pick<Assistant.Open, "kind" | "about" | "news">, lines: Lines) => {
+  const asked =
+    open.kind === "which"
+      ? `I asked whether you meant ${open.about}${addressed(lines)}.`
+      : yesNo(open.kind)
+        ? `I asked whether to ${open.about}${addressed(lines)}.`
+        : `I asked which project ${open.about || "that"} should go in${addressed(lines)}.`
+  return open.news === undefined ? asked : `${open.news} ${unaddressed(asked, lines)}`
+}
 
 /** An act the brain understood, but yapd can't do yet. */
 export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.`

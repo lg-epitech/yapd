@@ -66,6 +66,8 @@ export type Subject =
       readonly about: Option.Option<Threads.Ref>
       /** What he missed that it told him, by journal entry, which counts as heard once he's heard it to the end, said again or not. */
       readonly missed?: ReadonlyArray<number>
+      /** The question it was, in the words it was asked in, once it's closed: shown as it was, but told rather than asked again (I4). */
+      readonly asked?: string
     }
 
 /** The one question yapd has open, and what it's about. */
@@ -331,11 +333,12 @@ export const make = (options: {
     let hidden = 0
     /**
      * What yapd said last of its own accord, which "it" may mean, when it
-     * started saying it, and how many times yapd had been turned on or off
-     * then: once it's turned off, nothing said before is "it", nor said or
-     * shown again.
+     * started saying it, how many times yapd had been turned on or off then,
+     * and the question it asked, if it did: once yapd is turned off, nothing
+     * said before is "it", nor said or shown again, and once the question is
+     * closed, it's told rather than asked again.
      */
-    let answered: { readonly subject: Subject; readonly at: number; readonly turns: number } | undefined
+    let answered: { readonly subject: Subject; readonly at: number; readonly turns: number; readonly open?: Open } | undefined
     /**
      * For each press whose dictation hasn't ended, by the press: what "it"
      * meant then, before the dictation stopped what was playing, and what lets
@@ -433,7 +436,11 @@ export const make = (options: {
       if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
         return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject
       }
-      return said?.subject ?? ({ _tag: "Nothing" } satisfies Subject)
+      if (said === undefined) return { _tag: "Nothing" } satisfies Subject
+      // A question closed since, even with nothing said, like by "hide that" or a thanks, is told as what it asked, never asked again (I4).
+      const { open, subject: meant } = said
+      if (open === undefined || meant._tag !== "Answer" || Option.exists(current(now), ({ id }) => id === open.id)) return meant
+      return { ...meant, said: Brain.recalled(open, yield* persona.lines), asked: meant.said } satisfies Subject
     })
 
     /** What yapd asked in the last ten minutes, so no question is asked in the same words again. */
@@ -1604,7 +1611,7 @@ export const make = (options: {
                 const before = answered
                 // Asked again in other words, he may have heard it already.
                 const heard = asking?.said === true
-                const meant = { subject, at: now, turns: utterance.turns }
+                const meant = { subject, at: now, turns: utterance.turns, ...(open === undefined ? {} : { open }) }
                 answered = meant
                 if (open !== undefined && asking?.open.id === open.id) asking.said = true
                 unsaid = Effect.sync(() => {
