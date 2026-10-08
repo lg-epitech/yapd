@@ -458,12 +458,14 @@ export const make = (options: {
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
 
     /**
-     * Whether a limit of this provider other than the one under `limit` was
-     * said and still holds: until it resets, or, when nobody said when, for
-     * as long as the shortest does. T3 Code may only know when it resets by
-     * the time another thread hits it, which keys it apart.
+     * Whether a limit of this provider other than the one under `limit`,
+     * which resets at `resets` when that's known, was said and still holds:
+     * until it resets, or, when nobody said when, for as long as the shortest
+     * does, and only as this one's window, which can't reset later than that.
+     * T3 Code may only know when it resets by the time another thread hits
+     * it, which keys it apart; one that resets later is a window begun since.
      */
-    const holding = (who: string, limit: string) =>
+    const holding = (who: string, limit: string, resets: Option.Option<number>) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
         const said = yield* journal.since(now - longest, { kinds: ["notice"], most: 1000 })
@@ -474,7 +476,10 @@ export const make = (options: {
             entry.key.startsWith(key.limited(who, "")) &&
             Option.match(
               Option.filter(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)), (reset) => !Number.isNaN(reset)),
-              { onNone: () => now - entry.at < lasting, onSome: (reset) => now < reset },
+              {
+                onNone: () => now - entry.at < lasting && !Option.exists(resets, (reset) => reset - entry.at > lasting),
+                onSome: (reset) => now < reset,
+              },
             ),
         )
       })
@@ -496,7 +501,8 @@ export const make = (options: {
           const limit = key.limited(who, window(resets, at))
           const spoken = lines.limited(called, who, Option.flatMap(resets, (resets) => Option.fromNullable(Brain.clock(resets, at))), said)
           // Said for another thread, it isn't again till it resets, whether or not it was known when then.
-          const unsaid = Effect.zipWith(still, holding(who, limit), (still, held) => still && !held)
+          const reset = Option.filter(Option.map(resets, Date.parse), (reset) => !Number.isNaN(reset))
+          const unsaid = Effect.zipWith(still, holding(who, limit, reset), (still, held) => still && !held)
           const entry = { ...base, said: spoken, key: limit, detail: { failure: kind, ...Option.match(resets, { onNone: () => ({}), onSome: (resets) => ({ resets }) }) } }
           return yield* notify(ref, spoken, entry, unsaid, at, turns, limit)
         }

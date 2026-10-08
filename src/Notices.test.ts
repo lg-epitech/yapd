@@ -432,4 +432,33 @@ describe("Notices", () => {
     expect(result.told).toHaveLength(2)
     expect(result.told[1]).toMatch(/^Fix the loader hit Codex's limit, sir; it resets at \d/)
   })
+
+  test("a limit whose reset nobody said doesn't hide one hit hours later that resets past when the first could have", async () => {
+    // A Claude 429 is classed as the limit, with no reset; three hours later the real limit is hit, in a window begun since.
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "usage_limit" })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { status: "failed", latestRunId: "run-2", lastErrorClass: "usage_limit", usageLimitResetAt: "2026-10-09T04:00:00.000Z" })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, told } = yield* notices({
+          view: [tezos, mina],
+          bounded: {
+            tezos: { runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(3) }], turnItems: [failure("run-1", "usage_limit", "Claude API rate limit reached.")] },
+            mina: {
+              runs: [{ id: "run-2", status: "failed", ordinal: 1, startedAt: minutes(3) }],
+              turnItems: [failure("run-2", "usage_limit", "Claude usage limit reached.", "2026-10-09T04:00:00.000Z")],
+            },
+          },
+        })
+        yield* hear(ended(tezos, "run-1"))
+        yield* wait(10)
+        yield* wait(3 * 60 * 60)
+        yield* hear(ended(mina, "run-2"))
+        yield* wait(10)
+        return told
+      }),
+    )
+    expect(result).toHaveLength(2)
+    expect(result[0]).toBe("Migrate Tezos Integration hit Claude's limit, sir.")
+    expect(result[1]).toMatch(/^Open Mina SSV2 Bug Tickets hit Claude's limit, sir; it resets at \d/)
+  })
 })
