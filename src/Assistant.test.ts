@@ -2730,4 +2730,68 @@ describe("Assistant", () => {
       })
     }
   })
+
+  test("turned off and on while a turn stopped to be told something in its place is still showing as busy, it isn't told once it shows stopped, and why is noted, with nothing said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const others = [tezos]
+        const { dictate, toggle, wait, flush, spoken, dispatched, journal } = yield* assistant(
+          (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
+          undefined,
+          { others },
+        )
+        const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
+        yield* flush
+        yield* wait(2)
+        yield* toggle(false)
+        yield* toggle(true)
+        // It shows stopped a moment later, which would have had it told.
+        others[0] = thread(tezos.id, tezos.title, "integration")
+        yield* wait(1)
+        // Let go of at once, rather than once the fifteen seconds are up.
+        const over = Option.isSome(yield* Fiber.poll(going))
+        yield* wait(15)
+        yield* Fiber.join(going)
+        const kept = yield* journal.since(0, { kinds: ["sent"] })
+        return { over, dispatched: dispatched.map(({ type }) => type), spoken: spoken(), kept: kept.map(({ said, detail }) => [said, (detail as { reason?: string }).reason]) }
+      }),
+    )
+    expect(result).toEqual({
+      over: true,
+      dispatched: ["run.interrupt"],
+      spoken: [],
+      kept: [["I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could.", Hands.switchedOff]],
+    })
+  })
+
+  test("turned off and on while a thread yapd stopped is let go of its queue, it isn't asked to carry on, and why is noted", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const others = [tezos]
+        const { dictate, toggle, wait, flush, dispatched, journal } = yield* assistant(
+          (situation) => Brain.decision({ act: "stop", target: handle(situation, tezos) }),
+          undefined,
+          {
+            others,
+            answer: () => (payload, bounded) => {
+              // Stopped, the live view shows it idle; letting go of its queue, T3 Code is slow to say it has.
+              if (payload.type === "run.interrupt") others[0] = thread(tezos.id, tezos.title, "integration")
+              return payload.type === "queue.resume" ? Effect.zipRight(Effect.sleep("5 seconds"), takes(payload, bounded)) : takes(payload, bounded)
+            },
+          },
+        )
+        yield* dictate("Stop the Tezos one.")
+        const going = yield* Effect.fork(dictate("Scratch that."))
+        yield* flush
+        yield* wait(2)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* wait(5)
+        yield* Fiber.join(going)
+        const kept = yield* journal.since(0, { kinds: ["action"] })
+        return { dispatched: dispatched.map(({ type }) => type), reasons: kept.flatMap(({ detail }) => (detail as { reason?: string }).reason ?? []) }
+      }),
+    )
+    expect(result).toEqual({ dispatched: ["run.interrupt", "queue.resume"], reasons: [Hands.switchedOff] })
+  })
 })

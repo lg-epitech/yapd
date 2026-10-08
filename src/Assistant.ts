@@ -1154,9 +1154,10 @@ export const make = (options: {
         }
         const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted)
         if (act === undefined) return reply(said.cantTell, thought.subject)
-        // Once it's begun, it's seen through and noted: turning yapd off meanwhile only stops what's said of it.
+        // Once it's begun, it's seen through and noted: turning yapd off meanwhile only stops what's said of it, and a step after one that went, like telling a turn it stopped (I8).
+        const wanted = Effect.map(outdated(utterance.turns), (off) => !off)
         return yield* Effect.uninterruptibleMask((free) =>
-          Effect.flatMap(hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice }), (outcome) =>
+          Effect.flatMap(hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice, wanted }), (outcome) =>
             told(
               act,
               outcome,
