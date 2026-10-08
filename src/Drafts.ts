@@ -135,6 +135,9 @@ export type Outcome =
   /** Nothing started, and this says why, or that there was nothing to start. */
   | { readonly _tag: "Said"; readonly spoken: string; readonly failed: boolean }
 
+/** Notes work as it starts, in the same breath, so nothing can come between the two. */
+export type Noted = (started: Extract<Outcome, { readonly _tag: "Started" }>) => Effect.Effect<void>
+
 /** What's said when the prompt couldn't be written. */
 export const unwritten = "I couldn't write that up, so nothing started. What you said is in my log."
 
@@ -184,8 +187,12 @@ export const make = (options: {
     /** Once more if it fails, as with summaries. */
     const decide = (material: Material) => writer.decide(material).pipe(Effect.retry({ times: 1 }), writing.withPermits(1))
 
-    /** Starts it, and says what started, or why nothing did. */
-    const launch = (resolved: Resolved, spoken: string, why: string, about: string, warning?: string) =>
+    /**
+     * Starts it, and says what started, or why nothing did. Once it's asked
+     * for, it's started and noted whatever happens meanwhile, like yapd being
+     * turned off: cut off halfway, a launch could leave a thread half made.
+     */
+    const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string) =>
       Effect.gen(function* () {
         const { machine, project, request } = resolved
         if (request.prompt === "") return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
@@ -195,25 +202,31 @@ export const make = (options: {
           }${request.baseBranch === undefined ? "" : ` from ${request.baseBranch}`}. ${why}`,
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
-        const outcome = yield* Effect.either(machine.launcher.start(request))
-        if (Either.isLeft(outcome)) {
-          yield* Effect.logWarning("Could not start", outcome.left)
-          return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
-        }
-        const started = outcome.right
-        yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
-        return {
-          _tag: "Started",
-          spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
-          started,
-          machine,
-          request,
-          about,
-        } satisfies Outcome
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            const outcome = yield* Effect.either(machine.launcher.start(request))
+            if (Either.isLeft(outcome)) {
+              yield* Effect.logWarning("Could not start", outcome.left)
+              return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
+            }
+            const started = outcome.right
+            yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
+            const begun = {
+              _tag: "Started",
+              spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
+              started,
+              machine,
+              request,
+              about,
+            } satisfies Outcome
+            yield* noted(begun)
+            return begun
+          }),
+        )
       })
 
     /** Reads through the project before writing the prompt, for a request that leans on something in it. */
-    const look = (material: Material, resolved: Resolved, decision: Decision): Effect.Effect<Outcome> =>
+    const look = (material: Material, resolved: Resolved, decision: Decision, noted: Noted): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { machine, project, request } = resolved
         const about = decision.about.trim()
@@ -232,18 +245,18 @@ export const make = (options: {
         if (Either.isRight(written)) {
           if (written.right.action === "ask") return { _tag: "Asked", question: written.right.spoken, about, material } satisfies Outcome
           const prompt = written.right.prompt
-          return yield* launch({ ...resolved, request: { ...request, prompt } }, written.right.spoken, written.right.why, about)
+          return yield* launch({ ...resolved, request: { ...request, prompt } }, written.right.spoken, written.right.why, about, noted)
         }
         // Written from what they said after all, which leaves what was to be looked up to the agent.
         yield* Effect.logWarning(`Could not read through ${project.name}, so it's written without`, written.left)
         const plain = { ...material, research: false }
         const blind = yield* decide(plain).pipe(Effect.either)
         if (Either.isLeft(blind)) return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
-        return yield* start({ decision: blind.right, material: plain }, "I couldn't read through it first.")
+        return yield* start({ decision: blind.right, material: plain }, noted, "I couldn't read through it first.")
       })
 
     /** Carries out what the writer decided: starts it, or says what has to be asked, or why nothing started. */
-    const start = (written: Written, warning?: string): Effect.Effect<Outcome> =>
+    const start = (written: Written, noted: Noted = () => Effect.void, warning?: string): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { decision, material } = written
         const about = decision.about.trim()
@@ -265,9 +278,9 @@ export const make = (options: {
               yield* Effect.logInfo(`Decided on "${decision.project}", which isn't a project anywhere. ${decision.why}`)
               return asking(resolved.left)
             }
-            if (decision.action === "start") return yield* launch(resolved.right, decision.spoken, decision.why, about, warning)
+            if (decision.action === "start") return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, warning)
             const spoken = decision.spoken.trim() || `Looking through ${resolved.right.project.name} first.`
-            return { _tag: "Looking", spoken, about, then: look(material, resolved.right, decision) } satisfies Outcome
+            return { _tag: "Looking", spoken, about, then: look(material, resolved.right, decision, noted) } satisfies Outcome
           }
           case "none":
           case "drop":
