@@ -307,6 +307,16 @@ describe("Brain", () => {
         Option.none(),
       ),
       Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }, lines, Option.some("Migrate Tezos Integration")),
+      // A message held behind a turn that's waiting, and a restart T3 Code couldn't take, done as a stop and then the message.
+      Hands.done({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, "queued", lines, Option.some("Migrate Tezos Integration"), { waiting: "asked" }),
+      Hands.done({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "restart" }, "now", lines, Option.none(), { stopped: true }),
+      Hands.failed(
+        { _tag: "Message", to: ref(tezos), text: "Merge it.", how: "restart" },
+        { _tag: "Refused", reason: Hands.plainly(`Target run ${tezos.id} is waiting and cannot be steered.`), stopped: true },
+        lines,
+        Option.some("Migrate Tezos Integration"),
+      ),
+      Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "restart" }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.none(), stopped: false }, lines, Option.none()),
       // As T3 Code words its reasons, with ids of any shape in them, quoted or not.
       ...[
         "Command yapd:u1:0 was previously rejected: Thread 'thr_01J9ABC' is archived.",

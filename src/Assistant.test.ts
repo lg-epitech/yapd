@@ -2570,4 +2570,63 @@ describe("Assistant", () => {
     // One line for the lot, and "sir" once.
     expect(result.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."])
   })
+
+  test("a restart T3 Code can't take is stopped, then told, as two steps, with the rest of the request after both", async () => {
+    const waiting = thread(tezos.id, tezos.title, "integration", {
+      activeRunId: null,
+      activityRunStatus: "waiting",
+      status: "waiting",
+      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-01T02:15:00.000Z" },
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const others = [waiting]
+        const { dictate, spoken, dispatched } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Stop")
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart", rest: "tell the Mina one to use its fee table" })
+              : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
+          undefined,
+          {
+            others,
+            answer: () => (payload, bounded) => {
+              // Stopped, the live view shows it idle.
+              if (payload.type === "run.interrupt") others[0] = thread(tezos.id, tezos.title, "integration")
+              return takes(payload, bounded)
+            },
+          },
+        )
+        yield* dictate("Stop the Tezos one and tell it to fix the loader instead, and tell the Mina one to use its fee table.")
+        return { spoken: spoken(), sent: dispatched.map(({ type, threadId, commandId }) => [type, threadId, String(commandId).replace(/^yapd:u\w+:/, "")]) }
+      }),
+    )
+    expect(result.sent).toEqual([
+      ["run.interrupt", tezos.id, "0"],
+      ["message.dispatch", tezos.id, "1"],
+      ["message.dispatch", mina.id, "2"],
+    ])
+    expect(result.spoken).toEqual(["Stopped it, sir, and told it: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."])
+  })
+
+  test("turning yapd off while a restart waits for its turn to get going sends nothing, then or later", async () => {
+    const starting = thread(tezos.id, tezos.title, "integration", { activeRunId: "run-3", activityRunStatus: "starting", status: "starting" })
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, toggle, wait, flush, dispatched, ledger } = yield* assistant(
+          (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
+          undefined,
+          { others: [starting] },
+        )
+        const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
+        yield* flush
+        yield* wait(2)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* wait(30)
+        yield* Fiber.join(going)
+        return { dispatched: dispatched.length, written: yield* ledger.latest("1 hour") }
+      }),
+    )
+    expect(result).toEqual({ dispatched: 0, written: Option.none() })
+  })
 })

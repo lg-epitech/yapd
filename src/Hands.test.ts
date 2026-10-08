@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Effect, Option, Schema, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Effect, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
 import * as Hands from "./Hands.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
@@ -731,7 +731,7 @@ describe("Hands", () => {
           })
           const { send, dispatched } = yield* hands({ thread: asking, runs: [{ id: "run-1", status: "waiting", ordinal: 1 }] })
           const outcome = yield* send("u1", "Use the Mina fee table.")
-          const said = outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome.how, lines, Option.some("Migrate Tezos Integration"), outcome.waiting) : outcome._tag
+          const said = outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome.how, lines, Option.some("Migrate Tezos Integration"), outcome) : outcome._tag
           return { outcome: outcome._tag === "Done" ? [outcome.how, outcome.waiting] : outcome._tag, said, dispatched }
         }),
       )
@@ -744,6 +744,48 @@ describe("Hands", () => {
     const finishing = await waiting(false)
     expect(finishing.outcome).toEqual(["queued", "finishing"])
     expect(finishing.said).toBe("Migrate Tezos Integration is finishing something off, sir, so that will go once it's done.")
+  })
+
+  test("a restart waits for a turn getting going to be at it; one waiting on him, or still not at it after fifteen seconds, is stopped, then told at once, as two steps", async () => {
+    const at = (status: string, overrides: Record<string, unknown> = {}) =>
+      thread(tezos.id, { activeRunId: status === "waiting" ? null : "run-1", activityRunStatus: status, status, ...overrides })
+    const restarting = (first: T3Live.Thread, then?: T3Live.Thread) =>
+      run(
+        Effect.gen(function* () {
+          const { send, answering, becomes, bounded, dispatched } = yield* hands({ thread: first, runs: [{ id: "run-1", status: first.activityRunStatus ?? "", ordinal: 1 }] })
+          answering((payload, bounded) => {
+            if (payload.type !== "run.interrupt") return takes()(payload, bounded)
+            // Stopped, it shows so in the live view.
+            bounded.runs[0]!.status = "interrupted"
+            becomes(thread(tezos.id))
+            return Effect.succeed({ sequence: 7 })
+          })
+          const going = yield* Effect.fork(send("u1", "Drop that and fix the loader instead.", "restart"))
+          yield* TestClock.adjust("2 seconds")
+          if (then !== undefined) {
+            becomes(then)
+            bounded.runs[0]!.status = then.activityRunStatus ?? ""
+          }
+          yield* TestClock.adjust("14 seconds")
+          const outcome = yield* Fiber.join(going)
+          return {
+            said: outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "restart" }, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            dispatched: dispatched.map(({ type, commandId, holdQueue, deliveryIntent }) => [type, commandId, holdQueue ?? deliveryIntent]),
+          }
+        }),
+      )
+    // At it within the fifteen seconds, it's restarted, as one step.
+    const atIt = await restarting(at("starting"), at("running"))
+    expect(atIt.dispatched).toEqual([["message.dispatch", "yapd:u1:0", "restart"]])
+    expect(atIt.said).toBe("On it, sir.")
+    for (const first of [at("waiting", { pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } }), at("starting")]) {
+      const stopped = await restarting(first)
+      expect(stopped.dispatched).toEqual([
+        ["run.interrupt", "yapd:u1:0", true],
+        ["message.dispatch", "yapd:u1:1", "auto"],
+      ])
+      expect(stopped.said).toBe("Stopped it, sir, and told it.")
+    }
   })
 
   test("scratch that withdraws a message still in the queue, and only offers to have one already read ignored", async () => {

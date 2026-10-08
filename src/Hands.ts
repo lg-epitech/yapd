@@ -1,4 +1,4 @@
-import { Clock, Context, Effect, Either, Option, Schema } from "effect"
+import { Clock, Context, type Duration, Effect, Either, Option, Schema } from "effect"
 import * as Brain from "./Brain.ts"
 import * as Ledger from "./Ledger.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
@@ -23,25 +23,37 @@ export type Act =
   /** Takes back what was just done: a stop, by letting the thread carry on, or a message, by withdrawing it. */
   | { readonly _tag: "Undo"; readonly to: Option.Option<Threads.Ref>; readonly carry: boolean }
 
+/**
+ * For a restart T3 Code couldn't take, done as a stop, as a step of its own,
+ * then the message at once, as the next: whether the stop went, so this is
+ * what came of the message, or didn't, so the message never went.
+ */
+interface Stopping {
+  readonly stopped?: boolean
+}
+
 /** What came of it. */
 export type Outcome =
-  | {
+  | ({
       readonly _tag: "Done"
       readonly how: Ledger.How
       readonly to: Threads.Ref
       /** Wanted at once, it went into T3 Code's queue instead, since the turn under way is waiting: on him, or finishing off. */
       readonly waiting?: Waiting
-    }
+    } & Stopping)
   /** T3 Code, or yapd looking first, said no: it's never sent again under these ids. */
-  | { readonly _tag: "Refused"; readonly reason: string }
+  | ({ readonly _tag: "Refused"; readonly reason: string } & Stopping)
   /** It never left yapd. With `again`, it may go once more on his yes, under the same ids. */
-  | { readonly _tag: "NotSent"; readonly reason: string; readonly again: Option.Option<string> }
+  | ({ readonly _tag: "NotSent"; readonly reason: string; readonly again: Option.Option<string> } & Stopping)
   /** It left yapd, and wasn't found in the thread when looked for. With `again`, it may go once more on his yes, under the same ids. */
-  | { readonly _tag: "Unknown"; readonly reason: string; readonly again: Option.Option<string> }
+  | ({ readonly _tag: "Unknown"; readonly reason: string; readonly again: Option.Option<string> } & Stopping)
   /** The same words went to the same thread lately: asked about first, never dropped. */
   | { readonly _tag: "Twin"; readonly row: Ledger.Row }
   /** The message to withdraw was read already, so it can only be told to ignore it. */
   | { readonly _tag: "Read"; readonly row: Ledger.Row }
+
+/** What came of a step that was written down: gone, turned down, never sent or unknown. */
+type Went = Exclude<Outcome, { readonly _tag: "Twin" | "Read" }>
 
 /** What the turn under way waits on: something it asked him, or its last bits of work. */
 export type Waiting = "asked" | "finishing"
@@ -192,6 +204,18 @@ const busy = (thread: T3Live.Thread) => T3Live.busy(thread) || thread.activityRu
 const waits = (thread: T3Live.Thread): Waiting | undefined =>
   thread.activityRunStatus !== "waiting" ? undefined : thread.pendingRuntimeRequest === null ? "finishing" : "asked"
 
+/** Whether its turn is getting going: not at it yet, so T3 Code can't restart it. */
+const getting = (thread: T3Live.Thread) => thread.activityRunStatus === "preparing" || thread.activityRunStatus === "starting"
+
+/** How long a restart gives a turn getting going to be at it, by the live view, before stopping it instead. */
+const settling = "15 seconds"
+
+/** How long, once a restart has stopped a turn, it gives the live view to show it stopped before telling it. */
+const stopping = "5 seconds"
+
+/** How often the live view is looked at meanwhile. */
+const glancing = "250 millis"
+
 /** What a step does, in a few words, for the log. */
 const doing: Readonly<Record<Ledger.Kind, string>> = {
   message: "send a message",
@@ -207,7 +231,7 @@ const doing: Readonly<Record<Ledger.Kind, string>> = {
 const refOf = (row: Ledger.Row): Threads.Ref => ({ machine: row.machine, id: row.thread })
 
 /** What a step that's in the ledger already came to, since it's never sent a second time on its own. */
-const settled = (row: Ledger.Row): Outcome => {
+const settled = (row: Ledger.Row): Went => {
   const again = row.kind === "message" ? Option.some(row.commandId) : Option.none<string>()
   switch (row.state) {
     case "sent":
@@ -314,7 +338,7 @@ export const make = (options: {
    * it's sent again, after which it's never offered again, unless it never
    * left yapd, which isn't sending it.
    */
-  const dispatch = (row: Ledger.Row, actions: T3Actions.Actions, wasBusy: boolean, last = false): Effect.Effect<Outcome> =>
+  const dispatch = (row: Ledger.Row, actions: T3Actions.Actions, wasBusy: boolean, last = false): Effect.Effect<Went> =>
     Effect.gen(function* () {
       const what = doing[row.kind]
       const sent = command(row.body)
@@ -424,8 +448,12 @@ export const make = (options: {
     Effect.gen(function* () {
       const { to, text } = act
       const { commandId } = Ledger.ids(step.utterance, step.step, true)
-      // Worked out again, it's the step it was, whatever came of it.
+      // Worked out again, it's the step it was, whatever came of it: for a restart that was a stop first, what came of the two.
       const before = yield* ledger.get(commandId)
+      if (Option.isSome(before) && before.value.kind === "stop") {
+        const told = yield* ledger.get(Ledger.ids(step.utterance, step.step + 1, true).commandId)
+        return Option.match(told, { onNone: (): Outcome => ({ ...settled(before.value), stopped: false }), onSome: (told): Outcome => ({ ...settled(told), stopped: true }) })
+      }
       if (Option.isSome(before)) return settled(before.value)
       const reached = yield* reach(to)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing.message)
@@ -436,11 +464,54 @@ export const make = (options: {
         const made = Option.isSome(twin) ? yield* twinned(twin.value, reached.right) : Option.none<Outcome>()
         if (Option.isSome(made)) return made.value
       }
+      if (act.how === "restart") return yield* restart(step, act, reached.right, digest)
       // T3 Code takes a message into a turn only while it's at it, and turns one down for a turn that's waiting, so it goes in the queue behind it.
       const waiting = act.how === "now" ? waits(reached.right.thread) : undefined
       const how = waiting === undefined ? act.how : "after"
       const sent = yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, digest)
       return sent._tag === "Done" && waiting !== undefined ? { ...sent, waiting } : sent
+    })
+
+  /** The thread as the live view has it once it's no longer as `still` says, or as it was after `within`, looked at every so often meanwhile. */
+  const watch = (to: Threads.Ref, thread: T3Live.Thread, still: (thread: T3Live.Thread) => boolean, within: Duration.DurationInput) =>
+    Effect.gen(function* () {
+      let now = Option.getOrElse(yield* threads.find(to), () => thread)
+      while (still(now)) {
+        yield* Effect.sleep(glancing)
+        now = Option.getOrElse(yield* threads.find(to), () => now)
+      }
+      return now
+    }).pipe(Effect.timeoutTo({ duration: within, onTimeout: () => thread, onSuccess: (now) => now }))
+
+  /**
+   * Stops the turn under way to start over with the message. T3 Code
+   * restarts only a turn that's running, so one getting going is given a
+   * while to be; one waiting, or still not running by then, is stopped
+   * instead, holding its queue, as a step of its own, and then told at once,
+   * as the next, which is what his words asked for.
+   */
+  const restart = (
+    step: Step,
+    act: Extract<Act, { readonly _tag: "Message" }>,
+    reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread },
+    digest: string,
+  ) =>
+    Effect.gen(function* () {
+      const { to, text } = act
+      // Nothing's written down yet, so turning yapd off meanwhile stops it here, with nothing sent.
+      const thread = yield* Effect.interruptible(watch(to, reached.thread, getting, settling))
+      const now = { ...reached, thread }
+      /** The message, as a step of its own, at the time it goes at. */
+      const send = (at: Step, how: T3Actions.When) =>
+        once(at, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), now, digest)
+      // At it, it's restarted; with nothing under way, it starts at once.
+      if (thread.activityRunStatus === "running" || !busy(thread)) return yield* send(step, "restart")
+      yield* Effect.logInfo(`Its turn is ${thread.activityRunStatus ?? "busy"}, which T3 Code can't restart, so stopping it, then telling it`)
+      const stopped = yield* once(step, "stop", to, () => ({ _tag: "Stop" }), now)
+      if (stopped._tag !== "Done") return { ...stopped, stopped: false } satisfies Outcome
+      // Once it shows stopped, so the message starts a turn of its own rather than wait in the queue the stop held.
+      yield* watch(to, thread, busy, stopping)
+      return { ...(yield* send({ ...step, step: step.step + 1 }, "now")), stopped: true } satisfies Outcome
     })
 
   const stop = (step: Step, to: Threads.Ref) =>
@@ -663,7 +734,10 @@ export const naming = (line: string, called: Option.Option<string>) =>
  * What's said once it's done, naming the thread when it isn't the one he's on
  * about, and why a message he wanted in at once waits in the queue, when it does.
  */
-export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Option<string>, waiting?: Waiting) => {
+export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Option<string>, as: { readonly waiting?: Waiting; readonly stopped?: boolean } = {}) => {
+  const { waiting } = as
+  // A restart T3 Code couldn't take, done as a stop and then the message.
+  if (as.stopped === true) return naming(`Stopped it${addressed(lines)}, and told it.`, called)
   if (waiting !== undefined) {
     const it = Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} is` })
     return waiting === "asked"
@@ -697,6 +771,17 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
   const asking = "again" in outcome && Option.isSome(outcome.again) ? ` ${unaddressed(lines.again, lines)}` : ""
   switch (act._tag) {
     case "Message":
+      // A restart done as a stop first: the stop that didn't go, so the message never went, or what came of the message after it.
+      if (outcome.stopped === false) {
+        return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} stopped${sir}, so I didn't tell it.` : `I couldn't stop ${name ?? "it"} to tell it that${sir}: ${reason}`
+      }
+      if (outcome.stopped === true) {
+        return outcome._tag === "Refused"
+          ? `I stopped ${name ?? "it"}${sir}, but the message didn't go through: ${reason}`
+          : outcome._tag === "NotSent"
+            ? `I stopped ${name ?? "it"}${sir}, but the message didn't get there: ${reason}${asking}`
+            : `I stopped ${name ?? "it"}${sir}, but couldn't confirm the message got there.${asking}`
+      }
       // Not sent again at another time, it's left, which isn't something that went wrong.
       if (outcome._tag === "Refused" && outcome.reason.startsWith(mayHave)) return `I left ${name === undefined ? "it" : `your message to ${name}`}${sir}: ${reason}`
       return outcome._tag === "Refused"

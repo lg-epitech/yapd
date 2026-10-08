@@ -1026,11 +1026,15 @@ export const make = (options: {
         switch (outcome._tag) {
           case "Done": {
             // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, he's told why.
-            const line = at.quietly === true && outcome.waiting === undefined ? "" : Hands.done(act, outcome.how, said, called, outcome.waiting)
-            yield* noting(line === "" ? undefined : line, { how: outcome.how, ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }) })
+            const line = at.quietly === true && outcome.waiting === undefined ? "" : Hands.done(act, outcome.how, said, called, outcome)
+            yield* noting(line === "" ? undefined : line, {
+              how: outcome.how,
+              ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }),
+              ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }),
+            })
             const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
-            // Taking a stop back is two steps: letting go of the queue, then the message to carry on.
-            return yield* free(onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" ? 2 : 1), said))
+            // Taking a stop back is two steps, letting go of the queue, then the message to carry on, as is a restart done as a stop, then the message.
+            return yield* free(onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" || outcome.stopped !== undefined ? 2 : 1), said))
           }
           case "Twin": {
             // One that may not have got there is offered again under its own ids; one that did, to a thread that hasn't answered since, is asked about.
@@ -1059,7 +1063,7 @@ export const make = (options: {
           }
           default: {
             const line = Hands.failed(act, outcome, said, called)
-            yield* noting(line, { reason: outcome.reason })
+            yield* noting(line, { reason: outcome.reason, ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }) })
             // What didn't go, and why, without the question.
             const news = Hands.failed(act, "again" in outcome ? { ...outcome, again: Option.none<string>() } : outcome, said, called)
             if (Option.isSome(onceMore) && act._tag === "Message") {
