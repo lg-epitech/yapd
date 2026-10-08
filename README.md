@@ -65,9 +65,9 @@ Say anything while yapd is talking and it stops. The model that writes the summa
 - Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one, unless the agent only says it understood.
 - If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
 
-You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. yapd takes about as long to work out what you meant as it does to write a summary, around two seconds with Codex.
+You can also reply just after it finishes, so "yes, merge it" works when an update ends on a question. The replies people give most are taken at once: a plain "yes" or "go ahead" to an update that asked something goes straight to the agent, and "thanks", "got it", "skip it" or "quiet" just end the update. Anything more, yapd takes about as long to work out as it does to write a summary, around two seconds with Codex.
 
-Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it just says it's on it, without repeating what you asked.
+Pausing to think doesn't cut you off. yapd keeps listening while it works out what you meant, and if you carry on, it takes in all of it. If you trail off mid-sentence, like "and tell it to…", it waits a few seconds more. When it passes something on, it just says it's on it, without repeating what you asked. With `YAPD_STYLE` set, the few lines it says most, like that one, are written once in your style and kept, and they're rendered ahead so they play the moment they're needed.
 
 You can send several follow-ups to the same update, including one you hear again. If the session is still on an earlier voice reply, yapd says it queued the next one. It sends queued replies in order as each turn finishes, and tells you when each goes through or fails. Typing unrelated work into the session cancels its queued replies and makes the old update stale. The queue is kept by the running daemon: turning yapd off or restarting it drops replies that haven't started delivery.
 
