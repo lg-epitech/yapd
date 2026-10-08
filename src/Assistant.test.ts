@@ -3469,6 +3469,28 @@ describe("Assistant", () => {
     }
   })
 
+  test("a question closed by something else while he's dictating is told as what it asked when what he dictated asks to hear it again", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, prepare, heard, spoken, show, open } = yield* assistant((situation) =>
+          Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+        )
+        yield* show.watch
+        // With a card up, "hide that" needs no model.
+        yield* dictate("Show me what's running.")
+        yield* dictate("Which migration was that?")
+        // He presses the shortcut while it's open, and what's typed meanwhile closes it.
+        yield* prepare(1, 1)
+        yield* heard({ heard: "Hide that.", via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: 1 })
+        const told = spoken().length
+        yield* heard({ heard: "Say that again.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 }, 1)
+        return { said: spoken().slice(told), open: yield* open }
+      }).pipe(Effect.scoped),
+    )
+    expect(result).toEqual({ said: [`I asked whether you meant ${choices}, sir.`], open: Option.none() })
+  })
+
   test("only an https address that came from T3 Code is opened", async () => {
     const linked = (id: string, title: string, url: string) =>
       thread(id, title, "yapd", {

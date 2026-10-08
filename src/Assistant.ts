@@ -66,6 +66,8 @@ export type Subject =
       readonly about: Option.Option<Threads.Ref>
       /** What he missed that it told him, by journal entry, which counts as heard once he's heard it to the end, said again or not. */
       readonly missed?: ReadonlyArray<number>
+      /** The question it asks, if it does: once that's closed, however quietly, it's told rather than asked again (I4). */
+      readonly question?: Open
       /** The question it was, in the words it was asked in, once it's closed: shown as it was, but told rather than asked again (I4). */
       readonly asked?: string
     }
@@ -342,12 +344,11 @@ export const make = (options: {
     const cards = new Set<{ readonly request: string; down: boolean }>()
     /**
      * What yapd said last of its own accord, which "it" may mean, when it
-     * started saying it, how many times yapd had been turned on or off then,
-     * and the question it asked, if it did: once yapd is turned off, nothing
-     * said before is "it", nor said or shown again, and once the question is
-     * closed, it's told rather than asked again.
+     * started saying it, and how many times yapd had been turned on or off
+     * then: once it's turned off, nothing said before is "it", nor said or
+     * shown again.
      */
-    let answered: { readonly subject: Subject; readonly at: number; readonly turns: number; readonly open?: Open } | undefined
+    let answered: { readonly subject: Subject; readonly at: number; readonly turns: number } | undefined
     /**
      * For each press whose dictation hasn't ended, by the press: what "it"
      * meant then, before the dictation stopped what was playing, and what lets
@@ -445,12 +446,22 @@ export const make = (options: {
       if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
         return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject
       }
-      if (said === undefined) return { _tag: "Nothing" } satisfies Subject
-      // A question closed since, even with nothing said, like by "hide that" or a thanks, is told as what it asked, never asked again (I4).
-      const { open, subject: meant } = said
-      if (open === undefined || meant._tag !== "Answer" || Option.exists(current(now), ({ id }) => id === open.id)) return meant
-      return { ...meant, said: Brain.recalled(open, yield* persona.lines), asked: meant.said } satisfies Subject
+      return said?.subject ?? ({ _tag: "Nothing" } satisfies Subject)
     })
+
+    /**
+     * What "it" means as what he said is worked out, however long after it
+     * was found: a question it asks that's closed since, however quietly,
+     * like by "hide that", a thanks, or what's typed while he dictates, is
+     * told as what it asked, never asked again (I4).
+     */
+    const meaning = (about: Subject, now: number) =>
+      Effect.gen(function* () {
+        const question = about._tag === "Answer" ? about.question : undefined
+        if (about._tag !== "Answer" || question === undefined || Option.exists(current(now), ({ id }) => id === question.id)) return about
+        const { question: _, ...told } = about
+        return { ...told, said: Brain.recalled(question, yield* persona.lines), asked: about.said } satisfies Subject
+      })
 
     /** What yapd asked in the last ten minutes, so no question is asked in the same words again. */
     const askedLately = Effect.gen(function* () {
@@ -468,9 +479,10 @@ export const make = (options: {
       )
 
     /** What the brain goes by, from memory: the desk, the journal and what's known of usage. */
-    const situate = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
+    const situate = (utterance: Utterance, meant: Subject, lines: ReadonlyArray<Line>) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
+        const about = yield* meaning(meant, now)
         // One he hasn't heard yet can't be what he's answering, nor one asked after he said this.
         const open = Option.filter(current(now), () => before(utterance)?.said === true)
         const focus =
@@ -521,9 +533,10 @@ export const make = (options: {
         return { version: against, situation, quick: Brain.fast(situation, yield* persona.lines) } satisfies Glance
       })
 
-    const worked = (glanced: Glance, utterance: Utterance, about: Subject, decision: Brain.Decision, source: Thought["source"]): Thought => ({
+    /** What was worked out, about what "it" meant as it was. */
+    const worked = (glanced: Glance, utterance: Utterance, decision: Brain.Decision, source: Thought["source"]): Thought => ({
       utterance,
-      subject: about,
+      subject: glanced.situation.subject,
       decision,
       situation: glanced.situation,
       version: glanced.version,
@@ -531,21 +544,21 @@ export const make = (options: {
     })
 
     /** What the model makes of it, or, when it can't be asked, a line saying so. */
-    const decide = (glanced: Glance, utterance: Utterance, about: Subject) =>
+    const decide = (glanced: Glance, utterance: Utterance) =>
       brain.decide(glanced.situation).pipe(
-        Effect.map((decision) => worked(glanced, utterance, about, decision, "model")),
+        Effect.map((decision) => worked(glanced, utterance, decision, "model")),
         Effect.catchAll((error) =>
           Effect.gen(function* () {
             yield* Effect.logWarning("Could not work out what you meant", error)
             const spoken = `I couldn't work that out just now${addressed(yield* persona.lines)}. What you said is in my log.`
-            return worked(glanced, utterance, about, Brain.decision({ act: "answer", spoken }), "failed")
+            return worked(glanced, utterance, Brain.decision({ act: "answer", spoken }), "failed")
           }),
         ),
       )
 
     const think = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
       Effect.flatMap(glance(utterance, about, lines), (glanced) =>
-        glanced.quick === undefined ? decide(glanced, utterance, about) : Effect.succeed(worked(glanced, utterance, about, glanced.quick, "fast")),
+        glanced.quick === undefined ? decide(glanced, utterance) : Effect.succeed(worked(glanced, utterance, glanced.quick, "fast")),
       )
 
     const called = (situation: Brain.Situation, handle: string) => situation.desk.threads.find((listed) => listed.handle === handle)
@@ -619,9 +632,10 @@ export const make = (options: {
         const at = yield* Clock.currentTimeMillis
         version++
         // A dictation begun before it was asked can't be answering it, so nothing holds it yet.
-        asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: new Set(), said: false }
+        const opened = { ...open, id: mint(at, "o"), version, at }
+        asking = { open: opened, asks: 1, repeat: undefined, held: new Set(), said: false }
         yield* Effect.logInfo(`Asked: ${open.asked}`)
-        return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
+        return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: askedAbout(open), question: opened }, kind: "question" } satisfies Outcome
       })
 
     /** Something being said may answer the open question, so it isn't said meanwhile, nor asked again until that's known. */
@@ -662,9 +676,10 @@ export const make = (options: {
           yield* close(open, "dropped: asked enough")
           return unfinished(reply(said.leaving, { _tag: "Nothing" }), open.decision.rest, said)
         }
-        asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: new Set() }
+        const reworded = { ...open, asked }
+        asking = { ...asking, open: reworded, asks: asking.asks + 1, repeat: undefined, held: new Set() }
         yield* Effect.logInfo(`Asked again: ${asked}`)
-        return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
+        return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open), question: reworded }, kind: "question" } satisfies Outcome
       })
 
     /**
@@ -1576,7 +1591,7 @@ export const make = (options: {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
         const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
-        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open) }, [{ speaker: "yapd", text: open.asked }])
+        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open }, [{ speaker: "yapd", text: open.asked }])
         if (thought.source === "fast" && thought.decision.act === "resume") return Option.none()
         // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
         if (Brain.murmured(thought.decision, utterance)) {
@@ -1648,7 +1663,7 @@ export const make = (options: {
                 const before = answered
                 // Asked again in other words, he may have heard it already.
                 const heard = asking?.said === true
-                const meant = { subject, at: now, turns: utterance.turns, ...(open === undefined ? {} : { open }) }
+                const meant = { subject, at: now, turns: utterance.turns }
                 answered = meant
                 if (open !== undefined && asking?.open.id === open.id) asking.said = true
                 unsaid = Effect.sync(() => {
@@ -1801,7 +1816,7 @@ export const make = (options: {
         const about = pressed ?? (yield* subject)
         const glanced = yield* glance(utterance, about, [])
         let thought: Thought
-        if (glanced.quick !== undefined) thought = worked(glanced, utterance, about, glanced.quick, "fast")
+        if (glanced.quick !== undefined) thought = worked(glanced, utterance, glanced.quick, "fast")
         else {
           // In case it's new work, or names the project asked about, the prompt is written while the model works out which.
           const asked = Option.filter(glanced.situation.open, ({ kind }) => kind === "project")
@@ -1824,7 +1839,7 @@ export const make = (options: {
             ),
             Effect.uninterruptible,
           )
-          thought = yield* decide(glanced, utterance, about)
+          thought = yield* decide(glanced, utterance)
           const { act, pending } = thought.decision
           // Kept only for what it was written for: new work, or the answer to which project.
           const answering = Option.isSome(asked) && pending === "answers"
