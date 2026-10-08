@@ -16,6 +16,7 @@ A running list of what this branch changed and what yapd can do now, for review.
 - What you dictated is transcribed while the "sent" sound plays, not after it, and the speaker gets ready while the answer is worked out.
 - Three Codex threads are kept ready instead of two, so working out a dictation, writing its prompt and summing up an update at the same moment don't wait for a new one.
 - The prompt for possible new work is only begun when the model is asked, so "who needs me", "say again" or "the first one" don't take up a ready Codex thread.
+- What you ask by the shortcut is said before any update: one your dictation cut off, or one that came in meanwhile, waits for the answer rather than being read in full first.
 
 ## Smarter
 
@@ -31,6 +32,13 @@ A running list of what this branch changed and what yapd can do now, for review.
 - Threads with the same spoken name are told apart by what they're doing or when they last did something. A machine the work is about doesn't count as where it runs, and answers never end in an offer that nothing would listen to.
 - Paths, links and hashes in an answer are said as "a file", "a link" and "a commit", and "the Codex agent" becomes the work, so a sentence still holds.
 - "Who needs me" with no threads in sight says why it can't see them, rather than that nothing needs you.
+- "Say that again" after an update says the update again, even with a question open. Right after the question, it asks the question in other words, and "what?" to its second asking gets a third wording rather than dropping it.
+- "Say that again" over something your dictation cut off says it once, from the start, not twice.
+- A question still waiting behind an update isn't closed by what you say over that update. If you move on before you've heard it, yapd says what it left: "I left the loader fix, since you'd moved on, sir."
+- After an update, "it" can be the thread doing that work, so "what's it doing now?" reads that thread.
+- Dictating work it started in the last half hour is answered as already under way, rather than started twice.
+- Usage is said by how long each window lasts and whose it is, like "its five-hour window" and "Fable's weekly window", never "session".
+- Branch names, wallet addresses and "the Claude Code session" are put in words too.
 
 ## More capable
 
@@ -48,3 +56,5 @@ A running list of what this branch changed and what yapd can do now, for review.
 - `scripts/brain-eval.ts` replays phrases against the live model, from a copy of your own threads written under `~/.yapd/eval/`, and times `orchestration.searchThreads`.
 - Turning yapd off while new work is being started still starts it and notes it, without a word, rather than cut T3 Code off halfway through making the thread.
 - The eval counts the thread the model picked even when it asks, and replays your logged answers to its questions, like "Migrate Tezos." while it asks which one.
+- A launch that never answers is ended by its own time limits again, with the reason said, rather than holding up every request after it.
+- The eval searches your threads for each phrase as the daemon does, checks that the 21:39 "start another thread" dictation comes out as new work, and runs without yapd's database.
