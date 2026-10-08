@@ -178,6 +178,9 @@ describe("Server", () => {
       expect(shown.status).toBe(200)
       expect(yield* Effect.promise(() => shown.json())).toEqual(card)
       expect((yield* call("/cards/c2")).status).toBe(404)
+      // An id that can't be decoded is no card's either.
+      expect((yield* call("/cards/%E0%A4%A")).status).toBe(404)
+      expect((yield* call("/updates/%E0%A4%A/replay", { method: "POST" })).status).toBe(404)
       expect((yield* call("/cards/c1", { method: "DELETE" })).status).toBe(404)
       const hidden = yield* call("/cards/current", { method: "DELETE" })
       expect(hidden.status).toBe(204)

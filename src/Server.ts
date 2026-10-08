@@ -143,6 +143,9 @@ export const paging = (query: URLSearchParams): Page | string => {
   return { most: limit ?? pages.usual, ...(before === undefined ? {} : { before }), kinds: asked as ReadonlyArray<Kind> }
 }
 
+/** A part of a path as it was meant, or nothing when it can't be decoded, which no card's or update's id is. */
+const decoded = Option.liftThrowable(decodeURIComponent)
+
 /** Names for this machine, so a web page can't reach the API through a DNS name of its own that points here. */
 const local = new Set(["127.0.0.1", "localhost", "[::1]"])
 
@@ -214,7 +217,8 @@ export const serve = (port: number, api: Api) =>
         }
         const card = request.method === "GET" ? /^\/cards\/([^/]+)$/.exec(url.pathname) : null
         if (card !== null) {
-          return Option.match(yield* api.card(decodeURIComponent(card[1]!)), {
+          const found = yield* Option.match(decoded(card[1]!), { onNone: () => Effect.succeed(Option.none<Card>()), onSome: api.card })
+          return Option.match(found, {
             onNone: () => new Response("No such card.", { status: 404 }),
             onSome: (card) => Response.json(card),
           })
@@ -227,9 +231,11 @@ export const serve = (port: number, api: Api) =>
         }
         const replay = request.method === "POST" ? /^\/updates\/([^/]+)\/replay$/.exec(url.pathname) : null
         if (replay !== null) {
+          const id = decoded(replay[1]!)
+          if (Option.isNone(id)) return new Response("No such update.", { status: 404 })
           // Rendering waits its turn, and for the voice to load.
           server.timeout(request, 0)
-          return yield* api.replay(decodeURIComponent(replay[1]!)).pipe(
+          return yield* api.replay(id.value).pipe(
             Effect.map((result) =>
               result === "queued"
                 ? new Response(null, { status: 202 })
