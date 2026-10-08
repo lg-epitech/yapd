@@ -229,7 +229,8 @@ export const make = (options: {
      * neither said nor asked again, and whether he's heard it yet: until he
      * has, nothing he says can be about it.
      */
-    let asking: { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: boolean; said: boolean } | undefined
+    /** The open question, with what's being said meanwhile that may answer it, by press or request, which holds it until each is dealt with. */
+    let asking: { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: Set<string>; said: boolean } | undefined
     /** Changes whenever the open question does, so what was worked out against another can tell. */
     let version = 0
     /** What yapd said last of its own accord, which "it" may mean, and when it started saying it. */
@@ -415,19 +416,21 @@ export const make = (options: {
         if (asking !== undefined) yield* close(asking.open, "replaced")
         const at = yield* Clock.currentTimeMillis
         version++
-        asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: false, said: false }
+        // A dictation begun before it was asked can't be answering it, so nothing holds it yet.
+        asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: new Set(), said: false }
         yield* Effect.logInfo(`Asked: ${open.asked}`)
         return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: Option.none() }, kind: "question" } satisfies Outcome
       })
 
     /** Something being said may answer the open question, so it isn't said meanwhile, nor asked again until that's known. */
-    const hold = Effect.suspend(() => {
-      if (asking === undefined) return Effect.void
-      const repeat = asking.repeat
-      asking.held = true
-      asking.repeat = undefined
-      return repeat === undefined ? Effect.void : Fiber.interruptFork(repeat)
-    })
+    const hold = (key: string) =>
+      Effect.suspend(() => {
+        if (asking === undefined) return Effect.void
+        const repeat = asking.repeat
+        asking.held.add(key)
+        asking.repeat = undefined
+        return repeat === undefined ? Effect.void : Fiber.interruptFork(repeat)
+      })
 
     /** Lets a question go that went unanswered as often as it's asked, and says so. */
     const letGo = (open: Open) =>
@@ -454,7 +457,7 @@ export const make = (options: {
           yield* close(open, "dropped: asked enough")
           return reply(said.leaving, { _tag: "Nothing" })
         }
-        asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: false }
+        asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: new Set() }
         yield* Effect.logInfo(`Asked again: ${asked}`)
         return { say: asked, subject: { _tag: "Answer", said: asked, about: Option.none() }, kind: "question" } satisfies Outcome
       })
@@ -478,7 +481,7 @@ export const make = (options: {
     /** Asks it again, or lets it go, a minute from now, unless something said meanwhile closes it first. */
     const later = (id: string) =>
       Effect.gen(function* () {
-        if (asking?.open.id !== id || asking.held || asking.repeat !== undefined) return
+        if (asking?.open.id !== id || asking.held.size > 0 || asking.repeat !== undefined) return
         if (lapses(asking.open)) return yield* close(asking.open, "dropped: unanswered")
         const repeat = yield* Effect.sleep(again).pipe(Effect.zipRight(turn.withPermits(1)(due(id))), Effect.interruptible, Effect.forkIn(scope))
         if (asking?.open.id === id) asking.repeat = repeat
@@ -488,17 +491,21 @@ export const make = (options: {
     const unanswered = (id: string): Effect.Effect<void> =>
       Effect.gen(function* () {
         // Not while something's being said that may answer it, nor twice over.
-        if (asking?.open.id !== id || asking.held || asking.repeat !== undefined) return
+        if (asking?.open.id !== id || asking.held.size > 0 || asking.repeat !== undefined) return
         if (asking.asks >= asks && !lapses(asking.open)) return yield* letGo(asking.open)
         yield* later(id)
       })
 
-    /** What was being said came to nothing, so the open question is waited on again, as if it went unanswered. */
-    const release = Effect.suspend(() => {
-      if (asking === undefined || !asking.held) return Effect.void
-      asking.held = false
-      return later(asking.open.id)
-    })
+    /**
+     * What was being said has been dealt with, without answering the open
+     * question, so once nothing else being said holds it, it's waited on again,
+     * as if it went unanswered.
+     */
+    const release = (key: string) =>
+      Effect.suspend(() => {
+        if (asking === undefined || !asking.held.delete(key) || asking.held.size > 0) return Effect.void
+        return later(asking.open.id)
+      })
 
     /** Says something now, ahead of the rest of the answer, like that it's looking. */
     const meanwhile = (spoken: string, utterance: Utterance) =>
@@ -923,7 +930,7 @@ export const make = (options: {
               : {
                   open: open.id,
                   // Only while it's the question open and nothing being said may answer it, so it's never said after what settles it.
-                  stale: Effect.sync(() => asking?.open.id !== open.id || asking.held),
+                  stale: Effect.sync(() => asking?.open.id !== open.id || asking.held.size > 0),
                   question: {
                     answer: listen(open),
                     unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),
@@ -952,7 +959,7 @@ export const make = (options: {
       })
 
     /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
-    const respond = (utterance: Utterance, pressed: Subject | undefined) =>
+    const respond = (utterance: Utterance, pressed: Subject | undefined, holding: string) =>
       Effect.gen(function* () {
         // Checked again once it's its turn: yapd may have been turned off and on while it waited behind another.
         if (yield* outdated(utterance.turns)) {
@@ -1001,7 +1008,7 @@ export const make = (options: {
         yield* note(thought, outcome, began)
         yield* deliver(outcome, utterance)
         return Option.some(utterance.id)
-      }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
+      }).pipe(Effect.ensuring(release(holding)), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
 
     /** The dictation a press began has ended, however long it took: what was kept for it, let go of. */
     const ended = (press: number | undefined) =>
@@ -1020,7 +1027,9 @@ export const make = (options: {
         // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
         if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
         const arrived = kept?.arrived ?? (yield* options.awaiting)
-        return yield* Effect.zipRight(hold, respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived))
+        // Held by its press since it began, or from now for a typed request.
+        const holding = press === undefined ? `request:${utterance.id}` : `press:${press}`
+        return yield* Effect.zipRight(hold(holding), respond(utterance, kept?.subject, holding)).pipe(Effect.ensuring(arrived))
       })
 
     return {
@@ -1033,7 +1042,7 @@ export const make = (options: {
           if (yield* outdated(turns)) return
           // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
           presses.set(press, { subject: yield* subject, arrived: yield* options.awaiting })
-          yield* hold
+          yield* hold(`press:${press}`)
           const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
           yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
           yield* Effect.forkIn(threads.refreshUsage, scope)
@@ -1041,7 +1050,7 @@ export const make = (options: {
       // Begun before yapd was turned off, it held nothing that's open now.
       nothing: (press, turns) =>
         Effect.zipRight(
-          Effect.unlessEffect(release, outdated(turns)),
+          Effect.unlessEffect(release(`press:${press}`), outdated(turns)),
           Effect.flatMap(ended(press), (kept) => kept?.arrived ?? Effect.void),
         ),
       // Not one he hasn't heard yet, which what he said can't have been about.

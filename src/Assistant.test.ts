@@ -415,6 +415,35 @@ describe("Assistant", () => {
     expect(result.stale).toBe(true)
   })
 
+  test("a question stays held while any dictation that may answer it is still being heard, however the others came out", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, prepare, heard, nothing, unanswered, wait, questions } = yield* assistant((situation) =>
+          Option.isNone(situation.open)
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), sure: "low", others: handle(situation, mina), spoken: "It's comparing formats." })
+            : Brain.decision({ act: "resume", pending: "" }),
+        )
+        yield* dictate("What's the status on my Tesla's migration request comparison?")
+        const question = questions()[0]!
+        yield* unanswered()
+        // He presses twice to answer it; the first comes out as a cough taken for words.
+        yield* prepare(1, 1)
+        yield* prepare(2, 1)
+        yield* heard({ heard: "Thank you.", via: "shortcut", at: now, voiced: 0.2, turns: 1 }, 1)
+        const heldByTheSecond = yield* question.stale
+        yield* wait(90)
+        const askedMeanwhile = questions().length
+        // The second comes to nothing too: only now is it waited on again, and asked once more a minute later.
+        yield* nothing(2, 1)
+        yield* wait(61)
+        return { heldByTheSecond, askedMeanwhile, askedAfter: questions().length }
+      }),
+    )
+    expect(result.heldByTheSecond).toBe(true)
+    expect(result.askedMeanwhile).toBe(1)
+    expect(result.askedAfter).toBe(2)
+  })
+
   test("starting new work that mentions an existing thread starts new work", async () => {
     const dictated =
       "Can you please go and look at what I did for the migration process for Mina and start another thread in integration on the main worktree to start working on the migration for Tezos, so I have a ticket open for that as well in my linear."
