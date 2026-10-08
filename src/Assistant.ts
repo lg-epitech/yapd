@@ -463,6 +463,17 @@ export const make = (options: {
         return { ...told, said: Brain.recalled(question, yield* persona.lines), asked: about.said } satisfies Subject
       })
 
+    /**
+     * What something was worked out against, with "it" as it means once it's
+     * acted on: a question closed since, like one let go meanwhile as it went
+     * unanswered too long, is told as what it asked, never asked again (I4).
+     */
+    const afresh = (situation: Brain.Situation) =>
+      Effect.map(
+        Effect.flatMap(Clock.currentTimeMillis, (now) => meaning(situation.subject, now)),
+        (subject): Brain.Situation => ({ ...situation, subject }),
+      )
+
     /** What yapd asked in the last ten minutes, so no question is asked in the same words again. */
     const askedLately = Effect.gen(function* () {
       const kept = yield* journal.since((yield* Clock.currentTimeMillis) - fresh, { kinds: ["answer"] })
@@ -1429,7 +1440,8 @@ export const make = (options: {
           return find(thought, said, at.step)
         case "again":
           return Effect.gen(function* () {
-            const { subject } = thought
+            const situation = yield* afresh(thought.situation)
+            const { subject } = situation
             // A dictation cut it off, so it's about to be said again from the start, and once is enough.
             if (subject._tag !== "Nothing" && (yield* options.queued(subject.said))) {
               yield* Effect.logInfo("Not saying it again, since it's about to be said again from the start")
@@ -1441,11 +1453,11 @@ export const make = (options: {
             // The model's words only when there's something to say again that isn't a closed question: with nothing, they can only be from before yapd
             // was turned off and on, and a question, closed or not, is never said again in the words it was asked in (I4).
             const theirs = decision.spoken.trim()
-            const taken = subject._tag !== "Nothing" && !(subject._tag === "Answer" && subject.asked !== undefined) && !thought.situation.asked.includes(theirs)
+            const taken = subject._tag !== "Nothing" && !(subject._tag === "Answer" && subject.asked !== undefined) && !situation.asked.includes(theirs)
             // Whether what was asked to be seen is on his screen is told only as it goes up.
             const say = Show.offScreen((taken ? theirs : "") || last, said)
             // Shown too while an app watches, for what's still not caught the second time.
-            const card = subject._tag === "Nothing" ? Option.none() : yield* options.show.caption(say, thought.situation)
+            const card = subject._tag === "Nothing" ? Option.none() : yield* options.show.caption(say, situation)
             return {
               say,
               subject,
@@ -1456,9 +1468,10 @@ export const make = (options: {
           })
         case "start":
           return start(thought, said, at.step)
-        case "show":
+        case "show": {
           // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
-          return Effect.flatMap(options.show.present(decision.how, target, thought.situation, said), ({ say, card, about, hides, unseen }) => {
+          const shown = Effect.flatMap(afresh(thought.situation), (situation) => options.show.present(decision.how, target, situation, said))
+          return Effect.flatMap(shown, ({ say, card, about, hides, unseen }) => {
             if (hides === true) for (const kept of cards) if (at.step === 0 || kept.request === thought.utterance.id) kept.down = true
             return onward(
               thought,
@@ -1475,6 +1488,7 @@ export const make = (options: {
               said,
             )
           })
+        }
         case "dismiss":
           // Nothing more to say to this, and the rest, like "thanks, and tell it to open a PR", still to do.
           return onward(thought, quiet(thought.subject), Option.none(), at.step + 1, said)

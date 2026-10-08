@@ -3528,6 +3528,47 @@ describe("Assistant", () => {
     expect(await replaced).toEqual({ spoken: [asked, again], open: Option.some(again) })
   })
 
+  test("a question let go while the model works out his asking to hear or see it again is told as what it asked, never asked again", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const late = (decided: Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          // The model takes three seconds.
+          const { heard, wait, flush, spoken, show, open } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("What")
+                ? decided
+                : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+            undefined,
+            { thinking: 3 },
+          )
+          const ask = (words: string) =>
+            Effect.gen(function* () {
+              const asking = yield* Effect.fork(heard({ heard: words, via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 }))
+              yield* flush
+              yield* wait(3)
+              yield* Fiber.join(asking)
+            })
+          yield* show.watch
+          yield* ask("Which migration was that?")
+          // Asked just before it's been open ten minutes, so it's let go of by the time that's worked out.
+          yield* wait(10 * 60 - 2)
+          yield* ask("What was it you asked me?")
+          // The line the card says was said.
+          const up = Option.map(yield* show.seen, ({ markdown }) => markdown.split("\n\n")[1])
+          return { said: spoken().slice(1), open: yield* open, up }
+        }).pipe(Effect.scoped),
+      )
+    const told = `I asked whether you meant ${choices}, sir.`
+    expect(await late(Brain.decision({ act: "again", how: "same", pending: "answers" }))).toEqual({ said: [told], open: Option.none(), up: Option.some(told) })
+    // Shown as it was asked, but told as what it asked.
+    expect(await late(Brain.decision({ act: "show", how: "said", pending: "answers" }))).toEqual({
+      said: [`It's on your screen. ${told}`],
+      open: Option.none(),
+      up: Option.some(`${choices}, sir?`),
+    })
+  })
+
   test("only an https address that came from T3 Code is opened", async () => {
     const linked = (id: string, title: string, url: string) =>
       thread(id, title, "yapd", {
