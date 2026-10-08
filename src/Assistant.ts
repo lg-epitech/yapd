@@ -71,7 +71,8 @@ export type Subject =
 export interface Open {
   readonly id: string
   readonly version: number
-  readonly kind: "which" | "confirm" | "offer" | "project" | "resend"
+  /** Its own, or what a thread waits on him for: an approval, or a question with its options. */
+  readonly kind: "which" | "confirm" | "offer" | "project" | "resend" | "approval" | "question"
   /** The request it belongs to. */
   readonly utterance: string
   /** What the user said in that request. */
@@ -90,6 +91,10 @@ export interface Open {
   readonly resend: Option.Option<string>
   /** What the question follows, like why a message didn't go, or that it went lately, which is said on its own if he never hears the question. */
   readonly news?: string
+  /** For what a thread waits on him for: the one request it is, which an answer settles, and nothing else. */
+  readonly asks?: Asks
+  /** For what a thread waits on him for: how it's asked again, in other words, each once. */
+  readonly rewordings?: ReadonlyArray<string>
 }
 
 /** What the user meant, worked out, not yet acted on. */

@@ -124,6 +124,13 @@ export type Request =
   /** A secret it asks for, like a key, which is only ever given in T3 Code. */
   | { readonly _tag: "Secret"; readonly id: string; readonly label: string }
 
+/**
+ * Whether what a thread says it waits on is a secret, which T3 Code stands in
+ * for a question in its summary of the thread, under the id of the card that
+ * asks for it. It's only ever given in T3 Code.
+ */
+export const secret = (id: string) => id.startsWith("turn-item:secret-request:")
+
 /** What answering with an option sends: its value when it has one, which isn't always its label. */
 export const choice = (option: { readonly label: string; readonly value?: string | undefined }) => option.value ?? option.label
 
