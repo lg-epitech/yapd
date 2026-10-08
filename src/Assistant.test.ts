@@ -1131,6 +1131,26 @@ describe("Assistant", () => {
     }
   })
 
+  test("a plain no to a thread's question that takes any answer is sent as the answer, while 'stop' still lets it go", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "bump", question: "Should I also bump the version?" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Stop.")
+        const stopped = { dispatched: made.dispatched.length, open: Option.isSome(yield* made.open) }
+        yield* asked(made, cloud)
+        yield* made.answer("No.")
+        return { stopped, spoken: made.spoken(), answers: made.dispatched.map(({ answers }) => answers) }
+      }),
+    )
+    const asking = "Cloud deployment discovery asks which network to start with, sir. What shall I tell it?"
+    expect(result.stopped).toEqual({ dispatched: 0, open: false })
+    expect(result.spoken).toEqual([asking, "I'll leave that one, sir.", asking, "On it, sir."])
+    expect(result.answers).toEqual([{ bump: "No" }])
+  })
+
   test("a secret request is never answered by voice", async () => {
     const secret = "turn-item:secret-request:cloud:stripe"
     const cloud = waitingOn({ id: secret, kind: "user_input" })

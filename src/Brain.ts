@@ -576,6 +576,9 @@ const declines: ReadonlySet<string> = new Set([
   "don't", "dont", "do not", "don't do it", "no don't", "no don't do it", "don't allow it", "don't approve it",
 ])
 
+/** A plain no, which answers a thread's question that takes any answer, like "Should I also bump the version?". */
+const noes: ReadonlySet<string> = new Set(["no", "nope", "nah", "no thanks", "no thank you"])
+
 /** Allowing it for the rest of the thread's work, which only these words ask for. */
 const sessionly = /\b(for (the|this) session|from now on)\b/
 
@@ -621,7 +624,8 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
  * a plain yes or a no to an approval, of which either yes only allows one
  * he's heard all of, and a plain yes only one that isn't risky, as the
  * assistant sees to, asking once more otherwise; an option of a question,
- * by position or a name only it has. Anything else is the model's to judge.
+ * by position or a name only it has, or a plain no to one that takes any
+ * answer. Anything else is the model's to judge.
  */
 const settling = (asks: Assistant.Asks | undefined, said: string, target: string): Decision | undefined => {
   switch (asks?._tag) {
@@ -639,6 +643,8 @@ const settling = (asks: Assistant.Asks | undefined, said: string, target: string
       // "Stop", "skip" or "enough" is to stop talking, never an option, even one that starts with it, like "Stop here".
       if (only === undefined || more.length > 0 || enough.has(said)) return undefined
       const { options } = only
+      // To one that takes any answer, with nothing to pick from, a plain no is the answer, never letting it go.
+      if (options.length === 0 && only.allowCustomAnswer && noes.has(said)) return decision({ act: "reply", target, text: "No", pending: "answers" })
       const ordinal = ordinals.find(([pattern]) => pattern.test(said))
       // A no, or "cancel", is only the option that's just that, never one it's a word of, like "Cancel the migration".
       const named = refused.has(said) ? [] : said.split(" ").filter((word) => !pointing.has(word))
