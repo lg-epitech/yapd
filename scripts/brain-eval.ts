@@ -3,6 +3,7 @@ import { ConfigProvider, Console, Context, Effect, Either, Layer, Option, Schema
 import { mkdir } from "node:fs/promises"
 import { hostname } from "node:os"
 import { join } from "node:path"
+import type * as Assistant from "../src/Assistant.ts"
 import * as Brain from "../src/Brain.ts"
 import * as Config from "../src/Config.ts"
 import { home, settings } from "../src/Home.ts"
@@ -21,13 +22,16 @@ import * as Threads from "../src/Threads.ts"
 //
 //   bun scripts/brain-eval.ts fixture
 //     Copies T3 Code's threads, archived ones too, to view.json, reading only,
-//     and writes phrases.json to edit if there's none: what was said, and a
-//     piece of the title or project of the thread it was about ("" for none).
+//     and writes phrases.json to edit if there's none: what was said, a piece
+//     of the title or project of the thread it was about ("" for none), and,
+//     for an answer to a question yapd asked, the request it was about and a
+//     piece of each thread it offered.
 //   bun scripts/brain-eval.ts run [--runs 5] [--effort low,minimal]
 //     Asks the model about each phrase, the runs times over, at each effort,
-//     and says whether the gate passes: the right thread every time, no
-//     question in at least four runs in five of each phrase, and a median
-//     under 3.6 s. Each answer goes to results-<time>.jsonl.
+//     and says whether the gate passes: the right thread every time, as its
+//     pick even when it asks, an answer taken as one, no question in at least
+//     four runs in five of each phrase, and a median under 3.6 s. Each answer
+//     goes to results-<time>.jsonl.
 //   bun scripts/brain-eval.ts probe [--runs 20]
 //     Times orchestration.searchThreads, which only reads, to tell whether
 //     its hits are quick enough to add to every request.
@@ -36,7 +40,11 @@ const folder = join(home, "eval")
 const viewFile = join(folder, "view.json")
 const phrasesFile = join(folder, "phrases.json")
 
-/** The phrases that went wrong in the reverted attempt, and a few everyday ones, to start from. */
+/** The question yapd asked in the log about each request, by the threads it offered. */
+const mina = { request: "Can you please tell me what's the status on MiNAS SV2?", choices: ["Mina SSV2", "Tezos"] }
+const tezos = { request: "What's the status on my Tesla's migration request comparison?", choices: ["Tezos", "Mina SSV2"] }
+
+/** The phrases that went wrong in the reverted attempt, the answers he gave its questions, and a few everyday ones, to start from. */
 const logged = [
   { heard: "Can you please tell me what's the status on MiNAS SV2?", thread: "Mina SSV2" },
   { heard: "What's the status on my Tesla's migration request comparison?", thread: "Tezos" },
@@ -44,13 +52,21 @@ const logged = [
   { heard: "Dazzles migration", thread: "Tezos" },
   { heard: "migrate stasos", thread: "Tezos" },
   { heard: "My grades tezos.", thread: "Tezos" },
-  { heard: "The most recent one with Mina.", thread: "Mina" },
+  { heard: "The recent one with mean migrations.", thread: "Mina SSV2", open: mina },
+  { heard: "The most recent one with Mina.", thread: "Mina SSV2", open: mina },
+  { heard: "Migrate Tezos.", thread: "Tezos", open: tezos },
   { heard: "What's going on?", thread: "" },
   { heard: "What did I miss?", thread: "" },
   { heard: "How's the yapd review going?", thread: "yapd" },
 ]
 
-const Phrases = Schema.Array(Schema.Struct({ heard: Schema.String, thread: Schema.String }))
+const Phrases = Schema.Array(
+  Schema.Struct({
+    heard: Schema.String,
+    thread: Schema.String,
+    open: Schema.optional(Schema.Struct({ request: Schema.String, choices: Schema.Array(Schema.String) })),
+  }),
+)
 const Shell = Schema.Struct({
   projects: Schema.Array(Schema.Unknown),
   threads: Schema.Array(Schema.Unknown),
@@ -155,22 +171,42 @@ const run = Effect.gen(function* () {
         const context = yield* Layer.build(Brain.ProviderBrain.pipe(Layer.provide(ProviderModel)))
         const brain = Context.get(context, Brain.Brain)
         const times: Array<number> = []
-        let right = 0
+        let correct = 0
         let total = 0
         const quiet: Array<{ readonly heard: string; readonly asked: number }> = []
+        const away = [...remotes.keys()].map((other) => ({ machine: other, reason: `I can't see ${other}'s threads yet.` }))
+        const fits = (listed: Threads.Listed | undefined, piece: string) =>
+          listed !== undefined && `${listed.thread.title} ${listed.project} ${listed.called}`.toLowerCase().includes(piece.toLowerCase())
         for (const phrase of phrases) {
           let asked = 0
           for (let run = 0; run < runs; run++) {
             const now = Date.now()
-            const desk: Threads.Desk = {
-              threads: Threads.shortlist({ machine, view, focus: Option.none(), pending: [], most: 30, started, said: new Map(), now }),
-              away: [...remotes.keys()].map((other) => ({ machine: other, reason: `I can't see ${other}'s threads yet.` })),
-            }
+            const shortlist = (pending: ReadonlyArray<Threads.Ref>) =>
+              Threads.shortlist({ machine, view, focus: Option.none(), pending, most: 30, started, said: new Map(), now })
+            // The threads it offered, first in the order it offered them, as when it asked.
+            const first = shortlist([])
+            const offered = (phrase.open?.choices ?? []).flatMap((piece) => Option.toArray(Option.fromNullable(first.find((listed) => fits(listed, piece)))))
+            const desk: Threads.Desk = { threads: shortlist(offered.map(({ ref }) => ref)), away }
+            const choices = desk.threads.slice(0, offered.length)
+            const open = Option.map(Option.fromNullable(phrase.open), ({ request }): Assistant.Open => ({
+              id: "eval-open",
+              version: 1,
+              kind: "which",
+              utterance: "eval-request",
+              heard: request,
+              decision: Brain.decision({ act: "answer", target: "t1", sure: "low", others: choices.slice(1).map(({ handle }) => handle).join(", ") }),
+              candidates: choices.map(({ ref }) => ref),
+              asked: Brain.which(choices, Persona.plain, []) ?? "",
+              about: Brain.choices(choices),
+              at: now - 20_000,
+              material: Option.none(),
+              resend: Option.none(),
+            }))
             const situation: Brain.Situation = {
               utterance: { id: `eval-${run}`, heard: phrase.heard, via: "shortcut", at: now, voiced: 3, turns: 0 },
               subject: { _tag: "Nothing" },
               lines: [],
-              open: Option.none(),
+              open,
               desk,
               lately: [],
               unheard: [],
@@ -193,22 +229,20 @@ const run = Effect.gen(function* () {
             const decision = decided.right
             const listed = desk.threads.find(({ handle }) => handle === decision.target)
             const checked = Brain.check(decision, situation, Persona.plain)
+            // Its likeliest thread counts even when it asks, which is held to the four in five instead.
             const asking = checked._tag === "Ask" || decision.act === "clarify"
-            const wanted = phrase.thread.toLowerCase()
-            const fits =
-              !asking &&
-              (wanted === ""
-                ? decision.target === "" || listed !== undefined
-                : listed !== undefined && `${listed.thread.title} ${listed.project} ${listed.called}`.toLowerCase().includes(wanted))
-            if (fits) right++
+            // An answer to the question has to be taken as one, never as new work.
+            const answering = Option.isNone(open) || (decision.pending === "answers" && decision.act !== "start")
+            const right = answering && (phrase.thread === "" ? decision.target === "" || listed !== undefined : fits(listed, phrase.thread))
+            if (right) correct++
             if (asking) asked++
             const about = listed?.called ?? "no thread"
-            yield* Console.log(`  ${fits ? "ok  " : "MISS"} ${seconds(ms)} ${decision.act} → ${about}, ${decision.sure}: ${phrase.heard}`)
-            writer.write(`${JSON.stringify({ effort, heard: phrase.heard, run, ms, decision, thread: listed?.thread.title ?? null, fits, asking })}\n`)
+            yield* Console.log(`  ${right ? "ok  " : "MISS"} ${seconds(ms)} ${decision.act} → ${about}, ${decision.sure}${asking ? ", asked" : ""}: ${phrase.heard}`)
+            writer.write(`${JSON.stringify({ effort, heard: phrase.heard, run, ms, decision, thread: listed?.thread.title ?? null, right, asking })}\n`)
           }
           quiet.push({ heard: phrase.heard, asked })
         }
-        return { times, right, total, quiet }
+        return { times, right: correct, total, quiet }
       }),
     ).pipe(Effect.withConfigProvider(provider))
     const median = percentile(outcome.times, 0.5)
