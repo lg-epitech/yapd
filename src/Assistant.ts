@@ -342,9 +342,10 @@ export const make = (options: {
      * is for, which "hide that" keeps down: every one when it's said on its
      * own, but only its own request's when it's a later step of one, like
      * "show me everything, then hide that", which is about the card that
-     * request put up and no other. Each is let go of as its line is said, and
-     * all of them, kept down, once yapd is turned off, which drops what's
-     * waiting, though one being said just then may not have gone up yet.
+     * request put up and no other. Each is let go of as its line is said, or
+     * once it won't be, and all of them, kept down, once yapd is turned off,
+     * which drops what's waiting, though one being said just then may not
+     * have gone up yet.
      */
     const cards = new Set<{ readonly request: string; down: boolean }>()
     /**
@@ -1718,6 +1719,14 @@ export const make = (options: {
               Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) ? journal.reword(entry.value, instead) : Effect.void))),
             ),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
+            // Never said, like gone stale or dropped by a dictation that cut it off, its card is let go of all the same.
+            ...(kept === undefined
+              ? {}
+              : {
+                  gone: Effect.sync(() => {
+                    cards.delete(kept)
+                  }),
+                }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {

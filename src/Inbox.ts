@@ -52,6 +52,11 @@ export interface Notice {
   /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
   readonly heard?: Effect.Effect<void>
   /**
+   * Run once it's done with, said or not, like gone stale, dropped or never
+   * queued as yapd was off: never while it's put back to be said again.
+   */
+  readonly gone?: Effect.Effect<void>
+  /**
    * For a question: what to do with the answer, and when there's none; and
    * when it can't be asked in full, like when the audio helper quits midway,
    * what undoes its `saying`, since it counts as never said.

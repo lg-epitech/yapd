@@ -204,6 +204,7 @@ const make = (says?: string, options: {
       readonly done?: boolean
       readonly saying?: Array<string>
       readonly heard?: Array<string>
+      readonly gone?: Array<string>
     } = {},
   ) =>
     tell({
@@ -216,6 +217,7 @@ const make = (says?: string, options: {
       stale: Effect.succeed(options.stale === true),
       ...(options.saying === undefined ? {} : { saying: Effect.sync(() => void options.saying?.push(id)) }),
       ...(options.heard === undefined ? {} : { heard: Effect.sync(() => void options.heard?.push(id)) }),
+      ...(options.gone === undefined ? {} : { gone: Effect.sync(() => void options.gone?.push(id)) }),
       ...(options.question === undefined
         ? {}
         : {
@@ -751,6 +753,43 @@ describe("Daemon", () => {
     )
     expect(result.played).toEqual(["Nothing needs you right now, sir.", "The loader fix is ready, sir.", "The Tezos migration is comparing request formats, sir."])
     expect(result.heard).toEqual(["whole"])
+  })
+
+  test("what yapd says is done with once it's said, gone stale, cut off and not put back, dropped or never queued, but not while it's put back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, dictate, toggle } = yield* daemon
+        const gone: Array<string> = []
+        const cutOff = Effect.gen(function* () {
+          yield* wait(2)
+          const dictation = yield* dictate
+          yield* Scope.close(dictation, Exit.void)
+          yield* wait(0)
+        })
+        yield* notice("said", "Nothing needs you right now, sir.", { answer: true, gone })
+        yield* wait(11)
+        yield* notice("stale", "Looking through yapd first.", { stale: true, needsYou: true, gone })
+        yield* wait(1)
+        // What came of something he asked for is put back to be said after what he dictated, and an answer isn't.
+        yield* notice("started", "Started in yapd, on Fable, in a worktree.", { done: true, gone })
+        yield* cutOff
+        const putBack = [...gone]
+        yield* wait(11)
+        yield* notice("cut", "The loader fix is ready, sir.", { answer: true, gone })
+        yield* cutOff
+        yield* wait(11)
+        // Turned off as one is said and another waits, and told one while it's off.
+        yield* notice("playing", "The Tezos migration is comparing request formats, sir.", { answer: true, gone })
+        yield* notice("waiting", "Two running, sir.", { answer: true, gone })
+        yield* wait(2)
+        yield* toggle(false)
+        yield* notice("off", "One running, sir.", { answer: true, gone })
+        return { putBack, gone }
+      }),
+    )
+    expect(result.putBack).toEqual(["said", "stale"])
+    expect(result.gone.slice(0, 4)).toEqual(["said", "stale", "started", "cut"])
+    expect(result.gone.slice(4).toSorted()).toEqual(["off", "playing", "waiting"])
   })
 
   test("a clarification cut off by a dictation is not put back", async () => {

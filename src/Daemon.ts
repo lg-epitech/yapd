@@ -156,21 +156,36 @@ export const make = Effect.gen(function* () {
   /**
    * Renders a notice and queues it. One that can't be rendered is only logged.
    * `since` is when what it's about began, if before now, so it isn't said if
-   * yapd was turned off since.
+   * yapd was turned off since. Never queued, however that ends, it's done with.
    */
-  const tell = (notice: Inbox.Notice, since?: number) =>
-    Effect.gen(function* () {
+  const tell = (notice: Inbox.Notice, since?: number) => {
+    /** Whether it was queued, after which it's done with only once it's taken out to be said, or dropped. */
+    let queued = false
+    return Effect.gen(function* () {
       const turns = since ?? (yield* switched).turns
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* soon
       yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio }
-      if (!(yield* enqueue(said, turns))) {
+      // Noted in the same breath as it's queued, so nothing can stop it in between.
+      yield* enqueue(said, turns).pipe(
+        Effect.tap((taken) =>
+          Effect.sync(() => {
+            queued = taken
+          }),
+        ),
+        Effect.uninterruptible,
+      )
+      if (!queued) {
         yield* removeFile(audio)
         return yield* Effect.logInfo(`Not saying "${notice.spoken}", since yapd is off`)
       }
       yield* Effect.logInfo(`Ready: ${notice.spoken}`)
-    }).pipe(Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)))
+    }).pipe(
+      Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)),
+      Effect.ensuring(Effect.suspend(() => (queued ? Effect.void : (notice.gone ?? Effect.void)))),
+    )
+  }
 
   const late = (update: Conversation.Update, spoken: string, failed: boolean) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
@@ -699,13 +714,14 @@ export const make = Effect.gen(function* () {
       ),
       // Stopped at once, and not kept for later.
       Effect.raceFirst(turnedOff(turns)),
+      // Not put back, it's done with, said or not.
       Effect.ensuring(
         Effect.suspend(() =>
           kept
             ? Effect.void
             : Effect.zipRight(
                 removeFile(Inbox.audio(ready)),
-                "update" in ready && ready.replay !== undefined ? replayed(ready.replay) : Effect.void,
+                "update" in ready ? (ready.replay === undefined ? Effect.void : replayed(ready.replay)) : (ready.notice.gone ?? Effect.void),
               ),
         ),
       ),
@@ -754,7 +770,10 @@ export const make = Effect.gen(function* () {
       const { heard } = yield* SubscriptionRef.get(state)
       for (const entry of dropped) {
         yield* removeFile(Inbox.audio(entry))
-        if (!("update" in entry)) continue
+        if (!("update" in entry)) {
+          yield* entry.notice.gone ?? Effect.void
+          continue
+        }
         if (!heardAlready(heard, entry.update)) yield* release(entry.hook)
         if (entry.replay !== undefined) yield* replayed(entry.replay)
       }
