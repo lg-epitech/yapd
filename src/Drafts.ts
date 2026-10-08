@@ -139,7 +139,7 @@ export type Outcome =
       readonly machine: Machine
       readonly then: Effect.Effect<Outcome>
     }
-  /** It was asked for, and T3 Code is getting it ready, which takes minutes for a worktree: `then` is what comes of it. */
+  /** It was asked for, and T3 Code is getting it ready, which takes minutes for a worktree: `then` is what comes of it, which can be waited for more than once. */
   | { readonly _tag: "Launching"; readonly about: string; readonly project: string; readonly machine: Machine; readonly then: Effect.Effect<Outcome> }
   /** Nothing started, and this says why, or that there was nothing to start. */
   | { readonly _tag: "Said"; readonly spoken: string; readonly failed: boolean }

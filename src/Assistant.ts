@@ -216,7 +216,8 @@ export const make = (options: {
     /**
      * Work being started, by the request it's for, which the journal only has
      * once T3 Code has it ready: from when yapd starts reading through its
-     * project, if it does, so the model knows not to start it again meanwhile.
+     * project, if it does, until the launch settles, even once yapd is turned
+     * off, so the model knows not to start it again meanwhile.
      */
     const starting = new Map<string, Kept>()
 
@@ -613,11 +614,13 @@ export const make = (options: {
             // T3 Code can take minutes to get a worktree ready, so what comes of it is said when it's ready, and nothing else waits for it meanwhile.
             const arrived = yield* options.awaiting
             const settled = yield* underWay(utterance, outcome, `Starting ${outcome.about || "it"}, which T3 Code is still getting ready.`)
+            // Under way until the launch itself settles, not only until what's said of it stops: turning yapd off stops that, but not the launch.
+            yield* outcome.then.pipe(Effect.ensuring(settled), Effect.forkIn(scope))
             yield* background(
               outcome.then.pipe(
                 Effect.flatMap((after) => begun(after, utterance, said, asked)),
                 Effect.flatMap((told) => deliver(told, utterance)),
-                Effect.ensuring(Effect.zipRight(settled, arrived)),
+                Effect.ensuring(arrived),
                 Effect.annotateLogs({ utterance: utterance.id }),
               ),
             )

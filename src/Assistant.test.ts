@@ -787,6 +787,34 @@ describe("Assistant", () => {
     expect(result.started).toEqual(["/code/yapd"])
   })
 
+  test("work T3 Code is still getting ready when yapd is turned off and on is still under way, so asking for it again doesn't start it twice", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, heard, toggle, wait, spoken, started, journal } = yield* assistant(
+          (situation) =>
+            situation.lately.some(({ kind }) => kind === "started")
+              ? Brain.decision({ act: "answer", spoken: "The loader fix is already under way, sir." })
+              : Brain.decision({ act: "start", text: situation.utterance.heard }),
+          () => written({}),
+          { launching: 10 },
+        )
+        yield* dictate("Fix the loader in yapd.")
+        yield* toggle(false)
+        yield* toggle(true)
+        // Asked for again, typed, before T3 Code has the first one ready.
+        yield* wait(5)
+        yield* heard({ heard: "Fix the loader in yapd.", via: "typed", at: now + 5_000, voiced: 3, turns: 3 })
+        yield* wait(10)
+        const kept = yield* journal.since(0, { kinds: ["started"] })
+        return { spoken: spoken(), started: started.map(({ project }) => project), kept: kept.map(({ thread }) => thread) }
+      }),
+    )
+    // Turned off since it was asked for, it isn't said when it's ready, only noted.
+    expect(result.spoken).toEqual(["The loader fix is already under way, sir."])
+    expect(result.started).toEqual(["/code/yapd"])
+    expect(result.kept).toEqual(["new-thread"])
+  })
+
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
     const result = await run(
       Effect.gen(function* () {
