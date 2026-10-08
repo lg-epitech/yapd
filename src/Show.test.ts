@@ -77,6 +77,32 @@ describe("Show", () => {
     expect(Show.verbatim(command).startsWith("````\n")).toBe(true)
   })
 
+  test("a thread's own message keeps no link but to an https page, however it's written", () => {
+    const { tamed } = Show
+    // Brackets in a link's words, definitions in a quote or a list, which count for the whole message, and angle brackets.
+    expect(tamed("[a [b] c](file:///Applications/Calculator.app)")).toBe("a \\[b\\] c")
+    expect(tamed("> [r]: javascript:alert(1)\n\n[go][r]")).toBe("> \\[r\\]: javascript:alert(1)\n\n\\[go\\]\\[r\\]")
+    expect(tamed("- [r]: file:///etc/passwd\n\n[go][r]")).toBe("- \\[r\\]: file:///etc/passwd\n\n\\[go\\]\\[r\\]")
+    expect(tamed("<foo@bar.com>, <javascript:alert(1)> and <img src=x onerror=alert(1)>")).toBe(
+      "\\<foo@bar.com>, \\<javascript:alert(1)> and \\<img src=x onerror=alert(1)>",
+    )
+    // A fence with a backtick after it opens no code block, so what follows is still read as markdown.
+    expect(tamed("```x`\n[z](javascript:alert(1))")).toBe("\\`\\`\\`x\\`\nz")
+    // What's kept: links to https pages, written out in full, code spans and code blocks as they are, and an image's description.
+    expect(tamed('See [the docs](https://ok.example/docs "Docs"), <https://ok.example/a>, `[x](javascript:1)` and ![chart](https://ok.example/c.png)')).toBe(
+      "See [the docs](<https://ok.example/docs>), <https://ok.example/a>, `[x](javascript:1)` and chart",
+    )
+    expect(tamed("[![build](https://ok.example/b.svg)](https://ok.example/run)")).toBe("[build](<https://ok.example/run>)")
+    expect(tamed("```js\nconst link = [x](javascript:1)\n```\nThen [y](javascript:2)")).toBe("```js\nconst link = [x](javascript:1)\n```\nThen y")
+  })
+
+  test("a message made to trip a pattern up is tamed at once", () => {
+    const started = performance.now()
+    for (const message of ["[](<".repeat(625), "[](".repeat(833), "![](".repeat(625)]) Show.tamed(message)
+    // Each took a second or so before, holding up everything yapd does meanwhile.
+    expect(performance.now() - started).toBeLessThan(500)
+  })
+
   test("what a thread waits on goes up as its card when it can't be read aloud, said to be on screen only while an app watches", async () => {
     const answer = "The build cleanup wants to delete the build folder and run a script from the web, sir."
     const result = await Effect.runPromise(

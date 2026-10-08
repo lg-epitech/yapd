@@ -102,29 +102,162 @@ export const secure = (address: string): Option.Option<string> => {
   return url.protocol === "https:" && url.hostname !== "" ? Option.some(url.href) : Option.none()
 }
 
-/** Whether an address is safe to follow. */
-const safe = (address: string) => Option.isSome(secure(address))
-
 /** How much of a thread's own message a card shows. */
 const longest = 2500
 
+/** What a backslash escapes in markdown: any ASCII punctuation. */
+const escapable = /[!-/:-@[-`{-~]/
+
+/** An address in angle brackets, which markdown makes a link of. */
+const angled = /<([a-z][a-z0-9+.-]{1,31}:[^\s<>]*)>/iy
+
+/** The length of the run of a character at `at`. */
+const run = (line: string, at: number) => {
+  let end = at
+  while (end < line.length && line[end] === line[at]) end++
+  return end - at
+}
+
+/** Where the code span opened by the run of `length` backticks before `from` closes on the line, if it does: at the next run as long. */
+const spanEnd = (line: string, from: number, length: number) => {
+  for (let at = line.indexOf("`", from); at >= 0; at = line.indexOf("`", at + run(line, at))) {
+    if (run(line, at) === length) return at
+  }
+  return undefined
+}
+
 /**
- * A thread's own markdown, cut to a card's length, with anything that could
- * open something other than an https page taken out: other links keep only
- * their words, and images only their description.
+ * The inline link or image whose `[` is at `at`, as in `[words](address
+ * "title")`: its words, where it goes, and where it ends. Nothing when it
+ * isn't one, like a bracket on its own or a link to a definition.
+ */
+const linkAt = (line: string, at: number, closing: ReadonlyMap<number, number>) => {
+  const close = closing.get(at)
+  if (close === undefined || line[close + 1] !== "(") return undefined
+  const blank = (end: number) => {
+    while (line[end] === " " || line[end] === "\t") end++
+    return end
+  }
+  const start = blank(close + 2)
+  let end = start
+  let address: string
+  if (line[start] === "<") {
+    end = line.indexOf(">", start)
+    if (end < 0 || line.slice(start + 1, end).includes("<")) return undefined
+    address = line.slice(start + 1, end++)
+  } else {
+    // Up to a space or the bracket that closes it, past any it opens.
+    for (let depth = 0; end < line.length && line[end]! > " "; end++) {
+      if (line[end] === "\\" && escapable.test(line[end + 1] ?? "")) end++
+      else if (line[end] === "(") depth++
+      else if (line[end] === ")" && depth-- === 0) break
+    }
+    address = line.slice(start, end)
+  }
+  // A title, after a space, in quotes or brackets.
+  const spaced = blank(end)
+  const quote = ({ '"': '"', "'": "'", "(": ")" } as Readonly<Record<string, string>>)[line[spaced] ?? ""]
+  if (quote !== undefined && spaced > end) {
+    end = spaced + 1
+    while (end < line.length && line[end] !== quote) end += line[end] === "\\" ? 2 : 1
+    if (end >= line.length) return undefined
+    end = blank(end + 1)
+  } else {
+    end = spaced
+  }
+  if (line[end] !== ")") return undefined
+  return { words: line.slice(at + 1, close), address: address.replace(/\\([!-/:-@[-`{-~])/g, "$1"), end: end + 1 }
+}
+
+/**
+ * A line of a thread's own markdown with nothing in it that could link but
+ * the links to https pages, written again: every other bracket, angle bracket
+ * and backtick is escaped, but in a code span, which is kept as it is. Other
+ * links keep only their words, images only their description, and a link's
+ * words, `linking` off, keep no link of their own.
+ */
+const unlinked = (line: string, linking = true): string => {
+  // Each `[` with the `]` that closes it, nesting as markdown does.
+  const closing = new Map<number, number>()
+  const opened: Array<number> = []
+  for (let at = 0; at < line.length; at++) {
+    if (line[at] === "\\") at++
+    else if (line[at] === "[") opened.push(at)
+    else if (line[at] === "]" && opened.length > 0) closing.set(opened.pop()!, at)
+  }
+  let out = ""
+  let at = 0
+  while (at < line.length) {
+    const char = line[at]!
+    if (char === "\\" && escapable.test(line[at + 1] ?? "")) {
+      out += line.slice(at, at + 2)
+      at += 2
+    } else if (char === "`") {
+      const length = run(line, at)
+      const end = spanEnd(line, at + length, length)
+      // Not one with a pipe in it, which a table would split into cells that are read as markdown.
+      if (end === undefined || line.slice(at, end).includes("|")) {
+        out += "\\`".repeat(length)
+        at += length
+      } else {
+        out += line.slice(at, end + length)
+        at = end + length
+      }
+    } else if (char === "[" || (char === "!" && line[at + 1] === "[")) {
+      const image = char === "!"
+      const link = linkAt(line, image ? at + 1 : at, closing)
+      if (link === undefined) {
+        out += image ? "!\\[" : "\\["
+        at += image ? 2 : 1
+      } else {
+        const words = unlinked(link.words, false)
+        const address = linking && !image ? secure(link.address) : Option.none()
+        // In angle brackets, so nothing in the address can end the link early.
+        out += Option.match(address, { onNone: () => words, onSome: (address) => `[${words}](<${address}>)` })
+        at = link.end
+      }
+    } else if (char === "<") {
+      angled.lastIndex = at
+      const found = angled.exec(line)
+      const address = linking && found !== null ? secure(found[1]!) : Option.none()
+      // An address in angle brackets stays a link when it's to an https page, and anything else in them is only text, HTML too.
+      out += Option.match(address, { onNone: () => "\\<", onSome: (address) => `<${address}>` })
+      at += Option.isSome(address) ? found![0].length : 1
+    } else {
+      out += char === "]" ? "\\]" : char
+      at++
+    }
+  }
+  return out
+}
+
+/**
+ * A thread's own markdown, cut to a card's length, with nothing that could
+ * open anything but an https page: no other link, no image, no definition a
+ * link could point at, no address in angle brackets and no HTML. Code blocks
+ * are kept as they are, which nothing in can link from.
  */
 export const tamed = (markdown: string) => {
+  const text = markdown.replace(/\r\n?/g, "\n")
   // At the end of a line, when there's one to cut at.
-  const end = markdown.lastIndexOf("\n", longest)
-  const cut = markdown.length <= longest ? markdown : `${markdown.slice(0, end > 0 ? end : longest)}\n…`
-  const tame = cut
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)/g, (link, words: string, address: string) => (safe(address) ? link : words))
-    .replace(/<([a-z][\w+.-]*:[^>\s]*)>/gi, (link, address: string) => (safe(address) ? link : address))
-    .replace(/^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s.*)?$/gm, (definition, address: string) => (safe(address) ? definition : ""))
+  const end = text.lastIndexOf("\n", longest)
+  const cut = text.length <= longest ? text : `${text.slice(0, end > 0 ? end : longest)}\n…`
+  let fence: { readonly mark: string; readonly length: number } | undefined
+  const lines = cut.split("\n").map((line) => {
+    if (fence !== undefined) {
+      const closing = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1]
+      if (closing !== undefined && closing[0] === fence.mark && closing.length >= fence.length) fence = undefined
+      return line
+    }
+    // Only a fence at the very start of a line opens a code block whatever comes before it, so only that one is kept as it is.
+    const opening = /^(`{3,})[^`]*$|^(~{3,})/.exec(line)
+    if (opening === null) return unlinked(line)
+    const mark = opening[1] ?? opening[2]!
+    fence = { mark: mark[0]!, length: mark.length }
+    return line
+  })
   // A code block cut short is closed, so the rest of the card isn't taken into it.
-  const fences = tame.match(/^ {0,3}(`{3,}|~{3,})/gm) ?? []
-  return fences.length % 2 === 0 ? tame : `${tame}\n${fences.at(-1)!.trim()}`
+  return [...lines, ...(fence === undefined ? [] : [fence.mark.repeat(fence.length)])].join("\n")
 }
 
 // ---------------------------------------------------------------- cards
