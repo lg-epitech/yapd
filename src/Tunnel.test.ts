@@ -1,0 +1,165 @@
+import { describe, expect, test } from "bun:test"
+import { Clock, Effect, Exit, Layer, Logger, Option, Redacted, TestClock, TestContext } from "effect"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { ProcessError } from "./Process.ts"
+import type { Exec } from "./Remote.ts"
+import * as T3Actions from "./T3Actions.ts"
+import * as Server from "./T3CodeServer.ts"
+import * as Tunnel from "./Tunnel.ts"
+
+/** Never made: the tunnel only ever removes a socket left behind there. */
+const folder = join(tmpdir(), "yapd-tunnel-test-nothing-here")
+
+/**
+ * A machine at the other end of SSH that a test talks for. `opens` says how
+ * each try to connect goes, and `answers` what `yapd t3` prints there, in turn.
+ */
+const machine = (options: { readonly opens?: Array<boolean>; readonly answers?: Array<string | ProcessError> } = {}) => {
+  const opens = [...(options.opens ?? [])]
+  const answers = [...(options.answers ?? [])]
+  const calls: Array<string> = []
+  /** When each try to connect was made, by the test's clock. */
+  const tries: Array<number> = []
+  let alive = false
+  let tokens = 0
+  const exec: Exec = (command) =>
+    Effect.gen(function* () {
+      const line = command.join(" ")
+      calls.push(line)
+      const fail = (code: number, stderr = "") => Effect.fail(new ProcessError({ command: line, code, stderr }))
+      if (command.includes("-O")) {
+        if (command.includes("exit")) alive = false
+        return alive ? "" : yield* fail(255, "Control socket connect: No such file or directory")
+      }
+      if (command.includes("-M")) {
+        tries.push(yield* Clock.currentTimeMillis)
+        alive = opens.shift() ?? true
+        return alive ? "" : yield* fail(255, "ssh: connect to host rig port 22: Operation timed out")
+      }
+      const answer = answers.shift() ?? JSON.stringify({ origin: "http://127.0.0.1:3774", token: `token-${++tokens}` })
+      return answer instanceof ProcessError ? yield* Effect.fail(answer) : `Welcome to rig\n${answer}\n`
+    })
+  return {
+    exec,
+    calls,
+    tries,
+    answers,
+    drop: () => {
+      alive = false
+    },
+  }
+}
+
+/** Free ports, one after the other. */
+const ports = () => {
+  let next = 50000
+  return Effect.sync(() => ++next)
+}
+
+/** Lets the tunnel's fibers catch up, since the clock only moves when told to. */
+const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)))
+
+describe("yapd t3", () => {
+  test("prints the origin and the token and nothing else, and why not when there's none", async () => {
+    const token = Option.some(Redacted.make("t3-token"))
+    const running = Effect.succeed({ origin: "http://127.0.0.1:3774" })
+    expect(await Effect.runPromise(Tunnel.serve(token, running))).toBe('{"origin":"http://127.0.0.1:3774","token":"t3-token"}')
+    const stopped = Effect.fail(new Server.Trouble({ reason: "T3 Code isn't running." }))
+    expect(JSON.parse(await Effect.runPromise(Tunnel.serve(token, stopped)))).toEqual({ reason: "T3 Code isn't running." })
+    expect(JSON.parse(await Effect.runPromise(Tunnel.serve(Option.none(), running)))).toEqual({
+      reason: "yapd has no T3 Code token here.",
+    })
+  })
+})
+
+describe("Tunnel", () => {
+  test("connects again with backoff and asks for the token again", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine({ opens: [true, false, false, true] })
+        const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
+        const before = yield* tunnel.locate
+        expect(before.server.origin).toBe("http://127.0.0.1:50001")
+        expect(Redacted.value(before.token)).toBe("token-1")
+        expect(rig.calls).toContain(`ssh -S ${folder}/ssh-rig.sock -O forward -L 127.0.0.1:50001:127.0.0.1:3774 -- me@rig.example.com`)
+
+        rig.drop()
+        yield* TestClock.adjust("5 seconds")
+        yield* flush
+        expect(yield* tunnel.status).toEqual({ _tag: "Down", reason: "I can't reach rig right now.", outage: 1 })
+        for (const wait of ["1 second", "2 seconds"] as const) {
+          yield* TestClock.adjust(wait)
+          yield* flush
+        }
+        const after = yield* tunnel.locate
+        expect(after.server.origin).toBe("http://127.0.0.1:50002")
+        expect(Redacted.value(after.token)).toBe("token-2")
+        expect(rig.tries).toEqual([0, 5000, 6000, 8000])
+        expect(rig.calls.filter((line) => line.endsWith("cd / && yapd t3"))).toHaveLength(2)
+        expect(yield* tunnel.master).toEqual(Option.some(`${folder}/ssh-rig.sock`))
+
+        // T3 Code there restarted on another port, with a new token.
+        rig.answers.push(JSON.stringify({ origin: "http://127.0.0.1:3775", token: "token-3" }))
+        const moved = yield* tunnel.refresh
+        expect([moved.server.origin, Redacted.value(moved.token)]).toEqual(["http://127.0.0.1:50003", "token-3"])
+        expect(rig.calls).toContain(`ssh -S ${folder}/ssh-rig.sock -O cancel -L 127.0.0.1:50002:127.0.0.1:3774 -- me@rig.example.com`)
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("an action on rig while it's down fails at once with a spoken reason", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const cases = [
+          { rig: machine({ opens: [false] }), reason: "I can't reach rig right now." },
+          {
+            rig: machine({ answers: [new ProcessError({ command: "ssh", code: 1, stderr: "usage: yapd setup | yapd doctor" })] }),
+            reason: "yapd on rig needs updating.",
+          },
+          { rig: machine({ answers: [JSON.stringify({ reason: "T3 Code isn't running." })] }), reason: "rig's T3 Code isn't running." },
+        ]
+        for (const { rig, reason } of cases) {
+          const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
+          yield* tunnel.status
+          const asked = rig.calls.length
+          const actions = T3Actions.make(Tunnel.transport(tunnel.locate))
+          const sending = yield* Effect.fork(Effect.flip(actions.run("thread-1", { _tag: "Send", text: "Merge it.", steer: false })))
+          yield* flush
+          const exit = Option.getOrUndefined(yield* sending.poll)
+          expect(exit !== undefined && Exit.isSuccess(exit) ? T3Actions.reason(exit.value) : "still waiting").toBe(reason)
+          // Nothing was tried on its behalf: trying again is the tunnel's, in the background.
+          expect(rig.calls.length).toBe(asked)
+        }
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("never puts the token in the log, even when what came back can't be read", async () => {
+    const secret = "t3-secret-token"
+    const lines: Array<string> = []
+    const statuses: Array<Tunnel.Status> = []
+    const logger = Logger.map(Logger.logfmtLogger, (line) => void lines.push(line))
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine({
+          answers: [
+            // Decoding says what it found instead of a string.
+            JSON.stringify({ origin: "http://127.0.0.1:3774", token: [secret] }),
+            JSON.stringify({ origin: "nowhere", token: secret }),
+            JSON.stringify({ origin: "http://127.0.0.1:3774", token: secret }),
+          ],
+        })
+        const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
+        statuses.push(yield* tunnel.status)
+        for (const wait of ["1 second", "2 seconds"] as const) {
+          yield* TestClock.adjust(wait)
+          yield* flush
+        }
+        statuses.push(yield* tunnel.status)
+        expect(Redacted.value((yield* tunnel.locate).token)).toBe(secret)
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(TestContext.TestContext, Logger.replace(Logger.defaultLogger, logger)))),
+    )
+    expect(statuses).toEqual([{ _tag: "Down", reason: "yapd on rig answered in a way I don't understand.", outage: 1 }, { _tag: "Up" }])
+    expect(lines.length).toBeGreaterThan(0)
+    expect(lines.filter((line) => line.includes(secret))).toEqual([])
+  })
+})
