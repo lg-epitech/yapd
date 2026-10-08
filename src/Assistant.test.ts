@@ -1970,6 +1970,36 @@ describe("Assistant", () => {
     expect(result.ids[1]).toEqual(result.ids[0])
   })
 
+  test("a message for now to a thread waiting on him goes behind its turn, and a yes to sending it again sends it as it went", async () => {
+    let lost = true
+    const result = await run(
+      Effect.gen(function* () {
+        const waiting = thread(tezos.id, tezos.title, "integration", {
+          activeRunId: null,
+          activityRunStatus: "waiting",
+          status: "waiting",
+          pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-01T02:15:00.000Z" },
+        })
+        const { dictate, answer, spoken, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
+          others: [waiting],
+          answer: () => (payload, bounded) =>
+            lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes(payload, bounded),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        lost = false
+        yield* answer("Yes.")
+        return { spoken: spoken(), sent: dispatched.map(({ commandId, dispatchMode }) => [commandId, (dispatchMode as { type: string }).type]) }
+      }),
+    )
+    expect(result.spoken[0]).toBe("I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?")
+    expect(result.spoken).toHaveLength(2)
+    expect(result.spoken[1]).not.toContain("I left it")
+    expect(result.sent).toEqual([
+      [result.sent[0]![0], "queue_after_active"],
+      [result.sent[0]![0], "queue_after_active"],
+    ])
+  })
+
   test("yes, but once it's done, to sending again goes after the turn under way if it never left, and is left, saying why, if it may have got there", async () => {
     const later = (left: boolean) => {
       let down = true

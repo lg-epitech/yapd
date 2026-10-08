@@ -984,13 +984,17 @@ export const make = (options: {
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { utterance, situation } = thought
-        // A question about it is about the words that went, or were to, which an answer can't stand in for.
-        const decision = act._tag === "Message" ? { ...thought.decision, text: act.text } : thought.decision
         /** Sending again a message other than the one asked for now, like the word to carry on: as it went, with the rest of the request after it. */
         const resending = (text: string, how: string) => Brain.decision({ act: "send", text, how, rest: thought.decision.rest })
         const onceMore = "again" in outcome ? outcome.again : Option.none<string>()
         // What may go again is about the thread it was for, which "carry on" needn't name.
         const kept = Option.isSome(onceMore) ? yield* ledger.get(onceMore.value) : Option.none<Ledger.Row>()
+        // A question about it is about the words that went, or were to, at the time they went at, like behind a turn that was waiting, which an answer can't stand in for.
+        const went = Option.flatMap(kept, Hands.went)
+        const decision =
+          act._tag === "Message"
+            ? { ...thought.decision, text: act.text, ...Option.match(went, { onNone: () => ({}), onSome: ({ how }) => ({ how }) }) }
+            : thought.decision
         const ref =
           outcome._tag === "Done"
             ? outcome.to
@@ -1021,9 +1025,9 @@ export const make = (options: {
         const base = { utterance: utterance.id, heard: utterance.heard, material: Option.none(), candidates: ref === undefined ? [] : [ref] }
         switch (outcome._tag) {
           case "Done": {
-            // Gone as asked after a step said on its own, it's noted and not said.
-            const line = at.quietly === true ? "" : Hands.done(act, outcome.how, said, called)
-            yield* noting(line === "" ? undefined : line, { how: outcome.how })
+            // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, he's told why.
+            const line = at.quietly === true && outcome.waiting === undefined ? "" : Hands.done(act, outcome.how, said, called, outcome.waiting)
+            yield* noting(line === "" ? undefined : line, { how: outcome.how, ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }) })
             const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
             // Taking a stop back is two steps: letting go of the queue, then the message to carry on.
             return yield* free(onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" ? 2 : 1), said))

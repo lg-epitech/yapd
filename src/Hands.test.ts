@@ -39,15 +39,25 @@ interface Bounded {
   turnItems: Array<Record<string, unknown>>
 }
 
-/** Takes a message in as T3 Code does: a turn of its own on an idle thread, into the turn under way or behind it on a busy one. */
+/**
+ * Takes a message in as T3 Code does: a turn of its own on an idle thread,
+ * into the turn under way or behind it on a busy one. It steers or restarts
+ * only a turn that's running, queues behind one getting going, and turns
+ * down steering one that's waiting, or restarting one that isn't running.
+ */
 const takes =
   (intent: "steer" | "queued_turn" = "steer"): Answer =>
   (payload, bounded) =>
-    Effect.sync(() => {
+    Effect.suspend(() => {
       if (payload.type === "message.dispatch") {
         const messageId = String(payload.messageId)
-        const going = bounded.runs.some(({ status }) => status === "running")
-        const queued = (payload.dispatchMode as { type: string }).type === "queue_after_active" || intent === "queued_turn"
+        const active = bounded.runs.find(({ status }) => ["preparing", "starting", "running", "waiting"].includes(status))
+        const going = active !== undefined
+        const into = (payload.dispatchMode as { type: string }).type === "start_immediately" && active !== undefined && active.status !== "running"
+        if (into && (payload.deliveryIntent === "restart" || (payload.deliveryIntent === "auto" && active.status === "waiting"))) {
+          return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: `Target run ${active.id} is ${active.status} and cannot be steered.` }))
+        }
+        const queued = (payload.dispatchMode as { type: string }).type === "queue_after_active" || intent === "queued_turn" || into
         bounded.messages.push({ id: messageId, role: "user", text: String(payload.text), createdAt: "now" })
         if (!going || queued) {
           bounded.runs.push({ id: `run-${bounded.runs.length + 1}`, status: going ? "queued" : "running", ordinal: bounded.runs.length + 1, userMessageId: messageId })
@@ -58,7 +68,7 @@ const takes =
         const run = bounded.runs.find(({ id }) => id === payload.runId)
         if (run !== undefined) run.status = "cancelled"
       }
-      return { sequence: 7 }
+      return Effect.succeed({ sequence: 7 })
     })
 
 /** Hands over a ledger of its own and a T3 Code that answers as the test says, keeping what it was sent. */
@@ -707,6 +717,33 @@ describe("Hands", () => {
     expect(result.dispatched[0]).not.toHaveProperty("deliveryIntent")
     expect(result.outcome).toEqual({ _tag: "Done", how: "queued", to: tezos })
     expect(result.held).toEqual([])
+  })
+
+  test("a message for now to a thread whose turn is waiting, which T3 Code won't steer into, goes in its queue, and he's told why", async () => {
+    const waiting = (pending: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const asking = thread(tezos.id, {
+            activeRunId: null,
+            activityRunStatus: "waiting",
+            status: "waiting",
+            pendingRuntimeRequest: pending ? { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } : null,
+          })
+          const { send, dispatched } = yield* hands({ thread: asking, runs: [{ id: "run-1", status: "waiting", ordinal: 1 }] })
+          const outcome = yield* send("u1", "Use the Mina fee table.")
+          const said = outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome.how, lines, Option.some("Migrate Tezos Integration"), outcome.waiting) : outcome._tag
+          return { outcome: outcome._tag === "Done" ? [outcome.how, outcome.waiting] : outcome._tag, said, dispatched }
+        }),
+      )
+    const asked = await waiting(true)
+    expect(asked.dispatched).toHaveLength(1)
+    expect(asked.dispatched[0]).toMatchObject({ type: "message.dispatch", dispatchMode: { type: "queue_after_active" } })
+    expect(asked.dispatched[0]).not.toHaveProperty("deliveryIntent")
+    expect(asked.outcome).toEqual(["queued", "asked"])
+    expect(asked.said).toBe("Migrate Tezos Integration is waiting on you for something, sir, so that will go once it's dealt with.")
+    const finishing = await waiting(false)
+    expect(finishing.outcome).toEqual(["queued", "finishing"])
+    expect(finishing.said).toBe("Migrate Tezos Integration is finishing something off, sir, so that will go once it's done.")
   })
 
   test("scratch that withdraws a message still in the queue, and only offers to have one already read ignored", async () => {

@@ -25,7 +25,13 @@ export type Act =
 
 /** What came of it. */
 export type Outcome =
-  | { readonly _tag: "Done"; readonly how: Ledger.How; readonly to: Threads.Ref }
+  | {
+      readonly _tag: "Done"
+      readonly how: Ledger.How
+      readonly to: Threads.Ref
+      /** Wanted at once, it went into T3 Code's queue instead, since the turn under way is waiting: on him, or finishing off. */
+      readonly waiting?: Waiting
+    }
   /** T3 Code, or yapd looking first, said no: it's never sent again under these ids. */
   | { readonly _tag: "Refused"; readonly reason: string }
   /** It never left yapd. With `again`, it may go once more on his yes, under the same ids. */
@@ -36,6 +42,9 @@ export type Outcome =
   | { readonly _tag: "Twin"; readonly row: Ledger.Row }
   /** The message to withdraw was read already, so it can only be told to ignore it. */
   | { readonly _tag: "Read"; readonly row: Ledger.Row }
+
+/** What the turn under way waits on: something it asked him, or its last bits of work. */
+export type Waiting = "asked" | "finishing"
 
 /** What a restart's look found never said what came of it. */
 export interface Reconciled {
@@ -178,6 +187,10 @@ const answered = (thread: T3Live.Thread, at: number, own: Option.Option<{ readon
 
 /** Whether it's in the middle of something a message would go into, or wait behind. */
 const busy = (thread: T3Live.Thread) => T3Live.busy(thread) || thread.activityRunStatus === "waiting"
+
+/** What its turn under way is waiting on, if it is: a turn waiting takes nothing in, so what's sent waits behind it. */
+const waits = (thread: T3Live.Thread): Waiting | undefined =>
+  thread.activityRunStatus !== "waiting" ? undefined : thread.pendingRuntimeRequest === null ? "finishing" : "asked"
 
 /** What a step does, in a few words, for the log. */
 const doing: Readonly<Record<Ledger.Kind, string>> = {
@@ -409,7 +422,7 @@ export const make = (options: {
 
   const message = (step: Step, act: Extract<Act, { readonly _tag: "Message" }>, twice: boolean) =>
     Effect.gen(function* () {
-      const { to, text, how } = act
+      const { to, text } = act
       const { commandId } = Ledger.ids(step.utterance, step.step, true)
       // Worked out again, it's the step it was, whatever came of it.
       const before = yield* ledger.get(commandId)
@@ -423,7 +436,11 @@ export const make = (options: {
         const made = Option.isSome(twin) ? yield* twinned(twin.value, reached.right) : Option.none<Outcome>()
         if (Option.isSome(made)) return made.value
       }
-      return yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, digest)
+      // T3 Code takes a message into a turn only while it's at it, and turns one down for a turn that's waiting, so it goes in the queue behind it.
+      const waiting = act.how === "now" ? waits(reached.right.thread) : undefined
+      const how = waiting === undefined ? act.how : "after"
+      const sent = yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, digest)
+      return sent._tag === "Done" && waiting !== undefined ? { ...sent, waiting } : sent
     })
 
   const stop = (step: Step, to: Threads.Ref) =>
@@ -642,9 +659,18 @@ export const ago = (ms: number) => {
 export const naming = (line: string, called: Option.Option<string>) =>
   Option.match(called, { onNone: () => line, onSome: (name) => `${line.trim().replace(/[.!]+$/, "")}: ${name}.` })
 
-/** What's said once it's done, naming the thread when it isn't the one he's on about. */
-export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Option<string>) =>
-  naming(
+/**
+ * What's said once it's done, naming the thread when it isn't the one he's on
+ * about, and why a message he wanted in at once waits in the queue, when it does.
+ */
+export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Option<string>, waiting?: Waiting) => {
+  if (waiting !== undefined) {
+    const it = Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} is` })
+    return waiting === "asked"
+      ? `${it} waiting on you for something${addressed(lines)}, so that will go once it's dealt with.`
+      : `${it} finishing something off${addressed(lines)}, so that will go once it's done.`
+  }
+  return naming(
     act._tag === "Stop"
       ? lines.stopped
       : act._tag === "Undo"
@@ -656,6 +682,7 @@ export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Opt
           : lines.onIt,
     called,
   )
+}
 
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
