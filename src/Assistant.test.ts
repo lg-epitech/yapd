@@ -1541,6 +1541,40 @@ describe("Assistant", () => {
     expect(result.dispatched).toBe(0)
   })
 
+  test("what a restart found while yapd was off is said once it's turned on, without waiting for him to say something", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { undelivered, unconfirmed, back, toggle, flush, spoken, dispatched, ledger } = yield* assistant(() => undefined)
+        const message = yield* ledger.prepare({
+          utterance: "u-old1",
+          step: 0,
+          kind: "message",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        yield* ledger.settle(message.commandId, "unknown")
+        const stop = yield* ledger.prepare({ utterance: "u-old2", step: 0, kind: "stop", machine: "Rosie", thread: tezos.id, body: () => ({ _tag: "Stop" }), message: false })
+        yield* toggle(false)
+        yield* unconfirmed([{ ...stop, state: "abandoned", reason: Hands.unconfirmable }])
+        yield* undelivered([message])
+        const off = spoken().length
+        // Turned on from the menu bar.
+        yield* toggle(true)
+        yield* back
+        yield* flush
+        return { off, spoken: spoken(), dispatched: dispatched.length }
+      }),
+    )
+    expect(result.off).toBe(0)
+    expect(result.spoken).toEqual([
+      "Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir.",
+      "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir. Send it again?",
+    ])
+    expect(result.dispatched).toBe(0)
+  })
+
   test("a stop a restart couldn't confirm is said once, with why, and journaled, never done again", async () => {
     const result = await run(
       Effect.gen(function* () {

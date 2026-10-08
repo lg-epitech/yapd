@@ -41,7 +41,11 @@ export type Outcome =
 export interface Reconciled {
   /** Messages that didn't get there, each to be offered once to go again. */
   readonly undelivered: ReadonlyArray<Ledger.Row>
-  /** Other steps, like a stop, that couldn't be confirmed, each to be said once, and never done again. */
+  /**
+   * Steps it couldn't confirm, like a stop, new work, or a message too long
+   * ago to send again or that it couldn't look for, each with why, to be said
+   * once, and never done again.
+   */
   readonly unconfirmed: ReadonlyArray<Ledger.Row>
 }
 
@@ -71,9 +75,9 @@ export class Hands extends Context.Tag("yapd/Hands")<
      */
     readonly leave: (commandId: string, reason: string) => Effect.Effect<void>
     /**
-     * At startup: looks at what never said what came of it lately, and never
-     * sends anything (I6). Gives back the messages found not to have got
-     * there, to offer, and the other steps it couldn't confirm, to say so.
+     * At startup: looks at what never said what came of it, and never sends
+     * anything (I6). Gives back the messages found not to have got there
+     * lately, to offer, and whatever else it couldn't confirm, to say so.
      */
     readonly reconcile: Effect.Effect<Reconciled>
     /** A message a restart found didn't get there, while it's still to be offered: nothing came of it since, and it's recent enough to. */
@@ -87,8 +91,12 @@ const twins = 10 * 60_000
 const scratch = "2 minutes"
 /** How long after a stop "carry on" lets it carry on. */
 const resumable = "10 minutes"
-/** How far back a restart looks at what never said what came of it. Older than that, it's left be. */
+/** How long ago a message a restart found didn't get there can be offered to go again. Older than that, it's only said. */
 const recent = 15 * 60_000
+/** Why a step a restart looked for can't be confirmed, when the thread doesn't show it. */
+export const unconfirmable = "I couldn't tell whether it went through before I restarted."
+/** Why a message that may not have got there isn't offered to go again. */
+export const tooLong = "It's too long ago to send it again now."
 /** What a stop is noted with once it's been let carry on, so it's never let carry on twice. */
 const carried = "Carried on since."
 /** Why "carry on" does nothing to a thread let carry on already. */
@@ -559,37 +567,46 @@ export const make = (options: {
       for (const row of open.filter(({ at }) => at < started)) {
         // Only from where it was, in case something came of it since it was read.
         const from = [row.state]
-        if (now - row.at > recent) {
-          yield* ledger.settle(row.commandId, "abandoned", { reason: row.reason ?? "Too long ago to check after a restart.", from })
+        /**
+         * Not confirmed, it's said once, with why, and never done again. A
+         * message stays as it may be, never offered again on its own, so the
+         * same words said again find it, and are offered under its own ids.
+         */
+        const unsure = (reason: string) =>
+          Effect.gen(function* () {
+            if (row.kind === "message") {
+              yield* ledger.settle(row.commandId, "unknown", { reason, from })
+              yield* ledger.leave(row.commandId, reason)
+            } else yield* ledger.settle(row.commandId, "abandoned", { reason, from })
+            yield* Effect.logWarning(`Couldn't confirm ${row.commandId} went through before restarting: ${reason}`)
+            unconfirmed.push({ ...row, reason })
+          })
+        const actions = threads.actions(row.machine)
+        if (Option.isNone(actions)) {
+          yield* unsure(`I can't reach the threads on ${row.machine} right now.`)
           continue
         }
         if (row.kind === "start") {
           const thread = yield* threads.find(refOf(row))
           if (Option.isSome(thread)) yield* ledger.settle(row.commandId, "sent", { from })
-          else yield* Effect.logInfo(`Couldn't tell whether ${row.commandId} started, so it's left be`)
-          continue
-        }
-        const actions = threads.actions(row.machine)
-        if (Option.isNone(actions)) {
-          yield* Effect.logInfo(`Couldn't look for ${row.commandId} on ${row.machine}, so it's left be`)
+          else yield* unsure(unconfirmable)
           continue
         }
         const found = yield* Effect.either(landed(row, actions.value))
         if (Either.isLeft(found)) {
-          yield* Effect.logWarning(`Couldn't look for ${row.commandId} after restarting: ${found.left.reason}`)
+          yield* unsure(`I couldn't look for it just now: ${after(plainly(found.left.reason))}`)
           continue
         }
         if (found.right) {
           yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }), from })
           yield* Effect.logInfo(`Found ${row.commandId} after restarting: it got there`)
-        } else if (row.kind === "message") {
+        } else if (row.kind !== "message") yield* unsure(unconfirmable)
+        // Too long ago to send again, it's only said.
+        else if (now - row.at > recent) yield* unsure(tooLong)
+        else {
           yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", from })
           yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
           undelivered.push(row)
-        } else {
-          yield* ledger.settle(row.commandId, "abandoned", { reason: "I couldn't tell whether it went through before I restarted.", from })
-          yield* Effect.logWarning(`Couldn't tell whether ${row.commandId} went through before restarting, so it's left be`)
-          unconfirmed.push(row)
         }
       }
       return { undelivered, unconfirmed } satisfies Reconciled
@@ -671,19 +688,21 @@ export const twice = (sent: number, now: number, lines: Lines, called: Option.Op
 export const read = (lines: Lines, called: Option.Option<string>) =>
   `${Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} has` })} already read it${addressed(lines)}. Shall I tell it to ignore that?`
 
-/** Said after a restart, for a step other than a message that couldn't be confirmed, which isn't done again. */
-export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, called: Option.Option<string>) => {
+/** Said after a restart, for a step other than a message that couldn't be confirmed, which isn't done again, with why when it's more than that. */
+export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, called: Option.Option<string>, why: string = unconfirmable) => {
   const name = Option.getOrUndefined(called)
   const sent = command(row.body)
   const what =
     row.kind === "stop"
       ? `${name ?? "the work"} stopped`
-      : Option.exists(sent, ({ _tag }) => _tag === "Resume")
-        ? `${name ?? "the work"} was going again`
-        : Option.exists(sent, ({ _tag }) => _tag === "Cancel")
-          ? `your message${name === undefined ? "" : ` to ${name}`} was withdrawn`
-          : `what I last did${name === undefined ? "" : ` to ${name}`} went through`
-  return `Before I restarted, I couldn't confirm ${what}${addressed(lines)}.`
+      : row.kind === "start"
+        ? "the new work you asked for started"
+        : Option.exists(sent, ({ _tag }) => _tag === "Resume")
+          ? `${name ?? "the work"} was going again`
+          : Option.exists(sent, ({ _tag }) => _tag === "Cancel")
+            ? `your message${name === undefined ? "" : ` to ${name}`} was withdrawn`
+            : `what I last did${name === undefined ? "" : ` to ${name}`} went through`
+  return `Before I restarted, I couldn't confirm ${what}${addressed(lines)}.${why === unconfirmable ? "" : ` ${why}`}`
 }
 
 /** Said after a restart, for a message that wasn't found where it went and can't be offered to go again, with why, like "It's too long ago to send it again now." */

@@ -128,8 +128,10 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly drop: Effect.Effect<void>
     /** Messages a restart found didn't get there: each is offered to be sent again once, one at a time. */
     readonly undelivered: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
-    /** Steps a restart couldn't confirm, like a stop: each is said once, with why, and never done again. */
+    /** Steps a restart couldn't confirm, like a stop, or a message it can't offer: each is said once, with why, and never done again. */
     readonly unconfirmed: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
+    /** yapd was turned on: what a restart found while it was off is said, or offered, now. */
+    readonly back: Effect.Effect<void>
   }
 >() {}
 
@@ -264,8 +266,8 @@ export const make = (options: {
     const jobs = new Set<Fiber.RuntimeFiber<unknown, unknown>>()
     /** Work being started, which the journal only has once T3 Code has it ready, so the model knows not to start it again meanwhile. */
     const starting = new Set<Kept>()
-    /** Messages a restart found didn't get there, waiting their turn to be offered again. */
-    const lost: Array<Ledger.Row> = []
+    /** What a restart found, waiting its turn to be said: messages to offer to send again, and steps it couldn't confirm, to say so. */
+    const restarted: Array<{ readonly row: Ledger.Row; readonly offer: boolean }> = []
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
@@ -1264,52 +1266,61 @@ export const make = (options: {
       })
 
     /**
-     * Offers to send again the next message a restart found didn't get
-     * there, once nothing else is asked, he isn't dictating and yapd is on:
-     * one question at a time, each offered once. One that can't be offered by
-     * then, like one too long ago to send again, is said so, with why.
+     * Says the next thing a restart found, once nothing else is asked, he
+     * isn't dictating and yapd is on: one question at a time, each offered
+     * once. A message that didn't get there is offered to be sent again, or,
+     * when it can't be by then, like one too long ago, said so with why; a
+     * step it couldn't confirm is said once, with why.
      */
     const offering: Effect.Effect<void> = Effect.gen(function* () {
       while (asking === undefined && presses.length === 0) {
-        const row = lost.shift()
-        if (row === undefined) return
+        const next = restarted.shift()
+        if (next === undefined) return
         const power = yield* options.power
         // Off, it waits for him to be back.
         if (!power.on) {
-          lost.unshift(row)
+          restarted.unshift(next)
           return
         }
+        const { row, offer } = next
+        const kept = yield* ledger.get(row.commandId)
         // Sent again or taken back since it was found, there's nothing to offer or say.
-        if (!Option.exists(yield* ledger.get(row.commandId), Ledger.offerable)) {
-          yield* Effect.logInfo(`Not offering ${row.commandId} again, since something came of it meanwhile`)
+        if (offer ? !Option.exists(kept, Ledger.offerable) : Option.exists(kept, ({ state }) => state === "sent")) {
+          yield* Effect.logInfo(`Not saying anything of ${row.commandId}, since something came of it meanwhile`)
           continue
         }
         const went = Hands.went(row)
         const sent = Option.match(went, { onNone: () => "", onSome: ({ text }) => text })
         const ref = { machine: row.machine, id: row.thread }
         const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
-        const why = Option.isNone(yield* hands.still(row.commandId))
-          ? "It's too long ago to send it again now."
-          : sent === ""
-            ? "I can't read back what it said."
-            : undefined
         const said = yield* persona.lines
+        /** Said once, with why, and journaled with it. */
+        const telling = (line: string, reason: string) =>
+          Effect.gen(function* () {
+            yield* journal.write({
+              at: yield* Clock.currentTimeMillis,
+              kind: "action",
+              machine: row.machine,
+              thread: row.thread,
+              said: line,
+              utterance: row.utterance,
+              detail: { commandId: row.commandId, act: row.kind === "message" ? "Message" : row.kind, outcome: "Unknown", reason },
+            })
+            yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" }, { id: row.utterance, turns: power.turns })
+          })
+        if (!offer) {
+          const reason = row.reason ?? Hands.unconfirmable
+          const called = Option.fromNullable(listed?.called)
+          yield* telling(row.kind === "message" ? Hands.unoffered(said, called, reason) : Hands.unsure(row, said, called, reason), reason)
+          continue
+        }
+        const why = Option.isNone(yield* hands.still(row.commandId)) ? Hands.tooLong : sent === "" ? "I can't read back what it said." : undefined
         if (why !== undefined || listed === undefined) {
           const archived = Option.exists(yield* threads.find(ref), ({ archivedAt }) => archivedAt !== null)
           const reason = why ?? (archived ? "Its thread is archived now." : "I can't find its thread now.")
-          const line = Hands.unoffered(said, Option.fromNullable(listed?.called), reason)
           yield* hands.leave(row.commandId, reason)
           yield* Effect.logWarning(`Could not offer to send ${row.commandId} again: ${reason}`)
-          yield* journal.write({
-            at: yield* Clock.currentTimeMillis,
-            kind: "action",
-            machine: row.machine,
-            thread: row.thread,
-            said: line,
-            utterance: row.utterance,
-            detail: { commandId: row.commandId, act: "Message", outcome: "Unknown", reason },
-          })
-          yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" }, { id: row.utterance, turns: power.turns })
+          yield* telling(Hands.unoffered(said, Option.fromNullable(listed?.called), reason), reason)
           continue
         }
         const offered = yield* opening(
@@ -1329,7 +1340,7 @@ export const make = (options: {
         )
         yield* deliver(offered, { id: row.utterance, turns: power.turns })
       }
-    }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not offer to send it again", cause)))
+    }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not say what I found after restarting", cause)))
 
     /** Works out what he said and acts on it, then says what came of it, one request at a time. */
     const respond = (utterance: Utterance) =>
@@ -1425,33 +1436,15 @@ export const make = (options: {
       }),
       undelivered: (rows) =>
         Effect.gen(function* () {
-          lost.push(...rows)
+          restarted.push(...rows.map((row) => ({ row, offer: true })))
           yield* turn.withPermits(1)(offering)
         }),
       unconfirmed: (rows) =>
-        turn.withPermits(1)(
-          Effect.forEach(
-            rows,
-            (row) =>
-              Effect.gen(function* () {
-                const ref = { machine: row.machine, id: row.thread }
-                const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
-                const line = Hands.unsure(row, yield* persona.lines, Option.fromNullable(listed?.called))
-                const reason = row.reason ?? "I couldn't tell whether it went through before I restarted."
-                const { on, turns } = yield* options.power
-                yield* journal.write({
-                  at: yield* Clock.currentTimeMillis,
-                  kind: "action",
-                  machine: row.machine,
-                  thread: row.thread,
-                  ...(on ? { said: line } : {}),
-                  utterance: row.utterance,
-                  detail: { commandId: row.commandId, act: row.kind, outcome: "Unknown", reason },
-                })
-                yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" }, { id: row.utterance, turns })
-              }),
-            { discard: true },
-          ),
-        ).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not say what I couldn't confirm before restarting", cause))),
+        Effect.gen(function* () {
+          restarted.push(...rows.map((row) => ({ row, offer: false })))
+          yield* turn.withPermits(1)(offering)
+        }),
+      // In its turn, so turning yapd on never waits for it.
+      back: Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)),
     } satisfies Assistant["Type"]
   })

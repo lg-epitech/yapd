@@ -424,19 +424,72 @@ describe("Hands", () => {
         yield* prepare("u3", "stop")
         const { undelivered, unconfirmed } = yield* reconcile
         const states = yield* Effect.forEach(["u0", "u1", "u2", "u3"], (utterance) => Effect.map(ledger.get(`yapd:${utterance}:0`), Option.map(({ state }) => state)))
+        const called = Option.some("Migrate Tezos Integration")
         return {
           undelivered: undelivered.map(({ commandId }) => commandId),
-          unconfirmed: unconfirmed.map((row) => [row.commandId, Hands.unsure(row, lines, Option.some("Migrate Tezos Integration"))]),
+          unconfirmed: unconfirmed.map((row) => [
+            row.commandId,
+            row.kind === "message" ? Hands.unoffered(lines, called, row.reason ?? "") : Hands.unsure(row, lines, called, row.reason ?? undefined),
+          ]),
           states: states.map(Option.getOrNull),
+          restart: (yield* ledger.open(0)).map(({ commandId }) => commandId),
           dispatched: dispatched.length,
         }
       }),
     )
     expect(result.dispatched).toBe(0)
     expect(result.undelivered).toEqual(["yapd:u2:0"])
-    // The stop that can't be confirmed is said so, never done again.
-    expect(result.unconfirmed).toEqual([["yapd:u3:0", "Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir."]])
-    expect(result.states).toEqual(["abandoned", "sent", "unknown", "abandoned"])
+    // The stop that can't be confirmed, and the message too long ago to send again, are said so, never done again.
+    expect(result.unconfirmed).toEqual([
+      ["yapd:u0:0", "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir, and it's too long ago to send it again now."],
+      ["yapd:u3:0", "Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir."],
+    ])
+    // The old message stays as it may be, so the same words said again are asked about, but it isn't looked at again.
+    expect(result.states).toEqual(["unknown", "sent", "unknown", "abandoned"])
+    expect(result.restart).toEqual(["yapd:u2:0"])
+  })
+
+  test("a restart says what it couldn't look for, on a machine it can't reach or a thread it can't read, and new work it can't find, and sends nothing", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { reconcile, ledger, reads, dispatched } = yield* hands()
+        const prepare = (utterance: string, kind: Ledger.Kind, machine = "Rosie") =>
+          ledger.prepare({
+            utterance,
+            step: 0,
+            kind,
+            machine,
+            thread: kind === "start" ? "t-new" : tezos.id,
+            body: ({ messageId }) => (kind === "message" ? { _tag: "Send", text: "Use the fee table.", messageId, how: "now" } : {}),
+            message: kind !== "stop",
+          })
+        yield* prepare("u1", "message", "rig")
+        yield* prepare("u2", "message")
+        yield* prepare("u3", "start")
+        yield* TestClock.adjust("1 minute")
+        reads(false)
+        const { undelivered, unconfirmed } = yield* reconcile
+        return {
+          undelivered: undelivered.length,
+          unconfirmed: unconfirmed.map(({ commandId, reason }) => [commandId, reason]),
+          restart: yield* ledger.open(0),
+          dispatched: dispatched.length,
+        }
+      }),
+    )
+    expect(result.unconfirmed).toEqual([
+      ["yapd:u1:0", "I can't reach the threads on rig right now."],
+      ["yapd:u2:0", "I couldn't look for it just now: T3 Code is taking too long."],
+      ["yapd:u3:0", Hands.unconfirmable],
+    ])
+    expect(Hands.unoffered(lines, Option.none(), "I couldn't look for it just now: T3 Code is taking too long.")).toBe(
+      "Before I restarted, I couldn't confirm your message got there, sir, and I couldn't look for it just now: T3 Code is taking too long.",
+    )
+    expect(Hands.unsure({ kind: "start", body: {} }, lines, Option.none())).toBe("Before I restarted, I couldn't confirm the new work you asked for started, sir.")
+    expect(result.undelivered).toBe(0)
+    // Said once, never looked at again by a restart.
+    expect(result.restart).toEqual([])
+    expect(result.dispatched).toBe(0)
   })
 
   test("a different message to the same thread goes straight through", async () => {

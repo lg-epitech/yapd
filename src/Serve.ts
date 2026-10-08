@@ -65,7 +65,7 @@ const Relays = Layer.effect(
 const remembered = 365 * 24 * 60 * 60_000
 /** How long what yapd did to threads is kept. */
 const done = 90 * 24 * 60 * 60_000
-/** How long a restart waits for T3 Code to catch up before it looks at what never said what came of it, which is too old to look at by then. */
+/** How long a restart waits for T3 Code to catch up to look at what never said what came of it, which the next restart looks at otherwise. */
 const catchingUp = "15 minutes"
 
 export const serve = Effect.gen(function* () {
@@ -129,11 +129,12 @@ export const serve = Effect.gen(function* () {
   /**
    * Off, whatever hasn't started yet is dropped, from a dictation to what was
    * waiting to be said. The keys go before the dictations, so none starts in
-   * between, and all of it before the daemon waits on anything.
+   * between, and all of it before the daemon waits on anything. On, what a
+   * restart found while it was off is said.
    */
   const turn = (on: boolean) =>
     on
-      ? Effect.zipRight(daemon.turn(true), shortcut.toggle(true))
+      ? Effect.all([daemon.turn(true), shortcut.toggle(true), assistant.back], { discard: true })
       : Effect.all([shortcut.toggle(false), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
