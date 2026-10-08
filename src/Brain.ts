@@ -898,6 +898,12 @@ const line = (listed: Threads.Listed, now: number) =>
 const handleOf = (desk: Threads.Desk, machine: string | undefined, thread: string | undefined) =>
   thread === undefined ? undefined : desk.threads.find((listed) => listed.ref.id === thread && (machine === undefined || listed.ref.machine === machine))?.handle
 
+/** What yapd would have said of something it did, had he not turned it off since he asked for it, so it never said it. */
+export const unsaid = (kept: Pick<Kept, "detail">) => {
+  const detail = kept.detail as { readonly unsaid?: unknown } | null | undefined
+  return typeof detail === "object" && detail !== null && typeof detail.unsaid === "string" ? detail.unsaid : undefined
+}
+
 /** A journal entry as the model sees it. */
 const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   const handle = handleOf(desk, kept.machine, kept.thread)
@@ -905,6 +911,7 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   const where = about === "" ? "" : ` (${about})`
   const said = kept.said === undefined ? "" : fenced(kept.said)
   const text = kept.text === undefined ? "" : fenced(kept.text)
+  const untold = unsaid(kept)
   const what = (() => {
     switch (kept.kind) {
       case "update":
@@ -917,8 +924,10 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
         return `you started work${where}: ${said}`
       // What he had passed on to a thread, in the words it was sent, and what yapd told him of it, if it said anything.
       case "sent":
-        return `you sent his message to the thread${where}: ${text}${said === "" ? "" : `, and told him ${said}`}`
+        return `you sent his message to the thread${where}: ${text}${said === "" ? "" : `, and told him ${said}`}${untold === undefined ? "" : ", but never told him, since he turned you off"}`
       default:
+        // Done for him, but never said, since he turned yapd off meanwhile: what came of it is still what he asked for came to.
+        if (kept.kind === "action" && untold !== undefined) return `you did this${where}, but never told him, since he turned you off: ${fenced(untold)}`
         return `you said${where}: ${said}`
     }
   })()

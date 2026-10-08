@@ -227,6 +227,16 @@ describe("Brain", () => {
     expect(shown).toContain(`LATELY, oldest first:\n- 1 min ago, you sent his message to the thread (integration, ${handle}): «${message}»\n`)
   })
 
+  test("what was done for him that he was never told of, since he turned yapd off meanwhile, shows in what happened lately with what would have been said", () => {
+    const line = "I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could."
+    const stopped: Kept = { id: 1, at: now - 60_000, kind: "action", machine: "Rosie", thread: tezos.id, text: "Fix the loader instead.", detail: { reason: "yapd was turned off before I could.", unsaid: line } }
+    const sent: Kept = { id: 2, at: now - 60_000, kind: "sent", machine: "Rosie", thread: tezos.id, text: "Use the fee table.", detail: { unsaid: "On it, sir." } }
+    const shown = Brain.prompt(situation("What did you do to the Tezos one?", { lately: [stopped, sent] }), Option.none())
+    const handle = desk().threads.find(({ ref }) => ref.id === tezos.id)?.handle
+    expect(shown).toContain(`- 1 min ago, you did this (${handle}), but never told him, since he turned you off: «${line}»\n`)
+    expect(shown).toContain(`- 1 min ago, you sent his message to the thread (${handle}): «Use the fee table.», but never told him, since he turned you off\n`)
+  })
+
   test("usage read too long ago is never said or shown as what's used now, nor a window that has reset since", () => {
     const clock = (at: number) => new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
     const read = now - 6 * 60 * 60_000

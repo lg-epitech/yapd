@@ -449,8 +449,8 @@ export const make = (options: {
         // read, like an update his asking cut off: he's told of that as it's read, not twice.
         const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
         const missed = (yield* journal.unheard(since, unheard + coming.length)).filter(({ id }) => !coming.includes(id)).slice(-unheard)
-        // What was done, like a stop, but not the bookkeeping of questions closed, which says nothing.
-        const done = recent.filter(({ kind, said }) => kind !== "action" || said !== undefined).slice(-lately.most)
+        // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing.
+        const done = recent.filter((kept) => kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined).slice(-lately.most)
         return {
           utterance,
           subject: about,

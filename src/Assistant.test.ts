@@ -3084,13 +3084,16 @@ describe("Assistant", () => {
     }
   })
 
-  test("turned off and on while a turn stopped to be told something in its place is still showing as busy, it's let go of at once, never told even once it shows stopped, and why is noted, with nothing said", async () => {
+  test("turned off and on while a turn stopped to be told something in its place is still showing as busy, it's let go of at once, never told even once it shows stopped, and why is noted, with nothing said, for the model to know of", async () => {
     const toggled = (shows: boolean) =>
       run(
         Effect.gen(function* () {
           const others = [tezos]
-          const { dictate, toggle, wait, until, spoken, dispatched, journal } = yield* assistant(
-            (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
+          const { dictate, heard, toggle, wait, until, spoken, dispatched, journal, seen } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("What")
+                ? minaStatus(situation)
+                : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
             undefined,
             { others },
           )
@@ -3107,11 +3110,17 @@ describe("Assistant", () => {
           yield* wait(15)
           yield* Fiber.join(going)
           const kept = yield* journal.since(0, { kinds: ["sent", "action"] })
+          const said = spoken()
+          // Asked about it once yapd is on again, what was done is what the model goes by, though he was never told.
+          yield* heard({ heard: "What did you do to the Tezos one?", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 3 })
           return {
             over,
             dispatched: dispatched.map(({ type }) => type),
-            spoken: spoken(),
+            spoken: said,
             kept: kept.map(({ kind, said, detail }) => [kind, said, (detail as { reason?: string }).reason, (detail as { unsaid?: string }).unsaid]),
+            shown: Brain.prompt(seen.at(-1)!, Option.none()).includes(
+              "but never told him, since he turned you off: «I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could.»",
+            ),
           }
         }),
       )
@@ -3122,6 +3131,7 @@ describe("Assistant", () => {
         spoken: [],
         // Never noted as sent, nor as said, since it wasn't: what would have been said is kept aside.
         kept: [["action", undefined, Hands.switchedOff, "I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: yapd was turned off before I could."]],
+        shown: true,
       })
     }
   })
