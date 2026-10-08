@@ -337,6 +337,38 @@ describe("Hands", () => {
     expect(new Set(result.ids.map((pair) => pair.join(" ")))).toEqual(new Set(["yapd:u1:0 yapd:u1:0:m"]))
   })
 
+  test("a yes to sending again while the thread can't be found sends nothing, and leaves it to be offered under its own ids when the same words are said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, answering, becomes, ids } = yield* hands()
+        answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        yield* send("u1", "Use the fee table.")
+        // T3 Code's view lost the thread for a moment as he said yes.
+        becomes(thread("t-other"))
+        const refused = yield* again("yapd:u1:0")
+        becomes(thread(tezos.id))
+        answering(takes())
+        yield* TestClock.adjust("1 minute")
+        const said = yield* send("u2", "Use the fee table.")
+        const yes = said._tag === "Twin" ? yield* again(said.row.commandId) : said
+        return {
+          refused: refused._tag === "Refused" ? refused.reason : refused._tag,
+          said: said._tag === "Twin" ? [said.row.commandId, said.row.state] : said._tag,
+          yes: yes._tag,
+          ids: ids(),
+        }
+      }),
+    )
+    expect(result.refused).toBe("I can't find it among your threads right now.")
+    // Never "I won't risk sending it a third time": it only went once.
+    expect(result.said).toEqual(["yapd:u1:0", "unknown"])
+    expect(result.yes).toBe("Done")
+    expect(result.ids).toEqual([
+      ["yapd:u1:0", "yapd:u1:0:m"],
+      ["yapd:u1:0", "yapd:u1:0:m"],
+    ])
+  })
+
   test("a message taken back while it was still queued is new again when said again, whether or not T3 Code still shows it", async () => {
     const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
     const withdrawn = (forgotten: boolean) =>
