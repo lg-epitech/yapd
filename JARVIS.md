@@ -20,6 +20,10 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 - "Stop", "skip" or "enough" over an update skips it. "What did I miss?" leaves out what's about to be read anyway, and says how many are coming up.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
 
+## Needs you (built, waiting on review and its live check)
+
+- yapd hears from T3 Code itself and says each once, even across restarts: a thread waiting on you (an approval, a question, or a secret, which it never takes by voice), a run that failed and why, a usage limit and when it resets, and finished work from agents with no hooks. Hook updates are tied to their thread by its session id, so "it" means that thread. Answering approvals and questions by voice comes next.
+
 ## Faster
 
 - "Yes" or "go ahead" to an update that asked something, and "thanks" or "skip it", are handled without the model: about two seconds saved on the most common replies.
