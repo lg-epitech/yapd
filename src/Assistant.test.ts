@@ -195,6 +195,8 @@ const assistant = (
     readonly answer?: () => Answer
     /** How long the model takes, in seconds. */
     readonly thinking?: number
+    /** T3 Code never answers a launch it was sent, having started it or not. */
+    readonly unanswered?: "started" | "not started"
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -213,10 +215,14 @@ const assistant = (
         new Date(now - 26 * 60 * 60_000).toISOString(),
       ]),
     )
+    /** Threads T3 Code made since, without saying so. */
+    const appeared: Array<T3Live.Thread> = []
     const threads = yield* Threads.make({
       machine: "Rosie",
       live: {
-        view: Effect.succeed(Option.some({ ...view, threads: new Map([...view.threads, ...(given.others ?? []).map((other) => [other.id, other] as const)]) })),
+        view: Effect.sync(() =>
+          Option.some({ ...view, threads: new Map([...view.threads, ...[...(given.others ?? []), ...appeared].map((other) => [other.id, other] as const)]) }),
+        ),
         changes: Stream.never,
       },
       actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer))),
@@ -237,8 +243,13 @@ const assistant = (
           launcher: {
             catalog: Effect.succeed(catalog),
             start: (request) =>
-              // Like T3 Code preparing a worktree that never gets ready, which its launcher gives up on after six minutes.
-              (given.hanging === true ? Effect.never : Effect.sleep(`${given.launching ?? 0} seconds`)).pipe(
+              given.unanswered !== undefined
+                ? Effect.suspend(() => {
+                    if (given.unanswered === "started" && request.ids !== undefined) appeared.push(thread(request.ids.thread, "Fix the loader", "yapd"))
+                    return Effect.fail(new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started.", sent: true }))
+                  })
+                : // Like T3 Code preparing a worktree that never gets ready, which its launcher gives up on after six minutes.
+                  (given.hanging === true ? Effect.never : Effect.sleep(`${given.launching ?? 0} seconds`)).pipe(
                 Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started." }) }),
                 Effect.zipRight(
                   Effect.sync(() => {
@@ -253,6 +264,7 @@ const assistant = (
       ],
       rules: Effect.succeed(Option.none()),
       ledger,
+      find: (machine, id) => threads.find({ machine, id }),
       recent: Effect.succeed([]),
     }).pipe(
       Effect.provideService(Writer, {
@@ -809,6 +821,40 @@ describe("Assistant", () => {
     expect(result.told).toContainEqual(["started", "Starting the loader fix, which T3 Code is still getting ready."])
     expect(result.spoken).toEqual([...result.meanwhile, "About the loader fix: T3 Code is taking too long, so I don't know if it started."])
     expect(result.started).toEqual([])
+  })
+
+  test("new work T3 Code never answered for is looked for once: there, it's said as started; not there, as maybe started", async () => {
+    const launched = (unanswered: "started" | "not started") =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, wait, spoken, journal, ledger, seen } = yield* assistant(
+            (situation) => Brain.decision({ act: "start", text: situation.utterance.heard }),
+            () => written({ spoken: "Started in yapd, on Opus, without a worktree." }),
+            { unanswered },
+          )
+          yield* dictate("Start a thread in yapd to fix the loader.")
+          yield* wait(2)
+          const kept = yield* journal.since(0, { kinds: ["started"] })
+          const row = yield* ledger.latest("1 hour", { kinds: ["start"] })
+          // Asked again, what it's told shows it may be under way.
+          yield* dictate("Start a thread in yapd to fix the loader.")
+          return {
+            spoken: spoken().slice(0, 1),
+            started: kept.map(({ thread }) => thread === Option.getOrUndefined(row)?.thread),
+            state: Option.map(row, ({ state }) => state),
+            told: seen.at(-1)!.lately.map(({ said }) => said),
+          }
+        }),
+      )
+    const there = await launched("started")
+    expect(there.spoken).toEqual(["Started in yapd, on Opus, without a worktree."])
+    expect(there.started).toEqual([true])
+    expect(there.state).toEqual(Option.some("sent"))
+    const missing = await launched("not started")
+    expect(missing.spoken).toEqual(["About the loader fix: T3 Code is taking too long, so I don't know if it started."])
+    expect(missing.started).toEqual([])
+    expect(missing.state).toEqual(Option.some("unknown"))
+    expect(missing.told).toContain("About the loader fix: T3 Code is taking too long, so I don't know if it started.")
   })
 
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {

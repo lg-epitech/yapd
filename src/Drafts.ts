@@ -1,6 +1,7 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type * as Ledger from "./Ledger.ts"
+import type * as T3Live from "./T3Live.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
@@ -147,6 +148,19 @@ export interface Step {
   readonly step: number
 }
 
+/** How long T3 Code has to show new work it didn't answer for, before it's looked for. */
+const settling = "2 seconds"
+
+/** New work as T3 Code shows it, for one it started without saying so. */
+const seen = (thread: T3Live.Thread, resolved: Pick<Resolved, "project">): Started => ({
+  thread: thread.id,
+  project: resolved.project.name,
+  directory: thread.worktreePath ?? resolved.project.path,
+  branch: thread.branch,
+  model: thread.modelSelection.model,
+  worktree: thread.worktreePath !== null,
+})
+
 /** What's said when the prompt couldn't be written. */
 export const unwritten = "I couldn't write that up, so nothing started. What you said is in my log."
 
@@ -161,6 +175,8 @@ export const make = (options: {
   readonly expect?: (terms: ReadonlyArray<string>) => Effect.Effect<void>
   /** Where what's started is written down first, under the ids it's asked for with. */
   readonly ledger?: Ledger.Ledger["Type"]
+  /** A thread as T3 Code has it now, to look once for new work that was asked for and never said whether it started. */
+  readonly find?: (machine: string, thread: string) => Effect.Effect<Option.Option<T3Live.Thread>>
 }) =>
   Effect.gen(function* () {
     const writer = yield* Writer
@@ -250,12 +266,18 @@ export const make = (options: {
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
         const launching = yield* Effect.gen(function* () {
           const outcome = yield* Effect.either(machine.launcher.start(request))
-          if (Either.isLeft(outcome)) {
+          // Asked for and not answered, it may have started all the same: it's looked for once, under the id it was asked for with.
+          const found =
+            Either.isLeft(outcome) && outcome.left.sent === true && request.ids !== undefined && options.find !== undefined
+              ? yield* Effect.zipRight(Effect.sleep(settling), options.find(machine.name, request.ids.thread))
+              : Option.none<T3Live.Thread>()
+          if (Either.isLeft(outcome) && Option.isNone(found)) {
             yield* Effect.logWarning("Could not start", outcome.left)
             yield* settle(outcome.left.sent === true ? "unknown" : "failed", outcome.left.reason)
             return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
           }
-          const started = outcome.right
+          const started = Either.isRight(outcome) ? outcome.right : seen(Option.getOrThrow(found), resolved)
+          if (Either.isLeft(outcome)) yield* Effect.logInfo(`Found ${started.thread} after all: ${outcome.left.reason}`)
           yield* settle("sent")
           yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
           const begun = {

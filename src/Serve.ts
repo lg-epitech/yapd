@@ -78,14 +78,6 @@ export const serve = Effect.gen(function* () {
   yield* Effect.forkScoped(
     Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.zipRight(journal.prune(now - remembered), ledger.prune(now - done))),
   )
-  const drafts = yield* Drafts.make({
-    machines: everywhere,
-    rules: Preferences.load(preferences),
-    recent: daemon.recent,
-    expect: (yield* Vocabulary).expect,
-    ledger,
-  })
-  yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
   const token = yield* Config.t3codeToken
   const live = yield* T3Live.T3Live
   const threads = yield* Threads.make({
@@ -97,6 +89,15 @@ export const serve = Effect.gen(function* () {
     journal,
     store: yield* Store.Store,
   })
+  const drafts = yield* Drafts.make({
+    machines: everywhere,
+    rules: Preferences.load(preferences),
+    recent: daemon.recent,
+    expect: (yield* Vocabulary).expect,
+    ledger,
+    find: (machine, id) => threads.find({ machine, id }),
+  })
+  yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
   const hands = Hands.make({ threads, ledger, started })
   const assistant = yield* Assistant.make({
     threads,

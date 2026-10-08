@@ -752,7 +752,7 @@ const choosing = `Choosing a thread:
 - Fill "machine" only when he says where the thread runs, like "on rig". A machine the work is about, like a thread fixing rig's tunnel, doesn't count.
 - If nothing in THREADS fits but he named something specific, use "find".
 - New work that refers to an existing thread, like "look at what I did for the billing export and start another thread doing the same for invoices", is "start", not "send".
-- If THREADS or LATELY shows you started the same work in the last 30 minutes, don't start it again: "answer" that it's already under way, naming it.`
+- If THREADS or LATELY shows you started the same work in the last 30 minutes, or may have, as when T3 Code didn't say whether it started, don't start it again: "answer" that it's already under way, or may be, naming it.`
 
 const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".
 When OPEN asks yes or no to doing something, it says what a yes does. A plain yes is that act on that thread, with "text" empty. A no is "dismiss". A no with something else instead, like "no, the Mina one" or "no, tell it to use the other table", is that something else, decided in full, with "pending" "answers": yapd does that and not what it asked.`
