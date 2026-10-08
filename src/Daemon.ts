@@ -475,7 +475,10 @@ export const make = Effect.gen(function* () {
    * update unless the session has moved on or been answered since, even by a
    * follow-up that's still on its way, and a notice unless it has been dealt
    * with. Never a question yapd asked: what's dictated is the answer to it, or
-   * takes its place.
+   * takes its place. Nor an answer: talking over it, the user moved on, and
+   * "say that again" still has it. What came of something they asked to be
+   * done, like work that started, they still need to hear, but after whatever
+   * the dictation brings, so it goes back as a notice of yapd's own.
    */
   const keep = (ready: Inbox.Entry, dealtWith: boolean, turns: number) =>
     Effect.gen(function* () {
@@ -485,14 +488,19 @@ export const make = Effect.gen(function* () {
           ? activity.get(ready.update.session) !== generations.get(ready.update) ||
             followed.get(ready.update.session)?.current !== undefined ||
             (yield* conversation.sending(ready.update.session, ready.update))
-          : dealtWith || ready.notice.open !== undefined
+          : dealtWith || ready.notice.open !== undefined || ready.notice.kind === "answer"
       if (over) return false
+      const now = yield* Clock.currentTimeMillis
+      const again: Inbox.Entry =
+        "notice" in ready && ready.notice.kind === "done"
+          ? { ...ready, priority: "needs-you", arrivedAt: now, notice: { ...ready.notice, kind: "notice" } }
+          : ready
       // Not if yapd was turned off meanwhile, which dropped everything waiting.
       return yield* STM.commit(
         STM.gen(function* () {
           const current = yield* TRef.get(inbox)
-          if ((yield* TRef.get(power)).turns !== turns || current.has(ready.session)) return false
-          yield* TRef.set(inbox, Inbox.add(current, ready))
+          if ((yield* TRef.get(power)).turns !== turns || current.has(again.session)) return false
+          yield* TRef.set(inbox, Inbox.add(current, again))
           return true
         }),
       )

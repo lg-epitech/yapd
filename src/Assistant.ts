@@ -796,7 +796,7 @@ export const make = (options: {
         yield* options.tell(
           {
             id: mint(at, "a"),
-            kind: open === undefined ? "answer" : "question",
+            kind: open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer",
             priority: "needs-you",
             spoken: outcome.say,
             at,

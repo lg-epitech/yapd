@@ -28,10 +28,11 @@ export interface Replay {
 export interface Notice {
   readonly id: string
   /**
-   * An answer to what the user asked, or a question about it, which they're
+   * An answer to what the user asked, what came of something they asked to
+   * be done, like work that started, or a question about it, which they're
    * waiting for, so it goes before anything else; or a notice of yapd's own.
    */
-  readonly kind: "answer" | "question" | "notice"
+  readonly kind: "answer" | "done" | "question" | "notice"
   /** The open question it asks, which is never asked again once it's cut off. */
   readonly open?: string
   readonly priority: Exclude<Priority, "trivial">

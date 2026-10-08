@@ -157,13 +157,13 @@ const make = (says?: string, options: {
   const notice = (
     id: string,
     spoken: string,
-    options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean; readonly answer?: boolean } = {},
+    options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean; readonly answer?: boolean; readonly done?: boolean } = {},
   ) =>
     tell({
       id,
-      kind: options.question !== undefined ? "question" : options.answer === true ? "answer" : "notice",
+      kind: options.question !== undefined ? "question" : options.answer === true ? "answer" : options.done === true ? "done" : "notice",
       ...(options.question === undefined ? {} : { open: `open-${id}` }),
-      priority: options.question !== undefined || options.needsYou === true || options.answer === true ? "needs-you" : "done",
+      priority: options.question !== undefined || options.needsYou === true || options.answer === true || options.done === true ? "needs-you" : "done",
       spoken,
       at: 0,
       stale: Effect.succeed(options.stale === true),
@@ -275,6 +275,41 @@ describe("Daemon", () => {
     )
     expect(result.meanwhile).toEqual(["yapd. The PR is ready."])
     expect(result.played).toEqual(["yapd. The PR is ready.", "Four on the go, sir.", "yapd. The PR is ready."])
+  })
+
+  test("an answer cut off by a follow-up isn't said again, and work that started is said after the new answer", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { wait, dictate, notice, awaiting, played } = yield* daemon
+        /** He cuts in on what's being said by dictating for a while, and it takes a few seconds to answer. */
+        const follow = (spoken: string) =>
+          Effect.gen(function* () {
+            const arrived = yield* awaiting
+            const dictation = yield* dictate
+            yield* wait(30)
+            yield* Scope.close(dictation, Exit.void)
+            yield* wait(4)
+            yield* notice(spoken, spoken, { answer: true })
+            yield* arrived
+            yield* wait(11)
+            yield* wait(11)
+          })
+        yield* notice("status", "Four threads are on the go, sir, and the Tezos migration is the busiest.", { answer: true })
+        yield* wait(2)
+        yield* follow("The Tezos migration is running its tests, sir.")
+        yield* notice("started", "Started in yapd, on Fable, in a worktree.", { done: true })
+        yield* wait(2)
+        yield* follow("Nothing needs you right now, sir.")
+        return [...played]
+      }),
+    )
+    expect(result).toEqual([
+      "Four threads are on the go, sir, and the Tezos migration is the busiest.",
+      "The Tezos migration is running its tests, sir.",
+      "Started in yapd, on Fable, in a worktree.",
+      "Nothing needs you right now, sir.",
+      "Started in yapd, on Fable, in a worktree.",
+    ])
   })
 
   test("turns the microphone off once a dictation lets go of it, never while it records", async () => {
