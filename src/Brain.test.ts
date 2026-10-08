@@ -4,6 +4,7 @@ import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
+import * as Hands from "./Hands.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -205,6 +206,21 @@ describe("Brain", () => {
       Brain.used(usage, "how much claude have i got left", lines, now),
       Brain.used(usage, "usage", lines, now),
       Brain.used(Option.none(), "usage", lines, now),
+      Brain.confirming("stop Migrate Tezos Integration", lines, []),
+      Brain.reworded({ kind: "resend", asked: "Send it again?", about: "send that to Migrate Tezos Integration again" }, [], lines),
+      Brain.dropped({ kind: "confirm", about: "stop Migrate Tezos Integration" }, lines),
+      Brain.left({ kind: "offer", about: "tell Migrate Tezos Integration to ignore that" }, lines),
+      Hands.done({ _tag: "Stop", to: ref(tezos) }, "now", lines, Option.some("Migrate Tezos Integration")),
+      Hands.failed(
+        { _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" },
+        { _tag: "Refused", reason: Hands.plainly(`Thread ${tezos.id} is a subagent thread and can't take messages; command yapd:u1:0 was refused`) },
+        lines,
+        Option.none(),
+      ),
+      Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }, lines, Option.some("Migrate Tezos Integration")),
+      Hands.twice(now - 54_000, now, lines, Option.none()),
+      Hands.read(lines, Option.some("Migrate Tezos Integration")),
+      Hands.lost(lines, Option.none()),
       ...Persona.sayable(Persona.plain),
       Conversation.movedOn,
       Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
