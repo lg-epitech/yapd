@@ -627,6 +627,24 @@ export const face = (card: Card): Server.Card => ({
 export const pointer = (card: Option.Option<Card>): Server.Showing | null =>
   Option.match(card, { onNone: () => null, onSome: ({ id, kind, title, at }) => ({ id, kind, title, at: new Date(at).toISOString() }) })
 
+/** The state as `/state` gives it, with the card that's up, then each time either changes. */
+export const stated = (state: Stream.Stream<Omit<Server.State, "showing">>, show: Show["Type"]): Stream.Stream<Server.State> =>
+  Stream.zipLatestWith(state, show.showing, (state, showing) => ({ ...state, showing: pointer(showing) }))
+
+/** What the API serves of the cards, the threads on `desk` and the journal's pages, and how it counts a UI that shows cards as watching. */
+export const served = (
+  show: Show["Type"],
+  desk: Effect.Effect<Threads.Desk>,
+  page: (page: Server.Page) => Effect.Effect<ReadonlyArray<Kept>>,
+): Pick<Server.Api, "card" | "hide" | "back" | "threads" | "journal" | "watch"> => ({
+  card: (id) => Effect.map(show.card(id), Option.map(face)),
+  hide: Effect.asVoid(show.hide),
+  back: show.back,
+  threads: Effect.map(desk, listing),
+  journal: (asked) => Effect.map(page(asked), (kept) => kept.map(entry)),
+  watch: show.watch,
+})
+
 // ---------------------------------------------------------------- the service
 
 /** How many cards are kept to fetch again, like the one before the one that's up. */

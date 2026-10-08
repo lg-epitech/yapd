@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Option, Schema, TestClock, TestContext } from "effect"
+import { Effect, Fiber, Option, Schema, Stream, TestClock, TestContext } from "effect"
 import type * as Brain from "./Brain.ts"
+import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
+import * as Server from "./Server.ts"
 import * as Show from "./Show.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
@@ -132,6 +134,99 @@ describe("Show", () => {
     expect(tamed("[https://gіthub.com/pull/7](https://gіthub.com/pull/7)")).toBe("[https://gіthub.com/pull/7](<https://xn--gthub-n2e.com/pull/7>) (xn--gthub-n2e.com)")
     // Words that are the address show where it goes already.
     expect(tamed(`PR is up: [${pr}](${pr}) and [https://ok.example](https://ok.example)`)).toBe(`PR is up: [${pr}](<${pr}>) and [https://ok.example](<https://ok.example/>)`)
+  })
+
+  test("points at the card that's up, and serves a card and a journal entry, as the API documents them", () => {
+    const card: Show.Card = {
+      id: "c1",
+      kind: "pr",
+      title: "Migrate Tezos",
+      markdown: "**#412** in lg-epitech/integration, open",
+      url: "https://github.com/lg-epitech/integration/pull/412",
+      caption: "Checks pass, sir.",
+      at: now,
+    }
+    // To the millisecond, which the menu bar app reads it to.
+    expect(Show.pointer(Option.some(card))).toStrictEqual({ id: "c1", kind: "pr", title: "Migrate Tezos", at: "2026-10-08T22:00:00.000Z" })
+    expect(Show.pointer(Option.none())).toBeNull()
+    expect(Show.face(card)).toStrictEqual({ ...card, at: "2026-10-08T22:00:00.000Z" })
+    const { url: _url, caption: _caption, ...bare } = card
+    expect(Show.face(bare)).toStrictEqual({ ...bare, at: "2026-10-08T22:00:00.000Z" })
+    const heard: Kept = { id: 7, at: now, kind: "update", machine: "Rosie", project: "yapd", thread: waiting.id, said: "yapd. The tests pass.", heardAt: now + 9_000 }
+    expect(Show.entry(heard)).toStrictEqual({
+      id: 7,
+      at: "2026-10-08T22:00:00.000Z",
+      kind: "update",
+      machine: "Rosie",
+      project: "yapd",
+      thread: waiting.id,
+      said: "yapd. The tests pass.",
+      heard: "2026-10-08T22:00:09.000Z",
+    })
+    // Only what's documented, never where it ran on disk or what's kept besides.
+    const typed: Kept = { id: 8, at: now, kind: "dictation", text: "Who needs me?", utterance: "u1", directory: "/code/yapd", key: "k", detail: { via: "typed" } }
+    expect(Show.entry(typed)).toStrictEqual({ id: 8, at: "2026-10-08T22:00:00.000Z", kind: "dictation", text: "Who needs me?", utterance: "u1" })
+  })
+
+  test("the API serves the card that's up, the cards, the threads and the journal, and counts only a stream that asks for cards as watching", async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const asked: Array<Server.Page> = []
+          const kept: Kept = { id: 7, at: now, kind: "update", project: "yapd", said: "yapd. The tests pass.", heardAt: now + 9_000 }
+          const desk: Threads.Desk = { threads: [pulled("https://github.com/lg-epitech/yapd/pull/412")], away: [] }
+          const server = yield* Server.serve(0, {
+            handle: () => Effect.succeed(undefined),
+            state: Show.stated(Stream.succeed({ on: true, activity: "idle" as const, updates: [] }), show),
+            turn: () => Effect.void,
+            replay: () => Effect.succeed("unknown" as const),
+            utter: () => Effect.succeed(Option.none()),
+            ...Show.served(show, Effect.succeed(desk), (page) =>
+              Effect.sync(() => {
+                asked.push(page)
+                return [kept]
+              }),
+            ),
+          })
+          const url = `http://127.0.0.1:${server.port}`
+          const json = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init).then((response) => response.json()))
+          const before = yield* json("/state")
+          const card = yield* show.put({ ...Show.said("Two running.", Option.none()), caption: "Two running, sir." }, "Two running, sir.")
+          const state = (yield* json("/state")) as Server.State
+          const served = yield* json(`/cards/${card.id}`)
+          const threads = yield* json("/threads")
+          const journal = yield* json("/journal?limit=5")
+          yield* Effect.promise(() => fetch(`${url}/cards/current`, { method: "DELETE" }))
+          const after = yield* json("/state")
+
+          // A status bar module, then the menu bar app, until it quits.
+          const following = (path: string) =>
+            Effect.gen(function* () {
+              const gone = new AbortController()
+              const response = yield* Effect.promise(() => fetch(`${url}${path}`, { signal: gone.signal }))
+              yield* Effect.promise(() => response.body!.getReader().read())
+              return { watched: yield* show.watched, gone: Effect.sync(() => gone.abort()) }
+            })
+          const plain = yield* following("/state/stream")
+          yield* plain.gone
+          const app = yield* following("/state/stream?cards")
+          yield* app.gone
+          let left = yield* show.watched
+          for (let tries = 0; tries < 100 && left; tries++) left = yield* Effect.zipRight(Effect.promise(() => Bun.sleep(10)), show.watched)
+
+          expect(before).toEqual({ on: true, activity: "idle", updates: [], showing: null })
+          expect(state).toEqual({ on: true, activity: "idle", updates: [], showing: { id: card.id, kind: "said", title: "What I said", at: new Date(card.at).toISOString() } })
+          expect(state.showing?.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/)
+          expect(served).toEqual({ id: card.id, kind: "said", title: "What I said", markdown: card.markdown, caption: "Two running, sir.", at: new Date(card.at).toISOString() })
+          expect(threads).toEqual(Show.listing(desk))
+          expect(journal).toEqual([{ id: 7, at: "2026-10-08T22:00:00.000Z", kind: "update", project: "yapd", said: "yapd. The tests pass.", heard: "2026-10-08T22:00:09.000Z" }])
+          expect(asked).toEqual([{ most: 5, kinds: [] }])
+          expect(after).toMatchObject({ showing: null })
+          expect({ plain: plain.watched, app: app.watched, left }).toEqual({ plain: false, app: true, left: false })
+        }),
+      ),
+    )
   })
 
   test("a card put up while no app watched isn't taken to be on his screen once one does", async () => {

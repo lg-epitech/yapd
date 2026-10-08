@@ -130,8 +130,8 @@ export const serve = Effect.gen(function* () {
   const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
-  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, show.showing).pipe(
-    Stream.map(([state, activity, showing]): Server.State => ({
+  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes).pipe(
+    Stream.map(([state, activity]) => ({
       on: state.on,
       activity,
       updates: state.heard.map(({ id, update }) => ({
@@ -140,12 +140,11 @@ export const serve = Effect.gen(function* () {
         text: update.spoken,
         at: new Date(update.at).toISOString(),
       })),
-      showing: Show.pointer(showing),
     })),
   )
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
-    state,
+    state: Show.stated(state, show),
     // One at a time, so what's remembered is what's in effect.
     turn: (on) =>
       Effect.zipRight(settings.remember(on), turn(on)).pipe(
@@ -155,13 +154,8 @@ export const serve = Effect.gen(function* () {
     replay: daemon.replay,
     // Typed words were never faint, so nothing typed is taken for Whisper hearing words in silence.
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
-    card: (id) => Effect.map(show.card(id), Option.map(Show.face)),
-    hide: Effect.asVoid(show.hide),
-    back: show.back,
     // Every thread it can see, not only the likeliest, in the order the desk puts them.
-    threads: Effect.map(threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), Show.listing),
-    journal: (page) => Effect.map(journal.page(page), (kept) => kept.map(Show.entry)),
-    watch: show.watch,
+    ...Show.served(show, threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), journal.page),
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns }) => assistant.prepare(press, turns)))
