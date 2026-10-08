@@ -1226,6 +1226,42 @@ describe("Assistant", () => {
     expect(result.states).toEqual(["unknown", "sent"])
   })
 
+  test("the first step is said at once when the rest takes longer than a second to work out, and the rest is said only if it doesn't go", async () => {
+    const twoSteps = (refusing: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { heard, wait, flush, spoken, dispatched } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Stop")
+                ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest: "tell the Mina one to use its fee table" })
+                : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
+            undefined,
+            {
+              thinking: 3,
+              answer: () => (payload, bounded) =>
+                refusing && payload.type === "message.dispatch"
+                  ? Effect.fail(new T3CodeServer.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "The provider is offline." }))
+                  : takes(payload, bounded),
+            },
+          )
+          const dictated = yield* Effect.fork(heard({ heard: "Stop the Tezos one and tell the Mina one to use its fee table.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+          yield* flush
+          yield* wait(3)
+          yield* wait(1)
+          yield* Fiber.join(dictated)
+          const first = { spoken: spoken(), dispatched: dispatched.length }
+          yield* wait(2)
+          return { first, spoken: spoken(), dispatched: dispatched.map(({ type }) => type) }
+        }),
+      )
+    const done = await twoSteps(false)
+    expect(done.first).toEqual({ spoken: ["Stopped, sir: Migrate Tezos Integration."], dispatched: 1 })
+    expect(done.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration."])
+    expect(done.dispatched).toEqual(["run.interrupt", "message.dispatch"])
+    const refused = await twoSteps(true)
+    expect(refused.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration.", "That didn't go to Open Mina SSV2 Bug Tickets, sir: the provider is offline."])
+  })
+
   test("the rest of a request follows an answer, and a yes to sending again, and is said as left after starting new work", async () => {
     const rest = "tell the Mina one to use its fee table"
     const toMina = (situation: Brain.Situation) => Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })

@@ -156,6 +156,19 @@ const longest = 6 * 60_000
 const scratchable = "2 minutes"
 /** Steps one request can take at most, so a "rest" that never runs out can't go on for ever. */
 const steps = 4
+/** How long the rest of a request has to be worked out for what comes of it to be said in the same breath as the step before. */
+const joining = "1 second"
+
+/**
+ * Which step of its request something is, whether it's the same words sent
+ * again on his yes, and whether it's done quietly: the step before was said
+ * on its own already, so only what didn't go, or a question, is said of it.
+ */
+interface Stepping {
+  readonly step: number
+  readonly twice: boolean
+  readonly quietly?: boolean
+}
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
 
@@ -752,7 +765,7 @@ export const make = (options: {
       outcome: Hands.Outcome,
       thought: Thought,
       said: Lines,
-      at: { readonly step: number; readonly commandId: string },
+      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean },
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { utterance, situation, decision } = thought
@@ -784,8 +797,9 @@ export const make = (options: {
         const base = { utterance: utterance.id, heard: utterance.heard, material: Option.none(), candidates: ref === undefined ? [] : [ref] }
         switch (outcome._tag) {
           case "Done": {
-            const line = Hands.done(act, outcome.how, said, called)
-            yield* noting(line, { how: outcome.how })
+            // Gone as asked after a step said on its own, it's noted and not said.
+            const line = at.quietly === true ? "" : Hands.done(act, outcome.how, said, called)
+            yield* noting(line === "" ? undefined : line, { how: outcome.how })
             const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
             // Taking a stop back is two steps: letting go of the queue, then the message to carry on.
             return yield* onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" ? 2 : 1), said)
@@ -837,19 +851,39 @@ export const make = (options: {
       Effect.gen(function* () {
         const utterance: Utterance = { ...thought.utterance, heard: thought.decision.rest }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
-        const next = yield* think(utterance, { _tag: "Answer", said: first.say, about: on }, [
-          { speaker: "user", text: thought.utterance.heard },
-          { speaker: "yapd", text: first.say },
-        ])
+        // Working it out has no effect, so it carries on whether or not what's said waits for it.
+        const thinking = yield* Effect.forkIn(
+          think(utterance, { _tag: "Answer", said: first.say, about: on }, [
+            { speaker: "user", text: thought.utterance.heard },
+            { speaker: "yapd", text: first.say },
+          ]),
+          scope,
+        )
+        const ready = yield* Effect.timeoutOption(Fiber.join(thinking), joining)
+        if (Option.isSome(ready)) return yield* then(ready.value, first, step, said, false)
+        // Not worked out in time, the step before is said now, on its own, and the rest is done once it is, one request at a time as ever.
+        yield* Effect.logInfo("Saying what's done so far, while the rest is worked out")
+        yield* background(
+          Fiber.join(thinking).pipe(
+            Effect.flatMap((next) => turn.withPermits(1)(Effect.flatMap(then(next, quiet(first.subject), step, said, true), (after) => deliver(after, thought.utterance)))),
+            Effect.annotateLogs({ utterance: thought.utterance.id }),
+          ),
+        )
+        return first
+      })
+
+    /** What comes of the rest of a request, worked out, said with what was said of the step before. `quietly` when that was said already. */
+    const then = (next: Thought, first: Outcome, step: number, said: Lines, quietly: boolean): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
         if (next.source === "failed") return { ...first, say: joined(first.say, `I couldn't work out the rest${addressed(said)}.`, said) }
         if (next.decision.act === "dismiss" || next.decision.act === "resume") return first
-        const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, { step, twice: false })
+        const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, { step, twice: false, quietly })
         if (after.say === "") return first
         return { ...after, say: joined(first.say, after.say, said) }
       })
 
     /** Changes a thread as decided, once, unless yapd was turned off and on since it was said (I8). */
-    const write = (plan: Brain.Plan, thought: Thought, said: Lines, at: { readonly step: number; readonly twice: boolean }) =>
+    const write = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping) =>
       Effect.gen(function* () {
         const { utterance } = thought
         const power = yield* options.power
@@ -860,7 +894,11 @@ export const make = (options: {
         const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted)
         if (act === undefined) return reply(said.cantTell, thought.subject)
         const outcome = yield* hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice })
-        return yield* told(act, outcome, thought, said, { step: at.step, commandId: Ledger.ids(utterance.id, at.step, false).commandId })
+        return yield* told(act, outcome, thought, said, {
+          step: at.step,
+          commandId: Ledger.ids(utterance.id, at.step, false).commandId,
+          ...(at.quietly === true ? { quietly: true } : {}),
+        })
       })
 
     /**
@@ -915,7 +953,7 @@ export const make = (options: {
       })
 
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
-    const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: { readonly step: number; readonly twice: boolean } = { step: 0, twice: false }): Effect.Effect<Outcome> => {
+    const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping = { step: 0, twice: false }): Effect.Effect<Outcome> => {
       const { decision, target } = plan
       switch (decision.act) {
         case "send":
@@ -956,7 +994,7 @@ export const make = (options: {
       checked: Brain.Checked,
       thought: Thought,
       said: Lines,
-      at: { readonly step: number; readonly twice: boolean } = { step: 0, twice: false },
+      at: Stepping = { step: 0, twice: false },
     ): Effect.Effect<Outcome> => {
       switch (checked._tag) {
         case "Say":
