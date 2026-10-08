@@ -1101,6 +1101,11 @@ export const make = (options: {
               news: Hands.readAlready(said, called),
             })
           }
+          case "Moot": {
+            // Dealt with in T3 Code meanwhile: nothing's done, and nothing's said, but the rest of the request still is.
+            yield* noting(undefined, { reason: "It no longer waited on it." })
+            return yield* free(onward(thought, quiet(subject), Option.fromNullable(ref), at.step + 1, said))
+          }
           default: {
             const line = Hands.failed(act, outcome, said, called)
             yield* noting(line, { reason: outcome.reason, ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }) })
