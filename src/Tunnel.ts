@@ -1,4 +1,4 @@
-import { Deferred, Duration, Effect, Either, Option, Redacted, Schema } from "effect"
+import { Deferred, Duration, Effect, Either, Exit, Option, Redacted, Schema } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import * as Home from "./Home.ts"
@@ -108,6 +108,15 @@ const again = (failures: number) => Duration.seconds(Math.min(30, 2 ** Math.max(
 /** How often the connection is checked on. SSH gives up on one that's gone quiet after 45 seconds. */
 const every = "5 seconds"
 
+/** A port here forwarded to one on the machine, through the connection. */
+interface Forward {
+  readonly local: number
+  readonly remote: number
+}
+
+/** A forward as `ssh -L` takes it, only ever on 127.0.0.1 at both ends. */
+const spec = ({ local, remote }: Forward) => `127.0.0.1:${local}:127.0.0.1:${remote}`
+
 /** The port an `http://` origin listens on. */
 const port = (origin: string) => {
   try {
@@ -136,7 +145,9 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
 
     /** Whether the connection is known to be open. */
     let open = false
-    let forwarded: { readonly local: number; readonly remote: number } | undefined
+    let forwarded: Forward | undefined
+    /** Forwards the connection may still have that lead nowhere, to cancel before opening another. */
+    const stale: Array<Forward> = []
     let located: Located | undefined
     /** Unset until the first try is over, so starting up isn't taken for an outage. */
     let status: Status | undefined
@@ -159,10 +170,11 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
       ),
     )
 
-    /** Forgets the connection that's gone, and the forward that went with it. */
+    /** Forgets the connection that's gone, and the forwards that went with it. */
     const forget = () => {
       open = false
       forwarded = undefined
+      stale.length = 0
     }
 
     /** Fails, with the reason to say, once SSH says the connection is gone. When it can't say, it's asked again next time. */
@@ -202,6 +214,35 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
       open = true
     })
 
+    /**
+     * Forwards a free port here to `remote` there, in place of the forward
+     * there was. Each forward is kept track of from the moment SSH is asked to
+     * open it until cancelling it has been tried, so whatever asked being
+     * interrupted can't leave one listening that nothing will cancel, or have
+     * the next try open another beside it. Those to cancel go before another
+     * is opened: one that may never have opened has a port the new one could
+     * get, and cancelling it after would close the new one.
+     */
+    const reforward = (remote: number) =>
+      Effect.gen(function* () {
+        // T3 Code there moved to another port: the forward there was leads nowhere.
+        if (forwarded !== undefined) stale.push(forwarded)
+        forwarded = undefined
+        for (let old = stale[0]; old !== undefined; old = stale[0]) {
+          yield* Effect.ignore(control("-O", "cancel", "-L", spec(old)))
+          stale.shift()
+        }
+        const fresh = { local: yield* free, remote }
+        // When asking fails or is cut short, SSH may have opened it all the same.
+        yield* Effect.onExit(control("-O", "forward", "-L", spec(fresh)), (exit) =>
+          Effect.sync(() => {
+            if (Exit.isSuccess(exit)) forwarded = fresh
+            else stale.push(fresh)
+          }),
+        )
+        return fresh
+      })
+
     /** Asks yapd there where its T3 Code listens and for the token, and forwards a port here to it. */
     const look = Effect.gen(function* () {
       const garbled = trouble(`yapd on ${host} answered in a way I don't understand.`)
@@ -225,14 +266,8 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
       }
       const remote = origin === undefined ? undefined : port(origin)
       if (remote === undefined || token === undefined || token === "") return yield* garbled
-      if (forwarded?.remote !== remote) {
-        const local = yield* free
-        yield* control("-O", "forward", "-L", `127.0.0.1:${local}:127.0.0.1:${remote}`)
-        // T3 Code there moved to another port: the old one leads nowhere.
-        if (forwarded !== undefined) yield* Effect.ignore(control("-O", "cancel", "-L", `127.0.0.1:${forwarded.local}:127.0.0.1:${forwarded.remote}`))
-        forwarded = { local, remote }
-      }
-      located = { server: { origin: `http://127.0.0.1:${forwarded.local}` }, token: Redacted.make(token) }
+      const { local } = forwarded?.remote === remote ? forwarded : yield* reforward(remote)
+      located = { server: { origin: `http://127.0.0.1:${local}` }, token: Redacted.make(token) }
       return located
     })
 

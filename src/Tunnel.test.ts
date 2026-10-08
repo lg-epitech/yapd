@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, type Duration, Effect, Exit, Layer, Logger, Option, Redacted, Scope, TestClock, TestContext } from "effect"
+import { Clock, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Scope, TestClock, TestContext } from "effect"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ProcessError } from "./Process.ts"
@@ -29,10 +29,18 @@ const machine = (
   const answers = [...(options.answers ?? [])]
   /** Checks on the connection SSH can't answer, in turn: it couldn't start, or it hangs. */
   const unsure: Array<"failed" | "hung"> = []
+  /** How many of the next cancels of a forward hang. */
+  let stalled = 0
+  /** The forwards listening here, as `-L` gives them, which go with the connection. */
+  const forwards = new Set<string>()
   const calls: Array<string> = []
   /** When each try to connect was made, by the test's clock. */
   const tries: Array<number> = []
   let alive = options.open ?? false
+  const close = () => {
+    alive = false
+    forwards.clear()
+  }
   let tokens = 0
   const exec: Exec = (command) =>
     Effect.gen(function* () {
@@ -43,8 +51,16 @@ const machine = (
         const trouble = command.includes("check") ? unsure.shift() : undefined
         if (trouble === "hung") return yield* Effect.never
         if (trouble === "failed") return yield* fail(-1, "posix_spawn: Resource temporarily unavailable")
-        if (command.includes("exit")) alive = false
-        return alive ? "" : yield* fail(255, `Control socket connect(${command[2]}): No such file or directory`)
+        if (command.includes("cancel") && stalled > 0) {
+          stalled--
+          return yield* Effect.never
+        }
+        if (command.includes("exit")) close()
+        if (!alive) return yield* fail(255, `Control socket connect(${command[2]}): No such file or directory`)
+        const spec = command[command.indexOf("-L") + 1] ?? ""
+        if (command.includes("forward")) forwards.add(spec)
+        if (command.includes("cancel")) forwards.delete(spec)
+        return ""
       }
       if (command.includes("-M")) {
         tries.push(yield* Clock.currentTimeMillis)
@@ -61,9 +77,11 @@ const machine = (
     tries,
     answers,
     unsure,
-    drop: () => {
-      alive = false
+    forwards,
+    stall: () => {
+      stalled++
     },
+    drop: close,
   }
 }
 
@@ -135,6 +153,26 @@ describe("Tunnel", () => {
         rig.drop()
         rig.answers.push(JSON.stringify({ origin: "http://127.0.0.1:3775", token: "token-3" }))
         expect((yield* Effect.flip(tunnel.refresh)).reason).toBe("I can't reach rig right now.")
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("leaves one forward listening when T3 Code moves there, even when what asked is interrupted halfway", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine()
+        const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
+        expect((yield* tunnel.locate).server.origin).toBe("http://127.0.0.1:50001")
+
+        // T3 Code there restarted on another port, and what asked is interrupted while the old forward is cancelled.
+        const moved = JSON.stringify({ origin: "http://127.0.0.1:3775", token: "token-2" })
+        rig.answers.push(moved, moved)
+        rig.stall()
+        const refreshing = yield* Effect.fork(tunnel.refresh)
+        yield* flush
+        yield* Fiber.interrupt(refreshing)
+
+        const origin = (yield* tunnel.refresh).server.origin
+        expect([origin, [...rig.forwards]]).toEqual(["http://127.0.0.1:50002", ["127.0.0.1:50002:127.0.0.1:3775"]])
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
