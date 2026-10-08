@@ -1559,8 +1559,9 @@ export const make = (options: {
         // Whether "it" is the question, as when he pressed the shortcut while it was being asked, even if it broke off before he'd heard it all.
         const asked = decided.subject._tag === "Answer" && (decided.subject.question?.id === open.id || decided.subject.said === open.asked)
         // He didn't catch the question, so it's asked again in other words, now rather than later, however that was taken: what he'd hear is the
-        // question, which is never closed and then said again (I4).
-        if (decision.act === "again" && (decision.pending === "answers" || asked)) return yield* reask(said)
+        // question, which is never closed and then said again (I4). Taken as an answer while "it" is something else, only once he's heard the
+        // question: until then it's still waiting its turn, and what he asks to hear again is what he was hearing.
+        if (decision.act === "again" && (asked || (decision.pending === "answers" && asking?.said === true))) return yield* reask(said)
         // Nor when he asks to see it.
         if (decision.act === "show" && decision.how === "said" && asked) return yield* reshown(said, decided.situation)
         // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it: what didn't go, and the rest of its request.

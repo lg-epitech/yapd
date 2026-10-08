@@ -3528,6 +3528,38 @@ describe("Assistant", () => {
     expect(await replaced).toEqual({ spoken: [asked, again], open: Option.some(again) })
   })
 
+  test("a question still waiting its turn behind an update is left when he asks to hear the update again, even if the model takes that for an answer to it", async () => {
+    const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
+    const again = (pending: "answers" | "replaces") =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, reading, wait, spoken, questions, open } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("What")
+                ? Brain.decision({ act: "again", how: "same", pending })
+                : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+            undefined,
+            { waiting: true },
+          )
+          // Asked while an update is read, so it waits its turn, and he asks to hear the update again before it comes.
+          yield* dictate("Which migration was that?")
+          yield* wait(1)
+          yield* reading("integration", "The Tezos migration is comparing request formats.")
+          yield* wait(1)
+          yield* dictate("What did it say again?")
+          return { spoken: spoken(), stale: yield* questions()[0]!.stale, questions: questions().length, open: yield* open }
+        }),
+      )
+    for (const pending of ["answers", "replaces"] as const) {
+      expect(await again(pending)).toEqual({
+        spoken: [`${choices}, sir?`, `I didn't ask whether you meant ${choices}, since you'd moved on, sir.`, "The Tezos migration is comparing request formats."],
+        stale: true,
+        questions: 1,
+        open: Option.none(),
+      })
+    }
+  })
+
   test("a question let go while the model works out his asking to hear or see it again is told as what it asked, never asked again", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const late = (decided: Brain.Decision) =>
