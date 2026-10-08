@@ -51,7 +51,7 @@ const patience = "15 seconds"
 /** How long an answer on its way holds everything else back at most, in case it never comes. */
 const holding = "20 seconds"
 
-/** How long after a session's last Stop it's forgotten: T3 Code says its thread finished well within it. */
+/** How long a Stop is kept in mind: T3 Code says its thread finished well within it. */
 const forgotten = 60 * 60_000
 
 /** How long finding the T3 Code thread a hook came from can take, after which its update goes the old way. */
@@ -116,8 +116,8 @@ export const make = (
     hook?: Ticket
   }
   const followed = new Map<string, Replies>()
-  /** When each session's last Stop came, by the agent's own id for it, whether or not it was said, for an hour. */
-  const stops = new Map<string, number>()
+  /** When each session's Stops came, oldest first, by the agent's own id for it, whether or not they were said, for an hour. */
+  const stops = new Map<string, ReadonlyArray<number>>()
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
   /**
@@ -635,8 +635,12 @@ export const make = (
         }
         case "Stop": {
           // Every one, even one that's never said, so T3 Code's word that its thread finished leaves it to the hook.
-          stops.set(payload.session_id, arrivedAt)
-          for (const [other, at] of stops) if (arrivedAt - at > forgotten) stops.delete(other)
+          for (const [other, times] of stops) {
+            const kept = times.filter((at) => arrivedAt - at <= forgotten)
+            if (kept.length === 0) stops.delete(other)
+            else stops.set(other, kept)
+          }
+          stops.set(payload.session_id, [...(stops.get(payload.session_id) ?? []), arrivedAt])
           // Not kept for later, so a waiting hook is let go of at once.
           const { on, turns } = yield* switched
           if (!on) {
@@ -1062,12 +1066,9 @@ export const make = (
     ),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
-    /** When the latest Stop hook of any of these sessions came, by the agent's own ids for them, whether its update was said or not. */
+    /** When the Stop hooks of these sessions came in the last hour, oldest first, by the agent's own ids for them, whether their updates were said or not. */
     stopped: (sessions: ReadonlyArray<string>) =>
-      Effect.sync(() => {
-        const at = sessions.flatMap((session) => Option.toArray(Option.fromNullable(stops.get(session))))
-        return at.length === 0 ? Option.none<number>() : Option.some(Math.max(...at))
-      }),
+      Effect.sync((): ReadonlyArray<number> => sessions.flatMap((session) => stops.get(session) ?? []).toSorted((a, b) => a - b)),
     finished,
     overtaken,
   }

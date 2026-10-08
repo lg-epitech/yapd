@@ -23,6 +23,8 @@ const Run = Schema.Struct({
   userMessageId: Schema.optional(Schema.NullOr(Schema.String)),
   requestedAt: Schema.optional(Schema.NullOr(Schema.String)),
   startedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  /** When it ended, or, for one that went well, when what it changed was taken stock of, a moment after. */
+  completedAt: Schema.optional(Schema.NullOr(Schema.String)),
 })
 
 const Option_ = Schema.Struct({ decision: Schema.String, label: Schema.String })
@@ -274,6 +276,8 @@ export interface Ran {
   readonly failure: Option.Option<typeof Failure.Type>
   /** The agent's own ids for the thread's conversations. */
   readonly natives: ReadonlyArray<string>
+  /** The run before it, when that went well, so a Stop hook came of it: when it started and ended, in ms. */
+  readonly previous: Option.Option<{ readonly startedAt: number; readonly endedAt: number }>
 }
 
 const instant = (iso: string | null | undefined) =>
@@ -288,10 +292,13 @@ export const ran = (projection: (typeof Bounded.Type)["projection"], runId: stri
     .filter((item) => item.type === "error" && item.runId === runId && item.status === "failed")
     .at(-1)?.failure
   const prompt = projection.messages.find(({ id, role }) => role === "user" && id !== undefined && id === run.userMessageId)?.text
+  const startedAt = Option.orElse(instant(run.startedAt), () => instant(run.requestedAt))
+  // The last that got going before it: one taken out of the queue never did.
+  const before = projection.runs.filter(({ ordinal, startedAt }) => ordinal < run.ordinal && Option.isSome(instant(startedAt))).toSorted((a, b) => b.ordinal - a.ordinal)[0]
   return Option.some({
     id: run.id,
     status: run.status,
-    startedAt: Option.orElse(instant(run.startedAt), () => instant(run.requestedAt)),
+    startedAt,
     userMessageId: Option.fromNullable(run.userMessageId),
     prompt: Option.filter(Option.fromNullable(prompt), (text) => text.trim() !== ""),
     said: projection.messages
@@ -301,6 +308,11 @@ export const ran = (projection: (typeof Bounded.Type)["projection"], runId: stri
       .join("\n\n"),
     failure: Option.fromNullable(failure),
     natives: natives(projection.providerThreads),
+    // One that went well ended by the time this one started, which is when it's taken to have when T3 Code doesn't say.
+    previous:
+      before?.status === "completed"
+        ? Option.all({ startedAt: instant(before.startedAt), endedAt: Option.orElse(instant(before.completedAt), () => startedAt) })
+        : Option.none(),
   })
 }
 

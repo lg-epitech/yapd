@@ -793,8 +793,8 @@ describe("Daemon", () => {
       }),
     )
     expect(result.played).toEqual(["yapd. Quick, with nobody watching.", "yapd. It was refused when it tried to push."])
-    expect(Option.isSome(result.stopped)).toBe(true)
-    expect(result.never).toEqual(Option.none())
+    expect(result.stopped).toHaveLength(1)
+    expect(result.never).toEqual([])
   })
 
   test("a hook that can't be linked is spoken and answered the old way", async () => {

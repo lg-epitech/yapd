@@ -67,7 +67,7 @@ const notices = (
   given: {
     readonly view: ReadonlyArray<T3Live.Thread>
     readonly bounded: Readonly<Record<string, Bounded>>
-    readonly stops?: ReadonlyMap<string, number>
+    readonly stops?: ReadonlyMap<string, ReadonlyArray<number>>
     readonly store?: Store.Store["Type"]
   },
 ) =>
@@ -119,11 +119,7 @@ const notices = (
       journal,
       tell,
       power: Effect.succeed({ on: true, turns: 1 }),
-      stopped: (sessions) =>
-        Effect.sync(() => {
-          const at = sessions.flatMap((session) => Option.toArray(Option.fromNullable(given.stops?.get(session))))
-          return at.length === 0 ? Option.none() : Option.some(Math.max(...at))
-        }),
+      stopped: (sessions) => Effect.sync(() => sessions.flatMap((session) => given.stops?.get(session) ?? []).toSorted((a, b) => a - b)),
       finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message })),
       overtaken: (ref) => Effect.sync(() => void overtaken.push(ref.id)),
       mention: () => Effect.void,
@@ -219,8 +215,8 @@ describe("Notices", () => {
           view: [tezos, mina, loader],
           bounded,
           stops: new Map([
-            ["s-tezos", now - 2_000],
-            ["s-mina", now - 1_000],
+            ["s-tezos", [now - 2_000]],
+            ["s-mina", [now - 1_000]],
           ]),
         })
         yield* hear(ended(tezos, "run-1"), ended(mina, "run-3"), ended(loader, "run-2"))
@@ -234,6 +230,72 @@ describe("Notices", () => {
     expect(result.finished).toEqual([{ key: "done:Rosie:run-2", message: "The loader is fixed." }])
     // The failure its hook told of isn't said again.
     expect(result.told).toEqual([])
+  })
+
+  test("a run that fails right after the one before it went well is said, though that one's Stop hook came after it started", async () => {
+    // Each ran a message queued behind a turn that went well, which failed at once, the Mina one on the limit the turn before used up.
+    // The earlier turn's Stop hook, a moment getting going, came after the next had started; Claude has no Stop for a failure.
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-2", lastErrorClass: "provider_error" })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { status: "failed", latestRunId: "run-2", lastErrorClass: "usage_limit" })
+    const queued = (kind: string, message: string, resetAt?: string) => ({
+      runs: [
+        { id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), completedAt: new Date(now - 3_050).toISOString() },
+        { id: "run-2", status: "failed", ordinal: 2, startedAt: new Date(now - 3_000).toISOString(), completedAt: new Date(now - 2_500).toISOString() },
+      ],
+      turnItems: [failure("run-2", kind, message, resetAt)],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, told } = yield* notices({
+          view: [tezos, mina],
+          bounded: {
+            tezos: { ...queued("provider_error", "API Error: 500 Internal server error"), sessions: ["s-tezos"] },
+            mina: { ...queued("usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z"), sessions: ["s-mina"] },
+          },
+          stops: new Map([
+            ["s-tezos", [now - 2_700]],
+            ["s-mina", [now - 2_300]],
+          ]),
+        })
+        yield* hear(ended(tezos, "run-2"), ended(mina, "run-2"))
+        yield* wait(10)
+        return told
+      }),
+    )
+    expect(result).toHaveLength(2)
+    expect(result).toContain("Migrate Tezos Integration failed, sir: the model provider had an error.")
+    expect(result.some((line) => /^Open Mina SSV2 Bug Tickets hit Claude's limit, sir; it resets at \d/.test(line))).toBe(true)
+  })
+
+  test("a short turn of yapd's right after the one before it is left to its own hook, however late or early that one's came", async () => {
+    // yapd's message waited behind a turn that went well, and ran in a few seconds: its own Stop came after the earlier one's, which
+    // came late for the Tezos thread, after it had started, and early for the loader, before the earlier run's checkpoint was taken.
+    const tezos = thread("tezos", "Migrate Tezos Integration", { latestRunId: "run-2" })
+    const loader = thread("loader", "Fix the loader", { latestRunId: "run-2" })
+    const queued = (id: string) => ({
+      runs: [
+        { id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), completedAt: new Date(now - 3_050).toISOString() },
+        { id: "run-2", status: "completed", ordinal: 2, startedAt: new Date(now - 3_000).toISOString(), userMessageId: `yapd:${id}` },
+      ],
+      messages: [{ id: `a-${id}`, runId: "run-2", role: "assistant", text: "Done, the fee table is in.", createdAt: minutes(0) }],
+      sessions: [`s-${id}`],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, finished } = yield* notices({
+          view: [tezos, loader],
+          bounded: { tezos: queued("tezos"), loader: queued("loader") },
+          stops: new Map([
+            ["s-tezos", [now - 2_700, now - 500]],
+            ["s-loader", [now - 4_500, now - 1_000]],
+          ]),
+        })
+        yield* hear(ended(tezos, "run-2"), ended(loader, "run-2"))
+        yield* wait(20)
+        return finished
+      }),
+    )
+    expect(result).toEqual([])
   })
 
   test("a turn no hook told of isn't said once its thread started again or went, as a hook's update isn't once the next prompt comes", async () => {
