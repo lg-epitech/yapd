@@ -358,7 +358,8 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
           const file = `${dir}/${crypto.randomUUID()}${extension}`
           yield* voice.render(text, file).pipe(
             Effect.as(file),
-            Effect.onError(() => forget(text, made)),
+            // Whatever it wrote before it failed is of no use.
+            Effect.onError(() => Effect.zipRight(Effect.promise(() => rm(file, { force: true })), forget(text, made))),
             Effect.intoDeferred(made),
             Effect.forkIn(scope),
           )

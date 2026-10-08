@@ -152,6 +152,23 @@ describe("remembering", () => {
       }),
     ))
 
+  test("leaves nothing behind of a render that failed after writing", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const voice = yield* remembering(
+          {
+            render: (text, path) =>
+              Effect.promise(() => Bun.write(path, text)).pipe(Effect.zipRight(Effect.fail(new ProcessError({ command: "say", code: 1, stderr: "" })))),
+          },
+          dir,
+          1,
+        )
+        for (let tries = 0; tries < 3; tries++) yield* Effect.either(voice.render("Hello.", `${dir}/out-${tries}.wav`))
+        yield* Effect.promise(() => Bun.sleep(20))
+        expect(readdirSync(dir).filter((name) => !name.startsWith("out-"))).toEqual([])
+      }),
+    ))
+
   test("tries again after a render that failed", () =>
     run((dir) =>
       Effect.gen(function* () {
