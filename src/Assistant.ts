@@ -1184,11 +1184,14 @@ export const make = (options: {
         // What he missed that the step before told him is heard once he's heard the lot, as is what the rest told him.
         const missed = [...(first.missed ?? []), ...(after.missed ?? [])]
         const second = first.second ?? after.second
+        // A card the step before put up, like a thread's with a command he couldn't hear, goes up with the lot, unless the rest has one of its own.
+        const card = after.card ?? first.card
         return {
           ...after,
           say: joined(first.say, after.say, said),
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
+          ...(card === undefined ? {} : { card }),
         }
       })
 
