@@ -19,7 +19,7 @@ Live on `dev` now: everything below except Show me, which is merged here and wai
 
 - "Show me what's running", "show me that", "show me my usage", "show me what I missed": yapd says it in a line and puts a card in a small panel under the menu bar icon, read-only, which fades once it's done talking. It only says "it's on your screen" while the menu bar app is running. "Hide that" takes it down; the menu's Show Last Card brings it back.
 - "Show me that PR" or "open that PR" also opens it in your browser, only ever at the https address T3 Code has for it.
-- When a thread waits on something that can't be read aloud, like a command, its card goes up with the answer, the command shown as text. "Say that again" also captions the line while the app is running.
+- When a thread waits on something that can't be read aloud, like a command, its card goes up with the answer, the command shown as text. "Say that again" puts that card back up with the line, or captions the line, while the app is running.
 - The API gains `/cards`, `/threads` and `/journal` to read from; anything to do still goes through `/utterances`.
 
 ## Faster
