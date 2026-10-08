@@ -334,7 +334,10 @@ export const make = (options: {
       const run = found.right.value.run
       if (Option.isSome(run) && run.value.status === "queued") {
         const runId = run.value.id
-        return yield* once(step, "undo", ref, () => ({ _tag: "Cancel", runId }), reached.right)
+        const cancelled = yield* once(step, "undo", ref, () => ({ _tag: "Cancel", runId }), reached.right)
+        // Withdrawn, it's nothing to take back again, nor what "I sent that a minute ago" means.
+        if (cancelled._tag === "Done") yield* ledger.settle(row.commandId, "abandoned", { reason: "Withdrawn." })
+        return cancelled
       }
       yield* Effect.logInfo(`${row.commandId} was read already, so it can only be told to ignore it`)
       return { _tag: "Read", row } satisfies Outcome
