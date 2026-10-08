@@ -337,9 +337,12 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
       Effect.suspend(() => {
         if (kept.get(text) !== entry) return Effect.void
         kept.delete(text)
-        return Deferred.poll(entry).pipe(
-          Effect.flatMap((done) => (done._tag === "Some" ? Effect.either(done.value) : Effect.succeed(undefined))),
-          Effect.flatMap((done) => (done?._tag === "Right" ? Effect.promise(() => rm(done.right, { force: true })) : Effect.void)),
+        // Its file goes once it's there, which may be after a render that's still under way.
+        return Deferred.await(entry).pipe(
+          Effect.flatMap((file) => Effect.promise(() => rm(file, { force: true }))),
+          Effect.ignore,
+          Effect.forkIn(scope),
+          Effect.asVoid,
         )
       })
 

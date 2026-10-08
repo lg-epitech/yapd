@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { Effect, Fiber, TestClock, TestContext } from "effect"
-import { mkdtempSync, rmSync } from "node:fs"
+import { Deferred, Effect, Fiber, TestClock, TestContext } from "effect"
+import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
 import { ProcessError } from "./Process.ts"
@@ -127,6 +127,28 @@ describe("remembering", () => {
         expect((yield* Effect.either(voice.render("Hello.", `${dir}/b.wav`)))._tag).toBe("Left")
         yield* voice.render("Hello.", `${dir}/c.wav`)
         expect(calls).toBe(2)
+      }),
+    ))
+
+  test("removes a line it let go of while it was still rendering, once it's rendered", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<void>()
+        const voice = yield* remembering(
+          {
+            render: (text, path) =>
+              (text === "Slow." ? Deferred.await(gate) : Effect.void).pipe(Effect.zipRight(Effect.promise(() => Bun.write(path, text))), Effect.asVoid),
+          },
+          dir,
+          1,
+        )
+        const slow = yield* Effect.fork(voice.render("Slow.", `${dir}/out-slow.wav`))
+        yield* voice.render("Quick.", `${dir}/out-quick.wav`)
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(slow)
+        yield* Effect.promise(() => Bun.sleep(20))
+        const cached = readdirSync(dir).filter((name) => !name.startsWith("out-"))
+        expect(cached).toHaveLength(1)
       }),
     ))
 
