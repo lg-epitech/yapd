@@ -1249,28 +1249,52 @@ export const make = (options: {
 
     /**
      * Offers to send again the next message a restart found didn't get
-     * there, once nothing else is asked and he isn't dictating: one question
-     * at a time, each offered once.
+     * there, once nothing else is asked, he isn't dictating and yapd is on:
+     * one question at a time, each offered once. One that can't be offered by
+     * then, like one too long ago to send again, is said so, with why.
      */
     const offering: Effect.Effect<void> = Effect.gen(function* () {
       while (asking === undefined && presses.length === 0) {
         const row = lost.shift()
         if (row === undefined) return
         const power = yield* options.power
+        // Off, it waits for him to be back.
+        if (!power.on) {
+          lost.unshift(row)
+          return
+        }
+        // Sent again or taken back since it was found, there's nothing to offer or say.
+        if (!Option.exists(yield* ledger.get(row.commandId), Ledger.offerable)) {
+          yield* Effect.logInfo(`Not offering ${row.commandId} again, since something came of it meanwhile`)
+          continue
+        }
         const sent = typeof row.body === "object" && row.body !== null && "text" in row.body ? String(row.body.text) : ""
         const ref = { machine: row.machine, id: row.thread }
         const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
-        // Sent again or taken back since it was found, or too long ago now, it's nothing to offer.
-        if (Option.isNone(yield* hands.still(row.commandId))) {
-          yield* Effect.logInfo(`Not offering ${row.commandId} again, since something came of it meanwhile or it's too long ago`)
-          yield* hands.leave(row.commandId, "Too long ago to offer, or something came of it meanwhile.")
-          continue
-        }
-        if (!power.on || listed === undefined || sent === "") {
-          yield* hands.leave(row.commandId, power.on ? "Its thread is gone." : "yapd was off when it could have been offered.")
-          continue
-        }
+        const why = Option.isNone(yield* hands.still(row.commandId))
+          ? "It's too long ago to send it again now."
+          : sent === ""
+            ? "I can't read back what it said."
+            : undefined
         const said = yield* persona.lines
+        if (why !== undefined || listed === undefined) {
+          const archived = Option.exists(yield* threads.find(ref), ({ archivedAt }) => archivedAt !== null)
+          const reason = why ?? (archived ? "Its thread is archived now." : "I can't find its thread now.")
+          const line = Hands.unoffered(said, Option.fromNullable(listed?.called), reason)
+          yield* hands.leave(row.commandId, reason)
+          yield* Effect.logWarning(`Could not offer to send ${row.commandId} again: ${reason}`)
+          yield* journal.write({
+            at: yield* Clock.currentTimeMillis,
+            kind: "action",
+            machine: row.machine,
+            thread: row.thread,
+            said: line,
+            utterance: row.utterance,
+            detail: { commandId: row.commandId, act: "Message", outcome: "Unknown", reason },
+          })
+          yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" }, { id: row.utterance, turns: power.turns })
+          continue
+        }
         const offered = yield* opening(
           {
             kind: "resend",

@@ -245,6 +245,7 @@ describe("Brain", () => {
       Hands.twice(now - 54_000, now, lines, Option.none()),
       Hands.read(lines, Option.some("Migrate Tezos Integration")),
       Hands.lost(lines, Option.none()),
+      Hands.unoffered(lines, Option.some("Migrate Tezos Integration"), "Its thread is archived now."),
       Hands.unsure({ kind: "stop", body: { _tag: "Stop" } }, lines, Option.none()),
       Hands.unsure({ kind: "undo", body: { _tag: "Cancel", runId: "run_7f3a9c2b" } }, lines, Option.some("Migrate Tezos Integration")),
       ...Persona.sayable(Persona.plain),

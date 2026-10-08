@@ -618,6 +618,10 @@ export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, cal
   return `Before I restarted, I couldn't confirm ${what}${addressed(lines)}.`
 }
 
+/** Said after a restart, for a message that wasn't found where it went and can't be offered to go again, with why, like "It's too long ago to send it again now." */
+export const unoffered = (lines: Lines, called: Option.Option<string>, why: string) =>
+  `Before I restarted, I couldn't confirm your message${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} got there${addressed(lines)}, and ${after(why).replace(/[.!?]+$/, "")}.`
+
 /** Offered after a restart, for a message that wasn't found where it went. */
 export const lost = (lines: Lines, called: Option.Option<string>) =>
   `Before I restarted, I couldn't confirm your message${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} got there${addressed(lines)}. ${unaddressed(lines.again, lines)}`

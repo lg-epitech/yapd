@@ -1388,6 +1388,57 @@ describe("Assistant", () => {
     expect(result.states).toEqual(["unknown", "sent"])
   })
 
+  test("a message a restart couldn't confirm waits while yapd is off, and one too long ago to send again by its turn is said so, with why", async () => {
+    const warned: Array<string> = []
+    const logger = Logger.make(({ logLevel, message }) => {
+      if (logLevel._tag === "Warning") warned.push(String(Array.isArray(message) ? message.join(" ") : message))
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { undelivered, heard, toggle, wait, spoken, dispatched, ledger, journal } = yield* assistant(() => undefined)
+        const lost = (utterance: string) =>
+          Effect.zipLeft(
+            ledger.prepare({
+              utterance,
+              step: 0,
+              kind: "message",
+              machine: "Rosie",
+              thread: tezos.id,
+              body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+              message: true,
+            }),
+            ledger.settle(`yapd:${utterance}:0`, "unknown"),
+          )
+        // Off as the restart's look finds it: it's offered once he's back and says something.
+        yield* toggle(false)
+        yield* undelivered([yield* lost("u-old1")])
+        const off = spoken().length
+        yield* toggle(true)
+        yield* heard({ heard: "Who needs me?", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 2, turns: 3 })
+        const back = spoken().at(-1)
+        // Found sixteen minutes after it was sent, it's too long ago to send again.
+        const old = yield* lost("u-old2")
+        yield* wait(16 * 60)
+        yield* heard({ heard: "No.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 2, turns: 3 })
+        yield* undelivered([old])
+        const kept = yield* journal.since(0, { kinds: ["action"] })
+        return {
+          off,
+          back,
+          last: spoken().at(-1),
+          reasons: kept.flatMap(({ detail }) => Option.toArray(Option.fromNullable((detail as { reason?: string }).reason))),
+          dispatched: dispatched.length,
+        }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result.off).toBe(0)
+    expect(result.back).toBe("Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir. Send it again?")
+    expect(result.last).toBe("Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir, and it's too long ago to send it again now.")
+    expect(result.reasons).toContain("It's too long ago to send it again now.")
+    expect(warned.some((line) => line.includes("It's too long ago to send it again now."))).toBe(true)
+    expect(result.dispatched).toBe(0)
+  })
+
   test("a stop a restart couldn't confirm is said once, with why, and journaled, never done again", async () => {
     const result = await run(
       Effect.gen(function* () {
