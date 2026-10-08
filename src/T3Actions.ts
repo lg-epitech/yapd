@@ -166,8 +166,8 @@ export type Command =
   | { readonly _tag: "Stop" }
   /** Lets go of the queue a stop held. */
   | { readonly _tag: "Resume" }
-  /** Drops a message still waiting in the queue, by the run it would start. */
-  | { readonly _tag: "Cancel"; readonly runId: string }
+  /** Drops a message still waiting in the queue, by the run it would start. Its own id isn't sent, but is how it's looked for after. */
+  | { readonly _tag: "Cancel"; readonly runId: string; readonly messageId?: string }
   | { readonly _tag: "Decide"; readonly requestId: string; readonly decision: string }
   | { readonly _tag: "Answer"; readonly requestId: string; readonly answers: Readonly<Record<string, string | ReadonlyArray<string>>> }
   | { readonly _tag: "Dismiss"; readonly requestId: string }

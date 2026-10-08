@@ -153,7 +153,7 @@ const Body = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("Send"), text: Schema.String, messageId: Schema.String, how: Schema.Literal("now", "after", "restart") }),
   Schema.Struct({ _tag: Schema.Literal("Stop") }),
   Schema.Struct({ _tag: Schema.Literal("Resume") }),
-  Schema.Struct({ _tag: Schema.Literal("Cancel"), runId: Schema.String }),
+  Schema.Struct({ _tag: Schema.Literal("Cancel"), runId: Schema.String, messageId: Schema.optionalWith(Schema.String, { exact: true }) }),
 )
 const command = Schema.decodeUnknownOption(Body)
 
@@ -188,6 +188,9 @@ export const plainly = (reason: string) => {
   const sentence = `${said.charAt(0).toUpperCase()}${said.slice(1)}`
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`
 }
+
+/** Whether a message went into the turn under way: steered in, or taken out of the queue into it, by his hand in T3 Code's app. */
+const steeredIn = (intent: T3Actions.Intent) => intent === "steer" || intent === "promoted_queued_to_steer"
 
 /** Runs that haven't said anything back yet: waiting in the queue, or getting going or at it. */
 const unanswered: ReadonlyArray<string> = ["queued", "preparing", "starting", "running"]
@@ -297,9 +300,17 @@ export const make = (options: {
     if (row.messageId !== null && row.kind === "message") return actions.has(row.thread, row.messageId)
     if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)
     if (Option.isSome(sent) && sent.value._tag === "Cancel") {
-      // Withdrawn, T3 Code drops the run, and its message, from the thread, or shows it cancelled: one that started meanwhile is being read.
-      const runId = sent.value.runId
-      return Effect.map(actions.detail(row.thread), ({ runs }) => !runs.some(({ id, status }) => id === runId && status !== "cancelled"))
+      // Withdrawn, T3 Code drops the run, and its message, from the thread, or shows it cancelled. One that started meanwhile is being read,
+      // as is one he steered into the turn under way, which cancels the run it waited in too, but keeps the message.
+      const { runId, messageId } = sent.value
+      if (messageId === undefined) return Effect.map(actions.detail(row.thread), ({ runs }) => !runs.some(({ id, status }) => id === runId && status !== "cancelled"))
+      return Effect.map(
+        actions.message(row.thread, messageId),
+        Option.match({
+          onNone: () => true,
+          onSome: ({ intent, run }) => !Option.exists(intent, steeredIn) && Option.exists(run, ({ status }) => status === "cancelled"),
+        }),
+      )
     }
     return Effect.succeed(false)
   }
@@ -313,7 +324,7 @@ export const make = (options: {
       return Option.match(intent, {
         onNone: () => fallback,
         onSome: (intent): Ledger.How =>
-          intent === "steer" || intent === "promoted_queued_to_steer" ? "steered" : intent === "queued_turn" ? "queued" : "now",
+          steeredIn(intent) ? "steered" : intent === "queued_turn" ? "queued" : "now",
       })
     })
 
@@ -440,7 +451,7 @@ export const make = (options: {
       const look = twin.messageId === null ? Either.right(Option.none<T3Actions.Found>()) : yield* Effect.either(reached.actions.message(twin.thread, twin.messageId))
       const found = Either.getOrElse(look, () => Option.none<T3Actions.Found>())
       // Steered in, even from the queue by his hand in T3 Code's app, which cancels the run it waited in, it's in the turn under way.
-      const steered = Option.exists(found, ({ intent }) => Option.exists(intent, (intent) => intent === "steer" || intent === "promoted_queued_to_steer"))
+      const steered = Option.exists(found, ({ intent }) => Option.exists(intent, steeredIn))
       const own = steered ? Option.none<{ readonly status: string }>() : Option.flatMap(found, ({ run }) => run)
       const gone = twin.state === "sent" && twin.messageId !== null && Either.isRight(look) && Option.isNone(found)
       if (gone || Option.exists(own, ({ status }) => status === "cancelled")) {
@@ -632,12 +643,13 @@ export const make = (options: {
       const row = last.value
       if (row.kind === "stop") return yield* refused("It was a stop, which carrying on takes back.")
       if (row.kind === "start") return yield* refused("Starting work can't be taken back yet.")
-      if (row.kind !== "message" || row.messageId === null) return yield* refused("There's nothing more to take back.")
+      const messageId = row.messageId
+      if (row.kind !== "message" || messageId === null) return yield* refused("There's nothing more to take back.")
       if (row.state !== "sent" && row.state !== "unknown") return yield* refused("It never went, so there's nothing to take back.")
       const ref = refOf(row)
       const reached = yield* reach(ref)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, "take a message back")
-      const found = yield* Effect.either(reached.right.actions.message(row.thread, row.messageId ?? ""))
+      const found = yield* Effect.either(reached.right.actions.message(row.thread, messageId))
       if (Either.isLeft(found)) {
         return yield* failing({ _tag: "NotSent", reason: plainly(found.left.reason), again: Option.none() } satisfies Outcome, "take a message back")
       }
@@ -655,7 +667,7 @@ export const make = (options: {
       const run = found.right.value.run
       if (Option.isSome(run) && run.value.status === "queued") {
         const runId = run.value.id
-        const cancelled = yield* once(step, "undo", ref, () => ({ _tag: "Cancel", runId }), reached.right)
+        const cancelled = yield* once(step, "undo", ref, () => ({ _tag: "Cancel", runId, messageId }), reached.right)
         // Withdrawn, it's nothing to take back again, nor what "I sent that a minute ago" means.
         if (cancelled._tag === "Done") yield* ledger.settle(row.commandId, "abandoned", { reason: Ledger.withdrawn })
         return cancelled

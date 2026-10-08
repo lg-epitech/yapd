@@ -925,6 +925,31 @@ describe("Hands", () => {
     expect(result.dispatched).toEqual(["message.dispatch", "queued-run.cancel", "message.dispatch", "message.dispatch"])
   })
 
+  test("scratch that whose answer was lost, for a message he steered into the turn under way meanwhile, isn't taken as withdrawn, so the same words are still asked about", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, run: act, answering, ledger, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* send("u1", "When it's done, open a PR.", "after")
+        // He pressed Steer on it in T3 Code's app just then, which cancels the run it waited in and steers it in, and the answer to the cancel was lost.
+        answering((_, bounded) =>
+          Effect.suspend(() => {
+            bounded.runs[1]!.status = "cancelled"
+            bounded.turnItems.push({ type: "user_message", messageId: "yapd:u1:0:m", inputIntent: "promoted_queued_to_steer" })
+            return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+          }),
+        )
+        const scratched = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+        const message = yield* ledger.get("yapd:u1:0")
+        answering(takes())
+        yield* TestClock.adjust("1 minute")
+        const again = yield* send("u3", "When it's done, open a PR.", "after")
+        return { scratched: scratched._tag, message: Option.map(message, ({ state }) => state), again: again._tag, dispatched: dispatched.map(({ type }) => type) }
+      }),
+    )
+    expect(result).toEqual({ scratched: "Unknown", message: Option.some("sent"), again: "Twin", dispatched: ["message.dispatch", "queued-run.cancel"] })
+  })
+
   test("scratch that is about the last thing done, never a message before it", async () => {
     const result = await run(
       Effect.gen(function* () {
