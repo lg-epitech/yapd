@@ -582,11 +582,13 @@ describe("Hands", () => {
     const restarted = await run(
       Effect.gen(function* () {
         const { send, answering, becomes, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
-        // T3 Code stops the turn under way, which ends it, and starts one of its own.
+        // T3 Code stops the turn under way, which ends it, as the live view shows, and the message starts one of its own.
         answering((payload, bounded) =>
           Effect.sync(() => {
-            bounded.runs[0]!.status = "interrupted"
-            bounded.runs.push({ id: "run-2", status: "running", ordinal: 2, userMessageId: String(payload.messageId) })
+            if (payload.type === "run.interrupt") {
+              bounded.runs[0]!.status = "interrupted"
+              becomes(thread(tezos.id, { status: "interrupted" }))
+            } else bounded.runs.push({ id: "run-2", status: "running", ordinal: 2, userMessageId: String(payload.messageId) })
             return { sequence: 7 }
           }),
         )
@@ -594,10 +596,10 @@ describe("Hands", () => {
         yield* TestClock.adjust("5 seconds")
         becomes(ended(now + 1000, { activeRunId: "run-2", activityRunStatus: "running", status: "running" }))
         const again = yield* send("u2", "Drop that and use the fee table.", "restart")
-        return { again: again._tag, dispatched: dispatched.length }
+        return { again: again._tag, dispatched: dispatched.map(({ type }) => type) }
       }),
     )
-    expect(restarted).toEqual({ again: "Twin", dispatched: 1 })
+    expect(restarted).toEqual({ again: "Twin", dispatched: ["run.interrupt", "message.dispatch"] })
   })
 
   test("the same words are asked about while they still wait in the queue, once the turn ahead asks something, or when the thread can't be read", async () => {
@@ -746,46 +748,73 @@ describe("Hands", () => {
     expect(finishing.said).toBe("Migrate Tezos Integration is finishing something off, sir, so that will go once it's done.")
   })
 
-  test("a restart waits for a turn getting going to be at it; one waiting on him, or still not at it after fifteen seconds, is stopped, then told at once, as two steps", async () => {
+  test("a message in place of the turn under way stops it, holding its queue, then tells it at once once the live view shows it stopped, whatever the turn was doing, and never asks T3 Code to restart it", async () => {
     const at = (status: string, overrides: Record<string, unknown> = {}) =>
       thread(tezos.id, { activeRunId: status === "waiting" ? null : "run-1", activityRunStatus: status, status, ...overrides })
-    const restarting = (first: T3Live.Thread, then?: T3Live.Thread) =>
+    /** The stop shows in the live view two seconds after T3 Code takes it, unless `shows` is false; `answer` is how it takes the message. */
+    const restarting = (first: T3Live.Thread, shows = true, answer: Answer = takes()) =>
       run(
         Effect.gen(function* () {
-          const { send, answering, becomes, bounded, dispatched } = yield* hands({ thread: first, runs: [{ id: "run-1", status: first.activityRunStatus ?? "", ordinal: 1 }] })
+          const going = first.activityRunStatus !== undefined
+          const { send, answering, becomes, dispatched } = yield* hands({ thread: first, runs: going ? [{ id: "run-1", status: first.activityRunStatus ?? "", ordinal: 1 }] : [] })
           answering((payload, bounded) => {
-            if (payload.type !== "run.interrupt") return takes()(payload, bounded)
-            // Stopped, it shows so in the live view.
+            if (payload.type !== "run.interrupt") return answer(payload, bounded)
             bounded.runs[0]!.status = "interrupted"
-            becomes(thread(tezos.id))
             return Effect.succeed({ sequence: 7 })
           })
-          const going = yield* Effect.fork(send("u1", "Drop that and fix the loader instead.", "restart"))
+          const sending = yield* Effect.fork(send("u1", "Drop that and fix the loader instead.", "restart"))
           yield* TestClock.adjust("2 seconds")
-          if (then !== undefined) {
-            becomes(then)
-            bounded.runs[0]!.status = then.activityRunStatus ?? ""
-          }
+          if (shows) becomes(thread(tezos.id, { status: "interrupted" }))
           yield* TestClock.adjust("14 seconds")
-          const outcome = yield* Fiber.join(going)
+          const outcome = yield* Fiber.join(sending)
+          const act: Hands.Act = { _tag: "Message", to: tezos, text: "", how: "restart" }
           return {
-            said: outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "restart" }, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            said: outcome._tag === "Done" ? Hands.done(act, outcome.how, lines, Option.none(), outcome) : outcome._tag === "NotSent" ? Hands.failed(act, outcome, lines, Option.none()) : outcome._tag,
             dispatched: dispatched.map(({ type, commandId, holdQueue, deliveryIntent }) => [type, commandId, holdQueue ?? deliveryIntent]),
           }
         }),
       )
-    // At it within the fifteen seconds, it's restarted, as one step.
-    const atIt = await restarting(at("starting"), at("running"))
-    expect(atIt.dispatched).toEqual([["message.dispatch", "yapd:u1:0", "restart"]])
-    expect(atIt.said).toBe("On it, sir.")
-    for (const first of [at("waiting", { pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } }), at("starting")]) {
-      const stopped = await restarting(first)
-      expect(stopped.dispatched).toEqual([
-        ["run.interrupt", "yapd:u1:0", true],
-        ["message.dispatch", "yapd:u1:1", "auto"],
-      ])
-      expect(stopped.said).toBe("Stopped it, sir, and told it.")
+    const asked = at("waiting", { pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } })
+    for (const first of [at("running"), at("starting"), asked]) {
+      expect(await restarting(first)).toEqual({
+        said: "Stopped it, sir, and told it.",
+        dispatched: [
+          ["run.interrupt", "yapd:u1:0", true],
+          ["message.dispatch", "yapd:u1:1", "auto"],
+        ],
+      })
     }
+    // Doing nothing, it's just told.
+    expect(await restarting(thread(tezos.id))).toEqual({ said: "On it, sir.", dispatched: [["message.dispatch", "yapd:u1:0", "auto"]] })
+    // Still busy fifteen seconds on, it isn't told, since it could still take it into the turn being stopped, or hold it in the queue.
+    expect(await restarting(at("running"), false)).toEqual({
+      said: "I stopped it, sir, but couldn't tell it yet: it was still winding down fifteen seconds later.",
+      dispatched: [["run.interrupt", "yapd:u1:0", true]],
+    })
+    // Put in the queue all the same, he's told it waits there.
+    const queues: Answer = (payload, bounded) =>
+      Effect.sync(() => {
+        bounded.runs.push({ id: "run-2", status: "queued", ordinal: 2, userMessageId: String(payload.messageId) })
+        return { sequence: 8 }
+      })
+    expect((await restarting(at("running"), true, queues)).said).toBe("Stopped it, sir, but that's waiting in its queue.")
+  })
+
+  test("a turn that ended just before it was stopped to be told something in its place is told at once", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // The live view still has it finishing off, but its run has ended by the time the stop looks.
+        const finishing = thread(tezos.id, { activeRunId: null, activityRunStatus: "waiting", status: "waiting" })
+        const { send, dispatched } = yield* hands({ thread: finishing, runs: [{ id: "run-1", status: "completed", ordinal: 1 }] })
+        const outcome = yield* send("u1", "Drop that and fix the loader instead.", "restart")
+        return {
+          outcome: outcome._tag === "Done" ? [outcome.how, outcome.stopped] : outcome._tag,
+          said: outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "restart" }, outcome.how, lines, Option.none(), outcome) : "",
+          dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
+        }
+      }),
+    )
+    expect(result).toEqual({ outcome: ["now", "ended"], said: "On it, sir.", dispatched: [["message.dispatch", "yapd:u1:1"]] })
   })
 
   test("scratch that withdraws a message still in the queue, and only offers to have one already read ignored", async () => {

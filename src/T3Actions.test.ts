@@ -133,7 +133,8 @@ describe("T3Actions", () => {
     // After the turn under way, it goes in T3 Code's own queue, as the app's queue button sends it.
     expect(send("after")).toMatchObject({ dispatchMode: { type: "queue_after_active" } })
     expect(send("after")).not.toHaveProperty("deliveryIntent")
-    expect(send("restart")).toMatchObject({ dispatchMode: { type: "start_immediately" }, deliveryIntent: "restart" })
+    // In place of the turn under way, it goes once yapd has stopped it, never as T3 Code's own restart, which it turns down in too many ordinary states.
+    expect(send("restart")).toMatchObject({ dispatchMode: { type: "start_immediately" }, deliveryIntent: "auto" })
     expect(T3Actions.command("t1", { _tag: "Resume" }, undefined, "c")).toEqual({ commandId: "c", threadId: "t1", type: "queue.resume" })
     expect(T3Actions.command("t1", { _tag: "Cancel", runId: "run-3" }, undefined, "c")).toEqual({ commandId: "c", threadId: "t1", type: "queued-run.cancel", runId: "run-3" })
     expect(T3Actions.command("t1", { _tag: "Decide", requestId: "r1", decision: "accept" }, undefined, "c")).toEqual({

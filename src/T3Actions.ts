@@ -150,7 +150,8 @@ const recent = 6
 /**
  * When a message goes in: `now`, into the turn under way when there is one,
  * as the app sends it; `after` the turn under way, in T3 Code's own queue;
- * or `restart`, stopping the turn under way to start over with it.
+ * or `restart`, in place of the turn under way, which yapd stops first, as a
+ * step of its own, so it then goes as `now` does.
  */
 export type When = "now" | "after" | "restart"
 
@@ -191,9 +192,8 @@ export const command = (threadId: string, what: Command, runId: string | undefin
         text: what.text,
         attachments: [],
         // As the app does: into the turn under way when the agent can take it, and after it when it can't; or in the queue, with no intent.
-        ...(what.how === "after"
-          ? { dispatchMode: { type: "queue_after_active" } }
-          : { dispatchMode: { type: "start_immediately" }, deliveryIntent: what.how === "restart" ? "restart" : "auto" }),
+        // Never T3 Code's own restart, which it turns down for a turn getting going, waiting, or busy only in the background.
+        ...(what.how === "after" ? { dispatchMode: { type: "queue_after_active" } } : { dispatchMode: { type: "start_immediately" }, deliveryIntent: "auto" }),
       }
     case "Stop":
       return { ...base, type: "run.interrupt", runId, holdQueue: true }

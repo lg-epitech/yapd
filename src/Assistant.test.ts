@@ -2627,41 +2627,49 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."])
   })
 
-  test("a restart T3 Code can't take is stopped, then told, as two steps, with the rest of the request after both", async () => {
+  test("a message in place of the turn under way stops it, then tells it, as two steps, with the rest of the request after both, whether the turn is at it or waiting on him", async () => {
     const waiting = thread(tezos.id, tezos.title, "integration", {
       activeRunId: null,
       activityRunStatus: "waiting",
       status: "waiting",
       pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-01T02:15:00.000Z" },
     })
-    const result = await run(
-      Effect.gen(function* () {
-        const others = [waiting]
-        const { dictate, spoken, dispatched } = yield* assistant(
-          (situation) =>
-            situation.utterance.heard.startsWith("Stop")
-              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart", rest: "tell the Mina one to use its fee table" })
-              : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
-          undefined,
-          {
-            others,
-            answer: () => (payload, bounded) => {
-              // Stopped, the live view shows it idle.
-              if (payload.type === "run.interrupt") others[0] = thread(tezos.id, tezos.title, "integration")
-              return takes(payload, bounded)
+    const instead = (turn: T3Live.Thread) =>
+      run(
+        Effect.gen(function* () {
+          const others = [turn]
+          const { dictate, spoken, dispatched } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Stop")
+                ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart", rest: "tell the Mina one to use its fee table" })
+                : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
+            undefined,
+            {
+              others,
+              answer: () => (payload, bounded) => {
+                // Stopped, the live view shows it idle.
+                if (payload.type === "run.interrupt") others[0] = thread(tezos.id, tezos.title, "integration")
+                return takes(payload, bounded)
+              },
             },
-          },
-        )
-        yield* dictate("Stop the Tezos one and tell it to fix the loader instead, and tell the Mina one to use its fee table.")
-        return { spoken: spoken(), sent: dispatched.map(({ type, threadId, commandId }) => [type, threadId, String(commandId).replace(/^yapd:u\w+:/, "")]) }
-      }),
-    )
-    expect(result.sent).toEqual([
-      ["run.interrupt", tezos.id, "0"],
-      ["message.dispatch", tezos.id, "1"],
-      ["message.dispatch", mina.id, "2"],
-    ])
-    expect(result.spoken).toEqual(["Stopped it, sir, and told it: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."])
+          )
+          yield* dictate("Stop the Tezos one and tell it to fix the loader instead, and tell the Mina one to use its fee table.")
+          return {
+            spoken: spoken(),
+            sent: dispatched.map(({ type, threadId, commandId, deliveryIntent }) => [type, threadId, String(commandId).replace(/^yapd:u\w+:/, ""), deliveryIntent]),
+          }
+        }),
+      )
+    for (const turn of [tezos, waiting]) {
+      expect(await instead(turn)).toEqual({
+        spoken: ["Stopped it, sir, and told it: Migrate Tezos Integration. On it: Open Mina SSV2 Bug Tickets."],
+        sent: [
+          ["run.interrupt", tezos.id, "0", undefined],
+          ["message.dispatch", tezos.id, "1", "auto"],
+          ["message.dispatch", mina.id, "2", "auto"],
+        ],
+      })
+    }
   })
 
   test("a request said before a question asked since never asks in its place: the same words again aren't sent, and he's told why", async () => {
@@ -2688,25 +2696,38 @@ describe("Assistant", () => {
     expect(result.dispatched).toBe(1)
   })
 
-  test("turning yapd off while a restart waits for its turn to get going sends nothing, then or later", async () => {
-    const starting = thread(tezos.id, tezos.title, "integration", { activeRunId: "run-3", activityRunStatus: "starting", status: "starting" })
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, toggle, wait, flush, dispatched, ledger } = yield* assistant(
-          (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
-          undefined,
-          { others: [starting] },
-        )
-        const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
-        yield* flush
-        yield* wait(2)
-        yield* toggle(false)
-        yield* toggle(true)
-        yield* wait(30)
-        yield* Fiber.join(going)
-        return { dispatched: dispatched.length, written: yield* ledger.latest("1 hour") }
-      }),
-    )
-    expect(result).toEqual({ dispatched: 0, written: Option.none() })
+  test("a turn stopped to be told something in its place that never shows stopped isn't told, he's told why fifteen seconds on, and what he says next is still answered", async () => {
+    const waiting = thread(tezos.id, tezos.title, "integration", { activeRunId: null, activityRunStatus: "waiting", status: "waiting" })
+    const unshown = (turn: T3Live.Thread) =>
+      run(
+        Effect.gen(function* () {
+          // T3 Code takes the stop, but the live view goes on showing the turn as it was.
+          const { dictate, wait, flush, spoken, dispatched, journal } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Stop")
+                ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" })
+                : minaStatus(situation),
+            undefined,
+            { others: [turn] },
+          )
+          const going = yield* Effect.fork(dictate("Stop the Tezos one and tell it to fix the loader instead."))
+          yield* flush
+          yield* wait(15)
+          yield* Fiber.join(going)
+          yield* dictate("What's the Mina one doing?")
+          const kept = yield* journal.since(0, { kinds: ["sent"] })
+          return { spoken: spoken(), dispatched: dispatched.map(({ type }) => type), kept: kept.map(({ detail }) => (detail as { reason?: string }).reason) }
+        }),
+      )
+    for (const turn of [tezos, waiting]) {
+      expect(await unshown(turn)).toEqual({
+        spoken: [
+          "I stopped Migrate Tezos Integration, sir, but couldn't tell it yet: it was still winding down fifteen seconds later.",
+          "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+        ],
+        dispatched: ["run.interrupt"],
+        kept: ["It was still winding down fifteen seconds later."],
+      })
+    }
   })
 })
