@@ -88,25 +88,22 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
     const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
+    // As long as the microphone's, so what's heard lasts as long as it would.
     const frames = (probability: number, count: number) =>
-      Queue.offerAll(microphone, Array.from({ length: count }, () => new Float32Array([probability]))).pipe(
+      Queue.offerAll(microphone, Array.from({ length: count }, () => new Float32Array(512).fill(probability))).pipe(
         Effect.zipRight(flush),
       )
     const speak = frames(0.9, 10).pipe(Effect.zipRight(frames(0, defaults.silence)))
     const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
-    /** Asks a question instead, once the update has been given up on, that takes what's said after "yes" for an answer. */
+    /** Asks a question instead, once the update has been given up on, which `answer` works out what's said to. */
+    const question = (answer: Conversation.Question["answer"]) =>
+      Fiber.interrupt(fiber).pipe(Effect.zipRight(Effect.fork(made.ask({ audio: "/tmp/question.wav", answer }))))
+    /** One that takes what's said after "yes" for an answer. */
     const ask = (answers: Array<string>) =>
-      Fiber.interrupt(fiber).pipe(
-        Effect.zipRight(
-          made.ask({
-            audio: "/tmp/question.wav",
-            answer: (heard) =>
-              Effect.succeed(heard.startsWith("Yes") ? Option.some(Effect.sync(() => void answers.push(heard))) : Option.none()),
-          }),
-        ),
-        Effect.fork,
+      question((heard) =>
+        Effect.succeed(heard.startsWith("Yes") ? Option.some(Effect.sync(() => void answers.push(heard))) : Option.none()),
       )
-    return { ...made, fiber, heard, sent, late, saying, speak, wait, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
+    return { ...made, fiber, heard, sent, late, saying, speak, wait, question, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
   })
 
 /** Talks, then waits for the reply to be sent and read out. */
@@ -342,6 +339,34 @@ describe("Questions", () => {
       }),
     )
     expect(result).toEqual({ answered: true, answers: ["Yes, in yapd."] })
+  })
+
+  test("tells the answer how much of all the user said was speech, when they carry on after a pause", async () => {
+    const tried = await scoped(
+      Effect.gen(function* () {
+        const tried: Array<readonly [string, number]> = []
+        const { question, frames, wait } = yield* conversation(["Thank", "you."])
+        // Working it out takes a while, as with the model, so there's time to carry on.
+        const asking = yield* question((heard, voiced) =>
+          Effect.sync(() => void tried.push([heard, Math.round(voiced * 1000)])).pipe(
+            Effect.zipRight(Effect.sleep("5 seconds")),
+            Effect.as(Option.some(Effect.void)),
+          ),
+        )
+        // A word, a pause, then the rest, each with the quiet before it that's kept.
+        yield* frames(0, defaults.lead)
+        yield* frames(0.9, 6)
+        yield* frames(0, defaults.silence)
+        yield* frames(0, defaults.lead)
+        yield* frames(0.9, 30)
+        yield* frames(0, defaults.silence)
+        yield* wait(5)
+        yield* Fiber.join(asking)
+        return tried
+      }),
+    )
+    // In milliseconds: 6 frames of speech, then 30 more.
+    expect(tried).toEqual([["Thank", 192], ["Thank you.", 1152]])
   })
 
   test("leaves a question unanswered when nothing is said, or nothing meant for it", async () => {

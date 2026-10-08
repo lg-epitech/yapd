@@ -108,8 +108,9 @@ export interface Question {
   readonly audio: string
   /**
    * Works out what the user meant by what they said, and how many seconds of
-   * it were speech, which may be called again if they carry on. What it
-   * returns is run once they've stopped, and none means it wasn't an answer.
+   * it were speech, which may be called again with all of it if they carry
+   * on. What it returns is run once they've stopped, and none means it
+   * wasn't an answer.
    */
   readonly answer: (heard: string, voiced: number) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
@@ -289,19 +290,22 @@ export const make = (options: {
     /**
      * Works out a reply while still listening, so pausing mid-thought doesn't cut
      * the user off: if they carry on before it's ready, it starts again with all
-     * they said. Nothing's done with a reply while they might still be talking.
+     * they said, and how many seconds of all of it were speech. Nothing's done
+     * with a reply while they might still be talking.
      */
     const settle = <R>(
       ear: Ear,
       first: string,
+      audio: Float32Array,
       transcribe: (audio: Float32Array) => Effect.Effect<string>,
-      respond: (heard: string) => Effect.Effect<R>,
+      respond: (heard: string, voiced: number) => Effect.Effect<R>,
     ) =>
       Effect.gen(function* () {
         const until = (yield* Clock.currentTimeMillis) + rambling
         let heard = first
+        let speech = voiced(audio)
         while (true) {
-          const replying = unfinished(heard) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard)) : respond(heard)
+          const replying = unfinished(heard) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech)) : respond(heard, speech)
           if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, reply: yield* replying }
           const id = fresh()
           const fiber = yield* replying.pipe(
@@ -354,7 +358,11 @@ export const make = (options: {
             }
           }
           yield* Fiber.interrupt(fiber)
-          if (more !== undefined) heard = together(heard, yield* transcribe(more))
+          if (more === undefined) continue
+          const after = yield* transcribe(more)
+          heard = together(heard, after)
+          // Only what added words, since speech Whisper made nothing of isn't in what was heard.
+          if (after !== "") speech += voiced(more)
         }
       })
 
@@ -446,7 +454,7 @@ export const make = (options: {
             }
 
             const said = cut(text, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
-            const { heard, reply } = yield* settle(outcome.ear, first, transcribe, (heard) =>
+            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, transcribe, (heard) =>
               responder
                 .respond({
                   project: update.project,
@@ -520,9 +528,7 @@ export const make = (options: {
           const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), pondering)
           if (outcome._tag === "Finished") return false
           const first = yield* transcribe(outcome.audio)
-          const speech = voiced(outcome.audio)
-          const answer =
-            first === "" ? Option.none() : (yield* settle(outcome.ear, first, transcribe, (heard) => question.answer(heard, speech))).reply
+          const answer = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, transcribe, question.answer)).reply
           if (Option.isSome(answer)) {
             // They've answered, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(answer.value)
