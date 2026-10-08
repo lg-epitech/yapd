@@ -79,6 +79,14 @@ describe("Persona", () => {
     expect(result.lines.again).toBe("Shall I send it again?")
   })
 
+  test("asking whether to send something again always asks: kept lines where it doesn't are written again, and one that still doesn't is asked plainly", async () => {
+    const result = await persona({ ...jarvis, again: "I can send it again." }, { ...jarvis, again: "I could always send it again." })
+    expect(result.asked).toBe(1)
+    expect(result.lines.again).toBe("Send it again?")
+    expect(result.stored.again).toBe("Send it again?")
+    expect(result.lines.stopped).toBe("Stopped, sir.")
+  })
+
   test("how he's addressed is kept without marks, so a line said in its place doesn't ask, and isn't written again at the next start", async () => {
     const first = await persona(undefined, { ...jarvis, address: "sir?", cantTell: "Which one, sir?" })
     expect(first.lines.address).toBe("sir")
