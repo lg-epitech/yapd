@@ -204,7 +204,7 @@ const assistant = (
       coming: Effect.void,
       awaiting: Effect.void,
       arrived: Effect.void,
-      rereading: () => Effect.succeed(false),
+      queued: () => Effect.succeed(false),
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

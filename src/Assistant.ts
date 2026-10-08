@@ -178,8 +178,8 @@ export const make = (options: {
   readonly awaiting: Effect.Effect<void>
   /** The answer longest on its way was queued, or won't come. */
   readonly arrived: Effect.Effect<void>
-  /** Whether an update is waiting to be read again, like one a dictation cut off. */
-  readonly rereading: (update: Conversation.Update) => Effect.Effect<boolean>
+  /** Whether these words are waiting to be said, like an update or an answer a dictation cut off. */
+  readonly queued: (spoken: string) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -648,9 +648,9 @@ export const make = (options: {
         case "again":
           return Effect.gen(function* () {
             const { subject } = thought
-            // A dictation cut it off, so it's about to be read again from the start, and only then.
-            if (subject._tag === "Session" && (yield* options.rereading(subject.update))) {
-              yield* Effect.logInfo("Not saying it again, since it's about to be read again from the start")
+            // A dictation cut it off, so it's about to be said again from the start, and once is enough.
+            if (subject._tag !== "Nothing" && (yield* options.queued(subject.said))) {
+              yield* Effect.logInfo("Not saying it again, since it's about to be said again from the start")
               return quiet(subject)
             }
             const last = subject._tag === "Nothing" ? Brain.nothingSaid(said) : subject.said

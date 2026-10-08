@@ -720,9 +720,11 @@ export const make = Effect.gen(function* () {
     awaiting,
     /** The answer longest on its way was queued, or won't come. */
     arrived: STM.commit(TRef.update(awaited, (all) => all.slice(1))),
-    /** Whether an update is waiting to be read again, like one a dictation cut off. */
-    rereading: (update: Conversation.Update) =>
-      STM.commit(STM.map(TRef.get(inbox), (queued) => [...queued.values()].some((entry) => "update" in entry && entry.update === update))),
+    /** Whether these words are waiting to be said, like an update or an answer a dictation cut off. */
+    queued: (spoken: string) =>
+      STM.commit(
+        STM.map(TRef.get(inbox), (waiting) => [...waiting.values()].some((entry) => ("update" in entry ? entry.update.spoken : entry.notice.spoken) === spoken)),
+      ),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
   }
