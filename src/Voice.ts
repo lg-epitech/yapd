@@ -444,6 +444,31 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
     return { render, renderFirst: rendering(render) }
   })
 
+/**
+ * Kokoro, with `fallback` rendering whatever it fails to. Not once a first part
+ * is out, since what the fallback makes of the whole wouldn't carry on from it.
+ */
+export const withFallback = (
+  render: (text: string, path: string, part?: (path: string) => void) => Effect.Effect<void, KokoroError>,
+  fallback: (text: string, path: string) => Effect.Effect<void, ProcessError>,
+): Voice["Type"] => {
+  const instead = (text: string, path: string) => (error: KokoroError) =>
+    Effect.logWarning("Kokoro failed, using say", error).pipe(Effect.zipRight(fallback(text, path)))
+  return {
+    render: (text, path) => render(text, path).pipe(Effect.catchAll(instead(text, path))),
+    renderFirst: rendering((text, path, part) => {
+      let out = false
+      return render(text, path, (file) => {
+        out = true
+        part(file)
+      }).pipe(
+        // Once its first part is out, what say makes of the whole wouldn't carry on from it, in another voice and pace.
+        Effect.catchAll((error): Effect.Effect<void, KokoroError | ProcessError> => (out ? Effect.fail(error) : instead(text, path)(error))),
+      )
+    }),
+  }
+}
+
 /** Lines this short are kept once rendered: acknowledgements, questions, notices. */
 const brief = 160
 
@@ -547,30 +572,7 @@ export const KokoroVoice = Layer.scopedContext(
     )
     // Kokoro's voices don't need the model, and a name it doesn't have won't start working later.
     const plain: Voice["Type"] = voices.has(name)
-      ? yield* Effect.map(kokoro([process.execPath, `${import.meta.dir}/Kokoro.ts`], name, yield* Config.effect), (voice) => ({
-          render: (text: string, path: string) =>
-            voice.render(text, path).pipe(
-              Effect.catchAll((error) =>
-                Effect.logWarning("Kokoro failed, using say", error).pipe(Effect.zipRight(say(text, path))),
-              ),
-            ),
-          renderFirst: rendering((text, path, part) => {
-            let out = false
-            return voice
-              .render(text, path, (file) => {
-                out = true
-                part(file)
-              })
-              .pipe(
-                // Once its first part is out, what say makes of the whole wouldn't carry on from it.
-                Effect.catchAll((error): Effect.Effect<void, KokoroError | ProcessError> =>
-                  out
-                    ? Effect.fail(error)
-                    : Effect.logWarning("Kokoro failed, using say", error).pipe(Effect.zipRight(say(text, path)), Effect.asVoid),
-                ),
-              )
-          }),
-        }))
+      ? withFallback((yield* kokoro([process.execPath, `${import.meta.dir}/Kokoro.ts`], name, yield* Config.effect)).render, say)
       : yield* Effect.as(Effect.logWarning(`Kokoro has no voice "${name}", so yapd uses say. Pick one from ${voicesPage}`), {
           render: say,
         })

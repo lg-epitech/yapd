@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
 import { ProcessError } from "./Process.ts"
-import { early, head, join, KokoroError, kokoro, opening, remembering, split, type Voice } from "./Voice.ts"
+import { early, head, join, KokoroError, kokoro, opening, remembering, split, type Voice, withFallback } from "./Voice.ts"
 
 /** Samples at `level`, with `rate` samples a second. */
 const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.round(seconds * rate)).fill(level)
@@ -116,6 +116,32 @@ describe("early", () => {
           expect(yield* Effect.flip(whole).pipe(Effect.timeout("1 second"))).toBeInstanceOf(KokoroError)
         }
       }),
+    ))
+})
+
+describe("withFallback", () => {
+  test("uses say only until a first part is out, since its whole wouldn't carry on from that part", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const said: Array<string> = []
+        const failing = (afterPart: boolean) =>
+          withFallback(
+            (_, path, part) =>
+              Effect.suspend(() => {
+                if (afterPart) part?.(`${path}.first.wav`)
+                return Effect.fail(new KokoroError({ cause: "Kokoro's process stopped" }))
+              }),
+            (_, path) => Effect.sync(() => void said.push(path)),
+          )
+        const text = "The tests pass. Nothing needs you."
+        const before = yield* failing(false).renderFirst!(text, "/before.wav")
+        expect(yield* before.first).toBe("/before.wav")
+        yield* before.whole
+        const after = yield* failing(true).renderFirst!(text, "/after.wav")
+        expect(yield* after.first).toBe("/after.wav.first.wav")
+        expect(yield* Effect.flip(after.whole)).toBeInstanceOf(KokoroError)
+        expect(said).toEqual(["/before.wav"])
+      }).pipe(Effect.scoped),
     ))
 })
 
