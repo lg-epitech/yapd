@@ -897,7 +897,8 @@ export const make = (options: {
         const thinking = yield* Effect.forkIn(
           think(utterance, { _tag: "Answer", said: first.say, about: on }, [
             { speaker: "user", text: thought.utterance.heard },
-            { speaker: "yapd", text: first.say },
+            // Nothing said of the step before, like a thanks, is nothing to show.
+            ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say } satisfies Line]),
           ]),
           scope,
         )
