@@ -37,6 +37,13 @@ const reads: ReadonlySet<Act> = new Set<Act>(["answer", "look", "find", "show"])
 /** Less speech than this said over something, a write is taken for talk or noise nearby, never acted on. */
 const faintest = 0.35
 
+/** Acts that change a thread. */
+const writes: ReadonlySet<Act> = new Set<Act>(["send", "stop", "undo", "decide", "reply", "tidy"])
+
+/** Whether it's a write said over something with too little speech to be his: talk or noise nearby, never acted on, nor taken as an answer. */
+export const murmured = (decided: Pick<Decision, "act">, utterance: Pick<Assistant.Utterance, "via" | "voiced">) =>
+  utterance.via === "reply" && utterance.voiced < faintest && writes.has(decided.act)
+
 /** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
 export type Sure = typeof Sure.Type
@@ -637,7 +644,7 @@ const writing = (
 ): Checked => {
   const { utterance, desk } = situation
   // Said over something, too little speech is talk or noise nearby, never something to do.
-  if (utterance.via === "reply" && utterance.voiced < faintest) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
+  if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   // Taking back what was just done needs no thread named: it's what was just done.
   if (choice.act === "undo" && Option.isNone(target)) return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target } }
   if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }

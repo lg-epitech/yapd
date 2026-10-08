@@ -1033,6 +1033,11 @@ export const make = (options: {
         const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
         const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: Option.none() }, [{ speaker: "yapd", text: open.asked }])
         if (thought.source === "fast" && thought.decision.act === "resume") return Option.none()
+        // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
+        if (Brain.murmured(thought.decision, utterance)) {
+          yield* Effect.logInfo(`Not taking "${heard}" as the answer, with only ${voiced.toFixed(2)} s of speech`)
+          return Option.none()
+        }
         return Option.some(
           Effect.flatMap(options.awaiting, (arrived) =>
             background(

@@ -1046,22 +1046,36 @@ describe("Assistant", () => {
     expect(result.ids[1]).toEqual(result.ids[0])
   })
 
-  test("a yes too faint to be his over an offer to send again sends nothing", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, questions, flush, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
-          answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })),
-        })
-        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
-        // A fifth of a second of "yeah" from across the room.
-        const taken = yield* questions().at(-1)!.question!.answer("Yeah.", 0.2)
-        if (Option.isSome(taken)) yield* taken.value
-        yield* flush
-        return dispatched.length
-      }),
-    )
-    // The one try that may have got there, and nothing more.
-    expect(result).toBe(1)
+  test("a yes or a pick too faint to be his sends nothing, and leaves the question open to be asked again", async () => {
+    const faintly = (model: (situation: Brain.Situation) => Brain.Decision, said: string, failing: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, questions, flush, unanswered, wait, open, spoken, dispatched, journal } = yield* assistant(model, undefined, {
+            ...(failing ? { answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) } : {}),
+          })
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          // A fifth of a second of it from across the room.
+          const taken = yield* questions().at(-1)!.question!.answer(said, 0.2)
+          if (Option.isSome(taken)) yield* taken.value
+          yield* flush
+          const left = yield* open
+          const closed = yield* journal.since(0, { kinds: ["action"] })
+          yield* unanswered()
+          yield* wait(60)
+          return {
+            taken: Option.isSome(taken),
+            open: Option.isSome(left),
+            answered: closed.some(({ detail }) => (detail as { open?: string } | undefined)?.open === "answered"),
+            asked: questions().length,
+            spoken: spoken().length,
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    // "Yeah" to sending again what may not have got there: the one try that may have, and nothing more.
+    expect(await faintly(tezosMessage("high"), "Yeah.", true)).toEqual({ taken: false, open: true, answered: false, asked: 2, spoken: 2, dispatched: 1 })
+    // "Tezos" to which thread a message is for.
+    expect(await faintly(tezosMessage("medium"), "Tezos.", false)).toEqual({ taken: false, open: true, answered: false, asked: 2, spoken: 2, dispatched: 0 })
   })
 
   test("an offer to send again left unanswered is asked once more in other words, then let go, and never sent", async () => {
