@@ -103,7 +103,9 @@ export const reason = (failure: Option.Option<{ readonly class: string; readonly
   const plain = message.trim() === "" ? "" : (Hands.plainly(message).split(/(?<=[.!?])\s/)[0] ?? "")
   if (plain === "" || !sayable.test(plain) || !english(plain)) return "it ran into an error."
   const words = plain.split(/\s+/)
-  return words.length <= most ? plain : `${words.slice(0, most).join(" ").replace(/[,;:]$/, "")}…`
+  const said = words.length <= most ? plain : `${words.slice(0, most).join(" ").replace(/[,;:]$/, "")}…`
+  // It follows a colon: a name keeps its capital, a sentence's first word doesn't.
+  return said.replace(/^(The|A|An|It|Its|This|That|There|No|Nothing|Something|Your)\b/, (word) => word.toLowerCase())
 }
 
 /** Whether a run was short enough that he was likely still looking at it, unless yapd sent what started it. */
