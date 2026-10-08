@@ -89,9 +89,10 @@ export class Hands extends Context.Tag("yapd/Hands")<
   {
     /**
      * Does it, once. `twice` when he said yes to sending the same words
-     * again, which isn't asked about a second time. `wanted` is whether what
-     * comes after a step of it that went, like telling a turn it stopped, may
-     * still be done: never once yapd was turned off since it was said (I8).
+     * again, which isn't asked about a second time. `wanted` is whether each
+     * step of it may still be begun, like telling a turn it stopped: never
+     * once yapd was turned off since it was said, however long a look at the
+     * thread before it took (I8).
      */
     readonly run: (step: Step, act: Act, options?: { readonly twice?: boolean; readonly wanted?: Effect.Effect<boolean> }) => Effect.Effect<Outcome>
     /**
@@ -242,8 +243,11 @@ const stopping = "15 seconds"
 /** Why a turn stopped to be told something in its place wasn't told: the live view never showed it stopped, so it could still have taken it in, or held it in the queue. */
 const windingDown = "It was still winding down fifteen seconds later."
 
-/** Why what comes after a step that went isn't done, once yapd was turned off since he said it (I8). */
+/** Why a step isn't done, once yapd was turned off since he said it (I8). */
 export const switchedOff = "yapd was turned off before I could."
+
+/** Whether a step wasn't done, as yapd was turned off after he said it. */
+const unwanted = (outcome: Outcome) => outcome._tag === "NotSent" && outcome.reason === switchedOff
 
 /** Why a turn stopped to be told something in its place wasn't told, when nothing noted why. */
 const untold = "I didn't get to tell it."
@@ -429,9 +433,12 @@ export const make = (options: {
 
   /**
    * Writes the step in the ledger and sends it, unless it's there already,
-   * when what came of it stands. Once written, it's seen through: stopped
-   * between the two, it would be left as if it may have gone when it didn't,
-   * and stopped while it's sent, as if it never went when it may have.
+   * when what came of it stands, or what it's for is no longer `wanted`,
+   * once yapd was turned off since he said it, however long what came first
+   * took, like a look at the thread: then nothing is written or sent (I8).
+   * Once written, it's seen through: stopped between the two, it would be
+   * left as if it may have gone when it didn't, and stopped while it's sent,
+   * as if it never went when it may have.
    */
   const once = (
     step: Step,
@@ -439,23 +446,31 @@ export const make = (options: {
     to: Threads.Ref,
     body: (ids: { readonly commandId: string; readonly messageId: string | null }) => typeof Body.Type,
     reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread },
+    wanted: Effect.Effect<boolean>,
     digest?: string,
   ) =>
-    Effect.uninterruptible(
-      Effect.gen(function* () {
-        const prepared = yield* ledger
-          .prepare({ ...step, kind, machine: to.machine, thread: to.id, body, message: kind === "message", ...(digest === undefined ? {} : { digest }) })
-          .pipe(Effect.either)
-        if (Either.isLeft(prepared)) {
-          return yield* failing(
-            { _tag: "NotSent", reason: "I couldn't write it down first, so I didn't send it.", again: Option.none() } satisfies Outcome,
-            doing[kind],
-          )
-        }
-        if (!prepared.right.fresh) return settled(prepared.right)
-        return yield* dispatch(prepared.right, reached.actions, busy(reached.thread))
-      }),
-    )
+    Effect.gen(function* () {
+      if (!(yield* wanted)) {
+        const there = yield* ledger.get(Ledger.ids(step.utterance, step.step, false).commandId)
+        if (Option.isSome(there)) return settled(there.value)
+        return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, doing[kind])
+      }
+      return yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const prepared = yield* ledger
+            .prepare({ ...step, kind, machine: to.machine, thread: to.id, body, message: kind === "message", ...(digest === undefined ? {} : { digest }) })
+            .pipe(Effect.either)
+          if (Either.isLeft(prepared)) {
+            return yield* failing(
+              { _tag: "NotSent", reason: "I couldn't write it down first, so I didn't send it.", again: Option.none() } satisfies Outcome,
+              doing[kind],
+            )
+          }
+          if (!prepared.right.fresh) return settled(prepared.right)
+          return yield* dispatch(prepared.right, reached.actions, busy(reached.thread))
+        }),
+      )
+    })
 
   /**
    * What's made of the same words going to a thread they went to lately,
@@ -524,7 +539,7 @@ export const make = (options: {
       // T3 Code takes a message into a turn only while it's at it, and turns one down for a turn that's waiting, so it goes in the queue behind it.
       const waiting = act.how === "now" ? waits(reached.right.thread) : undefined
       const how = waiting === undefined ? act.how : "after"
-      const sent = yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, digest)
+      const sent = yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, wanted, digest)
       return sent._tag === "Done" && waiting !== undefined ? { ...sent, waiting } : sent
     })
 
@@ -571,34 +586,34 @@ export const make = (options: {
     Effect.gen(function* () {
       const { to, text } = act
       /** The message, as a step of its own, at once. To a thread busy just before, how it went in is looked up rather than taken for granted. */
-      const send = (at: Step) => once(at, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how: "now" }), reached, digest)
-      /** Not told after all, with why, noted with a stop that went, so the same step worked out again says the same. */
-      const notTold = (reason: string, stopped: true | "ended") =>
-        Effect.gen(function* () {
-          if (stopped === true) yield* ledger.settle(Ledger.ids(step.utterance, step.step, false).commandId, "sent", { reason, from: ["sent"] })
-          return yield* failing({ _tag: "NotSent", reason, again: Option.none(), stopped } satisfies Outcome, "tell it what to do instead")
-        })
+      const send = (at: Step) => once(at, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how: "now" }), reached, wanted, digest)
+      /** Why it wasn't told, noted with the stop that went, so the same step worked out again, or a restart, says the same. */
+      const noting = (reason: string) => ledger.settle(Ledger.ids(step.utterance, step.step, false).commandId, "sent", { reason, from: ["sent"] })
       if (!busy(reached.thread)) return yield* send(step)
       yield* Effect.logInfo(`Stopping its turn, which is ${reached.thread.activityRunStatus ?? "busy"}, to tell it something in its place`)
-      const stopped = yield* once(step, "stop", to, () => ({ _tag: "Stop", then: text }), reached)
+      const stopped = yield* once(step, "stop", to, () => ({ _tag: "Stop", then: text }), reached, wanted)
       const next = { ...step, step: step.step + 1 }
       if (stopped._tag === "Refused" && idle(stopped.reason)) {
-        if (!(yield* wanted)) return yield* notTold(switchedOff, "ended")
         yield* Effect.logInfo("Its turn ended just before it was stopped, so telling it at once")
         return { ...(yield* send(next)), stopped: "ended" } satisfies Outcome
       }
       if (stopped._tag !== "Done") return { ...stopped, stopped: false } satisfies Outcome
       const after = yield* watch(to, reached.thread, busy, stopping, wanted)
-      if (!(yield* wanted)) return yield* notTold(switchedOff, true)
-      if (busy(after)) return yield* notTold(windingDown, true)
-      return { ...(yield* send(next)), stopped: true } satisfies Outcome
+      // Still busy once the wait is up, it isn't told; ended early by yapd being turned off, it isn't either, which sending it sees to (I8).
+      if (busy(after) && (yield* wanted)) {
+        yield* noting(windingDown)
+        return yield* failing({ _tag: "NotSent", reason: windingDown, again: Option.none(), stopped: true } satisfies Outcome, "tell it what to do instead")
+      }
+      const told = yield* send(next)
+      if (unwanted(told)) yield* noting(switchedOff)
+      return { ...told, stopped: true } satisfies Outcome
     })
 
-  const stop = (step: Step, to: Threads.Ref) =>
+  const stop = (step: Step, to: Threads.Ref, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
       const reached = yield* reach(to)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing.stop)
-      return yield* once(step, "stop", to, () => ({ _tag: "Stop" }), reached.right)
+      return yield* once(step, "stop", to, () => ({ _tag: "Stop" }), reached.right, wanted)
     })
 
   /**
@@ -643,28 +658,26 @@ export const make = (options: {
       // Told something in its place that waits in the queue the stop held, carrying on is letting that go, never asking it to pick up what it was told to drop.
       const then = yield* ledger.get(Ledger.ids(stopped.value.utterance, stopped.value.step + 1, true).commandId)
       const instead = Option.exists(then, (row) => row.kind === "message" && row.machine === ref.machine && row.thread === ref.id && row.state === "sent" && row.how === "queued")
-      const resumed = yield* once(step, "undo", ref, () => (instead ? { _tag: "Resume" } : { _tag: "Resume", then: carryOn }), reached.right)
+      const resumed = yield* once(step, "undo", ref, () => (instead ? { _tag: "Resume" } : { _tag: "Resume", then: carryOn }), reached.right, wanted)
       if (instead) {
         if (resumed._tag === "Done") yield* ledger.settle(stopped.value.commandId, "abandoned", { reason: carried, from: ["sent"] })
         return resumed
       }
       // Nothing held is nothing to let go of, which doesn't stop it carrying on.
       if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
-      if (!(yield* wanted)) {
-        // Noted with the queue let go of, so a restart doesn't say it again.
-        yield* ledger.settle(Ledger.ids(step.utterance, step.step, false).commandId, "sent", { reason: switchedOff, from: ["sent"] })
-        return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, "ask it to carry on")
-      }
       const told = yield* once(
         { ...step, step: step.step + 1 },
         "message",
         ref,
         ({ messageId }) => ({ _tag: "Send", text: carryOn, messageId: messageId ?? "", how: "now" }),
         reached.right,
+        wanted,
         Ledger.digest(carryOn),
       )
       // Let carry on, the stop is taken back, and isn't taken back twice.
       if (told._tag === "Done") yield* ledger.settle(stopped.value.commandId, "abandoned", { reason: carried, from: ["sent"] })
+      // Not asked to carry on since yapd was turned off, that's noted with the queue let go of, so a restart doesn't say it again.
+      if (unwanted(told)) yield* ledger.settle(Ledger.ids(step.utterance, step.step, false).commandId, "sent", { reason: switchedOff, from: ["sent"] })
       return told
     })
 
@@ -673,7 +686,7 @@ export const make = (options: {
    * been read, it can only be told to ignore it. It's only ever the last thing
    * done, never anything before it.
    */
-  const withdraw = (step: Step, to: Option.Option<Threads.Ref>) =>
+  const withdraw = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
       const last = yield* ledger.latest(scratch, Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }))
       const refused = (reason: string) => failing({ _tag: "Refused", reason } satisfies Outcome, "take it back")
@@ -705,7 +718,7 @@ export const make = (options: {
       const run = found.right.value.run
       if (Option.isSome(run) && run.value.status === "queued") {
         const runId = run.value.id
-        const cancelled = yield* once(step, "undo", ref, () => ({ _tag: "Cancel", runId, messageId }), reached.right)
+        const cancelled = yield* once(step, "undo", ref, () => ({ _tag: "Cancel", runId, messageId }), reached.right, wanted)
         // Withdrawn, it's nothing to take back again, nor what "I sent that a minute ago" means.
         if (cancelled._tag === "Done") yield* ledger.settle(row.commandId, "abandoned", { reason: Ledger.withdrawn })
         return cancelled
@@ -721,9 +734,9 @@ export const make = (options: {
         case "Message":
           return message(step, act, options.twice === true, wanted)
         case "Stop":
-          return stop(step, act.to)
+          return stop(step, act.to, wanted)
         case "Undo":
-          return act.carry ? carry(step, act.to, wanted) : withdraw(step, act.to)
+          return act.carry ? carry(step, act.to, wanted) : withdraw(step, act.to, wanted)
       }
     },
     // Taken to send again, it's seen through, as a step is once written.

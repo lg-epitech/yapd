@@ -148,14 +148,15 @@ const takes: Answer = (payload, bounded) =>
   })
 
 /**
- * A T3 Code that answers reads, has nothing pending, finds for each word what
- * `search` says, in its order, and answers commands as `answer` says, keeping
- * them in `dispatched`.
+ * A T3 Code that answers reads, once `reading` has run, has nothing pending,
+ * finds for each word what `search` says, in its order, and answers commands
+ * as `answer` says, keeping them in `dispatched`.
  */
 const transport = (
   search: (query: string) => ReadonlyArray<string>,
   dispatched: Array<Record<string, unknown>> = [],
   answer: () => Answer = () => takes,
+  reading: Effect.Effect<void> = Effect.void,
 ): Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> => {
   const bounded: Bounded = {
     runs: [{ id: "run-3", status: "running", ordinal: 3 }],
@@ -163,7 +164,11 @@ const transport = (
     turnItems: [],
   }
   return Effect.succeed({
-    api: (<A, I>(_: string, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
+    api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
+      Effect.zipRight(
+        reading,
+        Effect.suspend(() => Schema.decodeUnknown(schema)({ projection: bounded })),
+      ).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
     call: (<A, I>(method: string, params: Record<string, unknown> & { readonly query?: string }, schema: Schema.Schema<A, I>) =>
       method === "orchestration.dispatchCommand"
         ? Effect.suspend(() => {
@@ -218,6 +223,8 @@ const assistant = (
     readonly writes?: (material: Material) => Effect.Effect<void>
     /** How T3 Code answers commands, when not as it usually does. */
     readonly answer?: () => Answer
+    /** What a read of a thread's last turns waits on before it's answered, like a T3 Code slow to answer. */
+    readonly reading?: Effect.Effect<void>
     /** How long the model takes, in seconds. */
     readonly thinking?: number
     /** T3 Code never answers a launch it was sent, having started it or not. */
@@ -250,7 +257,7 @@ const assistant = (
         ),
         changes: Stream.never,
       },
-      actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer))),
+      actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer, given.reading))),
       others: [],
       journal,
       store,
@@ -3088,5 +3095,59 @@ describe("Assistant", () => {
       }),
     )
     expect(result).toEqual({ dispatched: ["run.interrupt", "queue.resume"], reasons: [Hands.switchedOff] })
+  })
+
+  test("turned off and on while the thread is read before a step, like the same words again once it's answered, or scratch that on a queued message, nothing goes, and why is noted, with nothing said", async () => {
+    const read = (then: "same words" | "scratch that") =>
+      run(
+        Effect.gen(function* () {
+          const others = [tezos]
+          let slow = false
+          let reads = 0
+          const { dictate, toggle, wait, until, spoken, dispatched, journal } = yield* assistant(
+            (situation) =>
+              Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: situation.utterance.heard.includes("once it's done") ? "after" : "now" }),
+            undefined,
+            {
+              others,
+              // T3 Code queues a message for once the turn is done, and is slow to answer reads once the test says.
+              answer: () => (payload, bounded) =>
+                payload.type === "message.dispatch" && (payload.dispatchMode as { type: string }).type === "queue_after_active"
+                  ? Effect.sync(() => {
+                      const messageId = String(payload.messageId)
+                      bounded.messages.push({ id: messageId, role: "user", text: String(payload.text), createdAt: "x" })
+                      bounded.runs.push({ id: "run-4", status: "queued", ordinal: 4, userMessageId: messageId })
+                      bounded.turnItems.push({ type: "user_message", messageId, inputIntent: "queued_turn" })
+                      return { sequence: 1 }
+                    })
+                  : takes(payload, bounded),
+              reading: Effect.suspend(() => (slow ? Effect.zipRight(Effect.sync(() => reads++), Effect.sleep("3 seconds")) : Effect.void)),
+            },
+          )
+          if (then === "same words") {
+            yield* dictate("Tell the Tezos one to use the fee table.")
+            yield* wait(60)
+            // Its turn has ended since, which answered it, so the same words go as new, once the thread is read.
+            others[0] = thread(tezos.id, tezos.title, "integration", { latestRunCompletedAt: new Date(now + 30_000).toISOString() })
+          } else yield* dictate("Tell the Tezos one to use the fee table once it's done.")
+          const before = spoken().length
+          slow = true
+          const going = yield* Effect.fork(dictate(then === "same words" ? "Tell the Tezos one to use the fee table." : "Scratch that."))
+          yield* until(() => reads > 0)
+          yield* toggle(false)
+          yield* toggle(true)
+          yield* wait(3)
+          yield* Fiber.join(going)
+          const kept = yield* journal.since(0, { kinds: ["sent", "action"] })
+          return {
+            dispatched: dispatched.map(({ type }) => type),
+            spoken: spoken().slice(before),
+            reasons: kept.flatMap(({ detail }) => Option.toArray(Option.fromNullable((detail as { reason?: string }).reason))),
+          }
+        }),
+      )
+    for (const then of ["same words", "scratch that"] as const) {
+      expect(await read(then)).toEqual({ dispatched: ["message.dispatch"], spoken: [], reasons: [Hands.switchedOff] })
+    }
   })
 })

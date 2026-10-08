@@ -509,7 +509,9 @@ describe("Hands", () => {
         yield* Fiber.interrupt(sending)
         becomes(thread(tezos.id, { status: "interrupted" }))
         // Then, back, it stops once the queue is let go of, before asking it to carry on.
-        const carrying = yield* Effect.fork(act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true }, { wanted: Effect.never }))
+        let looked = 0
+        const stalls = Effect.suspend(() => (++looked === 1 ? Effect.succeed(true) : Effect.never))
+        const carrying = yield* Effect.fork(act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true }, { wanted: stalls }))
         yield* TestClock.adjust("1 second")
         yield* Fiber.interrupt(carrying)
         // Neither a plain stop, nor one whose message went, is anything to say.
@@ -527,8 +529,13 @@ describe("Hands", () => {
           message: true,
         })
         yield* ledger.settle("yapd:u4:1", "sent")
-        // Nor is one that wasn't asked to carry on since yapd was turned off meanwhile, which was said then.
-        const off = yield* act({ utterance: "u5", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true }, { wanted: Effect.succeed(false) })
+        // Nor is one that wasn't asked to carry on since yapd was turned off as its queue was let go of, which was said then.
+        let on = true
+        answering((payload, bounded) => {
+          if (payload.type === "queue.resume") on = false
+          return takes()(payload, bounded)
+        })
+        const off = yield* act({ utterance: "u5", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true }, { wanted: Effect.sync(() => on) })
         yield* TestClock.adjust("1 minute")
         const back = restarted(now + 3 * 60_000)
         const first = yield* back.reconcile
