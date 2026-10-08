@@ -177,6 +177,12 @@ export const wav = (samples: Float32Array, sampleRate = rate) => {
 
 type End = "Sent" | "Cancelled"
 
+/** How a dictation ended, and when: the press that ended it, however long anything before it took. */
+interface Ending {
+  readonly end: End
+  readonly at: number
+}
+
 /** What a dictation that came to nothing hands on. */
 const silence = { text: "", voiced: 0 }
 
@@ -232,7 +238,7 @@ export const WhisperDictation = Layer.scoped(
       }).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not say "${text}"`, error)))
 
     /** Ends a dictation from this side, unless the shortcut has moved on to the next one. */
-    const cancel = (ended: Deferred.Deferred<End>) => Effect.suspend(() => (ending === ended ? shortcut.cancel : Effect.void))
+    const cancel = (ended: Deferred.Deferred<Ending>) => Effect.suspend(() => (ending === ended ? shortcut.cancel : Effect.void))
 
     /** Each window on its own, since Whisper only hears 30 seconds. Empty when there was no speech. */
     const transcribe = (frames: ReadonlyArray<Float32Array>, voiced: ReadonlyArray<boolean>) =>
@@ -248,7 +254,7 @@ export const WhisperDictation = Layer.scoped(
      * microphone, so the next dictation waits for them rather than have this one
      * turn its microphone off. Nothing without a microphone.
      */
-    const record = (ended: Deferred.Deferred<End>, scope: Scope.Scope) =>
+    const record = (ended: Deferred.Deferred<Ending>, scope: Scope.Scope) =>
       Effect.gen(function* () {
         yield* cue("started")
         const microphone = yield* audio.microphone
@@ -289,11 +295,12 @@ export const WhisperDictation = Layer.scoped(
           Effect.forever,
           Effect.fork,
         )
-        const end = yield* Deferred.await(ended).pipe(
-          Effect.timeoutTo({ duration: longest, onSuccess: (end): End | "Expired" => end, onTimeout: () => "Expired" }),
-        )
-        // When it was said, which is what it can be about, however long it then takes to hear.
-        const at = yield* Clock.currentTimeMillis
+        const sent = yield* Deferred.await(ended).pipe(Effect.timeoutOption(longest))
+        // When it was said, which is what it can be about: the press that sent it, however long the voice detector took to load
+        // or it then takes to hear, or now, for one that went on too long.
+        const { end, at }: { readonly end: End | "Expired"; readonly at: number } = Option.isSome(sent)
+          ? sent.value
+          : { end: "Expired", at: yield* Clock.currentTimeMillis }
         yield* Fiber.interrupt(recording)
         if (end === "Sent") {
           // Also keep frames the helper had delivered before the capture fiber stopped.
@@ -326,7 +333,7 @@ export const WhisperDictation = Layer.scoped(
      * saying why. One that failed came to nothing too, which is passed on like
      * the rest, so whoever waits on its press knows it's over.
      */
-    const hear = (ended: Deferred.Deferred<End>) =>
+    const hear = (ended: Deferred.Deferred<Ending>) =>
       Effect.gen(function* () {
         const recorded = yield* record(ended, yield* Effect.scope)
         const nothing = { ...silence, at: recorded?.at ?? (yield* Clock.currentTimeMillis) }
@@ -374,7 +381,7 @@ export const WhisperDictation = Layer.scoped(
      * which a long one can be after a short one that followed it: what they
      * said is passed on in the order they said it, since one can build on another.
      */
-    const dictate = (press: Press, ended: Deferred.Deferred<End>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
+    const dictate = (press: Press, ended: Deferred.Deferred<Ending>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
       Effect.gen(function* () {
         // While they talk, which is plenty of time.
         yield* Effect.forkIn(transcriber.prepare, scope)
@@ -392,14 +399,14 @@ export const WhisperDictation = Layer.scoped(
         ),
       )
 
-    let ending: Deferred.Deferred<End> | undefined
+    let ending: Deferred.Deferred<Ending> | undefined
     let last: Deferred.Deferred<void> | undefined
     yield* shortcut.events.pipe(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           if (event._tag === "Started") {
             const press: Press = { press: ++pressed, turns: yield* turns }
-            const ended = yield* Deferred.make<End>()
+            const ended = yield* Deferred.make<Ending>()
             const done = yield* Deferred.make<void>()
             const before = last
             ending = ended
@@ -407,7 +414,7 @@ export const WhisperDictation = Layer.scoped(
             yield* PubSub.publish(presses, { ...press, drops })
             return yield* FiberSet.run(dictations, dictate(press, ended, before, done))
           }
-          if (ending !== undefined) yield* Deferred.succeed(ending, event._tag)
+          if (ending !== undefined) yield* Deferred.succeed(ending, { end: event._tag, at: yield* Clock.currentTimeMillis })
           ending = undefined
         }),
       ),

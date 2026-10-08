@@ -28,6 +28,8 @@ const dictation = (
     readonly detect?: (call: number) => Effect.Effect<number> | undefined
     /** How long whoever takes the transcripts in takes over the one a press began. */
     readonly consume?: (press: number) => Effect.Effect<void>
+    /** What voice detection waits for before it's loaded, like its model on the first dictation. */
+    readonly loading?: Effect.Effect<void>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -89,7 +91,10 @@ const dictation = (
           }),
           // Each frame holds the probability that it's speech.
           Layer.succeed(Vad, {
-            make: Effect.succeed((frame: Float32Array) => Effect.suspend(() => options.detect?.(detected++) ?? Effect.succeed(frame[0]!))),
+            make: Effect.zipRight(
+              options.loading ?? Effect.void,
+              Effect.succeed((frame: Float32Array) => Effect.suspend(() => options.detect?.(detected++) ?? Effect.succeed(frame[0]!))),
+            ),
           }),
           Layer.succeed(DictationTranscriber, {
             transcribe: (audio) =>
@@ -383,6 +388,25 @@ describe("Dictation", () => {
       }),
     )
     expect(result).toEqual([0, 1000])
+  })
+
+  test("hands on a dictation as said when it was sent, though voice detection was still loading then", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const loaded = yield* Deferred.make<void>()
+        const { press, talk, wait, flush, spoken } = yield* dictation(["The second one."], { loading: Deferred.await(loaded) })
+        const start = yield* TestClock.currentTimeMillis
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* wait(1)
+        yield* press("Sent")
+        yield* wait(4)
+        yield* Deferred.succeed(loaded, undefined)
+        yield* flush
+        return spoken.map((at) => at - start)
+      }),
+    )
+    expect(result).toEqual([1000])
   })
 
   test("turns the microphone off after saying something, while an earlier dictation is still transcribed", async () => {
