@@ -537,19 +537,19 @@ export const make = Effect.gen(function* () {
   /**
    * What's played for a notice: its own words, or those it says in their
    * place when it asks for them just before it's played, rendered then and
-   * removed once it's said. Should rendering fail, its own words go after all,
-   * and it's told which it gets only when it's those in their place.
+   * removed once it's said. Should rendering fail, its own words go after all.
+   * What tells it that it gets those in their place comes with them, to run
+   * once it's known it's still to be played.
    */
   const words = (said: Inbox.Said) =>
     Effect.gen(function* () {
       const { instead } = said.notice
-      if (instead === undefined || !(yield* instead.when)) return said.audio
+      const own = { path: said.audio, used: Effect.void }
+      if (instead === undefined || !(yield* instead.when)) return own
       const path = join(dir, `${crypto.randomUUID()}${extension}`)
       return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
-        Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`)),
-        Effect.zipRight(instead.used ?? Effect.void),
-        Effect.as(path),
-        Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say "${instead.spoken}" instead`, error), said.audio)),
+        Effect.as({ path, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`), instead.used ?? Effect.void) }),
+        Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say "${instead.spoken}" instead`, error), own)),
       )
     })
 
@@ -565,7 +565,10 @@ export const make = Effect.gen(function* () {
       const { question } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
       const saying = said.notice.saying ?? Effect.void
-      const played = yield* words(said)
+      const { path: played, used } = yield* words(said)
+      // Settled while its words were rendered, like a question closed by what he said meanwhile, it's dropped all the same.
+      if (yield* said.notice.stale) return yield* dealtWith
+      yield* used
       if (question === undefined) {
         const playback = yield* audio.play(played)
         yield* saying
