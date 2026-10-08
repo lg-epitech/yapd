@@ -54,12 +54,12 @@ export const migrations: ReadonlyArray<string> = [
   create index messages_held on messages (created_at) where state = 'held';`,
   // Kept with a held message so its reference cannot silently lose its guard on restart.
   "alter table messages add column reference text;",
-  // What yapd remembers for the user. The journal holds everything heard, said
-  // and done, oldest first, so it can be recalled after a restart and built
-  // on: what each update said, what the user answered or asked for, and what
-  // came of it. Memories are what the user asked yapd to keep in mind, and
-  // reminders what to bring up at a time. Times are milliseconds since 1970.
-  // Settings came before the steps, so an older database may have them.
+  // What yapd remembers for the user: a journal of everything heard, said and
+  // done, oldest first, so it can be recalled after a restart and built on:
+  // what each update said, what the user answered or asked for, and what came
+  // of it. Times are milliseconds since 1970, and `machine` is the hostname
+  // the machine's hooks report. Settings came before the steps, so an older
+  // database may have them already.
   `create table if not exists settings (name text primary key, value text not null);
   create table journal (
     id integer primary key,
@@ -74,20 +74,8 @@ export const migrations: ReadonlyArray<string> = [
     detail text
   ) strict;
   create index journal_at on journal (at);
-  create table memories (
-    id integer primary key,
-    text text not null,
-    at integer not null,
-    forgotten integer
-  ) strict;
-  create table reminders (
-    id integer primary key,
-    due integer not null,
-    text text not null,
-    at integer not null,
-    state text not null check (state in ('pending', 'said', 'cancelled'))
-  ) strict;
-  create index reminders_pending on reminders (due) where state = 'pending';`,
+  create index journal_kind_at on journal (kind, at);
+  create index journal_thread on journal (thread, at) where thread is not null;`,
 ]
 
 export class Store extends Context.Tag("yapd/Store")<

@@ -267,19 +267,19 @@ describe("CodexServer", () => {
       }),
     ))
 
-  test("lets go of threads that have waited too long", () =>
+  test("replaces ready threads before they'd be too old to trust, so a call after a quiet spell finds one", () =>
     withServer("", (server, log) =>
       Effect.gen(function* () {
         yield* until(log, threadsStarted(2))
         yield* settle
-        yield* TestClock.adjust("1 hour")
+        // Each round of five minutes looks them over: at fifteen they're replaced.
+        for (let round = 0; round < 3; round++) {
+          yield* TestClock.adjust("5 minutes")
+          yield* settle
+        }
+        const recorded = yield* until(log, threadsStarted(4))
+        expect(calls("thread/unsubscribe")(recorded).map((entry) => entry.params.threadId).toSorted()).toEqual(["thread-1", "thread-2"])
         expect(yield* server.run(turn)).toBe(answer("thread-3"))
-        const recorded = yield* until(log, (recorded) => calls("thread/unsubscribe")(recorded).length === 3)
-        expect(calls("thread/unsubscribe")(recorded).map((entry) => entry.params.threadId).toSorted()).toEqual([
-          "thread-1",
-          "thread-2",
-          "thread-3",
-        ])
       }),
     ))
 

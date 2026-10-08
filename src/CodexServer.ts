@@ -61,6 +61,15 @@ const spares = 2
  */
 const freshFor = 20 * 60_000
 
+/**
+ * How often ready threads are looked over, and how old one gets before it's
+ * replaced, well before it would be let go, so a call after a quiet spell still
+ * finds one ready rather than waiting seconds for a new one. Starting a thread
+ * asks nothing of the model, so it costs no usage.
+ */
+const renewEvery = "5 minutes"
+const renewAfter = 15 * 60_000
+
 /** How an app-server that never answered fails. Other flags won't fix it. */
 const silent = "didn't start"
 
@@ -509,6 +518,14 @@ export const make = (settings: Settings, codex: ReadonlyArray<string> = ["codex"
 
     // So the first update doesn't wait for the server or a thread.
     yield* refill
+    yield* Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const old = ready.filter((spare) => now - spare.at >= renewAfter)
+      ready = ready.filter((spare) => !old.includes(spare))
+      yield* Effect.forEach(old, (spare) => release(spare.server, spare.thread), { discard: true })
+      // Only when the server is up already: a stopped one starts again for the next call, not for this.
+      if (current !== undefined && !current.isClosed()) yield* refill
+    }).pipe(Effect.delay(renewEvery), Effect.forever, Effect.interruptible, Effect.forkIn(scope))
 
     const run = (turn: Turn) =>
       Effect.gen(function* () {

@@ -26,7 +26,7 @@ export type Kind =
 export interface Entry {
   readonly at: number
   readonly kind: Kind
-  /** The machine it happened on, by its hostname or by what the user calls it. */
+  /** The machine it happened on, by the hostname its hooks report. */
   readonly machine?: string | undefined
   readonly project?: string | undefined
   /** The thread or session it's about. */

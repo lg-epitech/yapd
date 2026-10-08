@@ -92,3 +92,24 @@ test("Store upgrades existing outgoing messages without losing them", () => with
   })))
   expect(row).toEqual({ text: "Keep API", state: "held", reference: null })
 }))
+
+test("Store brings a database from the reverted threads work up to date, keeping its settings and threads", () => within(async path => {
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const store = yield* Store.make(path, Store.migrations.slice(0, 2))
+    yield* store.transaction(database => {
+      database.run("create table settings (name text primary key, value text not null)")
+      database.run("insert into settings values ('on', 'false')")
+      database.run("insert into threads (machine, id, prompt, started, at) values ('Rosie', 't1', 'Migrate Tezos.', 1, '2026-09-30T00:00:00.000Z')")
+    })
+  })))
+  const found = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const store = yield* Store.make(path)
+    return yield* store.transaction(database => ({
+      on: database.query<{ value: string }, []>("select value from settings where name = 'on'").get()?.value,
+      threads: database.query<{ count: number }, []>("select count(*) as count from threads").get()?.count,
+      journal: database.query<{ count: number }, []>("select count(*) as count from journal").get()?.count,
+    }))
+  })))
+  expect(found).toEqual({ on: "false", threads: 1, journal: 0 })
+  expect(tables(path).version).toBe(Store.migrations.length)
+}))
