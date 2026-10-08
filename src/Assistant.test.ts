@@ -4103,7 +4103,7 @@ describe("Assistant", () => {
     expect(await said("update")).toBe("The loader is fixed.")
   })
 
-  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation", async () => {
+  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation, or with 'it's on your screen' before it", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const echoed = (echo: string) =>
       run(
@@ -4120,7 +4120,8 @@ describe("Assistant", () => {
           return spoken().at(-1)
         }),
       )
-    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`]) expect(await echoed(echo)).toBe("The loader is fixed.")
+    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, `It's on your screen. ${choices}, sir?`])
+      expect(await echoed(echo)).toBe("The loader is fixed.")
   })
 
   test("a pull request taken on a low guess between two is asked about before anything opens, and the one he picks is opened", async () => {
