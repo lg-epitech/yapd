@@ -29,6 +29,6 @@ Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6
 - A versioned SQLite store in `~/.yapd/yapd.sqlite`, with a journal of everything heard, said and done. It survives restarts and feeds "what did I miss".
 - A live link to T3 Code's threads that reconnects and catches up on its own, and actions on threads (message, steer, stop, approve, answer, archive, rename, snooze, search, usage). Messages, stops and starts by voice go through them now.
 - Every message, stop and start is written down before it goes out, under ids that make T3 Code do it once however often it's sent. A restart only looks; it never sends.
-- `scripts/m2-probe.ts` checks those T3 Code receipts once on a scratch thread; it sends nothing without `--send`.
+- `scripts/m2-probe.ts` checks those T3 Code receipts once, on a thread it starts for itself; it sends nothing without `--send`.
 - Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
