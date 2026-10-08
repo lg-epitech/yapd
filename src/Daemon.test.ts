@@ -19,11 +19,13 @@ import { Voice } from "./Voice.ts"
 /**
  * Runs the daemon with updates that each take ten seconds to read, and no
  * microphone unless the user `says` something, which is then meant for the agent
- * and takes three seconds to send.
+ * and takes three seconds to send, unless yapd has an `answer` to it.
  */
 const make = (says?: string, options: {
   /** How long rendering takes, which is at once unless said. */
   readonly renderSeconds?: number
+  /** What yapd answers to what the user says over an update, instead of passing it on. */
+  readonly answer?: string
   readonly transcripts?: ReadonlyArray<string>
   readonly waitingHooks?: boolean
   readonly onHookOpen?: () => Effect.Effect<void>
@@ -102,7 +104,13 @@ const make = (says?: string, options: {
     Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? says ?? "") }),
     Layer.succeed(Responder, {
       respond: ({ heard }) =>
-        says === undefined ? Effect.die("nothing to respond to") : Effect.succeed({ intent: "send" as const, spoken: "Okay, passed on.", message: heard }),
+        says === undefined
+          ? Effect.die("nothing to respond to")
+          : Effect.succeed(
+              options.answer === undefined
+                ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
+                : { intent: "answer" as const, spoken: options.answer, message: "" },
+            ),
     }),
     Layer.succeed(Relays, {
       send: (thread, text) =>
@@ -202,7 +210,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -354,6 +362,32 @@ describe("Daemon", () => {
       }),
     )
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. Merged it."])
+  })
+
+  test("what was heard last is the line said over an update, like an answer to what he asked over it, still tied to the update", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, wait, lastHeard, played } = yield* make("What does the PR change?", { answer: "The PR changes the microphone buffer." })
+        yield* finish("a", "The PR is ready.")
+        const reading = yield* lastHeard
+        yield* speak
+        yield* wait(1)
+        const answering = yield* lastHeard
+        // Said to the end, and nothing more said over it.
+        yield* wait(10)
+        yield* wait(3)
+        return { reading, answering, after: yield* lastHeard, played: [...played] }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready.", "The PR changes the microphone buffer."])
+    const update = { session: "claude:a", spoken: "yapd. The PR is ready." }
+    expect(result.reading).toEqual(Option.some(expect.objectContaining({ update: expect.objectContaining(update), said: "yapd. The PR is ready.", playing: true })))
+    expect(result.answering).toEqual(
+      Option.some(expect.objectContaining({ update: expect.objectContaining(update), said: "The PR changes the microphone buffer.", playing: true })),
+    )
+    expect(result.after).toEqual(
+      Option.some(expect.objectContaining({ update: expect.objectContaining(update), said: "The PR changes the microphone buffer.", playing: false })),
+    )
   })
 
   test("passes on a reply even when a dictation starts as it's being sent, and says so after", async () => {

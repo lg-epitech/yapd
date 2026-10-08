@@ -123,6 +123,11 @@ describe("Brain", () => {
     }
     expect(again({ _tag: "Answer", said: open.asked, about: Option.none() })).toEqual({ act: "again", pending: "answers", spoken: open.asked })
     expect(again({ _tag: "Session", update, said: update.spoken })).toEqual({ act: "again", pending: "replaces", spoken: update.spoken })
+    // Over an update, the line said last, like the answer to what he asked over it, which the model is shown beside the update.
+    const answered = "The two fixes are in the loader, sir."
+    expect(again({ _tag: "Session", update, said: answered })).toEqual({ act: "again", pending: "replaces", spoken: answered })
+    const shown = Brain.prompt(situation("Can you repeat that?", { subject: { _tag: "Session", update, said: answered } }), Option.none())
+    expect(shown).toContain(`yet: «${update.spoken}»\nWhat you said last, over it: «${answered}»`)
   })
 
   test("a bare stop never stops a thread", () => {

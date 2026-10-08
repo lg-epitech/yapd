@@ -230,7 +230,7 @@ const assistant = (
       }),
     )
     let power = { on: true, turns: 1 }
-    let listening = Option.none<{ readonly update: Conversation.Update; readonly at: number; readonly playing: boolean }>()
+    let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean }>()
     const made = yield* Assistant.make({
       threads,
       journal,
@@ -276,7 +276,14 @@ const assistant = (
       reading: (project: string, spoken: string) =>
         Effect.flatMap(TestClock.currentTimeMillis, (at) =>
           Effect.sync(() => {
-            listening = Option.some({ update: update(project, spoken, at), at, playing: true })
+            listening = Option.some({ update: update(project, spoken, at), said: spoken, at, playing: true })
+          }),
+        ),
+      /** yapd starts saying something back over the update being read, like an answer to what he asked over it. */
+      answering: (line: string) =>
+        Effect.flatMap(TestClock.currentTimeMillis, (at) =>
+          Effect.sync(() => {
+            listening = Option.map(listening, (heard) => ({ ...heard, said: line, at, playing: true }))
           }),
         ),
       /** Its turn came, after whatever was being said, and it was said to the end. */
@@ -451,6 +458,20 @@ describe("Assistant", () => {
       }),
     )
     expect(result).toEqual([answer, answer])
+  })
+
+  test("\"say that again\" over an update says what he heard last of it, like the answer to what he asked over it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { reading, answering, wait, dictate, spoken } = yield* assistant(() => undefined)
+        yield* reading("yapd", "Yapd. The PR is ready.")
+        yield* wait(10)
+        yield* answering("The PR changes the microphone buffer.")
+        yield* dictate("Say that again.")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["The PR changes the microphone buffer."])
   })
 
   test("a garbled answer to an open question closes it without asking again", async () => {

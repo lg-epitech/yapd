@@ -36,6 +36,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
     const heard: Array<string> = []
     const sent: Array<string> = []
     const late: Array<string> = []
+    const saying: Array<string> = []
     const transcripts = [...said]
     let dispatches = 0
     let replies = 0
@@ -82,6 +83,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       send: (update, message) => Context.get(context, Relays).send(update.thread, message).pipe(Effect.as("sent" as const)),
       late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
       replied: Effect.sync(() => void replies++),
+      saying: (_, line) => Effect.sync(() => void saying.push(line)),
     }).pipe(Effect.provide(context))
     const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -104,7 +106,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
         ),
         Effect.fork,
       )
-    return { ...made, fiber, heard, sent, late, speak, wait, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
+    return { ...made, fiber, heard, sent, late, saying, speak, wait, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
   })
 
 /** Talks, then waits for the reply to be sent and read out. */
@@ -249,6 +251,23 @@ describe("Follow-ups", () => {
       }),
     )
     expect(result).toEqual({ aside: 0, replies: 1, sent: ["Please merge it."] })
+  })
+
+  test("tells yapd of each line it says back over an update, which is then what the user heard last", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { fiber, speak, wait, saying } = yield* conversation(["Sam, can you grab the coffee?", "Please merge it."])
+        yield* speak
+        yield* wait(5)
+        const aside = [...saying]
+        yield* speak
+        yield* wait(5)
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { aside, saying }
+      }),
+    )
+    expect(result).toEqual({ aside: [], saying: ["Okay."] })
   })
 
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {

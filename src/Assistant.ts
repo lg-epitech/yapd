@@ -55,7 +55,7 @@ export type Subject =
       readonly asks: Option.Option<Asks>
       readonly row: number
     }
-  /** An update from a session T3 Code doesn't run. */
+  /** An update from a session T3 Code doesn't run, and what of it was said last, like an answer over it. */
   | { readonly _tag: "Session"; readonly update: Conversation.Update; readonly said: string }
   | {
       readonly _tag: "Answer"
@@ -202,8 +202,8 @@ export const make = (options: {
   readonly tell: (notice: Notice, since?: number) => Effect.Effect<void>
   /** Whether yapd is on, and how many times it was turned on or off. */
   readonly power: Effect.Effect<{ readonly on: boolean; readonly turns: number }>
-  /** The update being read, or the last one the user heard, and when. */
-  readonly lastHeard: Effect.Effect<Option.Option<{ readonly update: Conversation.Update; readonly at: number; readonly playing: boolean }>>
+  /** The update being read, or the last one the user heard, what of it was said last, like an answer over it, and when. */
+  readonly lastHeard: Effect.Effect<Option.Option<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean }>>
   /** Something is about to be said, so the speaker can get ready while it's worked out. */
   readonly coming: Effect.Effect<void>
   /**
@@ -287,7 +287,7 @@ export const make = (options: {
       const update = Option.filter(yield* options.lastHeard, ({ playing, at }) => playing || now - at < recall)
       const said = answered !== undefined && now - answered.at < recall ? answered : undefined
       if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
-        return { _tag: "Session", update: update.value.update, said: update.value.update.spoken } satisfies Subject
+        return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject
       }
       return said?.subject ?? ({ _tag: "Nothing" } satisfies Subject)
     })

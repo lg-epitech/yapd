@@ -759,7 +759,9 @@ const focus = (situation: Situation) => {
     case "Session": {
       const { update } = subject
       return [
-        `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(subject.said, 400)}`,
+        `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`,
+        // Like an answer to what he asked over it, which is what he heard last.
+        ...(subject.said === update.spoken ? [] : [`What you said last, over it: ${fenced(subject.said, 400)}`]),
         ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${fenced(prompt, 300)}`] }),
         `What it wrote: ${fenced(update.turn.message, 700)}`,
       ].join("\n")

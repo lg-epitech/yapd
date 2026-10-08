@@ -129,6 +129,8 @@ export const make = (options: {
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
   /** Something was said over an update and taken in, which takes the place of whatever yapd asked before. */
   readonly replied: Effect.Effect<void>
+  /** yapd starts saying something back over an update, like an answer or word of a follow-up, which is then what the user heard last. */
+  readonly saying: (update: Update, line: string) => Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -494,6 +496,7 @@ export const make = (options: {
             path = join(options.dir, `${crypto.randomUUID()}${extension}`)
             rendered.push(path)
             yield* voice.render(text, path)
+            yield* options.saying(update, text)
             from = 0
             missed = 0
           }
