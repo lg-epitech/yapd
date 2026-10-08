@@ -3017,6 +3017,71 @@ describe("Assistant", () => {
     expect(scratched.dispatched).toBe(1)
   })
 
+  test("a message that may not have got there, for a request said before a question asked since, is never offered to go again, then or after a restart, and he's told it was left", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, heard, wait, spoken, open, dispatched, ledger } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("What")
+              ? Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+              : tezosMessage("high")(situation),
+          undefined,
+          // T3 Code takes it, and never says so.
+          { answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) },
+        )
+        const said = yield* TestClock.currentTimeMillis
+        yield* wait(5)
+        // Asked about something else, then what was said before that was asked is handed on.
+        yield* dictate("What's it doing?")
+        const asked = Option.map(yield* open, ({ asked }) => asked)
+        yield* heard({ heard: "Tell the Tesla's migration to use the fee table from the Mina work.", via: "shortcut", at: said, voiced: 3, turns: 1 })
+        const row = yield* ledger.latest("1 hour", { kinds: ["message"] })
+        return {
+          asked,
+          kept: Option.map(yield* open, ({ asked }) => asked),
+          last: spoken().at(-1),
+          offerable: Option.map(row, Ledger.offerable),
+          restart: (yield* ledger.open(0)).length,
+          dispatched: dispatched.length,
+        }
+      }),
+    )
+    expect(result.kept).toEqual(result.asked)
+    expect(result.last).toBe("I couldn't confirm it got to Migrate Tezos Integration, sir. I didn't ask about sending it again, since I'm waiting on your answer to something else.")
+    expect(result.offerable).toEqual(Option.some(false))
+    expect(result.restart).toBe(0)
+    expect(result.dispatched).toBe(1)
+  })
+
+  test("what a restart found waits while he's dictating, and is offered once what he dictated is dealt with", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { prepare, heard, undelivered, spoken, questions, ledger } = yield* assistant(minaStatus)
+        const row = yield* ledger.prepare({
+          utterance: "u-old",
+          step: 0,
+          kind: "message",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        yield* ledger.settle(row.commandId, "unknown")
+        // He's pressed the shortcut, and the restart's look comes back while he's still talking.
+        yield* prepare(1, 1)
+        yield* undelivered([row])
+        const meanwhile = questions().length
+        yield* heard({ heard: "What's the Mina one doing?", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 }, 1)
+        return { meanwhile, spoken: spoken() }
+      }),
+    )
+    expect(result.meanwhile).toBe(0)
+    expect(result.spoken).toEqual([
+      "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+      "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir. Send it again?",
+    ])
+  })
+
   test("a question about the same words, or about a message read already, that he never heard says what it followed when something new takes its place", async () => {
     const unheard = (then: string) =>
       run(
