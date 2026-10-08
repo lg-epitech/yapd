@@ -301,8 +301,8 @@ const short = (status: string | null | undefined) => ["failed", "cancelled", "in
 /** How a launched thread's first turn is getting on, its only run so far. */
 const first = ({ projection }: Launched) => projection.runs.at(-1)?.status
 
-/** How long a thread T3 Code made for new work can show no run before the work is taken never to have gone in: T3 Code puts it in as soon as it's made the thread. */
-const handing = "10 seconds"
+/** How long after new work is asked for T3 Code can take to put it in the thread it made, a step of its own that it can be slow to get to. */
+const handing = "1 minute"
 
 /**
  * How new work is getting on, as T3 Code shows its thread, by the checks a
@@ -322,14 +322,16 @@ export const progress = (thread: Pick<T3Live.Thread, "status" | "latestRunStarte
 
 /**
  * New work's thread as `look` shows it once it's no longer being got ready,
- * or as it last did at `until`, in ms, looked at every second meanwhile, as a
- * launch looks: none if there's no thread for it. With no run, it's waited for
- * only as long as T3 Code takes to put the work in, which it does at once, so
- * one still empty by then never had it put in.
+ * or as it last did when a launch would have given up, looked at every second
+ * meanwhile, as a launch looks: none if there's no thread for it. With no run,
+ * it's waited for only as long after it was asked for, at `asked`, in ms, as
+ * T3 Code can take to put the work in; still without it then, it's as good as
+ * none, since the work may yet go in, so there's no saying it didn't start.
  */
-export const readied = (look: Effect.Effect<Option.Option<T3Live.Thread>>, until: number) =>
+export const readied = (look: Effect.Effect<Option.Option<T3Live.Thread>>, asked: number) =>
   Effect.gen(function* () {
-    const filled = Math.min(until, (yield* Clock.currentTimeMillis) + Duration.toMillis(handing))
+    const until = asked + Duration.toMillis(preparation)
+    const filled = Math.min(until, asked + Duration.toMillis(handing))
     /** Until when it's waited for, as it is now. */
     const waited = (thread: Option.Option<T3Live.Thread>) =>
       Option.match(Option.map(thread, progress), { onNone: () => 0, onSome: (now) => (now === "preparing" ? until : now === "empty" ? filled : 0) })
@@ -339,7 +341,7 @@ export const readied = (look: Effect.Effect<Option.Option<T3Live.Thread>>, until
       const next = yield* look
       if (Option.isSome(next)) now = next
     }
-    return now
+    return Option.filter(now, (thread) => progress(thread) !== "empty")
   })
 
 /** Why new work T3 Code made a thread for didn't start: it couldn't get its workspace ready. */
@@ -349,17 +351,11 @@ export const unready = (worktree: boolean, project = "the project") =>
 /**
  * Why new work didn't start, as T3 Code shows the thread it made for it once
  * it's been waited for, if it's known not to have: its workspace couldn't be
- * got ready, or the work never went into it. Begun, or still being got ready,
- * there's no saying it didn't.
+ * got ready. Begun, still being got ready, or with the work not in it yet,
+ * which T3 Code may still put in, there's no saying it didn't.
  */
-export const unstarted = (thread: Pick<T3Live.Thread, "status" | "latestRunStartedAt">, worktree: boolean, project?: string) => {
-  const now = progress(thread)
-  return now === "unstarted"
-    ? Option.some(unready(worktree, project))
-    : now === "empty"
-      ? Option.some("T3 Code never put the work in the thread it made, so it didn't start.")
-      : Option.none()
-}
+export const unstarted = (thread: Pick<T3Live.Thread, "status" | "latestRunStartedAt">, worktree: boolean, project?: string) =>
+  progress(thread) === "unstarted" ? Option.some(unready(worktree, project)) : Option.none()
 
 /** Why T3 Code wouldn't start it, to be read out. */
 export const reason = (error: Server.Trouble | Server.Refusal) =>

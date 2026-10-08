@@ -1756,11 +1756,43 @@ describe("Assistant", () => {
       state: Option.some("unknown"),
       asked: 1,
     })
-    // T3 Code puts the work in as soon as it's made the thread, so one still without it a moment later never had it put in: that's said then, not once a launch would give up.
-    const never = ["About the loader fix: T3 Code never put the work in the thread it made, so it didn't start."]
-    expect(await launched("never given")).toEqual({ meanwhile: { spoken: never, started: 0 }, spoken: never, started: 0, state: Option.some("failed"), asked: 1 })
+    // T3 Code makes the thread and puts the work in it as two steps, which it can be slow between: still without it a minute after it was asked for,
+    // it may yet go in, so it's as if T3 Code hadn't shown the thread at all, never said not to have started.
+    expect(await launched("never given")).toEqual({
+      meanwhile,
+      spoken: ["About the loader fix: T3 Code is taking too long, so I don't know if it started."],
+      started: 0,
+      state: Option.some("unknown"),
+      asked: 1,
+    })
     // Each case looks at the thread every second for minutes, which takes more than the usual few seconds on a busy machine.
   }, 30_000)
+
+  test("new work T3 Code never answered for, whose thread it put the work in only well after making it, is said and journaled as started, never as not started", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, wait, launched, spoken, journal, ledger } = yield* assistant(
+          (situation) => Brain.decision({ act: "start", text: situation.utterance.heard }),
+          () => written({ worktree: true, spoken: "Started in yapd, on Opus, in a worktree." }),
+          { unanswered: "started", made: {} },
+        )
+        yield* dictate("Start a thread in yapd to fix the loader in a worktree.")
+        // T3 Code, slow enough not to answer, puts the work in the thread it made 15 seconds after asking, then gets its worktree ready.
+        yield* wait(15)
+        yield* launched(preparing)
+        yield* wait(20)
+        yield* launched({ ...begun, worktreePath: "/code/yapd-worktrees/t3code-0a1b2c3d" })
+        yield* wait(60)
+        return {
+          spoken: spoken(),
+          started: (yield* journal.since(0, { kinds: ["started"] })).length,
+          unstarted: (yield* journal.since(0)).filter(({ said }) => said?.includes("didn't start") === true).length,
+          state: Option.map(yield* ledger.latest("1 hour", { kinds: ["start"] }), ({ state }) => state),
+        }
+      }),
+    )
+    expect(result).toEqual({ spoken: ["Started in yapd, on Opus, in a worktree."], started: 1, unstarted: 0, state: Option.some("sent") })
+  })
 
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
     const result = await run(

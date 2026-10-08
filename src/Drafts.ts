@@ -1,10 +1,10 @@
-import { Clock, Duration, Effect, Either, Fiber, Option } from "effect"
+import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type * as Ledger from "./Ledger.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
-import { preparation, progress, readied, unstarted } from "./T3CodeLauncher.ts"
+import { progress, readied, unstarted } from "./T3CodeLauncher.ts"
 import type * as T3Live from "./T3Live.ts"
 import { type Decision, type Destination, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
@@ -283,12 +283,13 @@ export const make = (options: {
           const outcome = yield* Effect.either(machine.launcher.start(request))
           // Asked for and not answered, it may have started all the same: it's looked for under the id it was asked for with, and, found,
           // waited for while T3 Code is still getting it ready, as a launch that answers is, since a thread made for it doesn't say it started.
+          // One T3 Code still hasn't put the work in by then is taken as not found, since it may yet put it in.
           const found =
             Either.isLeft(outcome) && outcome.left.sent === true && request.ids !== undefined && options.find !== undefined
-              ? yield* Effect.zipRight(Effect.sleep(settling), readied(options.find(machine.name, request.ids.thread), asked + Duration.toMillis(preparation)))
+              ? yield* Effect.zipRight(Effect.sleep(settling), readied(options.find(machine.name, request.ids.thread), asked))
               : Option.none<T3Live.Thread>()
           if (Either.isLeft(outcome) && !Option.exists(found, (thread) => progress(thread) === "begun")) {
-            // Ended before it began, or never given the work, it didn't start; still being got ready by the time a launch would have given up, it can't be told yet.
+            // Ended before it began, it didn't start; still being got ready by the time a launch would have given up, or not found, it can't be told yet.
             const ended = Option.flatMap(found, (thread) => unstarted(thread, request.worktree === true, project.name))
             const why = Option.getOrElse(ended, () => (Option.isSome(found) ? readying : outcome.left.reason))
             yield* Effect.logWarning(`Could not start: ${why}`, outcome.left)
