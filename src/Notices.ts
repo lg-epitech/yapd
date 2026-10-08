@@ -131,9 +131,9 @@ export const reason = (failure: Option.Option<{ readonly class: string; readonly
  * Whether a run had a Stop hook of its own, out of when the thread's Stops
  * came, oldest first: one since it started, unless it's the run before's,
  * come late. That one went well, so had one coming as it ended, which takes
- * a moment to get going: none came by the time this one started, the first
- * since, while it could still be that one's, is taken for it. It matters
- * for a run that fails at once, since Claude has no Stop for a failure.
+ * a moment to get going: when none had come by the time this one started,
+ * the first since, while it could still be that one's, is taken for it. It
+ * matters for a run that fails at once, since Claude has no Stop for that.
  */
 export const hooked = (stops: ReadonlyArray<number>, run: Pick<T3Actions.Ran, "previous">, startedAt: number) => {
   const since = startedAt - leeway
@@ -303,8 +303,9 @@ export const composer = (threads: Threads.Threads["Type"]) =>
  * Says what T3 Code's threads need the user for, whenever yapd is on, and
  * what failed and what finished with no hook to tell of it, unless yapd was
  * turned off since, as `tell` queues it. `stopped` is when sessions' Stop
- * hooks came, oldest first, `finished` says a finished turn as a hook's update, and
- * `mention` makes "it" the thread a notice is about as it starts being said.
+ * hooks came, oldest first, `finished` says a finished turn as a hook's
+ * update, and `mention` makes "it" the thread a notice is about as it starts
+ * being said.
  */
 export const make = (options: {
   readonly threads: Threads.Threads["Type"]
