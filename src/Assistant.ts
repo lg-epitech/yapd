@@ -175,6 +175,10 @@ const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" }
 /** Something said back that isn't about a thread. */
 const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _tag: "Answer", said: say, about: Option.none() }, kind: say === "" ? "none" : "answer" })
 
+/** The thread a yes or no question is about, which it names, so what's said once it's answered needn't name it again. */
+const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>
+  Brain.yesNo(open.kind) ? Option.fromNullable(open.candidates[0]) : Option.none<Threads.Ref>()
+
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
 
@@ -410,7 +414,7 @@ export const make = (options: {
         version++
         asking = { open: { ...open, id: mint(at, "o"), version, at }, asks: 1, repeat: undefined, held: false, said: false }
         yield* Effect.logInfo(`Asked: ${open.asked}`)
-        return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: Option.none() }, kind: "question" } satisfies Outcome
+        return { say: open.asked, subject: { _tag: "Answer", said: open.asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
       })
 
     /** Something being said may answer the open question, so it isn't said meanwhile, nor asked again until that's known. */
@@ -450,7 +454,7 @@ export const make = (options: {
         }
         asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: false }
         yield* Effect.logInfo(`Asked again: ${asked}`)
-        return { say: asked, subject: { _tag: "Answer", said: asked, about: Option.none() }, kind: "question" } satisfies Outcome
+        return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
       })
 
     /** A minute on, the question is asked once more in other words, or let go with a word if it's been asked as often as it will be. */
@@ -1084,7 +1088,7 @@ export const make = (options: {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
         const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
-        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: Option.none() }, [{ speaker: "yapd", text: open.asked }])
+        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open) }, [{ speaker: "yapd", text: open.asked }])
         if (thought.source === "fast" && thought.decision.act === "resume") return Option.none()
         // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
         if (Brain.murmured(thought.decision, utterance)) {

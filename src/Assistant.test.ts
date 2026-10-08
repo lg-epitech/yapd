@@ -919,7 +919,8 @@ describe("Assistant", () => {
       }),
     )
     expect(result.before).toBe(0)
-    expect(result.spoken.slice(1, 2)).toEqual(["Stop Migrate Tezos Integration, sir?"])
+    // The question named it, so what's said once it's done doesn't again.
+    expect(result.spoken.slice(1)).toEqual(["Stop Migrate Tezos Integration, sir?", "Stopped, sir."])
     expect(result.dispatched).toEqual([{ type: "run.interrupt", threadId: tezos.id, holdQueue: true }])
   })
 
@@ -1041,7 +1042,7 @@ describe("Assistant", () => {
         return { spoken: spoken(), ids: dispatched.map(({ commandId, messageId }) => [commandId, messageId]) }
       }),
     )
-    expect(result.spoken.slice(0, 2)).toEqual(["I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?", "On it, sir: Migrate Tezos Integration."])
+    expect(result.spoken.slice(0, 2)).toEqual(["I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?", "On it, sir."])
     expect(result.ids).toHaveLength(2)
     expect(result.ids[1]).toEqual(result.ids[0])
   })
@@ -1149,7 +1150,7 @@ describe("Assistant", () => {
       "I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?",
       "I'll leave that one, sir.",
       "I couldn't confirm that got to Migrate Tezos Integration before, sir. Send it again?",
-      "On it, sir: Migrate Tezos Integration.",
+      "On it, sir.",
     ])
     // Nothing went for the second time he said it, and his yes went under the first's ids.
     expect(result.before).toBe(1)
@@ -1221,7 +1222,7 @@ describe("Assistant", () => {
     )
     const offered = "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir. Send it again?"
     expect(result.first).toBe(1)
-    expect(result.spoken).toEqual([offered, "I'll leave that one, sir.", offered, "On it, sir: Migrate Tezos Integration."])
+    expect(result.spoken).toEqual([offered, "I'll leave that one, sir.", offered, "On it, sir."])
     expect(result.sent).toEqual([["yapd:u-old2:0", "Also add a test."]])
     expect(result.states).toEqual(["unknown", "sent"])
   })
