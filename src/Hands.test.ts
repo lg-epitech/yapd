@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Effect, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Deferred, Effect, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
 import * as Hands from "./Hands.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
@@ -655,6 +655,54 @@ describe("Hands", () => {
     // Said once, never looked at again by a restart.
     expect(result.restart).toEqual([])
     expect(result.dispatched).toBe(0)
+  })
+
+  test("a restart's look that comes back only once he's said yes to sending it again, and it went, leaves it sent, never offered again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(now)
+        const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
+        const { commandId } = yield* ledger.prepare({
+          utterance: "u1",
+          step: 0,
+          kind: "message",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        yield* ledger.settle(commandId, "unknown")
+        const bounded: Bounded = { runs: [], messages: [], turnItems: [] }
+        const reading = yield* Deferred.make<void>()
+        const resent = yield* Deferred.make<void>()
+        let reads = 0
+        // The restart's look reads the thread as it is, without the message, and is slow to answer: it only does once he's said yes and it went.
+        const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
+          api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
+            Effect.suspend(() => {
+              const seen = structuredClone(bounded)
+              const slow = ++reads === 1 ? Effect.zipRight(Deferred.succeed(reading, undefined), Deferred.await(resent)) : Effect.void
+              return Effect.zipRight(slow, Schema.decodeUnknown(schema)({ projection: seen }).pipe(Effect.orDie))
+            })) as Server.Transport["api"],
+          call: (<A, I>(_: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
+            takes()(payload, bounded).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value)), Effect.orDie)) as Server.Transport["call"],
+        })
+        const actions = T3Actions.make(reach)
+        const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions) } })
+        const looking = yield* Effect.fork(back.reconcile)
+        yield* Deferred.await(reading)
+        const yes = yield* back.again(commandId)
+        yield* Deferred.succeed(resent, undefined)
+        yield* Fiber.join(looking)
+        return {
+          yes: yes._tag,
+          state: Option.map(yield* ledger.get(commandId), ({ state }) => state),
+          offered: Option.isSome(yield* back.still(commandId)),
+        }
+      }),
+    )
+    // What it found, from before it went, never takes it back to may not have got there, which would offer it again.
+    expect(result).toEqual({ yes: "Done", state: Option.some("sent"), offered: false })
   })
 
   test("a different message to the same thread goes straight through", async () => {
