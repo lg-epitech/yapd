@@ -107,7 +107,7 @@ When you ask about a thread that waits on something that can't be read aloud, li
 ```
 
 - `kind`: `threads` for what's going on across your threads, grouped by what they're doing, `thread` for one thread, `pr` for a pull request, `usage` for your limits and when they reset, `list` for what you missed, and `said` for the last line yapd said and the last thing it heard you say.
-- `markdown`: the card, in Markdown. What a thread waits on is always in a code block, as text, never as a link. Links in a thread's own messages are kept only when they're `https`, and anything else that would make one, like a definition or an address in angle brackets, is escaped. An address written out bare is left as text, which some renderers make a link of, so follow only `https` links, as the menu bar app does.
+- `markdown`: the card, in Markdown. What a thread waits on is always in a code block, as text, never as a link. Links in a thread's own messages are kept only when they're `https`, with the host they go to written after them unless their words are the address itself, and anything else that would make one, like a definition or an address in angle brackets, is escaped. An address written out bare is left as text, which some renderers make a link of, so follow only `https` links, as the menu bar app does.
 - `url`: the address the card is about, only ever `https` and from T3 Code, like the pull request's. Missing when there's none.
 - `caption`: what yapd said with it, without "it's on your screen". Missing when it said nothing.
 

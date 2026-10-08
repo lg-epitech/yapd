@@ -177,11 +177,21 @@ const linkAt = (line: string, at: number, closing: ReadonlyMap<number, number>) 
 }
 
 /**
+ * Where a link to `address` goes, written after it, unless its words are that
+ * address: words can name one page and link to another, like a GitHub address
+ * that opens a page made to look like GitHub, however they're spelled.
+ */
+const where = (words: string, address: string) => {
+  const said = words.replace(/\\([!-/:-@[-`{-~])/g, "$1").trim()
+  return said === address || `${said}/` === address ? "" : ` (${plainly(new URL(address).host)})`
+}
+
+/**
  * A line of a thread's own markdown with nothing in it that could link but
- * the links to https pages, written again: every other bracket, angle bracket
- * and backtick is escaped, but in a code span, which is kept as it is. Other
- * links keep only their words, images only their description, and a link's
- * words, `linking` off, keep no link of their own.
+ * the links to https pages, written again with where they go: every other
+ * bracket, angle bracket and backtick is escaped, but in a code span, which
+ * is kept as it is. Other links keep only their words, images only their
+ * description, and a link's words, `linking` off, keep no link of their own.
  */
 const unlinked = (line: string, linking = true): string => {
   // Each `[` with the `]` that closes it, nesting as markdown does.
@@ -220,7 +230,7 @@ const unlinked = (line: string, linking = true): string => {
         const words = unlinked(link.words, false)
         const address = linking && !image ? secure(link.address) : Option.none()
         // In angle brackets, so nothing in the address can end the link early.
-        out += Option.match(address, { onNone: () => words, onSome: (address) => `[${words}](<${address}>)` })
+        out += Option.match(address, { onNone: () => words, onSome: (address) => `[${words}](<${address}>)${where(link.words, address)}` })
         at = link.end
       }
     } else if (char === "<") {

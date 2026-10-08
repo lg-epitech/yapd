@@ -115,12 +115,23 @@ describe("Show", () => {
     )
     // A fence with a backtick after it opens no code block, so what follows is still read as markdown.
     expect(tamed("```x`\n[z](javascript:alert(1))")).toBe("\\`\\`\\`x\\`\nz")
-    // What's kept: links to https pages, written out in full, code spans and code blocks as they are, and an image's description.
+    // What's kept: links to https pages, written out in full with where they go, code spans and code blocks as they are, and an image's description.
     expect(tamed('See [the docs](https://ok.example/docs "Docs"), <https://ok.example/a>, `[x](javascript:1)` and ![chart](https://ok.example/c.png)')).toBe(
-      "See [the docs](<https://ok.example/docs>), <https://ok.example/a>, `[x](javascript:1)` and chart",
+      "See [the docs](<https://ok.example/docs>) (ok.example), <https://ok.example/a>, `[x](javascript:1)` and chart",
     )
-    expect(tamed("[![build](https://ok.example/b.svg)](https://ok.example/run)")).toBe("[build](<https://ok.example/run>)")
+    expect(tamed("[![build](https://ok.example/b.svg)](https://ok.example/run)")).toBe("[build](<https://ok.example/run>) (ok.example)")
     expect(tamed("```js\nconst link = [x](javascript:1)\n```\nThen [y](javascript:2)")).toBe("```js\nconst link = [x](javascript:1)\n```\nThen y")
+  })
+
+  test("a link in a thread's message that names one address can't hide that it opens another", () => {
+    const { tamed } = Show
+    const pr = "https://github.com/lg-epitech/yapd/pull/7"
+    // However the words name it: in full, without a scheme, or in letters that only look like it.
+    expect(tamed(`PR is up: [${pr}](https://github.com.evil.example/login)`)).toBe(`PR is up: [${pr}](<https://github.com.evil.example/login>) (github.com.evil.example)`)
+    expect(tamed("[github.com/lg-epitech/yapd/pull/7](https://evil.example/pull/7)")).toBe("[github.com/lg-epitech/yapd/pull/7](<https://evil.example/pull/7>) (evil.example)")
+    expect(tamed("[https://gіthub.com/pull/7](https://gіthub.com/pull/7)")).toBe("[https://gіthub.com/pull/7](<https://xn--gthub-n2e.com/pull/7>) (xn--gthub-n2e.com)")
+    // Words that are the address show where it goes already.
+    expect(tamed(`PR is up: [${pr}](${pr}) and [https://ok.example](https://ok.example)`)).toBe(`PR is up: [${pr}](<${pr}>) and [https://ok.example](<https://ok.example/>)`)
   })
 
   test("a card put up while no app watched isn't taken to be on his screen once one does", async () => {
