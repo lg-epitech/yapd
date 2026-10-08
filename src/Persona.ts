@@ -43,6 +43,23 @@ export const sayable = (lines: Lines) => [lines.onIt, lines.queued, lines.mishea
 /** ", sir" before a line's last mark, when the user is addressed at all. */
 export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
 
+/**
+ * The lines that tell rather than ask: worded as a question, he'd answer one
+ * yapd isn't waiting on. Not "misheard", which may well ask him to say it again.
+ */
+const telling = ["onIt", "queued", "checking", "leaving", "cantTell"] as const
+
+/** Whether none of the lines that tell asks something. */
+const tells = (lines: Lines) => telling.every((key) => !lines[key].includes("?"))
+
+/** The lines, with the plain one, addressing him as the rest do, in place of any that should tell but asks. */
+const told = (lines: Lines): Lines =>
+  Object.assign(
+    {},
+    lines,
+    ...telling.filter((key) => lines[key].includes("?")).map((key) => ({ [key]: plain[key].replace(/\.$/, `${addressed(lines)}.`) })),
+  )
+
 export class Persona extends Context.Tag("yapd/Persona")<
   Persona,
   {
@@ -55,13 +72,13 @@ export const prompt = (style: string) =>
   [
     `You're the voice of a developer's assistant, the one getting their coding work done. Write the few short lines you say most, in the way they want you to talk, each a few words and readable aloud, in English. Talk about the work as yours, never about agents or sessions.`,
     `How they want you to talk:\n${style}`,
-    `Reply with only a JSON object with these keys:`,
+    `Reply with only a JSON object with these keys, each a statement, never a question unless it says so:`,
     `- "onIt": what you say once you've taken an instruction in hand, like "${plain.onIt}" Don't repeat back what was asked.`,
     `- "queued": that you'll do it as soon as the current task is done, like "${plain.queued}"`,
     `- "misheard": that you didn't catch what they said, like "${plain.misheard}"`,
     `- "checking": that you're looking into something before answering, like "${plain.checking}"`,
     `- "leaving": that you'll let a question you asked go, since it wasn't answered, like "${plain.leaving}"`,
-    `- "cantTell": that you couldn't tell which of their threads they meant, like "${plain.cantTell}"`,
+    `- "cantTell": that you couldn't tell which of their threads they meant, like "${plain.cantTell}" It's said instead of asking, so don't ask.`,
     `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")
 
@@ -82,13 +99,15 @@ export const layer = Layer.scoped(
     const model = yield* Model
     const kept = yield* settings.read("persona").pipe(
       Effect.map(Option.flatMap(Schema.decodeUnknownOption(stored))),
-      Effect.map(Option.filter((kept) => kept.style === style.value)),
+      // Kept from before they all had to tell, they're written again.
+      Effect.map(Option.filter((kept) => kept.style === style.value && tells(kept.lines))),
       Effect.orElseSucceed(() => Option.none()),
     )
     const written = Option.match(kept, {
       onSome: ({ lines }) => Effect.succeed(lines),
       onNone: () =>
         model.ask(Lines, prompt(style.value)).pipe(
+          Effect.map(told),
           Effect.tap((lines) =>
             settings.write("persona", JSON.stringify({ style: style.value, lines })).pipe(Effect.ignore),
           ),
