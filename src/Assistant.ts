@@ -88,7 +88,7 @@ export interface Open {
   readonly material: Option.Option<Material>
   /** For sending again: the command to dispatch again. */
   readonly resend: Option.Option<string>
-  /** For sending again: what the question follows, like why it didn't go, which is said on its own if he never hears the question. */
+  /** What the question follows, like why a message didn't go, or that it went lately, which is said on its own if he never hears the question. */
   readonly news?: string
 }
 
@@ -208,6 +208,10 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 
 /** What's said of something left rather than asked about, since a question is open already. */
 const unasked = (about: string, said: Lines) => `I left ${about || "that"} for now, since I'd have to ask you something about it${addressed(said)}.`
+
+/** What a question left unasked would have asked, said after the news it follows, which named what it's about already. */
+const unaskedAfter = (open: Pick<Open, "kind" | "about">) =>
+  open.kind === "resend" || open.kind === "confirm" ? "I didn't ask about sending it again" : `I didn't ask whether to ${open.about}`
 
 /** The thread a yes or no question is about, which it names, so what's said once it's answered needn't name it again. */
 const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>
@@ -559,7 +563,7 @@ export const make = (options: {
             open.kind === "which"
               ? said.cantTell
               : open.news !== undefined
-                ? `${open.news} I didn't ask about sending it again, ${waiting}.`
+                ? `${open.news} ${unaskedAfter(open)}, ${waiting}.`
                 : Brain.yesNo(open.kind)
                   ? `I didn't ask whether to ${open.about}, ${waiting}${addressed(said)}.`
                   : unasked(open.about, said)
@@ -1057,7 +1061,15 @@ export const make = (options: {
               const asked = `${news} ${unaddressed(said.again, said)}`
               return yield* asking({ ...base, kind: "resend", decision: twin, asked, about: doing, resend: Option.some(outcome.row.commandId), news })
             }
-            return yield* asking({ ...base, kind: "confirm", decision: twin, asked: Hands.twice(outcome.row.at, now, said, called), about: doing, resend: Option.none() })
+            return yield* asking({
+              ...base,
+              kind: "confirm",
+              decision: twin,
+              asked: Hands.twice(outcome.row.at, now, said, called),
+              about: doing,
+              resend: Option.none(),
+              news: Hands.sentBefore(outcome.row.at, now, said, called),
+            })
           }
           case "Read": {
             const text = typeof outcome.row.body === "object" && outcome.row.body !== null && "text" in outcome.row.body ? String(outcome.row.body.text) : ""
@@ -1069,6 +1081,7 @@ export const make = (options: {
               asked: Hands.read(said, called),
               about: `tell ${name} to ignore that`,
               resend: Option.none(),
+              news: Hands.readAlready(said, called),
             })
           }
           default: {
@@ -1332,7 +1345,7 @@ export const make = (options: {
         if (asking?.said === false) {
           if (decision.act === "resume") return quiet(decided.subject)
           yield* close(open, "replaced", utterance.id)
-          const left = open.news === undefined ? Brain.left(open, said) : `${open.news} I didn't ask about sending it again, since you'd moved on.`
+          const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
           yield* deliver(unfinished(reply(left, decided.subject), open.decision.rest, said), utterance)
           return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         }

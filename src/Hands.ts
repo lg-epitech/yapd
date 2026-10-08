@@ -875,13 +875,19 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
   }
 }
 
+/** That the same words went to the same thread lately: "I sent that a minute ago, sir." */
+export const sentBefore = (sent: number, now: number, lines: Lines, called: Option.Option<string>) =>
+  `I sent that${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} ${ago(now - sent)}${addressed(lines)}.`
+
 /** Asked when the same words went to the same thread lately, and it hasn't said anything since. */
-export const twice = (sent: number, now: number, lines: Lines, called: Option.Option<string>) =>
-  `I sent that${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} ${ago(now - sent)}${addressed(lines)}. Again?`
+export const twice = (sent: number, now: number, lines: Lines, called: Option.Option<string>) => `${sentBefore(sent, now, lines, called)} Again?`
+
+/** That a message he wants back was read already. */
+export const readAlready = (lines: Lines, called: Option.Option<string>) =>
+  `${Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} has` })} already read it${addressed(lines)}.`
 
 /** Offered when a message he wants back was read already. */
-export const read = (lines: Lines, called: Option.Option<string>) =>
-  `${Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} has` })} already read it${addressed(lines)}. Shall I tell it to ignore that?`
+export const read = (lines: Lines, called: Option.Option<string>) => `${readAlready(lines, called)} Shall I tell it to ignore that?`
 
 /** Said after a restart, for a step other than a message that couldn't be confirmed, which isn't done again, with why when it's more than that. */
 export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, called: Option.Option<string>, why: string = unconfirmable) => {

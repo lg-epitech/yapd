@@ -2675,28 +2675,64 @@ describe("Assistant", () => {
     }
   })
 
-  test("a request said before a question asked since never asks in its place: the same words again aren't sent, and he's told why", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, heard, wait, spoken, open, dispatched } = yield* assistant((situation) =>
-          situation.utterance.heard.startsWith("What")
-            ? Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
-            : tezosMessage("high")(situation),
-        )
-        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
-        yield* wait(60)
-        const said = yield* TestClock.currentTimeMillis
-        yield* wait(5)
-        // Asked about something else, then the same words, said before that was asked, are handed on.
-        yield* dictate("What's it doing?")
-        const asked = Option.map(yield* open, ({ asked }) => asked)
-        yield* heard({ heard: "Tell the Tesla's migration to use the fee table from the Mina work.", via: "shortcut", at: said, voiced: 3, turns: 1 })
-        return { asked, kept: Option.map(yield* open, ({ asked }) => asked), last: spoken().at(-1), dispatched: dispatched.length }
-      }),
+  test("a request said before a question asked since never asks in its place: the same words again aren't sent, nor is a message read already told to ignore it, and he's told what didn't happen and why", async () => {
+    const before = (then: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, heard, wait, spoken, open, dispatched } = yield* assistant((situation) =>
+            situation.utterance.heard.startsWith("What")
+              ? Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" })
+              : tezosMessage("high")(situation),
+          )
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          yield* wait(60)
+          const said = yield* TestClock.currentTimeMillis
+          yield* wait(5)
+          // Asked about something else, then what was said before that was asked is handed on.
+          yield* dictate("What's it doing?")
+          const asked = Option.map(yield* open, ({ asked }) => asked)
+          yield* heard({ heard: then, via: "shortcut", at: said, voiced: 3, turns: 1 })
+          return { asked, kept: Option.map(yield* open, ({ asked }) => asked), last: spoken().at(-1), dispatched: dispatched.length }
+        }),
+      )
+    const twice = await before("Tell the Tesla's migration to use the fee table from the Mina work.")
+    expect(twice.kept).toEqual(twice.asked)
+    expect(twice.last).toBe("I sent that to Migrate Tezos Integration a minute ago, sir. I didn't ask about sending it again, since I'm waiting on your answer to something else.")
+    expect(twice.dispatched).toBe(1)
+    const scratched = await before("Scratch that.")
+    expect(scratched.kept).toEqual(scratched.asked)
+    expect(scratched.last).toBe(
+      "Migrate Tezos Integration has already read it, sir. I didn't ask whether to tell Migrate Tezos Integration to ignore that, since I'm waiting on your answer to something else.",
     )
-    expect(result.kept).toEqual(result.asked)
-    expect(result.last).toBe("I didn't ask whether to send that to Migrate Tezos Integration again, since I'm waiting on your answer to something else, sir.")
-    expect(result.dispatched).toBe(1)
+    expect(scratched.dispatched).toBe(1)
+  })
+
+  test("a question about the same words, or about a message read already, that he never heard says what it followed when something new takes its place", async () => {
+    const unheard = (then: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, wait, spoken } = yield* assistant(
+            (situation) => (situation.utterance.heard.startsWith("What") ? minaStatus(situation) : tezosMessage("high")(situation)),
+            undefined,
+            { waiting: true },
+          )
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          yield* wait(60)
+          yield* dictate(then)
+          // He pressed again before what it asked was said.
+          yield* dictate("What's the Mina one doing?")
+          return spoken().slice(2)
+        }),
+      )
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(await unheard("Tell the Tesla's migration to use the fee table from the Mina work.")).toEqual([
+      "I sent that to Migrate Tezos Integration a minute ago, sir. I didn't ask about sending it again, since you'd moved on.",
+      status,
+    ])
+    expect(await unheard("Scratch that.")).toEqual([
+      "Migrate Tezos Integration has already read it, sir. I didn't ask whether to tell Migrate Tezos Integration to ignore that, since you'd moved on.",
+      status,
+    ])
   })
 
   test("a turn stopped to be told something in its place that never shows stopped isn't told, he's told why fifteen seconds on, and what he says next is still answered", async () => {
