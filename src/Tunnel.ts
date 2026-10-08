@@ -1,4 +1,4 @@
-import { Deferred, Duration, Effect, Either, Exit, Option, Redacted, Schema } from "effect"
+import { Deferred, Duration, Effect, Either, Option, Redacted, Schema } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import * as Home from "./Home.ts"
@@ -137,7 +137,26 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
     const first = yield* Deferred.make<void>()
     const lock = yield* Effect.makeSemaphore(1)
 
-    const alive = Effect.map(Effect.exit(control("-O", "check")), Exit.isSuccess)
+    /**
+     * Whether the connection is open or gone, failing when SSH couldn't say,
+     * like when it took too long or couldn't start. Only nothing listening on
+     * the socket means it's gone. Taking one that's just slow for gone would
+     * open a second connection and leave the first running, with its forwards,
+     * where nothing can reach it or close it.
+     */
+    const check = control("-O", "check").pipe(
+      Effect.as("open" as const),
+      Effect.catchIf(
+        ({ cause }) => cause instanceof ProcessError && /No such file or directory|Connection refused/.test(cause.stderr),
+        () => Effect.succeed("gone" as const),
+      ),
+    )
+
+    /** Forgets the connection that's gone, and the forward that went with it. */
+    const forget = () => {
+      open = false
+      forwarded = undefined
+    }
 
     /**
      * Opens the connection, unless one is open already, like one yapd left
@@ -145,12 +164,13 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
      * background once it's connected, so opening it is a command that finishes.
      */
     const connect = Effect.gen(function* () {
-      if (yield* alive) {
+      // When SSH can't say, the connection is taken to be as it was, and asked about again on the next try.
+      const state = yield* Effect.catchAll(check, (error) => (open ? Effect.succeed("open" as const) : Effect.fail(error)))
+      if (state === "open") {
         open = true
         return
       }
-      open = false
-      forwarded = undefined
+      forget()
       // A socket left by a connection that's gone would keep the new one from listening.
       yield* Effect.ignore(Effect.tryPromise(() => rm(socket, { force: true })))
       yield* exec(
@@ -226,9 +246,9 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
     const watch = Effect.gen(function* () {
       while (status?._tag === "Up") {
         yield* Effect.sleep(every)
-        if (!(yield* lock.withPermits(1)(alive))) {
-          open = false
-          forwarded = undefined
+        // When SSH can't say, it's asked again next time rather than taken for an outage.
+        if ((yield* lock.withPermits(1)(Effect.orElseSucceed(check, () => "open" as const))) === "gone") {
+          forget()
           yield* Effect.ignore(settle(Effect.fail(trouble(unreachable))))
         }
       }

@@ -14,14 +14,19 @@ const folder = join(tmpdir(), "yapd-tunnel-test-nothing-here")
 /**
  * A machine at the other end of SSH that a test talks for. `opens` says how
  * each try to connect goes, and `answers` what `yapd t3` prints there, in turn.
+ * `open` is for a connection an earlier yapd left open.
  */
-const machine = (options: { readonly opens?: Array<boolean>; readonly answers?: Array<string | ProcessError> } = {}) => {
+const machine = (
+  options: { readonly opens?: Array<boolean>; readonly answers?: Array<string | ProcessError>; readonly open?: boolean } = {},
+) => {
   const opens = [...(options.opens ?? [])]
   const answers = [...(options.answers ?? [])]
+  /** Checks on the connection SSH can't answer, in turn: it couldn't start, or it hangs. */
+  const unsure: Array<"failed" | "hung"> = []
   const calls: Array<string> = []
   /** When each try to connect was made, by the test's clock. */
   const tries: Array<number> = []
-  let alive = false
+  let alive = options.open ?? false
   let tokens = 0
   const exec: Exec = (command) =>
     Effect.gen(function* () {
@@ -29,8 +34,11 @@ const machine = (options: { readonly opens?: Array<boolean>; readonly answers?: 
       calls.push(line)
       const fail = (code: number, stderr = "") => Effect.fail(new ProcessError({ command: line, code, stderr }))
       if (command.includes("-O")) {
+        const trouble = command.includes("check") ? unsure.shift() : undefined
+        if (trouble === "hung") return yield* Effect.never
+        if (trouble === "failed") return yield* fail(-1, "posix_spawn: Resource temporarily unavailable")
         if (command.includes("exit")) alive = false
-        return alive ? "" : yield* fail(255, "Control socket connect: No such file or directory")
+        return alive ? "" : yield* fail(255, `Control socket connect(${command[2]}): No such file or directory`)
       }
       if (command.includes("-M")) {
         tries.push(yield* Clock.currentTimeMillis)
@@ -45,6 +53,7 @@ const machine = (options: { readonly opens?: Array<boolean>; readonly answers?: 
     calls,
     tries,
     answers,
+    unsure,
     drop: () => {
       alive = false
     },
@@ -130,6 +139,30 @@ describe("Tunnel", () => {
           // Nothing was tried on its behalf: trying again is the tunnel's, in the background.
           expect(rig.calls.length).toBe(asked)
         }
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("never takes the connection for gone when SSH can't say, so it never opens a second one", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        // One an earlier yapd left open, that SSH can't check on at first.
+        const rig = machine({ open: true })
+        rig.unsure.push("failed")
+        const tunnel = yield* Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder)
+        yield* flush
+        yield* TestClock.adjust("1 second")
+        yield* flush
+        expect((yield* tunnel.locate).server.origin).toBe("http://127.0.0.1:50001")
+
+        // A check that takes too long, while it's up.
+        rig.unsure.push("hung")
+        for (const wait of ["5 seconds", "5 seconds"] as const) {
+          yield* TestClock.adjust(wait)
+          yield* flush
+        }
+        expect(yield* tunnel.status).toEqual({ _tag: "Up" })
+        expect(rig.calls.filter((line) => line.includes(" -M "))).toEqual([])
+        expect(rig.calls.filter((line) => line.includes(" -O forward "))).toHaveLength(1)
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
