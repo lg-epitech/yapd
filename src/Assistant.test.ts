@@ -1632,6 +1632,39 @@ describe("Assistant", () => {
     expect(result.second).toEqual(["missed"])
   })
 
+  test("a catch-up said in one breath with the rest of the request, cut off, is heard once he's heard the lot said again to the end", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, cut, spoken, journal, dispatched } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("tell")
+              ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
+              : Brain.decision({
+                  act: "answer",
+                  how: "missed",
+                  spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir.",
+                  rest: "tell the Mina one to use its fee table",
+                }),
+          undefined,
+          { waiting: true },
+        )
+        const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* dictate("What did I miss? And tell the Mina one to use its fee table.")
+        yield* cut()
+        const cutOff = yield* unheard
+        yield* dictate("Say that again.")
+        yield* play()
+        return { cutOff, after: yield* unheard, spoken: spoken(), sent: dispatched.length }
+      }),
+    )
+    const line = "The loader fix is ready, sir. On it: Open Mina SSV2 Bug Tickets."
+    expect(result.sent).toBe(1)
+    expect(result.spoken).toEqual([line, line])
+    expect(result.cutOff).toEqual(["yapd. The loader fix is ready."])
+    expect(result.after).toEqual([])
+  })
+
   test("new work T3 Code never answered for is looked for once: there, it's said as started; not there, as maybe started", async () => {
     const launched = (unanswered: "started" | "not started") =>
       run(
