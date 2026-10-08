@@ -1,6 +1,6 @@
 import type { Subprocess } from "bun"
 import { Cause, Clock, Context, Data, Deferred, Effect, ExecutionStrategy, Exit, Fiber, FiberId, Layer, Option, Runtime, Scope } from "effect"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rename, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
 import * as Config from "./Config.ts"
@@ -266,6 +266,76 @@ export type Reply =
 
 /** Where the Kokoro process runs the model. It takes the GPU when there is one. */
 export type Device = "GPU" | "CPU"
+
+/** What the Kokoro process renders with: Kokoro, and ffmpeg for the effect. */
+export interface Speaker<E> {
+  /** The rate Kokoro renders at. */
+  readonly rate: number
+  /** Whether Kokoro reads the text in one go. */
+  readonly fits: (text: string) => Effect.Effect<boolean, E>
+  /** Kokoro's audio for the text. */
+  readonly speak: (text: string) => Effect.Effect<Float32Array, E>
+  /** Writes audio to a file as it is. */
+  readonly write: (audio: Float32Array, path: string) => Effect.Effect<void, E>
+  /** Applies the effect to the audio at `raw`, writing `path`, with only its first `samples` when given. */
+  readonly filter: (raw: string, path: string, samples?: number) => Effect.Effect<void, ProcessError>
+  /** Tells the daemon of something it should know but needn't act on. */
+  readonly warn: (message: string) => void
+}
+
+/** Applies `effect` with ffmpeg, as a `Speaker` does. */
+export const ffmpeg = (effect: string, rate: number) => (raw: string, path: string, samples?: number) =>
+  run([
+    "ffmpeg", "-loglevel", "error", "-y", "-i", raw, "-af", effect,
+    // ffmpeg rings echoes out past the end, which a first part mustn't: the whole carries on from exactly where it stops.
+    // Its effect is the very same up to there, since each filter only hears what came before.
+    ...(samples === undefined ? [] : ["-t", `${samples / rate}`]),
+    path,
+  ]).pipe(Effect.asVoid)
+
+/**
+ * Renders a request as the Kokoro process does, with `effect` unless it's
+ * "none". Asked for a first part, it renders the first sentences, saves them as
+ * the whole will start and tells `part`, then renders the rest: all in one
+ * request, so no other render can slip in between. `cancelled` says whether it
+ * was given up on meanwhile.
+ */
+export const speaking = <E>(speaker: Speaker<E>, effect: string) => {
+  const { rate, fits } = speaker
+
+  /** Applies the effect to `raw`, keeping only its first `samples` when given. */
+  const applyEffect = (raw: string, path: string, samples?: number) =>
+    speaker.filter(raw, path, samples).pipe(
+      Effect.catchAll((error) =>
+        Effect.sync(() => speaker.warn(`Could not apply the effect, playing it unprocessed: ${error.stderr}`)).pipe(
+          Effect.zipRight(Effect.promise(() => rename(raw, path))),
+        ),
+      ),
+      Effect.ensuring(Effect.promise(() => rm(raw, { force: true }))),
+    )
+
+  /** Writes the audio with the effect. A first part keeps exactly its length, so the whole goes on from where it stops. */
+  const save = (audio: Float32Array, path: string, exact = false) =>
+    Effect.gen(function* () {
+      const raw = effect === "none" ? path : `${path}.raw.wav`
+      yield* speaker.write(audio, raw)
+      if (raw !== path) yield* applyEffect(raw, path, exact ? audio.length : undefined)
+    })
+
+  const speakAll = (parts: ReadonlyArray<string>) => Effect.forEach(parts, speaker.speak)
+
+  return ({ text, path, first }: Extract<Request, { type: "render" }>, part: (path: string) => void, cancelled: () => boolean) =>
+    Effect.gen(function* () {
+      const opened = first === undefined ? undefined : yield* opening(text, fits)
+      if (first === undefined || opened === undefined) return yield* save(join(yield* speakAll(yield* split(text, fits)), rate), path)
+      const lead = yield* speaker.speak(opened.first)
+      yield* save(head(lead, rate), first, true)
+      part(first)
+      // Given up on while its first part rendered, so the rest isn't worth the wait.
+      if (cancelled()) return
+      yield* save(join([lead, ...(yield* speakAll(yield* split(opened.rest, fits)))], rate), path)
+    })
+}
 
 /** A render the process was asked for. */
 interface Asked {
