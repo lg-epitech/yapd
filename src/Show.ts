@@ -106,7 +106,9 @@ const longest = 2500
  * their words, and images only their description.
  */
 export const tamed = (markdown: string) => {
-  const cut = markdown.length <= longest ? markdown : `${markdown.slice(0, markdown.lastIndexOf("\n", longest) > 0 ? markdown.lastIndexOf("\n", longest) : longest)}\n…`
+  // At the end of a line, when there's one to cut at.
+  const end = markdown.lastIndexOf("\n", longest)
+  const cut = markdown.length <= longest ? markdown : `${markdown.slice(0, end > 0 ? end : longest)}\n…`
   const tame = cut
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)/g, (link, words: string, address: string) => (secure(address) ? link : words))
@@ -433,6 +435,9 @@ export const pointer = (card: Option.Option<Card>): Server.Showing | null =>
 /** How many cards are kept to fetch again, like the one before the one that's up. */
 const cards = 20
 
+/** How long reading a thread for its card, or opening its pull request, can hold up what's said. */
+const patience = "3 seconds"
+
 /** What's on the user's screen, reading threads with `read` for their cards, and opening pull requests with `open`. */
 export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = browser) =>
   Effect.gen(function* () {
@@ -465,6 +470,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         const address = Option.filter(Option.map(pullRequest(thread), ({ url }) => url.trim()), (url) => URL.canParse(url) && new URL(url).protocol === "https:")
         if (Option.isNone(address)) return false
         return yield* open(new URL(address.value).href).pipe(
+          Effect.timeout(patience),
           Effect.as(true),
           Effect.catchAll((error) => Effect.logWarning("Could not open the pull request", error).pipe(Effect.as(false))),
         )
@@ -515,7 +521,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
               yield* opening(listed.thread)
               return yield* shown((address) => verdict(listed, address), draft.value, lines, about)
             }
+            // What it says is there either way, so a T3 Code that's slow to answer only leaves its messages off the card.
             const detail = yield* read(listed.ref, listed.thread.pendingRuntimeRequest?.id).pipe(
+              Effect.timeout(patience),
               Effect.tapError((error) => Effect.logWarning(`Could not read ${listed.called} for its card`, error)),
               Effect.option,
             )
