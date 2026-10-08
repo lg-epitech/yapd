@@ -4,7 +4,7 @@ yapd serves a small HTTP API on the port its hooks use, `127.0.0.1:4747` unless 
 
 It only listens on localhost. From another machine, forward the port over SSH, like `ssh -N -L 4747:127.0.0.1:4747 mac`. A machine whose hooks already reach yapd through a [reverse tunnel](../README.md#agents-on-another-machine) can use the API at the same address.
 
-There's no authentication: anything that can reach the port can use it, as hooks do. Requests have to be addressed to `127.0.0.1`, `localhost` or `[::1]`, so a web page can't get in through a domain name of its own that points here, and a page from anywhere else can't read the responses, since yapd sends no CORS headers.
+There's no authentication: anything that can reach the port can use it, as hooks do. Requests have to be addressed to `127.0.0.1`, `localhost` or `[::1]`, so a web page can't get in through a domain name of its own that points here, and a page from anywhere else can't read the responses, since yapd sends no CORS headers. Anything a browser marks as sent by a page, with an `Origin` header or a `Sec-Fetch-Site` other than `none`, is turned away too, so no page can have yapd act for it by posting blind; apps, scripts and `curl` send neither.
 
 ## State
 
@@ -79,6 +79,6 @@ It can tell you what your threads are doing, who needs you, how much of your usa
 
 ## Errors
 
-Besides those, `400` means the body couldn't be read, `403` that the request was addressed to another host, and `500` that something went wrong in yapd, which its log says more about. `GET /health` answers `ok` while yapd runs.
+Besides those, `400` means the body couldn't be read, `403` that the request was addressed to another host or came from a web page, and `500` that something went wrong in yapd, which its log says more about. `GET /health` answers `ok` while yapd runs.
 
 `POST /events` is for the hooks, and isn't part of this API.

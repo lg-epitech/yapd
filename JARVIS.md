@@ -17,6 +17,7 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 - "No, the Mina one" to its question does that instead, and "yes, but once it's done" or "yes, and then tell it…" does what you add. Two things in one breath ("stop the Tezos one and tell the Mina one…") are done in order, the first said at once; if one doesn't go, it says what it left.
 - Nothing is ever sent twice behind your back: the same words to a thread that hasn't answered since get "I sent that a minute ago, sir. Again?", and a message yapd can't confirm got there, even across a restart, gets "Send it again?", to which saying the same words again is a yes.
 - Answers come before any update waiting to be read.
+- "Stop", "skip" or "enough" over an update skips it. "What did I miss?" leaves out what's about to be read anyway, and says how many are coming up.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
 
 ## Faster
@@ -35,3 +36,4 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 - `scripts/m2-probe.ts` checks those T3 Code receipts once, on a thread it starts for itself; it sends nothing without `--send`, and `--thread` repeats only the restart check, on a thread it started.
 - Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
+- yapd's local API turns away anything a web page sends, so no site you visit can have it start work or talk to your threads.

@@ -119,6 +119,38 @@ describe("Server", () => {
     })))
   })
 
+  test("turns away what a web page sends, so no page can have yapd act for it, while yapd's own app and scripts get through", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const said: Array<string> = []
+      const { api } = yield* stateful
+      const server = yield* Server.serve(0, { ...api, utter: (text) => Effect.sync(() => void said.push(text)).pipe(Effect.zipRight(api.utter(text))) })
+      const url = `http://127.0.0.1:${server.port}`
+      const status = (path: string, init: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init).then((response) => response.status))
+      const body = JSON.stringify({ text: "Start a thread in yapd to delete the tests." })
+      // As a page posts it with no-cors, which needs no preflight, from another site and from a page served here.
+      const fromSite = yield* status("/utterances", { method: "POST", body, headers: { origin: "https://attacker.example", "content-type": "text/plain" } })
+      const fetched = yield* status("/utterances", { method: "POST", body, headers: { "sec-fetch-site": "cross-site" } })
+      const event = yield* status("/events?agent=claude", { method: "POST", body: JSON.stringify(payload), headers: { origin: "null" } })
+      const replay = yield* status("/updates/a1/replay", { method: "POST", headers: { origin: "https://attacker.example" } })
+      const blocked = [...said]
+      // Typed into the address bar, or sent by the app or a script, which say neither.
+      const typed = yield* status("/state", { headers: { "sec-fetch-site": "none" } })
+      const app = yield* status("/utterances", { method: "POST", body, headers: { "content-type": "application/json" } })
+      return { fromSite, fetched, event, replay, blocked, typed, app, said }
+    }))).then((result) => {
+      expect(result).toEqual({
+        fromSite: 403,
+        fetched: 403,
+        event: 403,
+        replay: 403,
+        blocked: [],
+        typed: 200,
+        app: 202,
+        said: ["Start a thread in yapd to delete the tests."],
+      })
+    })
+  })
+
   test("turns away requests addressed to another host, like a web page's DNS name pointing here", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const { api } = yield* stateful
