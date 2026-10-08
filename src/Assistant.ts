@@ -1125,7 +1125,8 @@ export const make = (options: {
           // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
           if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
           const arrived = kept?.arrived ?? (yield* options.awaiting)
-          return yield* Effect.zipRight(hold(holding), stoppable(respond(utterance, kept?.subject), utterance)).pipe(Effect.ensuring(arrived))
+          // Only a question asked by the time it was said is held by it, however late it's handed on.
+          return yield* Effect.zipRight(hold(holding, utterance.at), stoppable(respond(utterance, kept?.subject), utterance)).pipe(Effect.ensuring(arrived))
         }).pipe(Effect.ensuring(release(holding)))
       })
 

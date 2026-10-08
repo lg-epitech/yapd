@@ -1191,6 +1191,42 @@ describe("Daemon", () => {
     expect(result).toEqual({ unheard: 1, warnings: ["Could not speak update"] })
   })
 
+  test("a question asked after a dictation was said is asked at once, though that dictation is still being worked out", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>()
+        const loader = thread("loader", "Fix loader")
+        const parser = thread("parser", "Fix parser")
+        const handle = (situation: Brain.Situation, id: string) => situation.desk.threads.find(({ ref }) => ref.id === id)!.handle
+        const { assistant, made, dictate, wait, flush, played } = yield* assisted(
+          (situation) =>
+            situation.utterance.heard === "Which fix?"
+              ? Brain.decision({ act: "clarify", target: handle(situation, "loader"), others: handle(situation, "parser"), sure: "low" })
+              : Brain.decision({ act: "answer", spoken: "Here is a separate answer." }),
+          {},
+          [loader, parser],
+          // The second takes a while to work out.
+          (situation) => (situation.utterance.heard === "Which fix?" ? Effect.void : Deferred.await(answered)),
+        )
+        const { turns } = yield* made.power
+        const floor = yield* dictate
+        // Two dictations, sent at 0 and a second later, are handed on together once the first is heard.
+        yield* wait(2)
+        yield* assistant.heard({ heard: "Which fix?", via: "shortcut", at: 0, voiced: 2, turns })
+        const second = yield* Effect.fork(assistant.heard({ heard: "Tell me something unrelated.", via: "shortcut", at: 1000, voiced: 2, turns }))
+        yield* flush
+        yield* Scope.close(floor, Exit.void)
+        yield* flush
+        yield* wait(1)
+        const asked = [...played]
+        yield* Deferred.succeed(answered, undefined)
+        yield* Fiber.join(second)
+        return asked
+      }),
+    )
+    expect(result).toEqual(["Fix loader or Fix parser?"])
+  })
+
   test.each([false, true])("an update whose playback breaks off midway isn't heard, and that's noted once, with a microphone: %s", async (microphone) => {
     const result = await run(
       Effect.gen(function* () {
