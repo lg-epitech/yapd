@@ -646,8 +646,13 @@ export const make = Effect.gen(function* () {
             }),
           )
     yield* reading.pipe(
+      // Failing, like when the audio helper quits midway, it isn't heard: trouble with the speaker rather than a fault of yapd's.
       Effect.catchAllCause((cause) =>
-        Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not speak update", cause),
+        Cause.isInterruptedOnly(cause)
+          ? Effect.void
+          : Cause.isDie(cause)
+            ? Effect.logError("Could not speak update", cause)
+            : Effect.logWarning("Could not speak update", cause),
       ),
       // Stopped at once, and let go of before the dictation starts.
       Effect.raceFirst(

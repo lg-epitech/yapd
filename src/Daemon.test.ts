@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import * as Assistant from "./Assistant.ts"
-import { Audio } from "./Audio.ts"
+import { Audio, AudioError } from "./Audio.ts"
 import * as Brain from "./Brain.ts"
 import { Waiting, WaitingLive } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
@@ -38,6 +38,8 @@ const make = (says?: string, options: {
   readonly trivialMessages?: ReadonlyArray<string>
   /** A microphone, even when the user says nothing. */
   readonly microphone?: boolean
+  /** Lines whose playback breaks off after so many seconds, as when the audio helper quits. */
+  readonly breaks?: Readonly<Record<string, number>>
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -48,6 +50,8 @@ const make = (says?: string, options: {
   const followUps: Array<string> = []
   const condensed: Array<Turn> = []
   const logs = yield* Queue.unbounded<string>()
+  /** What was logged as a warning, in order. */
+  const warnings: Array<string> = []
   const playbacks = yield* Queue.unbounded<string>()
   const nextEvent = (...prefixes: ReadonlyArray<string>) => Effect.gen(function* () {
     while (true) {
@@ -84,13 +88,17 @@ const make = (says?: string, options: {
           let done = false
           // Closing the scope stops it, as with the helper.
           yield* Effect.addFinalizer(() => Effect.sync(() => void (done || stopped.push(text))))
+          const breaks = options.breaks?.[text]
           return {
             duration: 10,
-            finished: Effect.sleep("10 seconds").pipe(
-              Effect.tap(() => {
-                done = true
-              }),
-            ),
+            finished:
+              breaks === undefined
+                ? Effect.sleep("10 seconds").pipe(
+                    Effect.tap(() => {
+                      done = true
+                    }),
+                  )
+                : Effect.sleep(`${breaks} seconds`).pipe(Effect.zipRight(new AudioError({ message: "The audio helper quit" }))),
             stop: Effect.succeed(2),
             volume: () => Effect.void,
           }
@@ -130,9 +138,11 @@ const make = (says?: string, options: {
         ),
     }),
     Floor.layer,
-    Logger.add(Logger.make(({ message }) => {
+    Logger.add(Logger.make(({ logLevel, message }) => {
       for (const line of Array.isArray(message) ? message : [message]) {
-        if (typeof line === "string") Queue.unsafeOffer(logs, line)
+        if (typeof line !== "string") continue
+        Queue.unsafeOffer(logs, line)
+        if (logLevel._tag === "Warning") warnings.push(line)
       }
     })),
   )
@@ -219,7 +229,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -1091,6 +1101,18 @@ describe("Daemon", () => {
       subject: Option.some({ said: "yapd. The PR is ready.", playing: true }),
       played: ["yapd. The PR is ready.", "It changes the parser."],
     })
+  })
+
+  test.each([false, true])("an update whose playback breaks off midway isn't heard, and that's noted once, with a microphone: %s", async (microphone) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, played, warnings, journal } = yield* make(undefined, { microphone, breaks: { "yapd. The PR is ready.": 3 } })
+        yield* finish("a", "The PR is ready.")
+        for (let i = 0; i < 6; i++) yield* wait(3)
+        return { played: [...played], unheard: (yield* journal.unheard(0, 12)).length, warnings: [...warnings] }
+      }),
+    )
+    expect(result).toEqual({ played: ["yapd. The PR is ready."], unheard: 1, warnings: ["Could not speak update"] })
   })
 
   test.each(["Stop.", "Skip.", "Enough.", "Next.", "Shut up.", "Stop, stop."])("told \"%s\" by the shortcut over an update, doesn't read it again, and counts it heard", async (said) => {

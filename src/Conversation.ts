@@ -1,7 +1,7 @@
 import { Clock, type Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
-import { Audio, type Playback } from "./Audio.ts"
+import { Audio, type AudioError, type Playback } from "./Audio.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
@@ -32,6 +32,8 @@ type Signal =
   | { readonly _tag: "Deaf" }
   /** The rest carry the id of what sent them, so one that's no longer waited on is let go. */
   | { readonly _tag: "Finished"; readonly id: number }
+  /** The playback broke off, like when the audio helper quits: what it played wasn't heard to the end. */
+  | { readonly _tag: "Broke"; readonly id: number; readonly error: AudioError }
   | { readonly _tag: "Lingered"; readonly id: number }
   /** The reply is whatever the one who asked for it works out: what to do about an update, or an answer to a question. */
   | { readonly _tag: "Replied"; readonly id: number; readonly reply: unknown }
@@ -213,10 +215,13 @@ export const make = (options: {
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
-        // Failing counts too, or this could wait for a signal that never comes.
+        // Failing ends it too, or this could wait for a signal that never comes.
         yield* playback.finished.pipe(
-          Effect.ignore,
-          Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id })),
+          Effect.match({
+            onFailure: (error): Signal => ({ _tag: "Broke", id, error }),
+            onSuccess: (): Signal => ({ _tag: "Finished", id }),
+          }),
+          Effect.flatMap((signal) => Queue.offer(signals, signal)),
           Effect.forkScoped,
         )
 
@@ -286,6 +291,10 @@ export const make = (options: {
               if (deaf) return { _tag: "Finished" } satisfies Outcome
               if (!speaking) yield* startLingering
               break
+            case "Broke":
+              // As without a microphone: cut short, it wasn't heard, and there's nothing to wait for a reply to.
+              if (signal.id !== id || !playing) break
+              return yield* Effect.fail(signal.error)
             case "Lingered":
               if (signal.id !== lingering?.id) break
               return { _tag: "Finished" } satisfies Outcome
@@ -366,6 +375,7 @@ export const make = (options: {
                 if (held !== undefined) return { heard, reply: held }
                 break
               case "Finished":
+              case "Broke":
               case "Lingered":
                 break
             }
