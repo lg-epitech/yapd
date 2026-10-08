@@ -93,13 +93,35 @@ describe("T3Actions", () => {
       },
     ])
     const idle = transport(projection({ runs: [{ id: "run-1", status: "completed", ordinal: 1 }] }))
-    expect(await Effect.runPromise(Effect.flip(idle.actions.run("t1", { _tag: "Stop" })))).toMatchObject({ _tag: "Refusal" })
+    expect(await Effect.runPromise(Effect.flip(idle.actions.run("t1", { _tag: "Stop" }, "yapd:stop")))).toMatchObject({ _tag: "Refusal" })
     expect(idle.sent).toEqual([])
   })
 
+  test("finds a message it sent by its id, how it went in, and the run it waits in", async () => {
+    const queued = projection({
+      runs: [
+        { id: "run-2", status: "running", ordinal: 2, userMessageId: "m-2" },
+        { id: "run-3", status: "queued", ordinal: 3, userMessageId: "m-3" },
+      ],
+      messages: [{ id: "m-2", role: "user", text: "Fix it.", createdAt: "a" }],
+      turnItems: [{ type: "user_message", messageId: "m-4", inputIntent: "steer", status: "completed" }],
+    })
+    const { actions } = transport(queued)
+    const found = (messageId: string) =>
+      Effect.runPromise(Effect.map(actions.message("t1", messageId), Option.map(({ intent, run }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run) }))))
+    expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued" } }))
+    expect(await found("m-4")).toEqual(Option.some({ intent: "steer", run: null }))
+    expect(await found("m-2")).toEqual(Option.some({ intent: null, run: { id: "run-2", status: "running" } }))
+    expect(await Effect.runPromise(actions.has("t1", "m-9"))).toBe(false)
+  })
+
   test("sends what the app sends", () => {
-    expect(T3Actions.command("t1", { _tag: "Send", text: "Merge it.", steer: true }, undefined, "c")).toMatchObject({
+    const send = (how: T3Actions.When) => T3Actions.command("t1", { _tag: "Send", text: "Merge it.", messageId: "m", how }, undefined, "c")
+    expect(send("now")).toEqual({
+      commandId: "c",
+      threadId: "t1",
       type: "message.dispatch",
+      messageId: "m",
       text: "Merge it.",
       createdBy: "user",
       creationSource: "web",
@@ -107,7 +129,12 @@ describe("T3Actions", () => {
       dispatchMode: { type: "start_immediately" },
       deliveryIntent: "auto",
     })
-    expect(T3Actions.command("t1", { _tag: "Send", text: "Later.", steer: false }, undefined, "c")).not.toHaveProperty("deliveryIntent")
+    // After the turn under way, it goes in T3 Code's own queue, as the app's queue button sends it.
+    expect(send("after")).toMatchObject({ dispatchMode: { type: "queue_after_active" } })
+    expect(send("after")).not.toHaveProperty("deliveryIntent")
+    expect(send("restart")).toMatchObject({ dispatchMode: { type: "start_immediately" }, deliveryIntent: "restart" })
+    expect(T3Actions.command("t1", { _tag: "Resume" }, undefined, "c")).toEqual({ commandId: "c", threadId: "t1", type: "queue.resume" })
+    expect(T3Actions.command("t1", { _tag: "Cancel", runId: "run-3" }, undefined, "c")).toEqual({ commandId: "c", threadId: "t1", type: "queued-run.cancel", runId: "run-3" })
     expect(T3Actions.command("t1", { _tag: "Decide", requestId: "r1", decision: "accept" }, undefined, "c")).toEqual({
       commandId: "c",
       threadId: "t1",

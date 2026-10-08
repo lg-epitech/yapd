@@ -65,3 +65,25 @@ describe("T3CodeServer HTTP", () => {
     }
   })
 })
+
+describe("T3CodeServer WebSocket", () => {
+  test("a request that went out may have been done whatever went wrong after, and one that never went out wasn't", async () => {
+    // Takes the request in and never answers, as T3 Code busy with it would.
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request, server) => (server.upgrade(request) ? undefined : new Response("no", { status: 400 })),
+      websocket: { message: () => {} },
+    })
+    const call = Server.call({ origin: `http://127.0.0.1:${server.port}` }, Redacted.make("test-token"))
+    try {
+      const late = await Effect.runPromise(Effect.flip(call("orchestration.dispatchCommand", {}, Schema.Unknown, "200 millis")))
+      expect(late).toMatchObject({ _tag: "Trouble", reason: "T3 Code is taking too long.", sent: true })
+    } finally {
+      await server.stop(true)
+    }
+    // Nothing listens there any more, so nothing went out.
+    const unsent = await Effect.runPromise(Effect.flip(call("orchestration.dispatchCommand", {}, Schema.Unknown, "2 seconds")))
+    expect(unsent).toMatchObject({ _tag: "Trouble", reason: "T3 Code isn't answering." })
+    expect(unsent._tag === "Trouble" && unsent.sent === true).toBe(false)
+  })
+})

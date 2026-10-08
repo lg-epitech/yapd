@@ -348,7 +348,7 @@ describe("Tunnel", () => {
           yield* flush
           const asked = rig.calls.length
           const actions = T3Actions.make(Tunnel.transport(tunnel.locate))
-          const sending = yield* Effect.fork(Effect.flip(actions.run("thread-1", { _tag: "Send", text: "Merge it.", steer: false })))
+          const sending = yield* Effect.fork(Effect.flip(actions.run("thread-1", { _tag: "Send", text: "Merge it.", messageId: "message-1", how: "now" }, "yapd:u1:0")))
           yield* flush
           const exit = Option.getOrUndefined(yield* sending.poll)
           expect(exit !== undefined && Exit.isSuccess(exit) ? T3Actions.reason(exit.value) : "still waiting").toBe(reason)
