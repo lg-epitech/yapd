@@ -1227,6 +1227,42 @@ describe("Daemon", () => {
     expect(result).toEqual(["Fix loader or Fix parser?"])
   })
 
+  test("an update stopped for him to speak isn't heard when the microphone goes before he's finished, and that's noted", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, microphone, warnings, journal } = yield* make(undefined, { microphone: true, breaks: { "yapd. The PR is ready.": 3 } })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        yield* Queue.offerAll(microphone, Array.from({ length: 4 }, () => new Float32Array([0.9])))
+        yield* wait(0)
+        // The helper goes, the microphone first, before the playback it stopped says it broke.
+        yield* Queue.shutdown(microphone)
+        yield* wait(1)
+        return { unheard: (yield* journal.unheard(0, 12)).length, warnings: [...warnings] }
+      }),
+    )
+    expect(result).toEqual({ unheard: 1, warnings: ["Could not speak update"] })
+  })
+
+  test("a question stopped for him to speak isn't said or heard when the microphone goes before he's finished, and goes unanswered", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, microphone } = yield* make(undefined, { microphone: true, breaks: { "Which project?": 3 } })
+        const saying: Array<string> = []
+        const heard: Array<string> = []
+        const question: Array<string> = []
+        yield* notice("q", "Which project?", { saying, heard, question })
+        yield* wait(2)
+        yield* Queue.offerAll(microphone, Array.from({ length: 4 }, () => new Float32Array([0.9])))
+        yield* wait(0)
+        yield* Queue.shutdown(microphone)
+        yield* wait(1)
+        return { saying, heard, question }
+      }),
+    )
+    expect(result).toEqual({ saying: [], heard: [], question: ["q unanswered"] })
+  })
+
   test.each([false, true])("an update whose playback breaks off midway isn't heard, and that's noted once, with a microphone: %s", async (microphone) => {
     const result = await run(
       Effect.gen(function* () {

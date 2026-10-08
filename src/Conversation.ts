@@ -1,7 +1,7 @@
 import { Clock, type Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
-import { Audio, type AudioError, type Playback } from "./Audio.ts"
+import { Audio, AudioError, type Playback } from "./Audio.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
@@ -223,7 +223,14 @@ export const make = (options: {
         // there and then, even when a stop asked for just before is still being answered: only playing to the
         // end finishes it, never being stopped.
         yield* playback.finished.pipe(
-          Effect.tap(() => through),
+          Effect.tap(() =>
+            Effect.zipRight(
+              Effect.sync(() => {
+                completed = true
+              }),
+              through,
+            ),
+          ),
           Effect.match({
             onFailure: (error): Signal => ({ _tag: "Broke", id, error }),
             onSuccess: (): Signal => ({ _tag: "Finished", id }),
@@ -238,6 +245,10 @@ export const make = (options: {
         let deaf = false
         /** Why it broke off after being stopped for him to speak, like the helper quitting, which nothing after may hide. */
         let broken: AudioError | undefined
+        /** Stopped for him to speak, rather than played to the end. */
+        let cut = false
+        /** Played to the end, even with a stop for him to speak still being answered. */
+        let completed = false
         let stoppedAt: number | undefined
         let lingering: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
         const stopLingering = Effect.suspend(() => {
@@ -276,6 +287,7 @@ export const make = (options: {
               yield* stopLingering
               if (playing) {
                 playing = false
+                cut = true
                 stoppedAt = yield* playback.stop
               }
               break
@@ -315,6 +327,8 @@ export const make = (options: {
             case "Deaf":
               deaf = true
               if (broken !== undefined) return yield* Effect.fail(broken)
+              // Stopped for him to speak, and gone deaf before he'd finished, it was never heard to the end, nor what he said.
+              if (cut && !completed) return yield* Effect.fail(new AudioError({ message: "The microphone went away while he was talking over it" }))
               if (!playing) return { _tag: "Finished" } satisfies Outcome
               yield* playback.volume(1)
               break
