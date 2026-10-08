@@ -743,7 +743,7 @@ export const make = Effect.gen(function* () {
      * after the user last stopped dictating at most.
      */
     awaiting,
-    /** Whether these words are waiting to be said, like an update or an answer a dictation cut off. */
+    /** Whether these words are waiting to be said, like an update or work that started, which a dictation cut off. */
     queued: (spoken: string) =>
       STM.commit(
         STM.map(TRef.get(inbox), (waiting) => [...waiting.values()].some((entry) => ("update" in entry ? entry.update.spoken : entry.notice.spoken) === spoken)),

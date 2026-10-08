@@ -182,7 +182,7 @@ export const make = (options: {
    * he stops dictating at most.
    */
   readonly awaiting: Effect.Effect<Effect.Effect<void>>
-  /** Whether these words are waiting to be said, like an update or an answer a dictation cut off. */
+  /** Whether these words are waiting to be said, like an update or work that started, which a dictation cut off. */
   readonly queued: (spoken: string) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
