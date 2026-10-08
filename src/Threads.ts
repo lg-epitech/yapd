@@ -50,8 +50,10 @@ export interface Desk {
   readonly away: ReadonlyArray<{ readonly machine: string; readonly reason: string }>
 }
 
+/** A thread couldn't be read or searched, with why, in words that can be said. */
 export class ThreadsError extends Data.TaggedError("ThreadsError")<{ readonly reason: string; readonly cause?: unknown }> {}
 
+/** The threads yapd keeps in mind, on every machine it can see. */
 export class Threads extends Context.Tag("yapd/Threads")<
   Threads,
   {

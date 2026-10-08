@@ -104,6 +104,7 @@ export interface Outcome {
   readonly kind: "answer" | "done" | "question" | "none"
 }
 
+/** What the user says to yapd itself, worked out and acted on. */
 export class Assistant extends Context.Tag("yapd/Assistant")<
   Assistant,
   {
@@ -157,6 +158,7 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
 
+/** The assistant, saying what came of each request through `tell`. */
 export const make = (options: {
   readonly threads: Threads.Threads["Type"]
   readonly journal: Journal["Type"]
@@ -532,8 +534,10 @@ export const make = (options: {
           return Option.match(target, { onNone: () => Effect.succeed(reply(said.cantTell, thought.subject)), onSome: (target) => look(target, thought, said) })
         case "find":
           return find(thought, said)
-        case "again":
-          return Effect.succeed({ say: decision.spoken.trim(), subject: thought.subject, kind: decision.spoken.trim() === "" ? "none" : "answer" })
+        case "again": {
+          const last = thought.subject._tag === "Nothing" ? Brain.nothingSaid(said) : thought.subject.said
+          return Effect.succeed({ say: decision.spoken.trim() || last, subject: thought.subject, kind: "answer" })
+        }
         case "start":
           return start(thought, said)
         case "dismiss":
@@ -592,8 +596,12 @@ export const make = (options: {
         if (asking !== undefined && Option.isNone(current(now))) yield* close(asking.open, "dropped: unanswered")
         const open = asking?.open
         if (open === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
-        // He didn't catch the question, so it's asked again in other words.
-        if (decision.act === "again" && decision.pending === "answers") return yield* reask(said)
+        // He didn't catch the question, so it's asked again in other words, now rather than later.
+        if (decision.act === "again" && decision.pending === "answers") {
+          if (asking?.repeat !== undefined) yield* Fiber.interruptFork(asking.repeat)
+          if (asking !== undefined) asking.repeat = undefined
+          return yield* reask(said)
+        }
         const answers = decision.pending === "answers" && decision.act !== "resume"
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : answers ? "answered" : "replaced", utterance.id)
         if (!answers) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
@@ -620,7 +628,8 @@ export const make = (options: {
     /** Asks it again a minute after it went unanswered, the first time, and lets it go with a word the second. */
     const unanswered = (id: string): Effect.Effect<void> =>
       Effect.gen(function* () {
-        if (asking?.open.id !== id) return
+        // Once a question is to be asked again, nothing more is waited for until it has been.
+        if (asking?.open.id !== id || asking.repeat !== undefined) return
         if (asking.asks < asks) {
           const repeat = yield* Effect.sleep(again).pipe(Effect.zipRight(turn.withPermits(1)(askAgain(id))), Effect.forkIn(scope))
           if (asking?.open.id === id) asking.repeat = repeat
@@ -637,10 +646,11 @@ export const make = (options: {
     const askAgain = (id: string): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (asking?.open.id !== id) return
+        // This is the asking again, so it's no longer waited for.
+        asking.repeat = undefined
         const power = yield* options.power
         if (!power.on) return
         const outcome = yield* reask(yield* persona.lines)
-        if (asking !== undefined) asking.repeat = undefined
         yield* deliver(outcome, { id: asking?.open.utterance ?? id, turns: power.turns })
       })
 
@@ -651,10 +661,11 @@ export const make = (options: {
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
+        // How much of it was speech isn't known here, so whether it was meant is left to the model.
         const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced: 1, turns }
         const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: Option.none() }, [{ speaker: "yapd", text: open.asked }])
-        // Words in silence answer nothing, and the question waits on.
-        if (thought.source === "fast" && thought.decision.act === "resume") return Option.none()
+        // Talk that wasn't meant for yapd, like someone else in the room, answers nothing, and the question waits on.
+        if (thought.decision.act === "resume") return Option.none()
         return Option.some(
           background(
             turn.withPermits(1)(

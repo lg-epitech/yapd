@@ -33,6 +33,7 @@ export const enabled: ReadonlySet<Act> = new Set<Act>(["dismiss", "resume", "ans
 /** Acts that only read, which go ahead on a fair guess and say which thread they took. */
 const reads: ReadonlySet<Act> = new Set<Act>(["answer", "look", "find", "show"])
 
+/** How sure the model is of the thread it picked. */
 export const Sure = Schema.Literal("high", "medium", "low")
 export type Sure = typeof Sure.Type
 
@@ -107,6 +108,7 @@ export interface Plan {
   readonly target: Option.Option<Threads.Listed>
 }
 
+/** What a decision comes to once checked: done, asked about, or answered with a reason. */
 export type Checked =
   | { readonly _tag: "Do"; readonly plan: Plan }
   /** A question built by code, naming what it could be. */
@@ -114,8 +116,10 @@ export type Checked =
   /** A reason, and no question. */
   | { readonly _tag: "Say"; readonly spoken: string }
 
+/** The model couldn't be asked, or its answer made no sense. */
 export class BrainError extends Data.TaggedError("BrainError")<{ readonly cause: unknown }> {}
 
+/** Works out what the user meant, in one call to the model. */
 export class Brain extends Context.Tag("yapd/Brain")<
   Brain,
   { readonly decide: (situation: Situation) => Effect.Effect<Decision, BrainError> }
@@ -126,7 +130,7 @@ export class Brain extends Context.Tag("yapd/Brain")<
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
 /** Small counts as words, the way they're said. */
-export const count = (n: number) =>
+const count = (n: number) =>
   ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"][n] ?? String(n)
 
 /** "A", "A or B", "A, B or C". */
@@ -279,7 +283,7 @@ const usage: ReadonlySet<string> = new Set([
 ])
 
 /** "What did I miss", for which what he hasn't heard comes first. */
-export const missed: ReadonlySet<string> = new Set([
+const missed: ReadonlySet<string> = new Set([
   "what did i miss", "what have i missed", "catch me up", "brief me", "fill me in", "what did i miss while i was away",
 ])
 
@@ -582,7 +586,7 @@ const pullRequest = (thread: Threads.Listed["thread"]) => {
 }
 
 /** A thread as the model sees it, in one line. */
-export const line = (listed: Threads.Listed, now: number) =>
+const line = (listed: Threads.Listed, now: number) =>
   [
     listed.handle,
     fenced(listed.thread.title, 90),

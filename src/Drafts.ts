@@ -138,6 +138,7 @@ export type Outcome =
 /** What's said when the prompt couldn't be written. */
 export const unwritten = "I couldn't write that up, so nothing started. What you said is in my log."
 
+/** Starts new work on the machines there are, with the user's rules and what they heard lately to go by. */
 export const make = (options: {
   readonly machines: ReadonlyArray<Machine>
   /** The user's rules, read as they are now. */
@@ -316,4 +317,5 @@ export const make = (options: {
     }
   })
 
+/** What starts new work. */
 export type Drafts = Effect.Effect.Success<ReturnType<typeof make>>

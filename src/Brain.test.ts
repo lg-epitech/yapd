@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Either, Option, Schema } from "effect"
 import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
+import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
@@ -141,6 +142,7 @@ describe("Brain", () => {
       Brain.used(usage, "how much claude have i got left", lines),
       Brain.used(Option.none(), "usage", lines),
       ...Persona.sayable(Persona.plain),
+      Conversation.movedOn,
       Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
       Brain.speakable(
         "t2 is still at it: it rewrote /Users/me/code/integration/src/fees.ts at 5c529e6b, and the agent says the session ends soon, see https://github.com/x/y/pull/412.",
