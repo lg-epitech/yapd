@@ -461,6 +461,12 @@ export const focused = (situation: Situation) => {
   return Option.flatMap(ref, (ref) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, ref))))
 }
 
+/** Why no thread he names can be found, when none can be seen at all: what keeps each machine from view, addressing him once. */
+export const unseen = (desk: Threads.Desk, lines: Pick<Lines, "address">) =>
+  desk.threads.length > 0 || desk.away.length === 0
+    ? undefined
+    : desk.away.map(({ reason }, index) => (index === 0 ? `${reason.replace(/\.$/, "")}${addressed(lines)}.` : reason)).join(" ")
+
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
 
@@ -620,7 +626,8 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
         case "thread":
         case "pr":
           // Like a look: it goes ahead on a fair guess, and only asks between a few it can't tell apart.
-          if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
+          // With no thread to be seen at all, why not is what he's told, rather than that it couldn't tell which.
+          if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: unseen(desk, lines) ?? lines.cantTell }
           if (choice.sure === "low" && candidates.length >= 2) return ask(candidates)
           return doing({ decision: choice, target })
         case "threads":

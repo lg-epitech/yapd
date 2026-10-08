@@ -175,6 +175,30 @@ describe("Brain", () => {
     expect(shown("Hide that.", { showing: "What's going on" })).toEqual({ act: "show", how: "hide", target: "" })
   })
 
+  test("showing a thread or its pull request asks between those it can't tell apart, and says why when no thread can be seen", () => {
+    const checked = (decided: Brain.Decision, overrides: Partial<Brain.Situation> = {}) => Brain.check(decided, situation("Show me the migration PR.", overrides), lines)
+    const [tezosHandle = "", minaHandle = ""] = [tezos, mina].map((thread) => desk().threads.find(({ ref }) => ref.id === thread.id)!.handle)
+    // Its pull request opens in his browser, so a low guess between two, or none at all, is asked about first.
+    expect(checked(Brain.decision({ act: "show", how: "pr", target: tezosHandle, others: minaHandle, sure: "low" }))._tag).toBe("Ask")
+    expect(checked(Brain.decision({ act: "show", how: "pr", others: `${tezosHandle}, ${minaHandle}` }))._tag).toBe("Ask")
+    expect(checked(Brain.decision({ act: "show", how: "pr", target: tezosHandle, others: minaHandle, sure: "medium" }))._tag).toBe("Do")
+    expect(checked(Brain.decision({ act: "show", how: "thread" }))).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    // With T3 Code down, there's no thread it could have told apart.
+    const blind: Threads.Desk = {
+      threads: [],
+      away: [
+        { machine: "Rosie", reason: "T3 Code isn't running, so I can't see your threads." },
+        { machine: "rig", reason: "I can't see rig's threads yet." },
+      ],
+    }
+    for (const how of ["thread", "pr"]) {
+      expect(checked(Brain.decision({ act: "show", how }), { desk: blind })).toEqual({
+        _tag: "Say",
+        spoken: "T3 Code isn't running, so I can't see your threads, sir. I can't see rig's threads yet.",
+      })
+    }
+  })
+
   test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {
     const rig = (decided: Brain.Decision) => Brain.check(decided, situation("What's the rig relay fix doing?"), lines)
     const here = rig(Brain.decision({ act: "look", target: "t2", machine: "rig", sure: "high" }))

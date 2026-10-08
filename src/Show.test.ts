@@ -211,6 +211,20 @@ describe("Show", () => {
     expect(result.unsafe).toEqual({ say: unsafe, caption: Option.some(unsafe), link: false })
   })
 
+  test("with no thread to be seen, showing one says why rather than that it couldn't tell which", async () => {
+    const away = [{ machine: "Rosie", reason: "T3 Code isn't running, so I can't see your threads." }]
+    const said = await Effect.runPromise(
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+        return yield* Effect.forEach(["thread", "pr"], (how) => Effect.map(show.present(how, Option.none(), situation([], away), lines), ({ say, card }) => ({ say, card })))
+      }),
+    )
+    expect(said).toEqual([
+      { say: "T3 Code isn't running, so I can't see your threads, sir.", card: Option.none() },
+      { say: "T3 Code isn't running, so I can't see your threads, sir.", card: Option.none() },
+    ])
+  })
+
   test("a browser or T3 Code that never answers holds up what's said with a card three seconds at most", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {

@@ -700,7 +700,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           }
           case "thread":
           case "pr": {
-            if (Option.isNone(target)) return { say: lines.cantTell, card: Option.none(), about: Option.none() }
+            if (Option.isNone(target)) return { say: Brain.unseen(situation.desk, lines) ?? lines.cantTell, card: Option.none(), about: Option.none() }
             const listed = target.value
             const about = Option.some(listed.ref)
             if (how === "pr") {
