@@ -17,6 +17,8 @@ A running list of what this branch changed and what yapd can do now, for review.
 - Three Codex threads are kept ready instead of two, so working out a dictation, writing its prompt and summing up an update at the same moment don't wait for a new one.
 - The prompt for possible new work is only begun when the model is asked, so "who needs me", "say again" or "the first one" don't take up a ready Codex thread.
 - What you ask by the shortcut is said before any update: one your dictation cut off, or one that came in meanwhile, waits for the answer rather than being read in full first.
+- The answer to a long dictation is said before any update too: the wait for it counts from when you stop talking, not from when you pressed the shortcut.
+- Asking something while new work is being started no longer waits for T3 Code to get it ready, which can take minutes in a worktree. You're answered at once, and whether the work started is said when it's ready.
 
 ## Smarter
 
@@ -39,6 +41,11 @@ A running list of what this branch changed and what yapd can do now, for review.
 - Dictating work it started in the last half hour is answered as already under way, rather than started twice.
 - Usage is said by how long each window lasts and whose it is, like "its five-hour window" and "Fable's weekly window", never "session".
 - Branch names, wallet addresses and "the Claude Code session" are put in words too.
+- Cutting in on an answer with another question doesn't make yapd read the first answer again before the new one. What started is still said, after the new answer.
+- Dictating the same work again while T3 Code is still getting it ready is answered as already under way.
+- "How much is left?" after an update is a question about the work, for the model. Only "how much Claude have I got left" or a word like quota or limit is read as usage.
+- An SSH, browser or tmux session in an answer is said as it is, and pairs like SSv1/SSv2 or x86/arm64 aren't taken for a branch.
+- Searching for what you said keeps the hits for the word that names the thread, so "my grades tezos" puts the Tezos thread in front of the model even when "grades" turns up more.
 
 ## More capable
 
@@ -58,3 +65,4 @@ A running list of what this branch changed and what yapd can do now, for review.
 - The eval counts the thread the model picked even when it asks, and replays your logged answers to its questions, like "Migrate Tezos." while it asks which one.
 - A launch that never answers is ended by its own time limits again, with the reason said, rather than holding up every request after it.
 - The eval searches your threads for each phrase as the daemon does, checks that the 21:39 "start another thread" dictation comes out as new work, and runs without yapd's database.
+- The eval asks answers said over its question the way the daemon does, counts a second question as a miss, expects "what's going on" to be answered, and gates only the first effort it's given.
