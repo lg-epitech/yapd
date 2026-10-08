@@ -420,7 +420,11 @@ export const make = (options: {
         yield* deliver(reply(Brain.dropped(open, yield* persona.lines), { _tag: "Nothing" }), { id: open.utterance, turns })
       })
 
-    /** Asks the open question once more, now, in words not asked lately, unless it's been asked as often as it will be. */
+    /**
+     * Asks the open question once more, now, in words not asked lately, or
+     * lets it go once every wording has been used. However often it was asked
+     * already: he asked to hear it, so he's still there to answer it.
+     */
     const reask = (said: Lines) =>
       Effect.gen(function* () {
         const before = yield* askedLately
@@ -428,12 +432,12 @@ export const make = (options: {
         const { open, repeat } = asking
         asking.repeat = undefined
         if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
-        const asked = asking.asks >= asks ? undefined : Brain.reworded(open, before, said)
+        const asked = Brain.reworded(open, before, said)
         if (asked === undefined) {
           yield* close(open, "dropped: asked enough")
           return reply(said.leaving, { _tag: "Nothing" })
         }
-        asking = { open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: false }
+        asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: false }
         yield* Effect.logInfo(`Asked again: ${asked}`)
         return { say: asked, subject: { _tag: "Answer", said: asked, about: Option.none() }, kind: "question" } satisfies Outcome
       })
