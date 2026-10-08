@@ -140,7 +140,8 @@ const lately = { span: 3 * 60 * 60_000, most: 8 }
 /** What it's told he missed. */
 const unheard = 12
 /** Threads on the desk: fewer for a reply, which is about what he just heard. */
-const desk = { asked: 30, reply: 12, vocabulary: 15 }
+/** Threads the model sees in full, for a dictation and for a reply, then how many more by name only; and how many give Whisper their words. */
+const desk = { asked: 30, reply: 12, named: 120, vocabulary: 15 }
 /** How long the searches for what he said have to add their threads to the desk. */
 const cap = "100 millis"
 
@@ -269,7 +270,7 @@ export const make = (options: {
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
         const [shortlist, recent, spoke, usage, asked] = yield* Effect.all([
-          threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found),
+          threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           journal.since(now - lately.span, { most: lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent"] }),
           journal.since(now - day, { most: 1, kinds: ["dictation", "reply"] }),
           threads.usage,

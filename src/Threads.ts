@@ -41,6 +41,8 @@ export interface Listed {
   readonly started: Option.Option<{ readonly dictated: string; readonly description: string | null }>
   /** The latest thing yapd said about it. */
   readonly last: Option.Option<{ readonly at: number; readonly said: string }>
+  /** One of the many below the likeliest, which the model sees by name only, to pick by how it sounds. */
+  readonly brief: boolean
 }
 
 /** The threads that matter right now, most first, and the machines whose threads can't be seen. */
@@ -58,7 +60,15 @@ export class Threads extends Context.Tag("yapd/Threads")<
   Threads,
   {
     /** Ranked shortlist from memory only: no listing, no SSH. `found` are threads a search just turned up. */
-    readonly desk: (focus: Option.Option<Ref>, pending: ReadonlyArray<Ref>, most: number, found?: ReadonlyArray<Ref>) => Effect.Effect<Desk>
+    readonly desk: (
+      focus: Option.Option<Ref>,
+      pending: ReadonlyArray<Ref>,
+      most: number,
+      found?: ReadonlyArray<Ref>,
+      more?: number,
+      /** What he said, for threads whose titles have his words. */
+      heard?: string,
+    ) => Effect.Effect<Desk>
     readonly find: (ref: Ref) => Effect.Effect<Option.Option<T3Live.Thread>>
     readonly changes: Stream.Stream<{ readonly machine: string; readonly change: T3Live.Change }>
     readonly actions: (machine: string) => Option.Option<T3Actions.Actions>
@@ -132,10 +142,12 @@ const plain = /^[\p{L}\p{N} ,.'’&:!?()#+-]+$/u
  * say, else which project's work it is and from when.
  */
 export const called = (title: string, description: string | null | undefined, project: string, at: number, now: number) => {
+  // Only a name that can be said in one breath: an older yapd kept a whole account of the work there.
+  const sayable = (text: string) => text !== "" && plain.test(text) && english(text) && speakable(text) && text.split(/\s+/).length <= 8
   const own = description?.trim() ?? ""
-  if (own !== "") return own
+  if (sayable(own)) return own
   const trimmed = title.trim()
-  if (trimmed !== "" && plain.test(trimmed) && english(trimmed) && speakable(trimmed) && trimmed.split(/\s+/).length <= 8) return trimmed
+  if (sayable(trimmed)) return trimmed
   return `the ${spoken(project)} work from ${when(at, now)}`
 }
 
@@ -163,7 +175,11 @@ export const shortlist = (input: {
   readonly pending: ReadonlyArray<Ref>
   /** Threads whose messages have the words the user said. */
   readonly found?: ReadonlyArray<Ref>
+  /** What he said, for threads whose titles have his words. */
+  readonly heard?: string
   readonly most: number
+  /** How many more, below those, the model sees by name only: the recent ones nothing puts higher. */
+  readonly more?: number
   readonly started: ReadonlyMap<string, Started>
   /** The latest line yapd said about each thread, by id. */
   readonly said: ReadonlyMap<string, { readonly at: number; readonly said: string }>
@@ -171,11 +187,12 @@ export const shortlist = (input: {
 }): ReadonlyArray<Listed> => {
   const { machine, view, focus, pending, most, started, said, now } = input
   const within = (at: number | undefined, span: number) => at !== undefined && now - at < span
+  const titled = new Set(entitled(input.heard ?? "", view))
   const group = (thread: T3Live.Thread, doing: State) => {
     const candidate = pending.findIndex((ref) => ref.machine === machine && ref.id === thread.id)
     if (candidate >= 0) return candidate / 100
     if (Option.isSome(focus) && focus.value.machine === machine && focus.value.id === thread.id) return 1
-    if ((input.found ?? []).some((ref) => ref.machine === machine && ref.id === thread.id)) return 1.5
+    if ((input.found ?? []).some((ref) => ref.machine === machine && ref.id === thread.id) || titled.has(thread.id)) return 1.5
     if (doing === "approval" || doing === "question") return 2
     if (doing === "running" || doing === "finishing" || doing === "queued") return 3
     const settled = thread.settledOverride === "settled"
@@ -186,14 +203,19 @@ export const shortlist = (input: {
     if (!settled && !snoozed && within(time(thread.updatedAt), days(7))) return 7
     return 8
   }
-  return [...view.threads.values()]
+  const ranked = [...view.threads.values()]
     .filter((thread) => !subagent(thread) && thread.archivedAt === null)
     .map((thread) => {
       const doing = state(thread)
       return { thread, doing, group: group(thread, doing), updated: time(thread.updatedAt) ?? 0 }
     })
     .toSorted((one, other) => one.group - other.group || other.updated - one.updated)
-    .slice(0, most)
+  // A misheard name can only be matched to a name the model sees, so the rest of the month's go too, by name.
+  const named = ranked
+    .slice(most)
+    .filter(({ updated }) => within(updated, days(30)))
+    .slice(0, input.more ?? 0)
+  return [...ranked.slice(0, most), ...named]
     .map(({ thread, doing }, index): Listed => {
       const project = view.projects.get(thread.projectId)?.title ?? ""
       const own = started.get(thread.id)
@@ -208,8 +230,52 @@ export const shortlist = (input: {
         since: since(thread, doing),
         started: Option.map(Option.fromNullable(own), ({ dictated, description }) => ({ dictated, description })),
         last: Option.fromNullable(said.get(thread.id)),
+        brief: index >= most,
       }
     })
+}
+
+/**
+ * A word as it's compared with a title's: lowercase, without accents or
+ * marks, doubled letters single and a plural's s gone, since that's how
+ * speech recognition tends to differ from what was typed: "MiNAS SV2" for
+ * "Mina SSV2".
+ */
+const stem = (word: string) => {
+  const plain = word.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "").replace(/[^a-z0-9]/g, "").replace(/(.)\1+/g, "$1")
+  return plain.length > 4 && plain.endsWith("s") ? plain.slice(0, -1) : plain
+}
+
+/** Words too short or too common to say which thread a title is. */
+const filler: ReadonlySet<string> = new Set(["the", "and", "for", "you", "can", "tel", "status", "on", "with", "from", "into", "add", "new"])
+
+const stems = (text: string) =>
+  new Set(
+    text
+      .split(/[^\p{L}\p{N}]+/u)
+      .map(stem)
+      .filter((word) => word.length >= 3 && !filler.has(word) && !common.has(word)),
+  )
+
+/** Threads put among the likeliest by their titles at most. */
+const entitledAt = 5
+
+/**
+ * Threads whose titles have two or more of his words, however speech mangled
+ * their spelling, the most first: T3 Code's search only looks through what
+ * the threads said, and only for a phrase as written. Short of that, a
+ * thread's name is the model's to recognise by its sound.
+ */
+export const entitled = (heard: string, view: T3Live.View): ReadonlyArray<string> => {
+  const said = stems(heard)
+  if (said.size < 2) return []
+  return [...view.threads.values()]
+    .filter((thread) => !subagent(thread) && thread.archivedAt === null)
+    .map((thread) => ({ id: thread.id, shared: [...stems(thread.title)].filter((word) => said.has(word)).length, at: time(thread.updatedAt) ?? 0 }))
+    .filter(({ shared }) => shared >= 2)
+    .toSorted((one, other) => other.shared - one.shared || other.at - one.at)
+    .slice(0, entitledAt)
+    .map(({ id }) => id)
 }
 
 /** Words searched for at most, and threads a search adds to the desk at most: a third of it. */
@@ -356,7 +422,7 @@ export const make = (options: {
     const refreshing = asking.withPermits(1)(Effect.flatMap(old, (old) => (old ? refresh : Effect.void)))
 
     return {
-      desk: (focus, pending, most, found = []) =>
+      desk: (focus, pending, most, found = [], more = 0, heard = "") =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis
           const away = options.others.map((other) => ({ machine: other, reason: `I can't see ${other}'s threads yet.` }))
@@ -368,7 +434,7 @@ export const make = (options: {
             return { threads: [], away: [{ machine, reason }, ...away] }
           }
           const [started, entries] = [yield* startedWork, yield* journal.since(now - days(7), { most: 500 })]
-          const threads = shortlist({ machine, view: view.value, focus, pending, found, most, started, said: latest(entries, machine), now })
+          const threads = shortlist({ machine, view: view.value, focus, pending, found, heard, most, more, started, said: latest(entries, machine), now })
           return { threads, away }
         }),
       find: (ref) =>

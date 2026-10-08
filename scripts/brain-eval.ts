@@ -53,10 +53,11 @@ const tezos = { request: "What's the status on my Tesla's migration request comp
 const logged = [
   { heard: "Can you please tell me what's the status on MiNAS SV2?", thread: "Mina SSV2" },
   { heard: "What's the status on my Tesla's migration request comparison?", thread: "Tezos" },
-  { heard: "Tesla celebration comparison", thread: "Tezos" },
-  { heard: "Dazzles migration", thread: "Tezos" },
-  { heard: "migrate stasos", thread: "Tezos" },
-  { heard: "My grades tezos.", thread: "Tezos" },
+  // Said over the question it asked about that one, as they were in the log.
+  { heard: "Tesla celebration comparison", thread: "Tezos", open: tezos, via: "reply" },
+  { heard: "Dazzles migration", thread: "Tezos", open: tezos, via: "reply" },
+  { heard: "migrate stasos", thread: "Tezos", open: tezos, via: "reply" },
+  { heard: "My grades tezos.", thread: "Tezos", open: tezos, via: "reply" },
   // Said over the question, then over it asked again; "Migrate Tezos." was dictated while it was open.
   { heard: "The recent one with mean migrations.", thread: "Mina SSV2", open: mina, via: "reply" },
   { heard: "The most recent one with Mina.", thread: "Mina SSV2", open: mina, via: "reply" },
@@ -70,6 +71,7 @@ const logged = [
       "Can you please go and look at what I did for the migration process for Mina and start another thread in integration on the main worktree to start working on the migration for Tezos, so I have a ticket open for that as well in my linear.",
     thread: "",
     act: "start",
+    said: "2026-10-01T01:39:00.000Z",
   },
 ]
 
@@ -81,6 +83,8 @@ const Phrases = Schema.Array(
     open: Schema.optional(Schema.Struct({ request: Schema.String, choices: Schema.Array(Schema.String) })),
     /** Said over the question rather than dictated by the shortcut. */
     via: Schema.optional(Schema.Literal("shortcut", "reply")),
+    /** When it was said, as ISO 8601: threads made after it, like the one it started, weren't there to be meant. */
+    said: Schema.optional(Schema.String),
   }),
 )
 const Shell = Schema.Struct({
@@ -234,12 +238,19 @@ const run = Effect.gen(function* () {
           const reply = phrase.via === "reply" && phrase.open !== undefined
           for (let run = 0; run < runs; run++) {
             const now = Date.now()
-            const shortlist = (pending: ReadonlyArray<Threads.Ref>, most: number) =>
-              Threads.shortlist({ machine, view, focus: Option.none(), pending, found: reply ? [] : (found.get(phrase.heard) ?? []), most, started, said: new Map(), now })
+            // Only the threads there were when it was said.
+            const before = phrase.said === undefined ? undefined : Date.parse(phrase.said)
+            const then: T3Live.View =
+              before === undefined
+                ? view
+                : { ...view, threads: new Map([...view.threads].filter(([, thread]) => Date.parse(thread.createdAt) < before)) }
+            const shortlist = (pending: ReadonlyArray<Threads.Ref>, most: number, more = 0) =>
+              Threads.shortlist({ machine, view: then, focus: Option.none(), pending, found: reply ? [] : (found.get(phrase.heard) ?? []), heard: phrase.heard, most, more, started, said: new Map(), now })
             // The threads it offered, first in the order it offered them, as when it asked.
             const every = shortlist([], view.threads.size)
             const offered = (phrase.open?.choices ?? []).flatMap((piece) => Option.toArray(Option.fromNullable(every.find((listed) => fits(listed, piece)))))
-            const desk: Threads.Desk = { threads: shortlist(offered.map(({ ref }) => ref), reply ? 12 : 30), away }
+            // As the daemon's desk: the likeliest in full, then the rest of the month's by name.
+            const desk: Threads.Desk = { threads: shortlist(offered.map(({ ref }) => ref), reply ? 12 : 30, 120), away }
             const choices = desk.threads.slice(0, offered.length)
             const open = Option.map(Option.fromNullable(phrase.open), ({ request }): Assistant.Open => ({
               id: "eval-open",

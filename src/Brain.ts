@@ -603,7 +603,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
 - These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "send" a thread a message, like an instruction, a correction or an answer to what it asked ("text": the message as he'd type it); "stop" a thread's run; "undo" what you just did; "decide" on what a thread waits for him to allow; "reply" to a thread's question; "mode" to change when you talk; "remember" or "forget" something; "remind" him later; "tidy" a thread away, like archiving or renaming it; "show" something on his screen.`
 
-const hearing = `What he says comes through speech recognition, and names get mangled: "Tesla's", "Dazzles", "stasos" and "my grades" were all Tezos; "MiNAS SV2" was Mina SSV2; "appd" and "YAPT" are yapd; "Wig" is rig; "Saul" is Sol; "masterwork tree" is master worktree; "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
+const hearing = `What he says comes through speech recognition, and names get mangled. A word that doesn't fit the sentence, or sounds like nothing he'd say, is most likely a name misheard: a thread's subject, a project, a machine or a model in THREADS or OTHER THREADS that sounds like it, like a coin, a client or a tool he works on coming out as an everyday word or a made-up one. Weigh such a word above the ordinary ones around it, like "migration" or "status", which fit many threads. His own words get mangled the same way: "appd" and "YAPT" are yapd, "Wig" is rig, "Saul" is Sol, "masterwork tree" is master worktree, "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
 
 const choosing = `Choosing a thread:
 - "it", "that" and "this one" mean FOCUS. "The other one" means the alternative you offered last. When FOCUS is an update not tied to a thread, "it" is the thread in THREADS doing that work, when one is: same project, same subject.
@@ -611,7 +611,7 @@ const choosing = `Choosing a thread:
 - When "sure" isn't "high", fill "others".
 - Fill "machine" only when he says where the thread runs, like "on rig". A machine the work is about, like a thread fixing rig's tunnel, doesn't count.
 - If nothing in THREADS fits but he named something specific, use "find".
-- New work that refers to an existing thread, like "look at what I did for Mina and start another thread for Tezos", is "start", not "send".
+- New work that refers to an existing thread, like "look at what I did for the billing export and start another thread doing the same for invoices", is "start", not "send".
 - If THREADS or LATELY shows you started the same work in the last 30 minutes, don't start it again: "answer" that it's already under way, naming it.`
 
 const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".`
@@ -844,7 +844,15 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     ...Option.toArray(Option.map(style, styled)),
     `NOW: ${date.toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}.\nMACHINES: ${machines || "none seen"}${desk.away.map(({ machine, reason }) => `; ${machine} is away: ${reason}`).join("")}`,
     `USAGE:\n${usageLines(situation.usage, now)}`,
-    `THREADS, the likeliest first:\n${desk.threads.length === 0 ? "None that you can see." : desk.threads.map((listed) => line(listed, now)).join("\n")}`,
+    `THREADS, the likeliest first:\n${desk.threads.length === 0 ? "None that you can see." : desk.threads.filter(({ brief }) => !brief).map((listed) => line(listed, now)).join("\n")}`,
+    ...(desk.threads.some(({ brief }) => brief)
+      ? [
+          `OTHER THREADS from the last month, by name only, newest first. They count as THREADS: a name he says that sounds like one of these means it:\n${desk.threads
+            .filter(({ brief }) => brief)
+            .map((listed) => `${listed.handle} ${fenced(listed.thread.title, 70)} · ${listed.project} · ${lasted(now - (Date.parse(listed.thread.updatedAt) || now))} ago`)
+            .join("\n")}`,
+        ]
+      : []),
     `WAITING ON YOU:\n${waiting.length === 0 ? "Nothing." : waiting.map((listed) => `- ${listed.handle}: ${doing(listed, now)}`).join("\n")}`,
     `LATELY, oldest first:\n${situation.lately.length === 0 ? "Nothing." : situation.lately.map(entry(desk, now)).join("\n")}`,
     `UNHEARD, what he hasn't heard yet:\n${situation.unheard.length === 0 ? "Nothing." : situation.unheard.map(entry(desk, now)).join("\n")}${
