@@ -506,6 +506,13 @@ export const said = (line: string, heard: Option.Option<string>): Draft => ({
   markdown: [`### I said\n\n${plainly(line)}`, ...Option.match(heard, { onNone: () => [], onSome: (heard) => [`### I heard you say\n\n${plainly(heard)}`] })].join("\n\n"),
 })
 
+/** A line in his style without addressing him, like "It's on your screen.", for after one that did already. */
+const unaddressed = (line: string, { address }: Pick<Lines, "address">) => {
+  const word = address.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  if (word === "") return line
+  return Brain.capital(line.replace(new RegExp(`^${word},\\s*`, "i"), "").replace(new RegExp(`,\\s*${word}(?=[.!?]*$)`, "i"), ""))
+}
+
 /** What yapd said last, when there's anything to say again. */
 const lastSaid = (situation: Brain.Situation) =>
   situation.subject._tag === "Nothing"
@@ -715,7 +722,8 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           const words = request === undefined ? [] : request._tag === "Approval" ? [request.what] : request.questions.map(({ question }) => question)
           if (words.every(readable)) return Option.none()
           const now = yield* Clock.currentTimeMillis
-          const say = (yield* watched) ? `${answer} ${lines.onScreen}` : answer
+          // The answer addressed him already.
+          const say = (yield* watched) ? `${answer} ${unaddressed(lines.onScreen, lines)}` : answer
           return Option.some({ say, card: { ...thread(target, Option.some(detail), now), caption: answer } })
         }),
       caption: (line, situation) =>

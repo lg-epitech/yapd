@@ -109,7 +109,15 @@ describe("Show", () => {
       Effect.gen(function* () {
         const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
         const unwatched = yield* show.aside(listed, detail(command), answer, lines)
-        const watched = yield* Effect.scoped(Effect.zipRight(show.watch, show.aside(listed, detail(command), answer, lines)))
+        // In his style, the line addresses him, which the answer did already.
+        const watched = yield* Effect.scoped(
+          Effect.zipRight(
+            show.watch,
+            Effect.forEach(["It's on your screen, sir.", "Sir, it's on your screen."], (onScreen) =>
+              Effect.map(show.aside(listed, detail(command), answer, { ...lines, onScreen }), Option.map(({ say }) => say)),
+            ),
+          ),
+        )
         const plain = yield* Effect.scoped(Effect.zipRight(show.watch, show.aside(listed, detail("Install the deploy tooling"), answer, lines)))
         return { unwatched, watched, plain }
       }),
@@ -117,7 +125,7 @@ describe("Show", () => {
     expect(Option.map(result.unwatched, ({ say, card }) => ({ say, kind: card.kind, caption: card.caption }))).toEqual(
       Option.some({ say: answer, kind: "thread", caption: answer }),
     )
-    expect(Option.map(result.watched, ({ say }) => say)).toEqual(Option.some(`${answer} It's on your screen.`))
+    expect(result.watched).toEqual([Option.some(`${answer} It's on your screen.`), Option.some(`${answer} It's on your screen.`)])
     expect(result.plain).toEqual(Option.none())
   })
 })
