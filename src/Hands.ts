@@ -170,6 +170,8 @@ const reasons: ReadonlyArray<readonly [RegExp, string]> = [
   // It takes a message into a turn only while the turn is at it, not getting going or waiting, nor busy only in the background, with no turn of the agent's going.
   [/\bcannot be steered\b/i, "It isn't at a point where it can take that yet."],
   [/\bno running provider turn\b/i, "It isn't at a point where it can take that yet."],
+  // It stops only a run with something going in it: one that ended just before the stop got there has nothing to stop.
+  [/\bis not interruptible\b/i, "It isn't doing anything right now."],
 ]
 
 /** A reason T3 Code gave, fit to say: no ids, nothing unreadable, the work never put down to an agent or a session, and a full stop. */

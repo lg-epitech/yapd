@@ -169,21 +169,24 @@ describe("Hands", () => {
         "No active provider session for thread abc123.",
         "The agent session has ended.",
         "Thread not found: 850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
-        "Run run_7f3a9c2b is not interruptible.",
+        "Run run_7f3a9c2b was cancelled.",
         "Target run 0193f2c4-7d1e-7a3b-9c5d-2e8f6a1b4c7d is starting and cannot be steered.",
         // As T3 Code said it live, for a turn busy only in the background.
         "No running provider turn found for active run run:thread:aaaf4547-528e-4031-8148-64e7a18d6540:ordinal:6",
-        "Active run run:thread:aaaf4547-528e-4031-8148-64e7a18d6540:ordinal:6 is not interruptible.",
+        "Active run run:thread:aaaf4547-528e-4031-8148-64e7a18d6540:ordinal:6 has ended.",
+        // T3 Code's word for a stop that came just after the run ended.
+        "Run run:thread:aaaf4547-528e-4031-8148-64e7a18d6540:ordinal:6 is not interruptible.",
       ].map(Hands.plainly),
     ).toEqual([
       "That command was previously rejected: that thread is archived.",
       "Nothing running for that thread.",
       "The work has ended.",
       "Thread not found.",
-      "That run is not interruptible.",
+      "That run was cancelled.",
       "It isn't at a point where it can take that yet.",
       "It isn't at a point where it can take that yet.",
-      "The active run is not interruptible.",
+      "The active run has ended.",
+      "It isn't doing anything right now.",
     ])
     // Names of things, like a model, are said as they are.
     expect(Hands.plainly("Model gpt-6-sol isn't available.")).toBe("Model gpt-6-sol isn't available.")
@@ -912,21 +915,35 @@ describe("Hands", () => {
     expect((await restarting(at("running"), true, queues)).said).toBe("Stopped it, sir, but that's waiting in its queue.")
   })
 
-  test("a turn that ended just before it was stopped to be told something in its place is told at once", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        // The live view still has it finishing off, but its run has ended by the time the stop looks.
-        const finishing = thread(tezos.id, { activeRunId: null, activityRunStatus: "waiting", status: "waiting" })
-        const { send, dispatched } = yield* hands({ thread: finishing, runs: [{ id: "run-1", status: "completed", ordinal: 1 }] })
-        const outcome = yield* send("u1", "Drop that and fix the loader instead.", "restart")
-        return {
-          outcome: outcome._tag === "Done" ? [outcome.how, outcome.stopped] : outcome._tag,
-          said: outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "restart" }, outcome.how, lines, Option.none(), outcome) : "",
-          dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
-        }
-      }),
-    )
-    expect(result).toEqual({ outcome: ["now", "ended"], said: "On it, sir.", dispatched: [["message.dispatch", "yapd:u1:1"]] })
+  test("a turn that ended just before it was stopped to be told something in its place is told at once, whether yapd's look or T3 Code finds it ended", async () => {
+    const ended = (by: "look" | "T3 Code") =>
+      run(
+        Effect.gen(function* () {
+          // The live view still has it finishing off, but its run has ended by the time the stop looks, or just after, by the time T3 Code takes it.
+          const finishing = thread(tezos.id, { activeRunId: null, activityRunStatus: "waiting", status: "waiting" })
+          const { send, answering, dispatched } = yield* hands({ thread: finishing, runs: [{ id: "run-1", status: by === "look" ? "completed" : "waiting", ordinal: 1 }] })
+          answering((payload, bounded) => {
+            if (payload.type !== "run.interrupt") return takes()(payload, bounded)
+            bounded.runs[0]!.status = "completed"
+            return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "Run run:thread:t-tezos:ordinal:1 is not interruptible." }))
+          })
+          const outcome = yield* send("u1", "Drop that and fix the loader instead.", "restart")
+          return {
+            outcome: outcome._tag === "Done" ? [outcome.how, outcome.stopped] : outcome._tag,
+            said: outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "restart" }, outcome.how, lines, Option.none(), outcome) : "",
+            dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
+          }
+        }),
+      )
+    expect(await ended("look")).toEqual({ outcome: ["now", "ended"], said: "On it, sir.", dispatched: [["message.dispatch", "yapd:u1:1"]] })
+    expect(await ended("T3 Code")).toEqual({
+      outcome: ["now", "ended"],
+      said: "On it, sir.",
+      dispatched: [
+        ["run.interrupt", "yapd:u1:0"],
+        ["message.dispatch", "yapd:u1:1"],
+      ],
+    })
   })
 
   test("scratch that withdraws a message still in the queue, and only offers to have one already read ignored", async () => {
