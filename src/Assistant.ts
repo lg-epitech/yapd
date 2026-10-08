@@ -684,6 +684,9 @@ export const make = (options: {
     const deliver = (outcome: Outcome, utterance: Pick<Utterance, "id" | "turns">): Effect.Effect<void> =>
       Effect.gen(function* () {
         if (outcome.say === "") return
+        // Turned off since, nothing about it is said, so nothing is noted as said.
+        const power = yield* options.power
+        if (!power.on || power.turns !== utterance.turns) return yield* Effect.logInfo(`Not saying "${outcome.say}", since yapd was turned off`)
         const at = yield* Clock.currentTimeMillis
         const open = outcome.kind === "question" && asking !== undefined ? asking.open : undefined
         const about = outcome.subject._tag === "Answer" ? outcome.subject.about : Option.none<Threads.Ref>()
