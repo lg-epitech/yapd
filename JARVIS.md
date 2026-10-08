@@ -29,3 +29,4 @@ Live on `dev` now: everything below. Being built: doing things to threads by voi
 - A live link to T3 Code's threads that reconnects and catches up on its own, and actions on threads (message, steer, stop, approve, answer, archive, rename, snooze, search, usage). The brain reads through them now; acting on threads by voice is the next milestone.
 - Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
+- yapd's local API turns away anything a web page sends, so no site you visit can have it start work or talk to your threads.
