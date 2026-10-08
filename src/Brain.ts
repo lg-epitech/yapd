@@ -578,12 +578,13 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 const hearing = `What he says comes through speech recognition, and names get mangled: "Tesla's", "Dazzles", "stasos" and "my grades" were all Tezos; "MiNAS SV2" was Mina SSV2; "appd" and "YAPT" are yapd; "Wig" is rig; "Saul" is Sol; "masterwork tree" is master worktree; "poll request" is pull request. Match threads by how they sound and by what the work is about, never by spelling. Short words like "no", "now", "on" and "not" are the least reliable of all.`
 
 const choosing = `Choosing a thread:
-- "it", "that" and "this one" mean FOCUS. "The other one" means the alternative you offered last.
+- "it", "that" and "this one" mean FOCUS. "The other one" means the alternative you offered last. When FOCUS is an update not tied to a thread, "it" is the thread in THREADS doing that work, when one is: same project, same subject.
 - "sure" is "high" when his words point at one thread: by name, even misheard, by what it's about, or by "it" with a FOCUS. "medium" when one fits best but another fits nearly as well. "low" when you'd be guessing.
 - When "sure" isn't "high", fill "others".
 - Fill "machine" only when he says where the thread runs, like "on rig". A machine the work is about, like a thread fixing rig's tunnel, doesn't count.
 - If nothing in THREADS fits but he named something specific, use "find".
-- New work that refers to an existing thread, like "look at what I did for Mina and start another thread for Tezos", is "start", not "send".`
+- New work that refers to an existing thread, like "look at what I did for Mina and start another thread for Tezos", is "start", not "send".
+- If THREADS or LATELY shows you started the same work in the last 30 minutes, don't start it again: "answer" that it's already under way, naming it.`
 
 const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".`
 
@@ -730,7 +731,7 @@ const focus = (situation: Situation) => {
     case "Session": {
       const { update } = subject
       return [
-        `Your update about ${update.project}, ${lasted(now - update.at)} ago, from a session that isn't in T3 Code: ${fenced(subject.said, 400)}`,
+        `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(subject.said, 400)}`,
         ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${fenced(prompt, 300)}`] }),
         `What it wrote: ${fenced(update.turn.message, 700)}`,
       ].join("\n")
