@@ -93,23 +93,37 @@ test("Store upgrades existing outgoing messages without losing them", () => with
   expect(row).toEqual({ text: "Keep API", state: "held", reference: null })
 }))
 
-test("Store brings a database from the reverted threads work up to date, keeping its settings and threads", () => within(async path => {
+test("a database at version 2 with settings and 42 threads moves to version 3 and keeps them all", () => within(async path => {
+  // As Rosie's was: settings from before the steps, 40 threads learned and 2 that yapd started.
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     const store = yield* Store.make(path, Store.migrations.slice(0, 2))
     yield* store.transaction(database => {
       database.run("create table settings (name text primary key, value text not null)")
       database.run("insert into settings values ('on', 'false')")
-      database.run("insert into threads (machine, id, prompt, started, at) values ('Rosie', 't1', 'Migrate Tezos.', 1, '2026-09-30T00:00:00.000Z')")
+      database.run(`insert into settings values ('persona', '{"style":"Jarvis"}')`)
+      for (let index = 0; index < 42; index++) {
+        database.run(
+          "insert into threads (machine, id, prompt, description, started, at) values ('Rosie', ?, ?, ?, ?, '2026-09-30T23:17:00.000Z')",
+          [`t${index}`, index < 2 ? "Migrate Tezos." : null, index < 2 ? "the Tezos migration" : null, index < 2 ? 1 : 0],
+        )
+      }
     })
   })))
+  expect(tables(path).version).toBe(2)
   const found = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     const store = yield* Store.make(path)
     return yield* store.transaction(database => ({
-      on: database.query<{ value: string }, []>("select value from settings where name = 'on'").get()?.value,
+      settings: database.query<{ name: string; value: string }, []>("select name, value from settings order by name").all(),
       threads: database.query<{ count: number }, []>("select count(*) as count from threads").get()?.count,
+      started: database.query<{ description: string }, []>("select description from threads where started = 1 order by id").all(),
       journal: database.query<{ count: number }, []>("select count(*) as count from journal").get()?.count,
     }))
   })))
-  expect(found).toEqual({ on: "false", threads: 1, journal: 0 })
-  expect(tables(path).version).toBe(Store.migrations.length)
+  expect(found).toEqual({
+    settings: [{ name: "on", value: "false" }, { name: "persona", value: '{"style":"Jarvis"}' }],
+    threads: 42,
+    started: [{ description: "the Tezos migration" }, { description: "the Tezos migration" }],
+    journal: 0,
+  })
+  expect(tables(path).version).toBe(3)
 }))
