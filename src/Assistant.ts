@@ -46,6 +46,12 @@ export type Asks =
   /** The agent's own message ended on a question. */
   | { readonly _tag: "Agent" }
 
+/** What a thread waits on him for that he heard asked, and the thread. */
+interface Heard {
+  readonly ref: Threads.Ref
+  readonly asks: Exclude<Asks, { readonly _tag: "Agent" }>
+}
+
 /**
  * What a thread waits on him for, worded to be asked as the one question
  * open: an approval, or a question with its options, which his answer
@@ -405,7 +411,7 @@ export const make = (options: {
     /** Questions about what a thread waited on him for that was dealt with in T3 Code, which a late answer does nothing to. */
     const gone = new Set<string>()
     /** What threads wait on him for that he's heard asked, by request, oldest first: answered by dictation, it's done as he says. */
-    const known = new Map<string, { readonly ref: Threads.Ref; readonly asks: Exclude<Asks, { readonly _tag: "Agent" }> }>()
+    const known = new Map<string, Heard>()
 
     /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
     const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
@@ -1410,13 +1416,13 @@ export const make = (options: {
      */
     const meant = (ref: Threads.Ref, shown: string, kind: "Approval" | "Question") =>
       Effect.gen(function* () {
-        const answers = (heard: { readonly ref: Threads.Ref; readonly asks: Exclude<Asks, { readonly _tag: "Agent" }> }) => Threads.same(heard.ref, ref) && heard.asks._tag === kind
+        const answers = (heard: Heard) => Threads.same(heard.ref, ref) && heard.asks._tag === kind
         const showing = known.get(shown)
         if (showing !== undefined && answers(showing)) return Option.some(showing.asks)
         for (const heard of [...known.values()].toReversed()) {
           if (heard.asks.requestId !== shown && answers(heard) && (yield* still(ref, heard.asks.requestId))) return Option.some(heard.asks)
         }
-        return Option.none<Exclude<Asks, { readonly _tag: "Agent" }>>()
+        return Option.none<Heard["asks"]>()
       })
 
     /**
