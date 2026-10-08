@@ -346,30 +346,39 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
         )
       })
 
+    /**
+     * The line's entry, rendering it if there's none. All at once, so a caller
+     * stopped halfway can't leave an entry behind that nothing will ever render.
+     */
+    const claim = (text: string) =>
+      Effect.gen(function* () {
+        const found = kept.get(text)
+        if (found !== undefined) {
+          // Last, as the most recently used.
+          kept.delete(text)
+          kept.set(text, found)
+          return found
+        }
+        const made = yield* Deferred.make<string, ProcessError>()
+        // Kept before it renders, so a render that fails at once finds it to forget.
+        kept.set(text, made)
+        const file = `${dir}/${crypto.randomUUID()}${extension}`
+        yield* voice.render(text, file).pipe(
+          Effect.as(file),
+          // Whatever it wrote before it failed is of no use.
+          Effect.onError(() => Effect.zipRight(Effect.promise(() => rm(file, { force: true })), forget(text, made))),
+          Effect.intoDeferred(made),
+          Effect.interruptible,
+          Effect.forkIn(scope),
+        )
+        while (kept.size > most) yield* forget(...kept.entries().next().value!)
+        return made
+      }).pipe(Effect.uninterruptible)
+
     const render = (text: string, path: string) =>
       Effect.gen(function* () {
         if (text.length > brief) return yield* voice.render(text, path)
-        let entry = kept.get(text)
-        if (entry === undefined) {
-          const made = yield* Deferred.make<string, ProcessError>()
-          entry = made
-          // Kept before it renders, so a render that fails at once finds it to forget.
-          kept.set(text, made)
-          const file = `${dir}/${crypto.randomUUID()}${extension}`
-          yield* voice.render(text, file).pipe(
-            Effect.as(file),
-            // Whatever it wrote before it failed is of no use.
-            Effect.onError(() => Effect.zipRight(Effect.promise(() => rm(file, { force: true })), forget(text, made))),
-            Effect.intoDeferred(made),
-            Effect.forkIn(scope),
-          )
-          while (kept.size > most) yield* forget(...kept.entries().next().value!)
-        } else {
-          // Last, as the most recently used.
-          kept.delete(text)
-          kept.set(text, entry)
-        }
-        const file = yield* Deferred.await(entry)
+        const file = yield* Deferred.await(yield* claim(text))
         yield* Effect.tryPromise(() => Bun.write(path, Bun.file(file))).pipe(
           Effect.catchAll(() => voice.render(text, path)),
         )

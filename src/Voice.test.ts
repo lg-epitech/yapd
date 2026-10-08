@@ -169,6 +169,21 @@ describe("remembering", () => {
       }),
     ))
 
+  test("still renders a line whose first caller was stopped as it asked", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const voice = yield* remembering({ render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid) }, dir)
+        // Stopped a little later each time, so one of them is stopped right after it's kept and before it renders.
+        for (let tries = 0; tries < 40; tries++) {
+          const asked = yield* Effect.fork(voice.render(`Line ${tries}.`, `${dir}/out-a.wav`).pipe(Effect.withMaxOpsBeforeYield(10)))
+          for (let wait = 0; wait < tries; wait++) yield* Effect.yieldNow()
+          yield* Fiber.interrupt(asked)
+          const again = yield* voice.render(`Line ${tries}.`, `${dir}/out-b.wav`).pipe(Effect.timeout("2 seconds"), Effect.either)
+          expect(again._tag).toBe("Right")
+        }
+      }),
+    ))
+
   test("tries again after a render that failed", () =>
     run((dir) =>
       Effect.gen(function* () {
