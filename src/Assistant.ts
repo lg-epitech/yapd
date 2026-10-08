@@ -5,7 +5,7 @@ import type * as Drafts from "./Drafts.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
-import type { Line } from "./Responder.ts"
+import { enough, gist, type Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 import { ago, type Material } from "./Writer.ts"
@@ -182,6 +182,9 @@ const catchUp = (kept: Kept) => {
   return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again"
 }
 
+/** Whether he only told yapd to stop what it's saying, like "skip" or "stop, stop", rather than taking it in, like "thanks". */
+const hushed = (heard: string) => enough.has([...new Set(gist(heard).split(" "))].join(" "))
+
 /** Whether what was heard was taken for noise rather than anything he said to yapd. */
 const noise = (kept: Kept) =>
   typeof kept.detail === "object" && kept.detail !== null && (kept.detail as { readonly decision?: Partial<Brain.Decision> }).decision?.act === "resume"
@@ -214,6 +217,8 @@ export const make = (options: {
   readonly awaiting: Effect.Effect<Effect.Effect<void>>
   /** Whether these words are waiting to be said, like an update or work that started, which a dictation cut off. */
   readonly queued: (spoken: string) => Effect.Effect<boolean>
+  /** Drops an update he told to stop, even one a dictation cut off to be read again, which then counts as heard. */
+  readonly skip: (update: Conversation.Update) => Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -821,6 +826,8 @@ export const make = (options: {
         const { decision } = decided
         // Nothing was really said, like words Whisper hears in silence: a question stays open.
         if (decided.source === "fast" && decision.act === "resume") return quiet(decided.subject)
+        // Told to stop the update he was hearing, it isn't read again once the dictation that cut it off is dealt with.
+        if (decision.act === "dismiss" && decided.subject._tag === "Session" && hushed(utterance.heard)) yield* options.skip(decided.subject.update)
         const said = yield* persona.lines
         // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
         if (decided.source === "failed") {

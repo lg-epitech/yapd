@@ -95,6 +95,7 @@ export const serve = Effect.gen(function* () {
     coming: daemon.coming,
     awaiting: daemon.awaiting,
     queued: daemon.queued,
+    skip: daemon.skip,
   })
   const shortcut = yield* Shortcut
   // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed on.

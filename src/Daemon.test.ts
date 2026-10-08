@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import * as Assistant from "./Assistant.ts"
 import { Audio } from "./Audio.ts"
+import * as Brain from "./Brain.ts"
 import { Waiting, WaitingLive } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
 import * as Daemon from "./Daemon.ts"
+import * as Drafts from "./Drafts.ts"
 import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
@@ -14,7 +17,10 @@ import { Transcriber } from "./Transcriber.ts"
 import { Vad, VadError } from "./Vad.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
+import * as Store from "./Store.ts"
+import * as Threads from "./Threads.ts"
 import { Voice } from "./Voice.ts"
+import { Writer } from "./Writer.ts"
 
 /**
  * Runs the daemon with updates that each take ten seconds to read, and no
@@ -210,13 +216,75 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
   Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
+
+/**
+ * The daemon with the assistant on top, wired as yapd serves them, without
+ * T3 Code, and with a model that decides what `model` says, which isn't asked
+ * about what needs no model.
+ */
+const assisted = (model: (situation: Brain.Situation) => Brain.Decision, options: Parameters<typeof make>[1] = {}) =>
+  Effect.gen(function* () {
+    const daemon = yield* make(undefined, options)
+    const { made, journal } = daemon
+    const threads = yield* Threads.make({
+      machine: "Rosie",
+      live: { view: Effect.succeed(Option.none()), changes: Stream.never },
+      actions: Option.none(),
+      others: [],
+      journal,
+      store: yield* Store.make(":memory:"),
+    })
+    const drafts = yield* Drafts.make({ machines: [], rules: Effect.succeed(Option.none()), recent: Effect.succeed([]) }).pipe(
+      Effect.provideService(Writer, { decide: () => Effect.never, research: () => Effect.never, prepare: Effect.void }),
+    )
+    const asked: Array<Brain.Situation> = []
+    const assistant = yield* Assistant.make({
+      threads,
+      journal,
+      drafts,
+      tell: made.tell,
+      power: made.power,
+      lastHeard: made.lastHeard,
+      coming: made.coming,
+      awaiting: made.awaiting,
+      queued: made.queued,
+      skip: made.skip,
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(Brain.Brain, {
+            decide: (situation) =>
+              Effect.sync(() => {
+                asked.push(situation)
+                return model(situation)
+              }),
+          }),
+          Persona.Plain,
+        ),
+      ),
+    )
+    let presses = 0
+    /** He presses the shortcut over whatever is being read, says `heard` for a couple of seconds, and lets go. */
+    const dictating = (heard: string) =>
+      Effect.gen(function* () {
+        const press = ++presses
+        const { turns } = yield* made.power
+        yield* assistant.prepare(press, turns)
+        const dictation = yield* daemon.dictate
+        yield* daemon.wait(2)
+        yield* Scope.close(dictation, Exit.void)
+        yield* assistant.heard({ heard, via: "shortcut", at: yield* Clock.currentTimeMillis, voiced: 2, turns }, press)
+        yield* daemon.flush
+      })
+    return { ...daemon, assistant, asked, dictating }
+  })
 
 describe("Daemon", () => {
   test("gets the speaker ready while an update renders, and lets it rest again when nothing comes", async () => {
@@ -991,5 +1059,41 @@ describe("Daemon", () => {
     )
     expect(result.answers).toEqual({ dropped: "off", asked: "queued" })
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
+  })
+
+  test.each(["Stop.", "Skip.", "Enough.", "Next.", "Shut up.", "Stop, stop."])("told \"%s\" by the shortcut over an update, doesn't read it again, and counts it heard", async (said) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictating, played, stopped, asked, journal } = yield* assisted(() => Brain.decision({ act: "answer", spoken: "Asked." }))
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        yield* dictating(said)
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { played: [...played], stopped: [...stopped], asked: asked.length, unheard: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result).toEqual({ played: ["yapd. The PR is ready."], stopped: ["yapd. The PR is ready."], asked: 0, unheard: 0 })
+  })
+
+  test("anything else dictated over an update, even thanks, has it read again from the start once it's dealt with", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictating, played, journal } = yield* assisted((situation) =>
+          situation.utterance.heard === "Thanks."
+            ? Brain.decision({ act: "dismiss" })
+            : Brain.decision({ act: "answer", spoken: "It changes the parser." }),
+        )
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        yield* dictating("Thanks.")
+        yield* wait(2)
+        yield* dictating("What does it change?")
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { played: [...played], unheard: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "It changes the parser.", "yapd. The PR is ready."])
+    // Heard to the end the last time.
+    expect(result.unheard).toBe(0)
   })
 })

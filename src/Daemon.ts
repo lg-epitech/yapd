@@ -564,6 +564,28 @@ export const make = Effect.gen(function* () {
     })
 
   /**
+   * Drops an update the user told to stop, even one a dictation cut off and
+   * put back to be read again: it isn't, and they've heard enough of it. Its
+   * hook waits on, like any they heard, for a reply to it heard again.
+   */
+  const skip = (update: Conversation.Update) =>
+    Effect.gen(function* () {
+      const dropped = yield* STM.commit(
+        TRef.modify(inbox, (current) => {
+          const queued = [...current.values()].find((entry) => "update" in entry && entry.update === update)
+          return queued === undefined ? [undefined, current] as const : [queued, Inbox.remove(current, queued.session)] as const
+        }),
+      )
+      if (dropped !== undefined && "update" in dropped) {
+        yield* removeFile(Inbox.audio(dropped))
+        if (!heardAlready((yield* SubscriptionRef.get(state)).heard, update)) yield* release(dropped.hook)
+        if (dropped.replay !== undefined) yield* replayed(dropped.replay)
+      }
+      const row = rows.get(update)
+      if (row !== undefined) yield* journal.markHeard([row], yield* Clock.currentTimeMillis)
+    })
+
+  /**
    * Waits for something to say. When something is about to be ready, the
    * speaker gets ready meanwhile, and if it doesn't come after all, like an
    * update that turned out trivial, there's nothing to say for now.
@@ -763,6 +785,7 @@ export const make = Effect.gen(function* () {
       STM.commit(
         STM.map(TRef.get(inbox), (waiting) => [...waiting.values()].some((entry) => ("update" in entry ? entry.update.spoken : entry.notice.spoken) === spoken)),
       ),
+    skip,
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
   }
