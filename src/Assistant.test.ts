@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Fiber, Layer, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
+import type * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
@@ -110,6 +111,18 @@ const lines: Persona.Lines = {
   address: "sir",
 }
 
+/** An update from a session T3 Code doesn't run, read to him at `at`. */
+const update = (project: string, spoken: string, at: number): Conversation.Update => ({
+  session: `claude:${project}`,
+  project,
+  turn: { prompt: Option.none(), message: spoken },
+  needsYou: false,
+  spoken,
+  audio: `/tmp/${project}.wav`,
+  thread: { agent: "claude", session: project, cwd: `/code/${project}`, message: spoken, origin: {} },
+  at,
+})
+
 /** A T3 Code that answers reads, has nothing pending, and finds for each word what `search` says, in its order. */
 const transport = (search: (query: string) => ReadonlyArray<string>): Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> =>
   Effect.succeed({
@@ -217,6 +230,7 @@ const assistant = (
       }),
     )
     let power = { on: true, turns: 1 }
+    let listening = Option.none<{ readonly update: Conversation.Update; readonly at: number; readonly playing: boolean }>()
     const made = yield* Assistant.make({
       threads,
       journal,
@@ -224,7 +238,7 @@ const assistant = (
       // Said at once, as when nothing else is being said.
       tell: (notice) => Effect.zipRight(Effect.sync(() => void said.push(notice)), given.waiting === true ? Effect.void : (notice.saying ?? Effect.void)),
       power: Effect.sync(() => power),
-      lastHeard: Effect.succeed(Option.none()),
+      lastHeard: Effect.sync(() => listening),
       coming: Effect.void,
       awaiting: Effect.succeed(Effect.void),
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
@@ -254,6 +268,13 @@ const assistant = (
       spoken: () => said.map(({ spoken }) => spoken),
       questions,
       flush,
+      /** An update starts being read to him. */
+      reading: (project: string, spoken: string) =>
+        Effect.flatMap(TestClock.currentTimeMillis, (at) =>
+          Effect.sync(() => {
+            listening = Option.some({ update: update(project, spoken, at), at, playing: true })
+          }),
+        ),
       /** Its turn came, after whatever was being said. */
       play: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
@@ -785,6 +806,23 @@ describe("Assistant", () => {
       "Started in yapd, on Claude Opus 5.5, without a worktree.",
     ])
     expect(result.started).toEqual(["/code/yapd"])
+  })
+
+  test("\"it\" in each dictation is what was being read as its own shortcut was pressed, though the next was pressed before it was heard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { prepare, heard, reading, seen } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir." }))
+        // He presses the shortcut over one update, then over the next, before the first dictation is transcribed.
+        yield* reading("integration-connectors", "Integration-connectors. The Mina tickets are filed.")
+        yield* prepare
+        yield* reading("integration", "Integration. The Tezos migration is comparing request formats.")
+        yield* prepare
+        yield* heard({ heard: "What is it doing?", via: "shortcut", at: now, voiced: 3, turns: 1 })
+        yield* heard({ heard: "Tell me more about it.", via: "shortcut", at: now, voiced: 3, turns: 1 })
+        return seen.map(({ subject }) => (subject._tag === "Nothing" ? "nothing" : subject.said))
+      }),
+    )
+    expect(result).toEqual(["Integration-connectors. The Mina tickets are filed.", "Integration. The Tezos migration is comparing request formats."])
   })
 
   test("work T3 Code is still getting ready when yapd is turned off and on is still under way, so asking for it again doesn't start it twice", async () => {

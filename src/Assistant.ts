@@ -205,10 +205,12 @@ export const make = (options: {
     let version = 0
     /** What yapd said last of its own accord, which "it" may mean, and when it started saying it. */
     let answered: { readonly subject: Subject; readonly at: number } | undefined
-    /** What "it" meant when the shortcut was pressed, before the dictation stopped what was playing. */
-    let pressed: Subject | undefined
-    /** For each press whose dictation hasn't ended, oldest first: when, and what lets updates be said again once its answer is queued. */
-    const presses: Array<{ readonly at: number; readonly arrived: Effect.Effect<void> }> = []
+    /**
+     * For each press whose dictation hasn't ended, oldest first: when, what
+     * "it" meant then, before the dictation stopped what was playing, and what
+     * lets updates be said again once its answer is queued.
+     */
+    const presses: Array<{ readonly at: number; readonly subject: Subject; readonly arrived: Effect.Effect<void> }> = []
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
@@ -895,15 +897,14 @@ export const make = (options: {
         yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
       })
 
-    /** Works out what he said and acts on it, then says what came of it, one request at a time. */
-    const respond = (utterance: Utterance) =>
+    /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
+    const respond = (utterance: Utterance, pressed: Subject | undefined) =>
       Effect.gen(function* () {
         yield* Effect.logInfo(`Heard: ${utterance.heard}`)
         // Whatever comes of it is said, so the speaker gets ready while it's worked out.
         yield* options.coming
         const began = yield* Clock.currentTimeMillis
-        const about = utterance.via === "shortcut" && pressed !== undefined ? pressed : yield* subject
-        pressed = undefined
+        const about = pressed ?? (yield* subject)
         const glanced = yield* glance(utterance, about, [])
         let ahead: Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>> | undefined
         let thought: Thought
@@ -951,15 +952,16 @@ export const make = (options: {
     const ended = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
       while (presses.length > 1 && now - presses[0]!.at > longest) yield* presses.shift()!.arrived
-      return presses.shift()?.arrived
+      return presses.shift()
     })
 
     const heard = (input: Omit<Utterance, "id">) =>
       Effect.gen(function* () {
         const utterance: Utterance = { ...input, id: mint(input.at, "u") }
-        // A dictation's answer was awaited from when the shortcut was pressed.
-        const arrived = (input.via === "shortcut" ? yield* ended : undefined) ?? (yield* options.awaiting)
-        return yield* Effect.zipRight(hold, respond(utterance)).pipe(Effect.ensuring(arrived))
+        // A dictation's answer was awaited from when the shortcut was pressed, and "it" is what he was listening to then.
+        const press = input.via === "shortcut" ? yield* ended : undefined
+        const arrived = press?.arrived ?? (yield* options.awaiting)
+        return yield* Effect.zipRight(hold, respond(utterance, press?.subject)).pipe(Effect.ensuring(arrived))
       })
 
     return {
@@ -967,21 +969,19 @@ export const make = (options: {
       act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought.utterance), outcome))),
       heard,
       prepare: Effect.gen(function* () {
-        // What's dictated is answered before anything else is said.
-        presses.push({ at: yield* Clock.currentTimeMillis, arrived: yield* options.awaiting })
+        // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
+        presses.push({ at: yield* Clock.currentTimeMillis, subject: yield* subject, arrived: yield* options.awaiting })
         yield* hold
-        pressed = yield* subject
         const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
         yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
         yield* Effect.forkIn(threads.refreshUsage, scope)
       }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
-      nothing: Effect.zipRight(release, Effect.flatMap(ended, (arrived) => arrived ?? Effect.void)),
+      nothing: Effect.zipRight(release, Effect.flatMap(ended, (press) => press?.arrived ?? Effect.void)),
       // Not one he hasn't heard yet, which what he said can't have been about.
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),
       drop: Effect.gen(function* () {
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
-        pressed = undefined
         // No answer is on its way any more, and the dictations they were for are dropped too.
         yield* Effect.forEach(presses.splice(0), ({ arrived }) => arrived, { discard: true })
         yield* Effect.forEach([...writing.values(), ...jobs], Fiber.interruptFork, { discard: true })
