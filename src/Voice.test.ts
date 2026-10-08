@@ -178,11 +178,19 @@ describe("speaking", () => {
         // Unlike the others, loudnorm hears seconds ahead, areverse all of it, and highpass, given a block size, a block.
         const effects = [
           [yield* defaultEffect, true],
+          ["highpass=f=120,equalizer=f=3000:t=q:w=1:g=3,chorus=0.7:0.9:25:0.25:0.3:2,aecho=0.8:0.5:40|70:0.25|0.15,volume=9dB", true],
+          ["equalizer=frequency=3k:width_type=h:width=200:gain=-3,volume=0.5", true],
           ["none", true],
           ["loudnorm", false],
           ["areverse", false],
           ["highpass=f=120:b=4096", false],
           ["highpass=120:q:0.707:2:1:all:0:di:auto:4096", false],
+          // ffmpeg works an expression out anew on each run, so one reading the clock has the first part filtered unlike the whole.
+          ["volume=1+0.5*sin(time(0))", false],
+          ["highpass=f=300+200*sin(time(0))", false],
+          // Or one reading the time in the audio, or worked out again for each frame, which a first part's shorter last frame could change.
+          ["volume=1-t", false],
+          ["volume=0.5:eval=frame", false],
         ] as const
         for (const [effect, early] of effects) {
           const { exit, told, path } = yield* render(dir, effect)

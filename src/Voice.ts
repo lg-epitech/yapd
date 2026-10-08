@@ -294,6 +294,49 @@ export const ffmpeg = (effect: string, rate: number) => (raw: string, path: stri
   ]).pipe(Effect.asVoid)
 
 /**
+ * A plain number. ffmpeg works out any other value as an expression on each
+ * run, and one reading the clock, like time(0), or where in the audio it is,
+ * like t, could filter a first part unlike the whole.
+ */
+const number = String.raw`[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?`
+
+/** Values that are all of `pattern`. */
+const values = (pattern: string) => new RegExp(`^(?:${pattern})$`)
+
+const plain = values(number)
+/** In hertz, or thousands of them. */
+const hertz = values(`${number}k?`)
+/** As a factor, or in decibels. */
+const decibels = values(`${number}(?:dB)?`)
+/** One for each echo or voice, apart by "|". */
+const numbers = values(`${number}(?:\\|${number})*`)
+/** Channels by name, like FL|FR, or all of them. */
+const channels = values(String.raw`all|[A-Z][A-Z0-9]*(?:\|[A-Z][A-Z0-9]*)*`)
+/** One of the words ffmpeg has for an option's settings. */
+const oneOf = (...words: ReadonlyArray<string>) => values(words.join("|"))
+
+/** An option a filter may be given, by any of its names, with the values ffmpeg reads alike on every run. */
+interface Option {
+  readonly names: ReadonlyArray<string>
+  readonly value: RegExp
+}
+
+const option = (value: RegExp, ...names: ReadonlyArray<string>): Option => ({ names, value })
+
+/** highpass's and equalizer's options, which differ in their fourth only. */
+const biquad = (fourth: Option) => [
+  option(hertz, "frequency", "f"),
+  option(oneOf("h", "q", "o", "s", "k"), "width_type", "t"),
+  option(plain, "width", "w"),
+  fourth,
+  option(plain, "mix", "m"),
+  option(channels, "channels", "c"),
+  option(oneOf("0", "1", "false", "true"), "normalize", "n"),
+  option(oneOf("di", "dii", "tdi", "tdii", "latt", "svf", "zdf"), "transform", "a"),
+  option(oneOf("auto", "s16", "s32", "f32", "f64"), "precision", "r"),
+]
+
+/**
  * ffmpeg filters that only hear what came before, with the options each may be
  * given, in ffmpeg's order, as it also reads them unnamed. Filtered with these
  * alone, a first part is exactly how the whole filtered starts, sample for
@@ -302,12 +345,12 @@ export const ffmpeg = (effect: string, rate: number) => (raw: string, path: stri
  * equalizer filter backwards by, or that a first part's shorter last frame
  * could change, like volume's evaluation for each frame.
  */
-const causal = new Map<string, ReadonlyArray<ReadonlyArray<string>>>([
-  ["highpass", [["frequency", "f"], ["width_type", "t"], ["width", "w"], ["poles", "p"], ["mix", "m"], ["channels", "c"], ["normalize", "n"], ["transform", "a"], ["precision", "r"]]],
-  ["equalizer", [["frequency", "f"], ["width_type", "t"], ["width", "w"], ["gain", "g"], ["mix", "m"], ["channels", "c"], ["normalize", "n"], ["transform", "a"], ["precision", "r"]]],
-  ["chorus", [["in_gain"], ["out_gain"], ["delays"], ["decays"], ["speeds"], ["depths"]]],
-  ["aecho", [["in_gain"], ["out_gain"], ["delays"], ["decays"]]],
-  ["volume", [["volume"], ["precision"]]],
+const causal = new Map<string, ReadonlyArray<Option>>([
+  ["highpass", biquad(option(plain, "poles", "p"))],
+  ["equalizer", biquad(option(plain, "gain", "g"))],
+  ["chorus", [option(plain, "in_gain"), option(plain, "out_gain"), option(numbers, "delays"), option(numbers, "decays"), option(numbers, "speeds"), option(numbers, "depths")]],
+  ["aecho", [option(plain, "in_gain"), option(plain, "out_gain"), option(numbers, "delays"), option(numbers, "decays")]],
+  ["volume", [option(decibels, "volume"), option(oneOf("fixed", "float", "double"), "precision")]],
 ])
 
 /**
@@ -325,12 +368,17 @@ export const keepsItsStart = (effect: string) =>
       if (options === undefined) return false
       const given = equals === -1 ? [] : filter.slice(equals + 1).split(":")
       // ffmpeg reads options by place until the first one named, and none by place after it.
-      const firstNamed = given.findIndex((option) => option.includes("="))
-      return given.every((option, place) =>
-        option.includes("=")
-          ? options.some((names) => names.includes(option.slice(0, option.indexOf("="))))
-          : (firstNamed === -1 || place < firstNamed) && place < options.length,
-      )
+      const firstNamed = given.findIndex((setting) => setting.includes("="))
+      return given.every((setting, place) => {
+        const named = setting.indexOf("=")
+        const known =
+          named === -1
+            ? firstNamed === -1 || place < firstNamed
+              ? options[place]
+              : undefined
+            : options.find(({ names }) => names.includes(setting.slice(0, named)))
+        return known !== undefined && known.value.test(named === -1 ? setting : setting.slice(named + 1))
+      })
     }))
 
 /**
