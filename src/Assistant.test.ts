@@ -964,6 +964,24 @@ describe("Assistant", () => {
     expect(result.ids[1]).toEqual(result.ids[0])
   })
 
+  test("a yes too faint to be his over an offer to send again sends nothing", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, questions, flush, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
+          answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        // A fifth of a second of "yeah" from across the room.
+        const taken = yield* questions().at(-1)!.question!.answer("Yeah.", 0.2)
+        if (Option.isSome(taken)) yield* taken.value
+        yield* flush
+        return dispatched.length
+      }),
+    )
+    // The one try that may have got there, and nothing more.
+    expect(result).toBe(1)
+  })
+
   test("an offer to send again left unanswered is asked once more in other words, then let go, and never sent", async () => {
     const result = await run(
       Effect.gen(function* () {

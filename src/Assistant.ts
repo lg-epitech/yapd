@@ -843,8 +843,9 @@ export const make = (options: {
 
     /**
      * A yes to doing what was asked about: the same thing on the same thread,
-     * as it's known now, never asked about a second time. To sending again,
-     * it's the same step under the same ids, once.
+     * as it's known now, checked as anything done is, and never asked about a
+     * second time. To sending again, it's the same step under the same ids,
+     * once; a yes that doesn't stand lets it go for good.
      */
     const agreeing = (open: Open, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
@@ -852,14 +853,6 @@ export const make = (options: {
         const target = Option.fromNullable(open.candidates[0]).pipe(
           Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
         )
-        const to = open.candidates[0]
-        if (Option.isSome(open.resend) && to !== undefined) {
-          const power = yield* options.power
-          if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
-          const outcome = yield* hands.again(open.resend.value)
-          const act: Hands.Act = { _tag: "Message", to, text: open.decision.text, how: "now" }
-          return yield* told(act, outcome, { ...thought, decision: open.decision }, said, { step: 0, commandId: open.resend.value, rest: false })
-        }
         const decision = Brain.decision({
           ...open.decision,
           target: Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle }),
@@ -868,9 +861,18 @@ export const make = (options: {
           pending: "answers",
         })
         const checked = Brain.check(decision, situation, said)
+        const resend = Option.filter(open.resend, () => checked._tag === "Do" && checked.plan.decision.act === "send" && Option.isSome(target))
+        if (Option.isNone(resend)) yield* forgo(open, "His yes didn't stand.")
         if (checked._tag === "Ask") {
           yield* Effect.logInfo("Leaving it, rather than ask again")
           return reply(said.leaving, thought.subject)
+        }
+        if (Option.isSome(resend) && Option.isSome(target)) {
+          const power = yield* options.power
+          if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
+          const outcome = yield* hands.again(resend.value)
+          const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: open.decision.text, how: "now" }
+          return yield* told(act, outcome, { ...thought, decision: open.decision }, said, { step: 0, commandId: resend.value, rest: false })
         }
         return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: true })
       })
