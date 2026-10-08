@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite"
-import { Clock, Context, Data, Effect, Option, Stream } from "effect"
+import { Clock, Context, Data, Effect, Either, Option, Stream } from "effect"
 import { english, speakable } from "./Condenser.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import type * as Store from "./Store.ts"
@@ -211,6 +211,57 @@ export const shortlist = (input: {
       }
     })
 }
+
+/** Words searched for at most, and threads a search adds to the desk at most. */
+const searches = 4
+const added = 5
+/** Words too common to tell threads apart. */
+const common: ReadonlySet<string> = new Set([
+  "what", "what's", "whats", "status", "with", "that", "this", "have", "please", "could", "would", "about", "going", "doing",
+  "tell", "there", "they", "them", "from", "into", "your", "thread", "work", "check", "look", "like", "just", "some", "when",
+  "where", "which", "will", "been", "were", "then", "than", "also", "it's", "thing", "things", "today", "right", "know",
+  "need", "needs", "want", "start", "make", "does", "done", "still", "much", "many", "more",
+])
+
+/** The words in what he said that tell threads apart: none too short or too common. */
+export const distinctive = (text: string) =>
+  [...new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length > 3 && !common.has(word)))].slice(0, searches)
+
+/** Searching the threads' messages for some words, as T3 Code does. */
+export type Search<E> = (words: string) => Effect.Effect<ReadonlyArray<{ readonly ref: Ref; readonly snippet: string }>, E>
+
+/**
+ * Threads whose messages have the words that tell threads apart, one search
+ * each, since T3 Code matches a phrase only as it's written: those with most
+ * of the words first, each with what was found. It fails only when no search
+ * could be made at all.
+ */
+export const matching = <E>(text: string, search: Search<E>) =>
+  Effect.gen(function* () {
+    const words = distinctive(text)
+    const sought = words.length > 0 ? words : text.trim() === "" ? [] : [text.trim()]
+    const all = yield* Effect.forEach(sought, (word) => Effect.either(search(word)), { concurrency: "unbounded" })
+    const failed = all.find(Either.isLeft)
+    if (failed !== undefined && all.every(Either.isLeft)) return yield* failed
+    const hits = new Map<string, { readonly ref: Ref; readonly snippet: string; count: number }>()
+    for (const matches of all.flatMap((searched) => (Either.isRight(searched) ? [searched.right] : []))) {
+      // Once for each word, however many of its messages have it.
+      const seen = new Set<string>()
+      for (const { ref, snippet } of matches) {
+        const key = `${ref.machine}\n${ref.id}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const hit = hits.get(key)
+        if (hit === undefined) hits.set(key, { ref, snippet, count: 1 })
+        else hit.count++
+      }
+    }
+    return [...hits.values()].toSorted((one, other) => other.count - one.count)
+  })
+
+/** The threads a search for what he said puts on the desk, those with most of his words first. */
+export const searched = <E>(text: string, search: Search<E>) =>
+  Effect.map(matching(text, search), (hits) => hits.slice(0, added).map(({ ref }) => ref))
 
 /** How long usage is good for before it's asked again. */
 const stale = 5 * 60_000

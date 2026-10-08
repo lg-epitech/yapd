@@ -23,15 +23,17 @@ import * as Threads from "../src/Threads.ts"
 //   bun scripts/brain-eval.ts fixture
 //     Copies T3 Code's threads, archived ones too, to view.json, reading only,
 //     and writes phrases.json to edit if there's none: what was said, a piece
-//     of the title or project of the thread it was about ("" for none), and,
-//     for an answer to a question yapd asked, the request it was about and a
-//     piece of each thread it offered.
+//     of the title or project of the thread it was about ("" for none), what
+//     it should come to when that's what matters, like "start" for new work
+//     that names a thread, and, for an answer to a question yapd asked, the
+//     request it was about and a piece of each thread it offered.
 //   bun scripts/brain-eval.ts run [--runs 5] [--effort low,minimal]
-//     Asks the model about each phrase, the runs times over, at each effort,
-//     and says whether the gate passes: the right thread every time, as its
-//     pick even when it asks, an answer taken as one, no question in at least
-//     four runs in five of each phrase, and a median under 3.6 s. Each answer
-//     goes to results-<time>.jsonl.
+//     Searches the threads for each phrase as the daemon does, reading only,
+//     then asks the model about it, the runs times over, at each effort, and
+//     says whether the gate passes: the right thread every time, as its pick
+//     even when it asks, an answer taken as one, no question in at least four
+//     runs in five of each phrase, and a median under 3.6 s. Each answer goes
+//     to results-<time>.jsonl.
 //   bun scripts/brain-eval.ts probe [--runs 20]
 //     Times orchestration.searchThreads, which only reads, to tell whether
 //     its hits are quick enough to add to every request.
@@ -58,12 +60,20 @@ const logged = [
   { heard: "What's going on?", thread: "" },
   { heard: "What did I miss?", thread: "" },
   { heard: "How's the yapd review going?", thread: "yapd" },
+  // 21:39: new work that names an existing thread, which is to be started, not sent to it.
+  {
+    heard:
+      "Can you please go and look at what I did for the migration process for Mina and start another thread in integration on the main worktree to start working on the migration for Tezos, so I have a ticket open for that as well in my linear.",
+    thread: "",
+    act: "start",
+  },
 ]
 
 const Phrases = Schema.Array(
   Schema.Struct({
     heard: Schema.String,
     thread: Schema.String,
+    act: Schema.optional(Brain.Act),
     open: Schema.optional(Schema.Struct({ request: Schema.String, choices: Schema.Array(Schema.String) })),
   }),
 )
@@ -127,23 +137,60 @@ const viewed = Effect.gen(function* () {
   }
 })
 
-/** What yapd noted of the work it started, read only. */
+interface Started {
+  readonly dictated: string
+  readonly description: string | null
+  readonly at: number
+}
+
+/** What yapd noted of the work it started, read only, or nothing when there's no database to read. */
 const startedWork = (machine: string) =>
-  Effect.sync(() => {
-    const database = new Database(Store.file, { readonly: true })
-    try {
-      return new Map(
-        database
-          .query<{ id: string; dictated: string | null; prompt: string | null; description: string | null; at: string }, [string]>(
-            "select id, dictated, prompt, description, at from threads where machine = ? and started = 1",
-          )
-          .all(machine)
-          .map((row) => [row.id, { dictated: row.dictated ?? row.prompt ?? "", description: row.description, at: Date.parse(row.at) || 0 }]),
-      )
-    } finally {
-      database.close()
+  Effect.try({
+    try: () => {
+      const database = new Database(Store.file, { readonly: true })
+      try {
+        return new Map(
+          database
+            .query<{ id: string; dictated: string | null; prompt: string | null; description: string | null; at: string }, [string]>(
+              "select id, dictated, prompt, description, at from threads where machine = ? and started = 1",
+            )
+            .all(machine)
+            .map((row): [string, Started] => [row.id, { dictated: row.dictated ?? row.prompt ?? "", description: row.description, at: Date.parse(row.at) || 0 }]),
+        )
+      } finally {
+        database.close()
+      }
+    },
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catchAll((cause) => Console.log(`Going without the work yapd started, since its database can't be read: ${String(cause)}`).pipe(Effect.as(new Map<string, Started>()))),
+  )
+
+/**
+ * What a search of the threads adds to the desk for each phrase, as the daemon
+ * searches them, reading only. Nothing for any phrase without a token.
+ */
+const searchedFor = (phrases: ReadonlyArray<{ readonly heard: string }>, machine: string) =>
+  Effect.gen(function* () {
+    const token = yield* Config.t3codeToken
+    if (Option.isNone(token)) {
+      yield* Console.log("No T3 Code token, so the desk goes without what a search would add.")
+      return new Map<string, ReadonlyArray<Threads.Ref>>()
     }
-  }).pipe(Effect.orElseSucceed(() => new Map()))
+    const actions = T3Actions.make(T3CodeServer.connect(token.value))
+    const search: Threads.Search<string> = (words) =>
+      actions.search(words).pipe(
+        Effect.map((matches) => matches.map(({ threadId, snippet }) => ({ ref: { machine, id: threadId }, snippet }))),
+        Effect.mapError(T3Actions.reason),
+      )
+    const found = yield* Effect.forEach(phrases, ({ heard }) =>
+      Threads.searched(heard, search).pipe(
+        Effect.catchAll((reason) => Console.log(`Couldn't search for "${heard}": ${reason}`).pipe(Effect.as<ReadonlyArray<Threads.Ref>>([]))),
+        Effect.map((refs) => [heard, refs] as const),
+      ),
+    )
+    return new Map(found)
+  })
 
 const percentile = (values: ReadonlyArray<number>, at: number) => {
   const sorted = values.toSorted((a, b) => a - b)
@@ -160,6 +207,7 @@ const run = Effect.gen(function* () {
   const machine = Option.getOrElse(yield* Config.name, () => hostname().split(".")[0] ?? hostname())
   const remotes = yield* Config.remotes
   const started = yield* startedWork(machine)
+  const found = yield* searchedFor(phrases, machine)
   const results = join(folder, `results-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`)
   const writer = Bun.file(results).writer()
   yield* Console.log(`${phrases.length} phrases, ${runs} runs each, against the threads as of ${new Date(at).toLocaleString()}.`)
@@ -182,7 +230,7 @@ const run = Effect.gen(function* () {
           for (let run = 0; run < runs; run++) {
             const now = Date.now()
             const shortlist = (pending: ReadonlyArray<Threads.Ref>) =>
-              Threads.shortlist({ machine, view, focus: Option.none(), pending, most: 30, started, said: new Map(), now })
+              Threads.shortlist({ machine, view, focus: Option.none(), pending, found: found.get(phrase.heard) ?? [], most: 30, started, said: new Map(), now })
             // The threads it offered, first in the order it offered them, as when it asked.
             const first = shortlist([])
             const offered = (phrase.open?.choices ?? []).flatMap((piece) => Option.toArray(Option.fromNullable(first.find((listed) => fits(listed, piece)))))
@@ -233,7 +281,13 @@ const run = Effect.gen(function* () {
             const asking = checked._tag === "Ask" || decision.act === "clarify"
             // An answer to the question has to be taken as one, never as new work.
             const answering = Option.isNone(open) || (decision.pending === "answers" && decision.act !== "start")
-            const right = answering && (phrase.thread === "" ? decision.target === "" || listed !== undefined : fits(listed, phrase.thread))
+            const right =
+              answering &&
+              (phrase.act !== undefined
+                ? decision.act === phrase.act
+                : phrase.thread === ""
+                  ? decision.target === "" || listed !== undefined
+                  : fits(listed, phrase.thread))
             if (right) correct++
             if (asking) asked++
             const about = listed?.called ?? "no thread"

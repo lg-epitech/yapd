@@ -141,17 +141,8 @@ const lately = { span: 3 * 60 * 60_000, most: 8 }
 const unheard = 12
 /** Threads on the desk: fewer for a reply, which is about what he just heard. */
 const desk = { asked: 30, reply: 12, vocabulary: 15 }
-/** Words searched for in the threads at most, threads a search adds to the desk at most, and how long those searches have. */
-const searches = 4
-const added = 5
+/** How long the searches for what he said have to add their threads to the desk. */
 const cap = "100 millis"
-/** Words too common to tell threads apart. */
-const common: ReadonlySet<string> = new Set([
-  "what", "what's", "whats", "status", "with", "that", "this", "have", "please", "could", "would", "about", "going", "doing",
-  "tell", "there", "they", "them", "from", "into", "your", "thread", "work", "check", "look", "like", "just", "some", "when",
-  "where", "which", "will", "been", "were", "then", "than", "also", "it's", "thing", "things", "today", "right", "know",
-  "need", "needs", "want", "start", "make", "does", "done", "still", "much", "many", "more",
-])
 
 const day = 24 * 60 * 60_000
 
@@ -162,10 +153,6 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
-
-/** The words in what he said that tell threads apart: none too short or too common. */
-const distinctive = (text: string) =>
-  [...new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length > 3 && !common.has(word)))].slice(0, searches)
 
 /** What yapd knows as it works something out, and what that comes to without the model, when it's enough. */
 interface Glance {
@@ -255,39 +242,9 @@ export const make = (options: {
       return kept.filter(question).flatMap(({ said }) => (said === undefined ? [] : [said]))
     })
 
-    /**
-     * Threads whose messages have the words that tell threads apart, one
-     * search each, since T3 Code matches a phrase only as it's written: those
-     * with most of the words first, each with what was found. It fails only
-     * when no search could be made at all.
-     */
-    const matching = (text: string) =>
-      Effect.gen(function* () {
-        const words = distinctive(text)
-        const sought = words.length > 0 ? words : text.trim() === "" ? [] : [text.trim()]
-        const all = yield* Effect.forEach(sought, (word) => Effect.either(threads.search(word)), { concurrency: "unbounded" })
-        const failed = all.find(Either.isLeft)
-        if (failed !== undefined && all.every(Either.isLeft)) return yield* failed
-        const hits = new Map<string, { readonly ref: Threads.Ref; readonly snippet: string; count: number }>()
-        for (const matches of all.flatMap((searched) => (Either.isRight(searched) ? [searched.right] : []))) {
-          // Once for each word, however many of its messages have it.
-          const seen = new Set<string>()
-          for (const { ref, snippet } of matches) {
-            const key = `${ref.machine}\n${ref.id}`
-            if (seen.has(key)) continue
-            seen.add(key)
-            const hit = hits.get(key)
-            if (hit === undefined) hits.set(key, { ref, snippet, count: 1 })
-            else hit.count++
-          }
-        }
-        return [...hits.values()].toSorted((one, other) => other.count - one.count)
-      })
-
     /** Threads a search for his words turns up, to add to the desk. T3 Code answers in a few ms, so only what's there within the cap is taken. */
     const searching = (heard: string) =>
-      matching(heard).pipe(
-        Effect.map((hits) => hits.slice(0, added).map(({ ref }) => ref)),
+      Threads.searched(heard, threads.search).pipe(
         Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []),
         Effect.timeoutTo({ duration: cap, onTimeout: () => [], onSuccess: (found): ReadonlyArray<Threads.Ref> => found }),
       )
@@ -531,7 +488,7 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         let found: ReadonlyArray<string>
         if (decision.how === "journal") {
-          const words = distinctive(wanted)
+          const words = Threads.distinctive(wanted)
           const kept = yield* journal.since(now - 30 * day, { most: 2000 })
           found = kept
             .map((entry) => ({ entry, score: words.filter((word) => `${entry.said ?? ""} ${entry.text ?? ""}`.toLowerCase().includes(word)).length }))
@@ -540,7 +497,7 @@ export const make = (options: {
             .slice(0, 8)
             .map(({ entry }) => `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}`)
         } else {
-          const matches = yield* matching(wanted).pipe(Effect.either)
+          const matches = yield* Threads.matching(wanted, threads.search).pipe(Effect.either)
           if (Either.isLeft(matches)) return reply(`I couldn't search your threads just now${addressed(said)}. ${matches.left.reason}`, thought.subject)
           found = yield* Effect.forEach(matches.right.slice(0, 8), ({ ref, snippet }) =>
             Effect.gen(function* () {
