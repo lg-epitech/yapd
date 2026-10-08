@@ -1186,9 +1186,13 @@ export const make = (options: {
         const second = first.second ?? after.second
         // A card the step before put up, like a thread's with a command he couldn't hear, goes up with the lot, unless the rest has one of its own.
         const card = after.card ?? first.card
+        const say = joined(first.say, after.say, said)
+        // What "it" means is what the rest was about, and what's said again is the lot, as heard, but never a question asked as part of it.
+        const subject: Subject = after.kind === "question" || after.subject._tag === "Nothing" ? after.subject : { ...after.subject, said: say }
         return {
           ...after,
-          say: joined(first.say, after.say, said),
+          say,
+          subject,
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
           ...(card === undefined ? {} : { card }),
