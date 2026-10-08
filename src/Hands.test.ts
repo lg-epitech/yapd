@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option, Schema, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Effect, Option, Schema, type Scope, TestClock, TestContext } from "effect"
 import * as Hands from "./Hands.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
@@ -547,6 +547,40 @@ describe("Hands", () => {
       }),
     )
     expect(result).toEqual({ again: "Twin", dispatched: 1 })
+  })
+
+  test("the same words are asked about until the thread answers after they went in, which a resend makes later than they were first written down", async () => {
+    const busy = (runId: string, ended: number) =>
+      thread(tezos.id, { activeRunId: runId, activityRunStatus: "running", status: "running", latestRunCompletedAt: new Date(ended).toISOString() })
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, answering, becomes, bounded, dispatched } = yield* hands({ thread: busy("run-1", now - 60_000), runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        // It went, T3 Code didn't answer, and it isn't in the thread.
+        answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        yield* send("u1", "Use the fee table.")
+        // The turn under way ended, and another began, before he said yes.
+        yield* TestClock.adjust("30 seconds")
+        bounded.runs[0]!.status = "completed"
+        bounded.runs.push({ id: "run-2", status: "running", ordinal: 2 })
+        becomes(busy("run-2", now + 30_000))
+        yield* TestClock.adjust("10 seconds")
+        // Taken in now, as T3 Code notes, into the turn under way.
+        answering((payload, bounded) =>
+          Effect.flatMap(Clock.currentTimeMillis, (at) =>
+            Effect.sync(() => {
+              bounded.messages.push({ id: String(payload.messageId), role: "user", text: String(payload.text), createdAt: new Date(at).toISOString() })
+              bounded.turnItems.push({ type: "user_message", messageId: payload.messageId, inputIntent: "steer" })
+              return { sequence: 8 }
+            }),
+          ),
+        )
+        const resent = yield* again("yapd:u1:0")
+        yield* TestClock.adjust("20 seconds")
+        const said = yield* send("u2", "Use the fee table.")
+        return { resent: resent._tag, said: said._tag, dispatched: dispatched.map(({ commandId }) => commandId) }
+      }),
+    )
+    expect(result).toEqual({ resent: "Done", said: "Twin", dispatched: ["yapd:u1:0", "yapd:u1:0"] })
   })
 
   test("a message to a busy thread says whether it was steered or queued, as T3 Code did", async () => {

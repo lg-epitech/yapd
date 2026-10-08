@@ -236,6 +236,8 @@ export interface Found {
   readonly intent: Option.Option<Intent>
   /** The run it started, or waits in the queue to start, if there's one. */
   readonly run: Option.Option<{ readonly id: string; readonly status: string }>
+  /** When T3 Code took it in, in ms by its own clock, when the thread shows the message itself. */
+  readonly at: Option.Option<number>
 }
 
 /** Finds a message yapd sent in a thread's bounded read: among its messages, the runs they started, or its turn items. */
@@ -244,7 +246,8 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
   const item = projection.turnItems
     .flatMap((item) => Option.toArray(decodeItem(item)))
     .find((item) => item.type === "user_message" && item.messageId === messageId)
-  if (run === undefined && item === undefined && !projection.messages.some(({ id }) => id === messageId)) return Option.none()
+  const message = projection.messages.find(({ id }) => id === messageId)
+  if (run === undefined && item === undefined && message === undefined) return Option.none()
   const intent = item?.inputIntent
   return Option.some({
     // One with no turn item yet still has its run to say: one it started is a turn of its own, unless it waits in the queue or was taken out of it.
@@ -255,6 +258,7 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
           ? Option.none()
           : Option.some(run.status === "queued" ? ("queued_turn" as const) : ("turn_start" as const)),
     run: Option.map(Option.fromNullable(run), ({ id, status }) => ({ id, status })),
+    at: Option.filter(Option.map(Option.fromNullable(message), ({ createdAt }) => Date.parse(createdAt)), (at) => !Number.isNaN(at)),
   })
 }
 

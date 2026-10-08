@@ -128,7 +128,7 @@ export const plainly = (reason: string) => {
 const unanswered: ReadonlyArray<string> = ["queued", "preparing", "starting", "running"]
 
 /**
- * Whether a thread has answered a message that went at `at`. One that started
+ * Whether a thread has answered a message that went in at `at`. One that started
  * a run of its own, or waits in the queue to, is answered once that run has
  * ended its turn or asks something, never by another run ending, as the one
  * it waited behind or the one it restarted does. One steered into the turn
@@ -339,7 +339,9 @@ export const make = (options: {
         yield* Effect.logInfo(`Found ${row.commandId} in the thread after all`)
         row = { ...row, state: "sent" }
       }
-      if (row.state === "sent" && Either.isRight(look) && answered(reached.thread, row.at, own)) return Option.none<Outcome>()
+      // Since it went in, by T3 Code's clock as the thread's turns are: sent once more, or late, that's after it was written down.
+      const since = Option.getOrElse(Option.flatMap(found, ({ at }) => at), () => row.at)
+      if (row.state === "sent" && Either.isRight(look) && answered(reached.thread, since, own)) return Option.none<Outcome>()
       if (row.state === "abandoned") {
         const reason = "I couldn't confirm either of the last two got there, so I won't risk sending it a third time."
         return Option.some<Outcome>(yield* failing({ _tag: "Refused", reason } satisfies Outcome, doing.message))
