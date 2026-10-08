@@ -187,4 +187,56 @@ describe("T3Live.follow", () => {
         expect(sockets[0]!.closed).toBe(true)
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
+
+  test("only counts as following again once a new connection has caught up, and keeps trying when a socket can't be used", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const { sockets, dial } = fake()
+        const live = yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        yield* flush
+        sockets[0]!.emit({ _tag: "Open" })
+        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
+        yield* flush
+        sockets[0]!.emit({ _tag: "Closed", reason: "gone" })
+        yield* flush
+        yield* TestClock.adjust("2 seconds")
+        yield* flush
+        sockets[1]!.emit({ _tag: "Open" })
+        sockets[1]!.emit({
+          _tag: "Message",
+          data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [{ kind: "thread.updated", sequence: 8, location: "active", thread: thread({ title: "Renamed" }) }] }),
+        })
+        yield* flush
+        const beforeMarker = Option.isSome(yield* live.view)
+        sockets[1]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [{ kind: "synchronized" }] }) })
+        yield* flush
+        const afterMarker = Option.isSome(yield* live.view)
+        return { beforeMarker, afterMarker }
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ).then(({ beforeMarker, afterMarker }) => {
+      expect(beforeMarker).toBe(false)
+      expect(afterMarker).toBe(true)
+    }))
+
+  test("tries again when a socket throws instead of sending", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        let dials = 0
+        const dial: T3Live.Dial = () => {
+          dials++
+          return {
+            send: () => {
+              throw new Error("WebSocket is not open")
+            },
+            close: () => {},
+            events: (listener) => listener({ _tag: "Open" }),
+          }
+        }
+        yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        yield* flush
+        yield* TestClock.adjust("5 seconds")
+        yield* flush
+        return dials
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ).then((dials) => expect(dials).toBeGreaterThan(1)))
 })

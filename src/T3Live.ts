@@ -287,27 +287,41 @@ export const follow = (
           }),
           (socket) => Effect.sync(() => socket.close()),
         )
-        const send = (message: object) => Effect.sync(() => socket.send(JSON.stringify(message)))
+        // A socket that isn't open, or has just closed, throws: that connection is over, and the next one starts.
+        const send = (message: object) =>
+          Effect.sync(() => {
+            try {
+              socket.send(JSON.stringify(message))
+              return true
+            } catch {
+              return false
+            }
+          })
         let unanswered = 0
         const subscription = "shell"
+        /** Whether this connection has caught up, which only its own marker says: after a drop, what's known is from before. */
         let caughtUp = false
         while (true) {
           const event = yield* Queue.take(events).pipe(Effect.timeout(ping), Effect.option)
           if (Option.isNone(event)) {
             if (unanswered >= missed) return caughtUp
             unanswered++
-            yield* send({ _tag: "Ping" })
+            if (!(yield* send({ _tag: "Ping" }))) return caughtUp
             continue
           }
           switch (event.value._tag) {
             case "Open":
-              yield* send({
-                _tag: "Request",
-                id: subscription,
-                tag: "orchestration.subscribeShell",
-                payload: { requestCompletionMarker: true, ...(view.sequence > 0 ? { afterSequence: view.sequence } : {}) },
-                headers: [],
-              })
+              if (
+                !(yield* send({
+                  _tag: "Request",
+                  id: subscription,
+                  tag: "orchestration.subscribeShell",
+                  payload: { requestCompletionMarker: true, ...(view.sequence > 0 ? { afterSequence: view.sequence } : {}) },
+                  headers: [],
+                }))
+              ) {
+                return caughtUp
+              }
               break
             case "Closed":
               return caughtUp
@@ -323,7 +337,7 @@ export const follow = (
                 if (Either.isLeft(item)) continue
                 const applied = apply(view, item.right)
                 view = applied.view
-                if (view.synced && !caughtUp) {
+                if (item.right.kind === "synchronized" && !caughtUp) {
                   caughtUp = true
                   live = true
                   yield* Effect.logInfo(`Following T3 Code: ${view.threads.size} threads in ${view.projects.size} projects`)
@@ -331,7 +345,7 @@ export const follow = (
                 yield* PubSub.publishAll(changes, applied.changes)
               }
               // It sends nothing more until this one is taken in.
-              yield* send({ _tag: "Ack", requestId: subscription })
+              if (!(yield* send({ _tag: "Ack", requestId: subscription }))) return caughtUp
             }
           }
         }
@@ -349,7 +363,12 @@ export const follow = (
       let said = false
       while (true) {
         const located = yield* Effect.either(locate)
-        const caughtUp = Either.isRight(located) ? yield* session(located.right) : false
+        // Whatever goes wrong with one connection, like a socket that can't be made, the next is tried.
+        const caughtUp = Either.isRight(located)
+          ? yield* session(located.right).pipe(
+              Effect.catchAllDefect((defect) => Effect.as(Effect.logWarning("Lost T3 Code", defect), false)),
+            )
+          : false
         if (caughtUp) {
           failures = 0
           said = false
