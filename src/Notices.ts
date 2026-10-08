@@ -1,4 +1,5 @@
 import { Cause, Clock, Effect, FiberSet, Option, Stream } from "effect"
+import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import { Condenser, english } from "./Condenser.ts"
 import * as Hands from "./Hands.ts"
@@ -14,7 +15,9 @@ import * as Threads from "./Threads.ts"
 // finished with no hook to tell of it. Each is kept in the journal under a key
 // as it's said, so it's said once, ever, whatever restarts or reconnects come
 // in between. A finished turn is left to its hook whenever one came, even one
-// that wasn't said, since only hooks know a turn the user was watching.
+// that wasn't said, since only hooks know a turn the user was watching. An
+// approval or a question is asked, for the user to answer by voice; a secret
+// is only told, since it's only ever given in T3 Code.
 
 /** What a change to a thread may come to, before anything is read of it. */
 export type News =
@@ -22,6 +25,8 @@ export type News =
   | { readonly _tag: "Asked"; readonly thread: T3Live.Thread; readonly requestId: string }
   /** A run of it ended, however: what it comes to is only known once it's read, a while later. */
   | { readonly _tag: "Ran"; readonly thread: T3Live.Thread; readonly runId: string }
+  /** What it waited on him for was dealt with, there or anywhere, or the thread went: it's no longer asked. */
+  | { readonly _tag: "Settled"; readonly thread: T3Live.Thread; readonly requestId: string }
 
 /**
  * What's worth looking into about a change. Never anything about a
@@ -37,6 +42,10 @@ export const verdict = (change: T3Live.Change): Option.Option<News> => {
       const runId = change.before.activeRunId ?? change.thread.latestRunId
       return runId === null ? Option.none() : Option.some({ _tag: "Ran", thread: change.thread, runId })
     }
+    case "Answered":
+      return Option.some({ _tag: "Settled", thread: change.thread, requestId: change.request.id })
+    case "Removed":
+      return Option.map(Option.fromNullable(change.thread.pendingRuntimeRequest), ({ id }): News => ({ _tag: "Settled", thread: change.thread, requestId: id }))
     default:
       return Option.none()
   }
@@ -133,6 +142,132 @@ export const lines = {
 /** What a request is said to want when the model can't say. */
 const unworded = (kind: string) => (kind === "user_input" ? "has a question for you" : "wants your go-ahead on something")
 
+/** "A", "A or B", "A, B or C". */
+const either = (names: ReadonlyArray<string>) => (names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`)
+
+/** How many options a question can have to be asked by voice: more is too many to take in. */
+const choices = 4
+
+/** An option of a question as it's said, when it can be said as it is. */
+const option = (label: string) => {
+  const trimmed = label.trim().replace(/[.!?]+$/, "")
+  return trimmed !== "" && sayable.test(trimmed) && english(trimmed) && Brain.speakable(trimmed, { threads: [], away: [] }) === trimmed ? trimmed : undefined
+}
+
+/**
+ * What a thread waits on him for, worded from what the model made of it,
+ * `what`, which follows the thread's name: asked, as an approval, which
+ * needs "approve" when it's risky by the model's word or by what it would
+ * run, and says so; or as a question with one part and a few options that
+ * can be said, or none, when any answer will do. Anything else is only
+ * told, as it's answered in T3 Code.
+ */
+export const asking = (
+  input: {
+    readonly ref: Threads.Ref
+    readonly called: string
+    readonly project: string
+    readonly request: Exclude<T3Actions.Request, { readonly _tag: "Secret" }>
+    readonly what: string
+    readonly risk: "low" | "high"
+    readonly at: number
+  },
+  said: Lines,
+): Assistant.Worded => {
+  const { ref, called, project, request, what, risk, at } = input
+  const sir = addressed(said)
+  const entry = (spoken: string) => ({
+    at,
+    kind: "notice" as const,
+    machine: ref.machine,
+    thread: ref.id,
+    project,
+    said: spoken,
+    key: key.asked(ref.machine, request.id),
+    detail: { request: request._tag },
+  })
+  const tell = (): Assistant.Worded => {
+    const spoken = lines.waiting(called, what, said)
+    return { _tag: "Tell", spoken, entry: entry(spoken) }
+  }
+  if (request._tag === "Approval") {
+    const dangerous = risk === "high" || Brain.dangerous(`${request.what}\n${request.command ?? ""}`)
+    const doing = /^wants to /i.test(what) ? what.replace(/^wants to /i, "") : undefined
+    const about = doing === undefined ? `give ${called} your go-ahead` : `allow ${called} to ${doing}`
+    const asked = dangerous ? `${capital(called)} ${what}, which can't be undone, so say 'approve' if you want it${sir}.` : `${capital(called)} ${what}. Allow it${sir}?`
+    const rewordings = dangerous
+      ? [`Shall I still ${about}${sir}? Only 'approve' will do.`, `Do you still want me to ${about}${sir}? Say 'approve' if you do.`]
+      : [`Shall I still ${about}${sir}?`, `Do you still want me to ${about}${sir}?`]
+    return {
+      _tag: "Ask",
+      asking: {
+        ref,
+        asks: { _tag: "Approval", requestId: request.id, dangerous, decisions: request.decisions.map(({ decision }) => decision), inFull: false },
+        asked,
+        about,
+        rewordings,
+        entry: entry(asked),
+      },
+    }
+  }
+  const [only, ...more] = request.questions
+  if (only === undefined || more.length > 0 || only.options.length > choices) return tell()
+  const options = only.options.map(({ label }) => option(label))
+  if (options.some((label) => label === undefined)) return tell()
+  const picks = either(options.flatMap((label) => (label === undefined ? [] : [label])))
+  const asked = picks === "" ? `${capital(called)} ${what}${sir}. What shall I tell it?` : `${capital(called)} ${what}: ${picks}${sir}?`
+  const rewordings =
+    picks === ""
+      ? [`What shall I tell ${called}${sir}?`, `${capital(called)} is still waiting on your answer${sir}. What shall I tell it?`]
+      : [`What shall I tell ${called}${sir}: ${picks}?`, `${capital(called)} is still waiting on your answer${sir}: ${picks}?`]
+  return {
+    _tag: "Ask",
+    asking: { ref, asks: { _tag: "Question", requestId: request.id, questions: request.questions }, asked, about: `${called}'s question`, rewordings, entry: entry(asked) },
+  }
+}
+
+/**
+ * Reads what a thread waits on him for and words it, to be asked, or only
+ * told, like a secret, which is never answered by voice, or one the model
+ * couldn't word, which isn't asked blind. None while the thread doesn't wait
+ * on it, or isn't on the desk.
+ */
+export const composer = (threads: Threads.Threads["Type"]) =>
+  Effect.gen(function* () {
+    const condenser = yield* Condenser
+    const persona = yield* Persona
+    return (ref: Threads.Ref, requestId: string, at?: number) =>
+      Effect.gen(function* () {
+        const thread = yield* threads.find(ref)
+        const shown = Option.fromNullable((yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref)))
+        if (Option.isNone(thread) || Option.isNone(shown) || thread.value.pendingRuntimeRequest?.id !== requestId) return Option.none<Assistant.Worded>()
+        const { called, project } = shown.value
+        const kind = thread.value.pendingRuntimeRequest?.kind ?? ""
+        const said = yield* persona.lines
+        const when = at ?? (yield* Clock.currentTimeMillis)
+        const request = yield* threads.detail(ref, requestId).pipe(
+          Effect.map(({ request }) => request),
+          Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not read what it waits on: ${error.reason}`), Option.none<T3Actions.Request>())),
+        )
+        const told = (spoken: string, detail: string): Assistant.Worded => ({
+          _tag: "Tell",
+          spoken,
+          entry: { at: when, kind: "notice", machine: ref.machine, thread: ref.id, project, said: spoken, key: key.asked(ref.machine, requestId), detail: { request: detail } },
+        })
+        if (Option.isNone(request)) return Option.some(told(lines.waiting(called, unworded(kind), said), kind))
+        const found = request.value
+        if (found._tag === "Secret") return Option.some(told(lines.secret(called, found.label, said), found._tag))
+        return Option.some(
+          yield* condenser.ask(found, called).pipe(
+            Effect.map(({ spoken, risk }) =>
+              spoken === "" ? told(lines.waiting(called, unworded(kind), said), found._tag) : asking({ ref, called, project, request: found, what: spoken, risk, at: when }, said),
+            ),
+            Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not word what it waits on", error), told(lines.waiting(called, unworded(kind), said), found._tag))),
+          ),
+        )
+      })
+  })
+
 /**
  * Says what T3 Code's threads need the user for, whenever yapd is on, and
  * what failed and what finished with no hook to tell of it, unless yapd was
@@ -156,13 +291,17 @@ export const make = (options: {
     readonly turns: number
   }) => Effect.Effect<void>
   readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
+  /** Asks what a thread waits on him for, as the one question open. */
+  readonly ask: (asking: Assistant.Asking) => Effect.Effect<void>
+  /** What a thread waited on him for was dealt with, so it isn't asked. */
+  readonly settled: (requestId: string) => Effect.Effect<void>
   /** Turns shorter than this are taken as watched, as hooks' are. */
   readonly shortest: number
 }) =>
   Effect.gen(function* () {
     const { threads, journal } = options
-    const condenser = yield* Condenser
     const persona = yield* Persona
+    const compose = yield* composer(threads)
     const running = yield* FiberSet.make()
     /** Requests being worded now, so one heard of twice at once, from the stream and on starting, isn't worded twice. */
     const wording = new Set<string>()
@@ -226,41 +365,15 @@ export const make = (options: {
 
     const ask = (ref: Threads.Ref, requestId: string, at: number) =>
       Effect.gen(function* () {
-        const thread = yield* threads.find(ref)
-        const shown = yield* listed(ref)
-        if (Option.isNone(thread) || Option.isNone(shown) || thread.value.pendingRuntimeRequest?.id !== requestId) return
-        const { called, project } = shown.value
-        const said = yield* persona.lines
-        const request = yield* threads.detail(ref, requestId).pipe(
-          Effect.map(({ request }) => request),
-          Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not read what it waits on: ${error.reason}`), Option.none<T3Actions.Request>())),
-        )
-        const spoken = yield* Option.match(request, {
-          onNone: () => Effect.succeed(lines.waiting(called, unworded(thread.value.pendingRuntimeRequest?.kind ?? ""), said)),
-          onSome: (request) =>
-            request._tag === "Secret"
-              ? Effect.succeed(lines.secret(called, request.label, said))
-              : condenser.ask(request, called).pipe(
-                  Effect.map(({ spoken }) => lines.waiting(called, spoken === "" ? unworded(thread.value.pendingRuntimeRequest?.kind ?? "") : spoken, said)),
-                  Effect.catchAll((error) =>
-                    Effect.as(Effect.logWarning("Could not word what it waits on", error), lines.waiting(called, unworded(thread.value.pendingRuntimeRequest?.kind ?? ""), said)),
-                  ),
-                ),
-        })
-        const still = Effect.map(threads.find(ref), Option.exists((thread) => thread.pendingRuntimeRequest?.id === requestId))
-        const entry = {
-          at,
-          kind: "notice" as const,
-          machine: ref.machine,
-          thread: ref.id,
-          project,
-          said: spoken,
-          key: key.asked(ref.machine, requestId),
-          detail: { request: Option.match(request, { onNone: () => thread.value.pendingRuntimeRequest?.kind, onSome: ({ _tag }) => _tag }) },
-        }
+        const worded = yield* compose(ref, requestId, at)
+        if (Option.isNone(worded)) return
         // What waits on him is there to say whenever yapd is on, even turned off and on while it was worded: off, it's said once it's on.
         const { on, turns } = yield* options.power
-        if (on) yield* notify(ref, spoken, entry, still, at, turns)
+        if (!on) return
+        // Asked as the one question open, for him to answer by voice.
+        if (worded.value._tag === "Ask") return yield* options.ask(worded.value.asking)
+        const still = Effect.map(threads.find(ref), Option.exists((thread) => thread.pendingRuntimeRequest?.id === requestId))
+        yield* notify(ref, worded.value.spoken, worded.value.entry, still, at, turns)
       })
 
     /**
@@ -328,6 +441,7 @@ export const make = (options: {
       Effect.gen(function* () {
         const news = verdict(change)
         if (Option.isNone(news)) return
+        if (news.value._tag === "Settled") return yield* options.settled(news.value.requestId)
         // Off, nothing is said later of what happened meanwhile; what still waits on him is said once it's on.
         const { on, turns } = yield* options.power
         if (!on) return

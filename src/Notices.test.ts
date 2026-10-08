@@ -99,6 +99,9 @@ const notices = (
       store,
     })
     const told: Array<string> = []
+    /** What was asked as the one question open, as the assistant asks it: once, ever, kept under its key. */
+    const asked: Array<string> = []
+    const settled: Array<string> = []
     const finished: Array<{ readonly key: string; readonly message: string }> = []
     const tell = (notice: Notice) =>
       Effect.gen(function* () {
@@ -119,6 +122,8 @@ const notices = (
         }),
       finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message })),
       mention: () => Effect.void,
+      ask: (asking) => Effect.map(journal.claim(asking.entry), (kept) => void (Option.isSome(kept) && asked.push(asking.asked))),
+      settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
       shortest: 60_000,
     }).pipe(Effect.provide(Layer.merge(persona, condenser)))
     yield* Effect.forkScoped(made.follow)
@@ -128,6 +133,8 @@ const notices = (
       store,
       journal,
       told,
+      asked,
+      settled,
       finished,
       /** T3 Code tells of these. */
       hear: (...happened: ReadonlyArray<T3Live.Change>) => Queue.offerAll(changes, happened).pipe(Effect.zipRight(flush)),
@@ -227,10 +234,10 @@ describe("Notices", () => {
         const second = yield* notices({ view: [tezos, mina], bounded, store })
         yield* second.reconcile
         yield* second.flush
-        return { first: first.told, second: second.told }
+        return { first: [...first.told, ...first.asked], second: [...second.told, ...second.asked] }
       }),
     )
-    expect(result.first).toEqual(["Migrate Tezos Integration wants to push the branch, sir: it's waiting for you in T3 Code."])
+    expect(result.first).toEqual(["Migrate Tezos Integration wants to push the branch. Allow it, sir?"])
     expect(result.second).toEqual([])
   })
 

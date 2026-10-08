@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { type Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
+import { Condenser } from "./Condenser.ts"
 import type * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
@@ -9,6 +10,7 @@ import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import * as Store from "./Store.ts"
@@ -112,6 +114,8 @@ const lines: Persona.Lines = {
   cantTell: "I couldn't tell which one you meant, sir.",
   stopped: "Stopped, sir.",
   carrying: "Carrying on, sir.",
+  approved: "Approved, sir.",
+  declined: "Declined, sir.",
   address: "sir",
 }
 
@@ -157,11 +161,12 @@ const transport = (
   dispatched: Array<Record<string, unknown>> = [],
   answer: () => Answer = () => takes,
   reading: Effect.Effect<void> = Effect.void,
+  items: ReadonlyArray<Record<string, unknown>> = [],
 ): Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> => {
   const bounded: Bounded = {
     runs: [{ id: "run-3", status: "running", ordinal: 3 }],
     messages: [{ role: "assistant", text: "Comparing fee tables.", createdAt: "x" }],
-    turnItems: [],
+    turnItems: [...items],
   }
   return Effect.succeed({
     api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
@@ -229,6 +234,8 @@ const assistant = (
     readonly thinking?: number
     /** T3 Code never answers a launch it was sent, having started it or not. */
     readonly unanswered?: "started" | "not started"
+    /** What the threads' turn items hold, like what one waits on him for. */
+    readonly items?: ReadonlyArray<Record<string, unknown>>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -249,15 +256,30 @@ const assistant = (
     )
     /** Threads T3 Code made since, without saying so. */
     const appeared: Array<T3Live.Thread> = []
+    /** Threads as T3 Code has them since, like once what one waited on was answered. */
+    const changed = new Map<string, T3Live.Thread>()
+    /** As T3 Code answers a request, which the thread then no longer waits on. */
+    const answering = (): Answer => (payload, bounded) =>
+      Effect.zipRight(
+        Effect.sync(() => {
+          if (payload.type !== "runtime-request.respond") return
+          const before = changed.get(String(payload.threadId)) ?? [...(given.others ?? []), ...view.threads.values()].find(({ id }) => id === payload.threadId)
+          if (before !== undefined && before.pendingRuntimeRequest?.id === payload.requestId) changed.set(before.id, { ...before, pendingRuntimeRequest: null })
+        }),
+        (given.answer ?? (() => takes))()(payload, bounded),
+      )
     const threads = yield* Threads.make({
       machine: "Rosie",
       live: {
         view: Effect.sync(() =>
-          Option.some({ ...view, threads: new Map([...view.threads, ...[...(given.others ?? []), ...appeared].map((other) => [other.id, other] as const)]) }),
+          Option.some({
+            ...view,
+            threads: new Map([...view.threads, ...[...(given.others ?? []), ...appeared, ...changed.values()].map((other) => [other.id, other] as const)]),
+          }),
         ),
         changes: Stream.never,
       },
-      actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer, given.reading))),
+      actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, answering, given.reading, given.items))),
       others: [],
       journal,
       store,
@@ -314,6 +336,23 @@ const assistant = (
     )
     let power = { on: true, turns: 1 }
     let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean }>()
+    /** What threads wait on him for, worded as notices word them, by a model that says what the agent wrote it wants, and whether it's risky. */
+    const compose = yield* Notices.composer(threads).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(Condenser, {
+            condense: () => Effect.die("not expected"),
+            ask: (request) =>
+              Effect.succeed(
+                request._tag === "Approval"
+                  ? { spoken: `wants to ${request.what.replace(/^Bash: /, "run ")}`, risk: "low" as const }
+                  : { spoken: "asks which network to start with", risk: "low" as const },
+              ),
+          }),
+          Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines) }),
+        ),
+      ),
+    )
     const made = yield* Assistant.make({
       threads,
       journal,
@@ -324,7 +363,9 @@ const assistant = (
       tell: (notice) =>
         Effect.zipRight(
           Effect.sync(() => void said.push(notice)),
-          given.waiting === true ? Effect.void : Effect.zipRight(notice.saying ?? Effect.void, notice.heard ?? Effect.void),
+          given.waiting === true
+            ? Effect.void
+            : (notice.saying ?? Effect.void).pipe(Effect.zipRight(notice.question?.through ?? Effect.void), Effect.zipRight(notice.heard ?? Effect.void)),
         ),
       power: Effect.sync(() => power),
       lastHeard: Effect.sync(() => listening),
@@ -333,6 +374,7 @@ const assistant = (
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
       skip: () => Effect.void,
       upcoming: Effect.succeed([]),
+      compose,
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -382,7 +424,19 @@ const assistant = (
           }),
         ),
       /** Its turn came, after whatever was being said, and it was said to the end. */
-      play: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(notice?.heard ?? Effect.void), Effect.zipRight(flush)),
+      play: (notice = said.at(-1)) =>
+        (notice?.saying ?? Effect.void).pipe(
+          Effect.zipRight(notice?.question?.through ?? Effect.void),
+          Effect.zipRight(notice?.heard ?? Effect.void),
+          Effect.zipRight(flush),
+        ),
+      /** What a thread waits on him for, read and worded as notices word it, if it still waits on it. */
+      compose: (of: T3Live.Thread) => compose({ machine: "Rosie", id: of.id }, of.pendingRuntimeRequest?.id ?? ""),
+      /** T3 Code has the thread as it is now, like once what it waited on was answered there. */
+      becomes: (next: T3Live.Thread) =>
+        Effect.sync(() => {
+          changed.set(next.id, next)
+        }).pipe(Effect.zipRight(flush)),
       /** Its turn came, and a dictation cut it off before the end. */
       cut: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
@@ -416,6 +470,34 @@ const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) => Effect.runPromise(
 /** What the model logged for the Mina status: the right thread, sure of it. */
 const minaStatus = (situation: Brain.Situation) =>
   Brain.decision({ act: "answer", target: handle(situation, mina), spoken: "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst." })
+
+/** The cloud deployment discovery, at work and waiting on him for what `pending` says. */
+const waitingOn = (pending: { readonly id: string; readonly kind: string }) =>
+  thread(distractors[4]!.id, "Cloud deployment discovery", "cloudmate", {
+    activeRunId: "run-3",
+    activityRunStatus: "running",
+    pendingRuntimeRequest: { ...pending, createdAt: "2026-10-01T02:17:00.000Z" },
+    updatedAt: "2026-10-01T02:17:00.000Z",
+  })
+
+/** What T3 Code keeps of an approval it waits on, with the command it's for. */
+const approval = (requestId: string, command: string) => [
+  { type: "approval_request", status: "waiting", requestId, requestKind: "command", prompt: `Bash: ${command}`, nativeItemRef: { nativeId: `tool-${requestId}` } },
+  { type: "command_execution", status: "running", input: command, nativeItemRef: { nativeId: `tool-${requestId}` } },
+]
+
+/** What a thread waits on him for, worded and asked as notices have it asked. */
+const asked = (made: { readonly compose: (of: T3Live.Thread) => Effect.Effect<Option.Option<Assistant.Worded>>; readonly ask: (asking: Assistant.Asking) => Effect.Effect<void> }, of: T3Live.Thread) =>
+  Effect.gen(function* () {
+    const worded = Option.getOrThrow(yield* made.compose(of))
+    if (worded._tag !== "Ask") return yield* Effect.die(`Only told: ${worded.spoken}`)
+    yield* made.ask(worded.asking)
+    yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
+    return worded.asking
+  })
+
+/** No model: what's said to what a thread waits on is settled without it, or not at all. */
+const unasked = () => undefined
 
 describe("Assistant", () => {
   test("status on MiNAS SV2 is answered about the Mina tickets first time, with no question", async () => {
@@ -481,6 +563,171 @@ describe("Assistant", () => {
     )
     expect(result.shown).toBe(true)
     expect(result.spoken).toEqual(["The Tezos migration finished three days ago, sir."])
+  })
+
+  test("yes to an approval heard in full allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install --global netlify-cli") })
+        yield* asked(made, cloud)
+        yield* made.answer("Yes.")
+        const steps = yield* made.ledger.steps(0)
+        return { spoken: made.spoken(), dispatched: made.dispatched, steps: steps.map(({ kind, state }) => `${kind} ${state}`) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?", "Approved, sir."])
+    expect(result.dispatched).toEqual([
+      { commandId: expect.stringMatching(/^yapd:u/), threadId: cloud.id, type: "runtime-request.respond", requestId: "r1", decision: "accept" },
+    ])
+    expect(result.steps).toEqual(["decide sent"])
+  })
+
+  test("a dangerous approval needs 'approve', and the notice says so", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "git push --force origin main") })
+        const asking = yield* asked(made, cloud)
+        // A plain yes, twice: asked once more, naming the word, then let go.
+        yield* made.answer("Yes.")
+        yield* made.answer("Yeah, go ahead.")
+        return { dangerous: asking.asks._tag === "Approval" && asking.asks.dangerous, spoken: made.spoken(), dispatched: made.dispatched.length, open: yield* made.open }
+      }),
+    )
+    expect(result.dangerous).toBe(true)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run git push --force origin main, sir? Only 'approve' will do.",
+      "It needs an \"approve\", so I've left it waiting for you in T3 Code, sir.",
+    ])
+    expect(result.dispatched).toBe(0)
+    expect(result.open).toEqual(Option.none())
+  })
+
+  test("'approve' allows a dangerous approval first time", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "git push --force origin main"), waiting: true })
+        yield* asked(made, cloud)
+        // Said over it, before he's heard all of it.
+        yield* made.cut()
+        yield* made.answer("Approve it.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ decision }) => decision) }
+      }),
+    )
+    expect(result.spoken.at(-1)).toBe("Approved, sir.")
+    expect(result.dispatched).toEqual(["accept"])
+  })
+
+  test("an approval dictated before he's heard it asked is read back first, and only a yes to that allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "npm install --global netlify-cli"),
+        })
+        yield* made.dictate("Approve the cloud deployment one.")
+        const before = made.dispatched.length
+        yield* made.answer("Yes.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?", "Approved, sir."])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("an approval answered in T3 Code meanwhile is not said, and a late yes does nothing", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2", "r3"].flatMap((requestId) => approval(requestId, "npm install --global netlify-cli"))
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items, waiting: true })
+        yield* asked(made, cloud)
+        const waiting = made.questions().at(-1)!
+        // Answered in T3 Code's app while something else was being said: by its turn, it isn't.
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("r1")
+        const unsaid = yield* waiting.stale
+        // Another, heard this time, then answered there as he says yes to it: the yes does nothing.
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.play()
+        const heard = made.questions().at(-1)!
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("r2")
+        yield* made.answer("Yes.", heard)
+        // And one he says yes to just as it's answered there, before yapd hears of it: nothing goes, and nothing's said.
+        const third = { ...cloud, pendingRuntimeRequest: { id: "r3", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(third)
+        yield* asked(made, third)
+        yield* made.play()
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.answer("Yes.")
+        const noted = yield* made.journal.since(0, { kinds: ["action"] })
+        return {
+          unsaid,
+          spoken: made.spoken(),
+          dispatched: made.dispatched.length,
+          moot: noted.filter(({ detail }) => (detail as { outcome?: string }).outcome === "Moot").length,
+        }
+      }),
+    )
+    expect(result.unsaid).toBe(true)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?",
+      "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?",
+      "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?",
+    ])
+    expect(result.dispatched).toBe(0)
+    expect(result.moot).toBe(1)
+  })
+
+  test("an option said aloud answers the thread's question", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [
+      {
+        type: "user_input_request",
+        status: "waiting",
+        requestId: "q1",
+        questions: [{ id: "Which network first?", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet", description: "" }] }],
+      },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Ghostnet.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ type, requestId, answers }) => ({ type, requestId, answers })) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Cloud deployment discovery asks which network to start with: Mainnet or Ghostnet, sir?", "Ghostnet it is, sir."])
+    expect(result.dispatched).toEqual([{ type: "runtime-request.respond", requestId: "q1", answers: { "Which network first?": "Ghostnet" } }])
+  })
+
+  test("a secret request is never answered by voice", async () => {
+    const secret = "turn-item:secret-request:cloud:stripe"
+    const cloud = waitingOn({ id: secret, kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "The key is sk test four two." }),
+          undefined,
+          { others: [cloud], items: [{ type: "secret_request", id: secret, status: "waiting", label: "Stripe API key" }] },
+        )
+        // Only ever told, never asked.
+        const worded = Option.getOrThrow(yield* made.compose(cloud))
+        yield* made.dictate("Tell the cloud one the key is sk test four two.")
+        return { worded: worded._tag === "Tell" ? worded.spoken : worded._tag, spoken: made.spoken(), dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.worded).toBe("Cloud deployment discovery needs the Stripe API key from you, sir, which I never take by voice: it's waiting for you in T3 Code.")
+    expect(result.spoken).toEqual(["That one needs T3 Code; I never take a secret by voice, sir."])
+    expect(result.dispatched).toBe(0)
   })
 
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {

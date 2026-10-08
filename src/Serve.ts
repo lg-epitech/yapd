@@ -90,8 +90,9 @@ export const serve = Effect.gen(function* () {
     journal,
     store: yield* Store.Store,
   })
-  // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it.
-  const daemon = yield* Daemon.make({ link: (session, cwd) => threads.link(machine, session, cwd) })
+  const hands = Hands.make({ threads, ledger, started })
+  // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
+  const daemon = yield* Daemon.make({ link: (session, cwd) => threads.link(machine, session, cwd), hands })
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),
@@ -101,7 +102,6 @@ export const serve = Effect.gen(function* () {
     find: (machine, id) => threads.find({ machine, id }),
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
-  const hands = Hands.make({ threads, ledger, started })
   const assistant = yield* Assistant.make({
     threads,
     journal,
@@ -116,6 +116,8 @@ export const serve = Effect.gen(function* () {
     queued: daemon.queued,
     skip: daemon.skip,
     upcoming: daemon.upcoming,
+    // What a thread waits on him for, worded as notices word it, to read back what he answers before he's heard it asked.
+    compose: yield* Notices.composer(threads),
   })
   // What threads need him for, what failed and what finished with no hook, each said once, ever.
   const notices = yield* Notices.make({
@@ -126,6 +128,8 @@ export const serve = Effect.gen(function* () {
     stopped: daemon.stopped,
     finished: daemon.finished,
     mention: assistant.mention,
+    ask: assistant.ask,
+    settled: assistant.settled,
     shortest: (yield* Config.minSeconds) * 1000,
   })
   yield* Effect.forkScoped(notices.follow)

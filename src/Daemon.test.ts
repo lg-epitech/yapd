@@ -406,6 +406,7 @@ const assisted = (
       queued: made.queued,
       skip: made.skip,
       upcoming: made.upcoming,
+      compose: () => Effect.succeedNone,
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
