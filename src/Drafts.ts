@@ -1,9 +1,10 @@
-import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
+import { Clock, Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type * as Ledger from "./Ledger.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
+import { preparation, progress, readied, unstarted } from "./T3CodeLauncher.ts"
 import type * as T3Live from "./T3Live.ts"
 import { type Decision, type Destination, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
@@ -158,6 +159,9 @@ export interface Step {
 /** How long T3 Code has to show new work it didn't answer for, before it's looked for. */
 const settling = "2 seconds"
 
+/** Why new work T3 Code never answered for can't be told to have started: it was still getting it ready when a launch would have given up. */
+export const readying = "T3 Code is still getting it ready, so I don't know if it started."
+
 /** New work as T3 Code shows it, for one it started without saying so. */
 const seen = (thread: T3Live.Thread, resolved: Pick<Resolved, "project">): Started => ({
   thread: thread.id,
@@ -275,16 +279,21 @@ export const make = (options: {
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
         const launching = yield* Effect.gen(function* () {
+          const asked = yield* Clock.currentTimeMillis
           const outcome = yield* Effect.either(machine.launcher.start(request))
-          // Asked for and not answered, it may have started all the same: it's looked for once, under the id it was asked for with.
+          // Asked for and not answered, it may have started all the same: it's looked for under the id it was asked for with, and, found,
+          // waited for while T3 Code is still getting it ready, as a launch that answers is, since a thread made for it doesn't say it started.
           const found =
             Either.isLeft(outcome) && outcome.left.sent === true && request.ids !== undefined && options.find !== undefined
-              ? yield* Effect.zipRight(Effect.sleep(settling), options.find(machine.name, request.ids.thread))
+              ? yield* Effect.zipRight(Effect.sleep(settling), readied(options.find(machine.name, request.ids.thread), asked + Duration.toMillis(preparation)))
               : Option.none<T3Live.Thread>()
-          if (Either.isLeft(outcome) && Option.isNone(found)) {
-            yield* Effect.logWarning("Could not start", outcome.left)
-            yield* settle(outcome.left.sent === true ? "unknown" : "failed", outcome.left.reason)
-            return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
+          if (Either.isLeft(outcome) && !Option.exists(found, (thread) => progress(thread) === "begun")) {
+            // Ended before it began, or never given the work, it didn't start; still being got ready by the time a launch would have given up, it can't be told yet.
+            const ended = Option.flatMap(found, (thread) => unstarted(thread, request.worktree === true, project.name))
+            const why = Option.getOrElse(ended, () => (Option.isSome(found) ? readying : outcome.left.reason))
+            yield* Effect.logWarning(`Could not start: ${why}`, outcome.left)
+            yield* settle(outcome.left.sent === true && Option.isNone(ended) ? "unknown" : "failed", why)
+            return { _tag: "Said", spoken: about === "" ? why : `About ${about}: ${why}`, failed: true } satisfies Outcome
           }
           const started = Either.isRight(outcome) ? outcome.right : seen(Option.getOrThrow(found), resolved)
           if (Either.isLeft(outcome)) yield* Effect.logInfo(`Found ${started.thread} after all: ${outcome.left.reason}`)

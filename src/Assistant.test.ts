@@ -128,6 +128,11 @@ const update = (project: string, spoken: string, at: number): Conversation.Updat
   at,
 })
 
+/** New work's thread as T3 Code shows it: getting its worktree ready, at work in it, or failed to make it, its turn never begun. */
+const preparing = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "preparing", status: "preparing" }
+const begun = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "running", status: "running", latestRunStartedAt: "2026-10-01T02:18:30.000Z" }
+const unbegun = { latestRunId: "run-1", status: "failed", lastError: "Workspace preparation failed.", latestRunCompletedAt: "2026-10-01T02:18:30.000Z" }
+
 /** What a thread's bounded read gives, which what it's sent adds to. */
 interface Bounded {
   runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string }>
@@ -233,6 +238,8 @@ const assistant = (
     readonly thinking?: number
     /** T3 Code never answers a launch it was sent, having started it or not. */
     readonly unanswered?: "started" | "not started"
+    /** How the thread T3 Code made for new work it never answered for looks at first: begun, unless the test says. */
+    readonly made?: Record<string, unknown>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -281,7 +288,8 @@ const assistant = (
             start: (request) =>
               given.unanswered !== undefined
                 ? Effect.suspend(() => {
-                    if (given.unanswered === "started" && request.ids !== undefined) appeared.push(thread(request.ids.thread, "Fix the loader", "yapd"))
+                    started.push(request)
+                    if (given.unanswered === "started" && request.ids !== undefined) appeared.push(thread(request.ids.thread, "Fix the loader", "yapd", given.made ?? begun))
                     return Effect.fail(new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started.", sent: true }))
                   })
                 : // Like T3 Code preparing a worktree that never gets ready, which its launcher gives up on after six minutes.
@@ -401,6 +409,11 @@ const assistant = (
         Effect.suspend(() => {
           power = { on, turns: power.turns + 1 }
           return on ? Effect.void : made.drop
+        }).pipe(Effect.zipRight(flush)),
+      /** The thread T3 Code made for new work it never answered for comes to look like this. */
+      launched: (looks: Record<string, unknown>) =>
+        Effect.sync(() => {
+          for (const [index, made] of appeared.entries()) appeared[index] = thread(made.id, made.title, made.projectId, looks)
         }).pipe(Effect.zipRight(flush)),
       /** Dictated by the shortcut. */
       dictate: (heard: string) =>
@@ -1665,7 +1678,7 @@ describe("Assistant", () => {
     expect(result.after).toEqual([])
   })
 
-  test("new work T3 Code never answered for is looked for once: there, it's said as started; not there, as maybe started", async () => {
+  test("new work T3 Code never answered for is looked for: begun, it's said as started; not there, as maybe started", async () => {
     const launched = (unanswered: "started" | "not started") =>
       run(
         Effect.gen(function* () {
@@ -1698,6 +1711,56 @@ describe("Assistant", () => {
     expect(missing.state).toEqual(Option.some("unknown"))
     expect(missing.told).toContain("About the loader fix: T3 Code is taking too long, so I don't know if it started.")
   })
+
+  test("new work T3 Code never answered for, found still getting its worktree ready, is waited for as a launch is: said as started only once it's begun, and never once it failed or isn't ready in time", async () => {
+    const launched = (then: "begun" | "failed" | "still preparing" | "never given") =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, wait, launched, spoken, journal, ledger, started } = yield* assistant(
+            (situation) => Brain.decision({ act: "start", text: situation.utterance.heard }),
+            () => written({ worktree: true, spoken: "Started in yapd, on Opus, in a worktree." }),
+            // Never given the work, it has no run, which T3 Code shows as idle.
+            { unanswered: "started", made: then === "never given" ? {} : preparing },
+          )
+          const kept = Effect.map(journal.since(0, { kinds: ["started"] }), (kept) => kept.length)
+          yield* dictate("Start a thread in yapd to fix the loader in a worktree.")
+          yield* wait(30)
+          // A thread made for it says nothing yet.
+          const meanwhile = { spoken: spoken(), started: yield* kept }
+          if (then === "begun") yield* launched({ ...begun, worktreePath: "/code/yapd-worktrees/t3code-0a1b2c3d" })
+          if (then === "failed") yield* launched(unbegun)
+          yield* wait(6 * 60)
+          return {
+            meanwhile,
+            spoken: spoken(),
+            started: yield* kept,
+            state: Option.map(yield* ledger.latest("1 hour", { kinds: ["start"] }), ({ state }) => state),
+            // Asked for once, and never again.
+            asked: started.length,
+          }
+        }),
+      )
+    const meanwhile = { spoken: [], started: 0 }
+    expect(await launched("begun")).toEqual({ meanwhile, spoken: ["Started in yapd, on Opus, in a worktree."], started: 1, state: Option.some("sent"), asked: 1 })
+    expect(await launched("failed")).toEqual({
+      meanwhile,
+      spoken: ["About the loader fix: T3 Code couldn't make the worktree, so the thread it made didn't start."],
+      started: 0,
+      state: Option.some("failed"),
+      asked: 1,
+    })
+    expect(await launched("still preparing")).toEqual({
+      meanwhile,
+      spoken: ["About the loader fix: T3 Code is still getting it ready, so I don't know if it started."],
+      started: 0,
+      state: Option.some("unknown"),
+      asked: 1,
+    })
+    // T3 Code puts the work in as soon as it's made the thread, so one still without it a moment later never had it put in: that's said then, not once a launch would give up.
+    const never = ["About the loader fix: T3 Code never put the work in the thread it made, so it didn't start."]
+    expect(await launched("never given")).toEqual({ meanwhile: { spoken: never, started: 0 }, spoken: never, started: 0, state: Option.some("failed"), asked: 1 })
+    // Each case looks at the thread every second for minutes, which takes more than the usual few seconds on a busy machine.
+  }, 30_000)
 
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
     const result = await run(
@@ -2564,6 +2627,33 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir."])
     expect(result.dispatched).toBe(0)
     expect(result.kept).toEqual([["Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir.", "I couldn't tell whether it went through before I restarted."]])
+  })
+
+  test("new work a restart found never started is said once, with why, and journaled as not gone, never as unknown", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { unconfirmed, spoken, dispatched, ledger, journal } = yield* assistant(() => undefined)
+        const row = yield* ledger.prepare({
+          utterance: "u-old",
+          step: 0,
+          kind: "start",
+          machine: "Rosie",
+          thread: tezos.id,
+          body: ({ commandId, messageId }) => ({ project: "/code/yapd", prompt: "Fix the loader.", worktree: true, ids: { thread: tezos.id, message: messageId, command: commandId } }),
+          message: true,
+        })
+        const reason = "T3 Code couldn't make the worktree, so the thread it made didn't start."
+        yield* ledger.settle(row.commandId, "failed", { reason })
+        yield* unconfirmed([{ ...row, state: "failed", reason }])
+        const kept = yield* journal.since(0, { kinds: ["action"] })
+        return { spoken: spoken(), dispatched: dispatched.length, kept: kept.map(({ detail }) => [(detail as { outcome?: string }).outcome, (detail as { reason?: string }).reason]) }
+      }),
+    )
+    expect(result).toEqual({
+      spoken: ["Before I restarted, I asked for new work, sir, but T3 Code couldn't make the worktree, so the thread it made didn't start."],
+      dispatched: 0,
+      kept: [["NotSent", "T3 Code couldn't make the worktree, so the thread it made didn't start."]],
+    })
   })
 
   test("a turn stopped to be told something in its place that a restart found never was told is said so once, with why, and never told", async () => {
