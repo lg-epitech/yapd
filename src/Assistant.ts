@@ -445,10 +445,14 @@ export const make = (options: {
         yield* deliver(yield* reask(yield* persona.lines), { id: utterance, turns: power.turns })
       })
 
+    /** Whether it's only ever asked once, like an offer, so it lapses when its window ends rather than being asked again. */
+    const lapses = (open: Open) => open.kind !== "which" && open.kind !== "project"
+
     /** Asks it again, or lets it go, a minute from now, unless something said meanwhile closes it first. */
     const later = (id: string) =>
       Effect.gen(function* () {
         if (asking?.open.id !== id || asking.held || asking.repeat !== undefined) return
+        if (lapses(asking.open)) return yield* close(asking.open, "dropped: unanswered")
         const repeat = yield* Effect.sleep(again).pipe(Effect.zipRight(turn.withPermits(1)(due(id))), Effect.interruptible, Effect.forkIn(scope))
         if (asking?.open.id === id) asking.repeat = repeat
       })
@@ -458,7 +462,7 @@ export const make = (options: {
       Effect.gen(function* () {
         // Not while something's being said that may answer it, nor twice over.
         if (asking?.open.id !== id || asking.held || asking.repeat !== undefined) return
-        if (asking.asks >= asks) return yield* letGo(asking.open)
+        if (asking.asks >= asks && !lapses(asking.open)) return yield* letGo(asking.open)
         yield* later(id)
       })
 

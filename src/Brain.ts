@@ -198,13 +198,16 @@ export const which = (candidates: ReadonlyArray<Threads.Listed>, lines: Lines, a
 
 /**
  * A question asked once more, in other words than it was, and than any asked
- * in the last ten minutes. None once every wording has been used.
+ * in the last ten minutes. None once every wording has been used, and none
+ * for an offer, which is never asked again.
  */
 export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about">, before: ReadonlyArray<string>, lines: Lines) => {
   const wordings =
     open.kind === "which"
       ? [`Which one${addressed(lines)}: ${open.about}?`, `I still need to know which you meant${addressed(lines)}: ${open.about}?`]
-      : [`Which project should ${open.about || "that"} go in${addressed(lines)}?`, `I still need a project for ${open.about || "that"}${addressed(lines)}.`]
+      : open.kind === "project"
+        ? [`Which project should ${open.about || "that"} go in${addressed(lines)}?`, `I still need a project for ${open.about || "that"}${addressed(lines)}.`]
+        : []
   return wordings.find((wording) => !repeated(wording, [open.asked, ...before]))
 }
 
