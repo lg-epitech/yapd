@@ -171,6 +171,27 @@ describe("remembering", () => {
       }),
     ))
 
+  test("has a short line's first sentence early, unless it's kept and a copy is quicker", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const rendered: Array<string> = []
+        const render = (text: string, path: string) =>
+          Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid)
+        const voice = yield* remembering(
+          { render, renderFirst: (text, path) => Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), whole: Effect.void }) },
+          dir,
+        )
+        const text = "The tests pass. Nothing needs you."
+        expect(yield* (yield* voice.renderFirst(text, `${dir}/out-a.wav`)).first).toBe(`${dir}/out-a.wav.first.wav`)
+        yield* voice.warm([text])
+        expect(yield* (yield* voice.renderFirst(text, `${dir}/out-b.wav`)).first).toBe(`${dir}/out-b.wav`)
+        // With no part to have early, a single sentence is kept for next time, like any short line.
+        yield* (yield* voice.renderFirst("On it, sir.", `${dir}/out-c.wav`)).whole
+        yield* voice.render("On it, sir.", `${dir}/out-d.wav`)
+        expect(rendered).toEqual([text, text, "On it, sir."])
+      }),
+    ))
+
   test("keeps only the newest", () =>
     run((dir) =>
       Effect.gen(function* () {

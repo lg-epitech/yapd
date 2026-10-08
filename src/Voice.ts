@@ -86,6 +86,14 @@ const say = (text: string, path: string) => run(["say", "--data-format=LEI16@240
 /** Clauses, then words: where a sentence too long for Kokoro to read in one go breaks. */
 const boundaries = [/(?<=[,;:])\s+/, /\s+/]
 
+/** The text's sentences, where Kokoro's splitter finds them. */
+const sentencesOf = (text: string) => {
+  const splitter = new TextSplitterStream()
+  splitter.push(text)
+  splitter.close()
+  return [...splitter]
+}
+
 /**
  * The parts Kokoro reads, each in one go: the whole text when it fits, else
  * whole sentences, as many as fit together. Only a sentence too long on its own
@@ -96,10 +104,7 @@ export const split = <E>(text: string, fits: (text: string) => Effect.Effect<boo
     // Nothing to say, which Kokoro would still render as a short sound.
     if (text.trim() === "") return []
     if (yield* fits(text)) return [text]
-    const splitter = new TextSplitterStream()
-    splitter.push(text)
-    splitter.close()
-    return yield* pack([...splitter], boundaries, fits)
+    return yield* pack(sentencesOf(text), boundaries, fits)
   })
 
 /** Packs pieces into as few parts as fit, breaking any that don't at the next, finer boundary. */
@@ -176,10 +181,7 @@ const words = (text: string) => (text === "" ? 0 : text.split(/\s+/).length)
  */
 export const opening = <E>(text: string, fits: (text: string) => Effect.Effect<boolean, E>) =>
   Effect.gen(function* () {
-    const splitter = new TextSplitterStream()
-    splitter.push(text)
-    splitter.close()
-    const sentences = [...splitter]
+    const sentences = sentencesOf(text)
     let first = ""
     let taken = 0
     // At least one sentence is left for the rest.
@@ -537,8 +539,15 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
 
     return {
       render,
-      /** A short line is copied whole, quicker than any first part of it would render. */
-      renderFirst: (text: string, path: string) => (text.length > brief ? early(voice, text, path) : rendering(render)(text, path)),
+      /**
+       * A short line already kept is copied whole, quicker than any first part
+       * of it would render, and one of a single sentence has no part to have
+       * early, so it's kept like any short line. Others come in parts.
+       */
+      renderFirst: (text: string, path: string) =>
+        text.length <= brief && (kept.has(text) || sentencesOf(text).length < 2)
+          ? rendering(render)(text, path)
+          : early(voice, text, path),
       /** Renders lines ahead of time, so even the first time they're said is instant. */
       warm: (lines: ReadonlyArray<string>) =>
         Effect.forEach(
