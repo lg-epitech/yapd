@@ -939,6 +939,8 @@ export const make = (options: {
         }
         yield* Effect.logInfo(`Said: ${outcome.say}`)
         const { subject, missed } = outcome
+        /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
+        let unsaid: Effect.Effect<void> = Effect.void
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -949,8 +951,16 @@ export const make = (options: {
             // "It" means this once he's heard it, not while it waits behind something else he's hearing.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
               Effect.sync(() => {
-                answered = { subject, at: now }
+                const before = answered
+                // Asked again in other words, he may have heard it already.
+                const heard = asking?.said === true
+                const meant = { subject, at: now }
+                answered = meant
                 if (open !== undefined && asking?.open.id === open.id) asking.said = true
+                unsaid = Effect.sync(() => {
+                  if (answered === meant) answered = before
+                  if (open !== undefined && asking?.open.id === open.id) asking.said = heard
+                })
               }),
             ),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
@@ -963,6 +973,8 @@ export const make = (options: {
                   question: {
                     answer: listen(open),
                     unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),
+                    // Broken off, he can't be taken to have heard it, so what he says next is something new, as before it was said.
+                    unsaid: Effect.suspend(() => unsaid),
                   },
                 }),
           },

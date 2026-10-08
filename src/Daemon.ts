@@ -520,8 +520,9 @@ export const make = Effect.gen(function* () {
   /**
    * Says a notice. Only a question is listened to: whatever else they'd say to
    * it has nowhere to go. What can't be played was never said, so it isn't
-   * what the user heard last; and a question that can't be asked in full goes
-   * unanswered, to be asked again later or let go, rather than left open.
+   * what the user heard last; and a question that can't be asked in full, even
+   * one that breaks off midway, counts as never said and goes unanswered, to be
+   * asked again later or let go, rather than left open.
    */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>) =>
     Effect.gen(function* () {
@@ -538,7 +539,9 @@ export const make = Effect.gen(function* () {
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
       const answered = yield* conversation.ask({ audio: said.audio, saying, answer }).pipe(
-        Effect.onError((cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.zipRight(dealtWith, question.unanswered))),
+        Effect.onError((cause) =>
+          Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
+        ),
       )
       // Answered, or asked in full.
       yield* said.notice.heard ?? Effect.void

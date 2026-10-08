@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
 import * as Assistant from "./Assistant.ts"
 import { Audio, AudioError } from "./Audio.ts"
 import * as Brain from "./Brain.ts"
@@ -18,6 +18,7 @@ import { Vad, VadError } from "./Vad.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
+import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 import { Voice } from "./Voice.ts"
 import { Writer } from "./Writer.ts"
@@ -185,7 +186,7 @@ const make = (says?: string, options: {
     })
   /**
    * Something yapd has to say for itself, which as a question, the one open, records how it went, in `saying` when it
-   * started being said, and in `heard` when it was heard to the end.
+   * started being said, until that's undone, and in `heard` when it was heard to the end.
    */
   const notice = (
     id: string,
@@ -216,6 +217,10 @@ const make = (says?: string, options: {
             question: {
               answer: () => Effect.succeed(Option.none()),
               unanswered: Effect.sync(() => void options.question?.push(`${id} unanswered`)),
+              unsaid: Effect.sync(() => {
+                const at = options.saying?.indexOf(id) ?? -1
+                if (at >= 0) options.saying?.splice(at, 1)
+              }),
             },
           }),
     }).pipe(Effect.zipRight(flush))
@@ -245,18 +250,42 @@ const daemon = make()
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
   Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
 
+/** A thread T3 Code runs, idle in the yapd project. */
+const thread = (id: string, title: string) =>
+  Schema.decodeUnknownSync(T3Live.Thread)({
+    id,
+    projectId: "yapd",
+    title,
+    modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+    activeRunId: null,
+    status: "idle",
+    pendingRuntimeRequest: null,
+    createdAt: "2026-10-01T12:00:00.000Z",
+    updatedAt: "2026-10-01T20:00:00.000Z",
+  })
+
 /**
  * The daemon with the assistant on top, wired as yapd serves them, without
- * T3 Code, and with a model that decides what `model` says, which isn't asked
- * about what needs no model.
+ * T3 Code but for what it shows of the threads on the `desk`, and with a model
+ * that decides what `model` says, which isn't asked about what needs no model.
  */
-const assisted = (model: (situation: Brain.Situation) => Brain.Decision, options: Parameters<typeof make>[1] = {}) =>
+const assisted = (
+  model: (situation: Brain.Situation) => Brain.Decision,
+  options: Parameters<typeof make>[1] = {},
+  desk: ReadonlyArray<T3Live.Thread> = [],
+) =>
   Effect.gen(function* () {
     const daemon = yield* make(undefined, options)
     const { made, journal } = daemon
+    const view: T3Live.View = {
+      projects: new Map([["yapd", { id: "yapd", title: "yapd", workspaceRoot: "/code/yapd" }]]),
+      threads: new Map(desk.map((thread) => [thread.id, thread])),
+      sequence: 1,
+      synced: true,
+    }
     const threads = yield* Threads.make({
       machine: "Rosie",
-      live: { view: Effect.succeed(Option.none()), changes: Stream.never },
+      live: { view: Effect.succeed(desk.length === 0 ? Option.none() : Option.some(view)), changes: Stream.never },
       actions: Option.none(),
       others: [],
       journal,
@@ -1144,7 +1173,7 @@ describe("Daemon", () => {
     expect(result).toEqual({ played: [], asked: ["question unanswered"], saying: [], heard: [] })
   })
 
-  test.each([false, true])("a question whose playback breaks off goes unanswered, and isn't heard, with a microphone: %s", async (microphone) => {
+  test.each([false, true])("a question whose playback breaks off goes unanswered, and counts as neither said nor heard, with a microphone: %s", async (microphone) => {
     const result = await run(
       Effect.gen(function* () {
         const { notice, wait } = yield* make(undefined, { microphone, breaks: { "The Tezos migration or the Mina tickets, sir?": 3 } })
@@ -1156,8 +1185,42 @@ describe("Daemon", () => {
         return { asked, saying, heard }
       }),
     )
-    // Begun, so what he says next may be about it, and asked again later.
-    expect(result).toEqual({ asked: ["question unanswered"], saying: ["question"], heard: [] })
+    // Begun, then broken off, so it's as if it was never said: what he says next isn't about it, and it's asked again later.
+    expect(result).toEqual({ asked: ["question unanswered"], saying: [], heard: [] })
+  })
+
+  test.each([false, true])("a question that breaks off as it's asked isn't what he answers next: it's left, and he's told, with a microphone: %s", async (microphone) => {
+    const loader = thread("1f0e8a7b-6c5d-4b7e-9d3c-2d5cee5c6a1f", "Fix the loader")
+    const parser = thread("6a5b4c3d-2e1f-4c1d-8e7f-850299f83b2a", "Fix the parser")
+    const question = "Fix the loader or Fix the parser?"
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictating, wait, played, asked, journal } = yield* assisted(
+          (situation) => {
+            const named = (of: T3Live.Thread) => situation.desk.threads.find(({ ref }) => ref.id === of.id)?.handle ?? ""
+            return situation.utterance.heard === "How's the fix going?"
+              ? Brain.decision({ act: "clarify", target: named(loader), sure: "low", others: named(parser) })
+              : Brain.decision({ act: "dismiss", pending: Option.isSome(situation.open) ? "answers" : "" })
+          },
+          { microphone, breaks: { [question]: 1 } },
+          [loader, parser],
+        )
+        yield* dictating("How's the fix going?")
+        // A second in, the audio helper quits, and he never hears which.
+        yield* wait(1)
+        yield* wait(2)
+        yield* dictating("No.")
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        const closed = yield* journal.since(0, { kinds: ["action"] })
+        const { open, subject } = asked.at(-1)!
+        return { played: [...played], open, subject, closed: closed.map(({ detail }) => (detail as { open: string }).open) }
+      }),
+    )
+    expect(result.played).toEqual([question, "I didn't ask whether you meant Fix the loader or Fix the parser, since you'd moved on."])
+    // Nor what "it" means.
+    expect(result.open).toEqual(Option.none())
+    expect(result.subject).toEqual({ _tag: "Nothing" })
+    expect(result.closed).toEqual(["replaced"])
   })
 
   test.each(["Stop.", "Skip.", "Enough.", "Next.", "Shut up.", "Stop, stop."])("told \"%s\" by the shortcut over an update, doesn't read it again, and counts it heard", async (said) => {
