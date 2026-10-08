@@ -197,6 +197,8 @@ const reasons: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bis not interruptible\b/i, "It isn't doing anything right now."],
   // It acts on a thread only while it's neither archived nor deleted.
   [/\bthread\b.*\bis not active\b/i, "It's been archived or deleted."],
+  // It lets go of a queue only once a turn that ran into a usage limit is carried on, from T3 Code's app.
+  [/\blimited thread\b/i, "It's hit a usage limit."],
 ]
 
 /** A reason T3 Code gave, fit to say: no ids, nothing unreadable, the work never put down to an agent or a session, and a full stop. */

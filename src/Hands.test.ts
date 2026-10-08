@@ -1566,6 +1566,31 @@ describe("Hands", () => {
     })
   })
 
+  test("carry on turned down since a turn ran into a usage limit says so plainly, never as T3 Code tells its app to carry on", async () => {
+    const carry = { _tag: "Undo", to: Option.none(), carry: true } as const
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { run: act, answering, becomes, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })
+        bounded.runs[0]!.status = "interrupted"
+        becomes(thread(tezos.id, { status: "interrupted" }))
+        // As T3 Code words it, for a thread whose last turn ran into a usage limit.
+        answering((payload, bounded) =>
+          payload.type === "queue.resume"
+            ? Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "Continue the limited thread before resuming its queue." }))
+            : takes()(payload, bounded),
+        )
+        const carried = yield* act({ utterance: "u2", step: 0 }, carry)
+        return {
+          carried: carried._tag === "Refused" ? Hands.failed(carry, carried, lines, Option.none()) : carried._tag,
+          dispatched: dispatched.map(({ type }) => type),
+        }
+      }),
+    )
+    expect(result).toEqual({ carried: "I couldn't get it going again, sir: it's hit a usage limit.", dispatched: ["run.interrupt", "queue.resume"] })
+  })
+
   test("guards: a restart leaves what this run did alone, an archived thread is sent nothing, a busy one isn't told to carry on, and a read message isn't cancelled", async () => {
     const restarted = await run(
       Effect.gen(function* () {
