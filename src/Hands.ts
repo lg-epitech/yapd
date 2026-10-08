@@ -46,7 +46,11 @@ export type Outcome =
       readonly _tag: "Done"
       readonly how: Ledger.How
       readonly to: Threads.Ref
-      /** Wanted at once, it went into T3 Code's queue instead, since the turn under way is waiting: on him, or finishing off. */
+      /**
+       * Wanted at once, it went into T3 Code's queue instead, since the turn
+       * under way is waiting: on him, or finishing off. Or, sent once more, it
+       * waits in a queue a stop has put on hold since.
+       */
       readonly waiting?: Waiting
     } & Stopping)
   /** T3 Code, or yapd looking first, said no: it's never sent again under these ids. */
@@ -63,8 +67,8 @@ export type Outcome =
 /** What came of a step that was written down: gone, turned down, never sent or unknown. */
 type Went = Exclude<Outcome, { readonly _tag: "Twin" | "Read" }>
 
-/** What the turn under way waits on: something it asked him, or its last bits of work. */
-export type Waiting = "asked" | "finishing"
+/** What a message in the queue waits on: the turn under way, for something it asked him, or its last bits of work; or the queue, on hold. */
+export type Waiting = "asked" | "finishing" | "held"
 
 /** What a restart's look found never said what came of it. */
 export interface Reconciled {
@@ -237,6 +241,18 @@ export const plainly = (reason: string) => {
 /** Whether a message went into the turn under way: steered in, or taken out of the queue into it, by his hand in T3 Code's app. */
 const steeredIn = (intent: T3Actions.Intent) => intent === "steer" || intent === "promoted_queued_to_steer"
 
+/**
+ * How a message T3 Code has went in, as the thread shows it: into the turn
+ * under way, waiting in the queue, or a turn of its own, as one that waited in
+ * the queue is once it's started.
+ */
+const shown = ({ intent, run }: T3Actions.Found): Ledger.How =>
+  Option.exists(intent, steeredIn)
+    ? "steered"
+    : Option.match(run, { onNone: () => Option.exists(intent, (intent) => intent === "queued_turn"), onSome: ({ status }) => status === "queued" })
+      ? "queued"
+      : "now"
+
 /** Runs that haven't said anything back yet: waiting in the queue, or getting going or at it. */
 const unanswered: ReadonlyArray<string> = ["queued", "preparing", "starting", "running"]
 
@@ -384,23 +400,30 @@ export const make = (options: {
 
   /**
    * What came of a message sent once more after it may have got there the
-   * first time, unless it's in the thread to be read: T3 Code answers for ids
-   * it has already from what it kept, without doing it again, so one taken out
-   * of its queue since only looks sent. Shown cancelled, it was withdrawn, so
-   * the same words said again are new. Otherwise T3 Code has it, as its answer
-   * says, so it went, but not found, or with the thread unread, whether it's
-   * still to be read can't be told, since one that went in is also dropped
-   * from the thread's read once enough happens after it: the same words said
-   * again are asked about.
+   * first time: T3 Code answers for ids it has already from what it kept,
+   * without doing it again, so it's looked for in the thread. There to be
+   * read, it went in as the thread shows it, which may be long before, never
+   * as the thread is now: still in a queue a stop has put on hold since, it
+   * waits there however idle the thread is. Shown cancelled, it was
+   * withdrawn, so the same words said again are new. Otherwise T3 Code has
+   * it, as its answer says, so it went, but not found, or with the thread
+   * unread, whether it's still to be read can't be told, since one that went
+   * in is also dropped from the thread's read once enough happens after it:
+   * the same words said again are asked about. None for what isn't a message.
    */
-  const missed = (row: Ledger.Row, actions: T3Actions.Actions) =>
+  const kept = (row: Ledger.Row, actions: T3Actions.Actions) =>
     Effect.gen(function* () {
       if (row.kind !== "message" || row.messageId === null) return Option.none<Went>()
       const look = yield* Effect.either(actions.message(row.thread, row.messageId))
       const found = Either.getOrElse(look, () => Option.none<T3Actions.Found>())
       // Steered in, even from the queue by his hand in T3 Code's app, which cancels the run it waited in, it's in the turn under way.
-      if (Option.exists(found, ({ intent, run }) => Option.exists(intent, steeredIn) || !Option.exists(run, ({ status }) => status === "cancelled"))) {
-        return Option.none<Went>()
+      const there = Option.filter(found, ({ intent, run }) => Option.exists(intent, steeredIn) || !Option.exists(run, ({ status }) => status === "cancelled"))
+      if (Option.isSome(there)) {
+        const how = shown(there.value)
+        const held = how === "queued" && Option.exists(there.value.run, ({ held }) => held)
+        yield* ledger.settle(row.commandId, "sent", { how })
+        yield* Effect.logInfo(`Dispatched ${row.commandId} → sent (${how}${held ? ", held" : ""}), as T3 Code had it already`)
+        return Option.some<Went>({ _tag: "Done", how, to: refOf(row), ...(held ? { waiting: "held" as const } : {}) })
       }
       if (Option.isSome(found)) {
         yield* ledger.settle(row.commandId, "abandoned", { reason: Ledger.withdrawn })
@@ -470,7 +493,7 @@ export const make = (options: {
       const result = yield* Effect.either(actions.run(row.thread, sent, row.commandId))
       if (Either.isRight(result)) {
         // What never left yapd the first time, T3 Code never had the ids of, so this is what it did with it now.
-        const gone = last && row.state !== "failed" ? yield* missed(row, actions) : Option.none<Went>()
+        const gone = last && row.state !== "failed" ? yield* kept(row, actions) : Option.none<Went>()
         if (Option.isSome(gone)) return gone.value
         const entry = yield* entered(row, actions, wasBusy, how)
         yield* ledger.settle(row.commandId, "sent", { how: entry })
@@ -883,7 +906,8 @@ export const make = (options: {
           const waiting = Option.exists(went(row), ({ how }) => how !== "after") ? waits(reached.right.thread) : undefined
           yield* Effect.logInfo(`Sending ${row.commandId} once more, as you said${waiting === undefined ? "" : ", behind the turn under way, which is waiting"}`)
           const sent = yield* dispatch(row, reached.right.actions, busy(reached.right.thread), true, waiting === undefined ? undefined : "after")
-          return sent._tag === "Done" && waiting !== undefined && sent.how === "queued" ? { ...sent, waiting } : sent
+          // Waiting in a queue on hold, it waits on that first, whatever the turn does.
+          return sent._tag === "Done" && waiting !== undefined && sent.how === "queued" && sent.waiting === undefined ? { ...sent, waiting } : sent
         }),
       ),
     leave: (commandId, reason) =>
@@ -982,6 +1006,8 @@ export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Opt
   // Named in the sentence, since a name after "told it" would sound like what it was told.
   if (as.stopped === true) return `Stopped ${Option.getOrElse(called, () => "it")}${addressed(lines)}, and told it.`
   if (waiting !== undefined) {
+    // On hold, its queue may be behind a turn begun since, so it isn't said to be stopped.
+    if (waiting === "held") return `${Option.match(called, { onNone: () => "Its", onSome: (name) => `${capital(name)}'s` })} queue is on hold${addressed(lines)}, so that will go once it's let carry on.`
     const it = Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} is` })
     return waiting === "asked"
       ? `${it} waiting on you for something${addressed(lines)}, so that will go once it's dealt with.`

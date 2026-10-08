@@ -34,7 +34,7 @@ const lines: Persona.Lines = { ...Persona.plain, onIt: "On it, sir.", queued: "I
 type Answer = (payload: Record<string, unknown>, bounded: Bounded) => Effect.Effect<unknown, Server.Trouble | Server.Refusal>
 
 interface Bounded {
-  runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string }>
+  runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string; queueHeld?: boolean }>
   messages: Array<{ id: string; role: string; text: string; createdAt: string }>
   turnItems: Array<Record<string, unknown>>
 }
@@ -586,6 +586,49 @@ describe("Hands", () => {
       said: "Twin",
       dispatched: 2,
     })
+  })
+
+  test("a yes to sending again a message T3 Code answers for from what it kept is said as it went in then, whatever the thread is doing now", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    /** A message for now to a thread whose turn is `doing`, its answer lost, then sent again once the turn has ended as `then` leaves it. */
+    const resent = (doing: "preparing" | "running", then: (bounded: Bounded) => void) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, becomes, ledger } = yield* hands({
+            thread: thread(tezos.id, { activeRunId: "run-1", activityRunStatus: doing, status: doing }),
+            runs: [{ id: "run-1", status: doing, ordinal: 1 }],
+          })
+          // T3 Code takes it, into the turn under way or behind it, but its answer is lost, and the thread can't be read to look for it.
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // The turn has ended since, and nothing's going.
+          then(bounded)
+          becomes(thread(tezos.id))
+          reads(true)
+          // Sent again under the same ids, T3 Code answers as it did the first time, without doing anything.
+          answering(() => Effect.succeed({ sequence: 7 }))
+          const outcome = yield* again("yapd:u1:0")
+          return {
+            how: outcome._tag === "Done" ? outcome.how : outcome._tag,
+            said: outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            noted: Option.flatMap(yield* ledger.get("yapd:u1:0"), ({ how }) => Option.fromNullable(how)),
+          }
+        }),
+      )
+    // Behind a turn getting going, which was stopped, holding its queue, so it waits there still: never said as gone in at once.
+    expect(
+      await resent("preparing", (bounded) => {
+        bounded.runs[0]!.status = "interrupted"
+        bounded.runs[1]!.queueHeld = true
+      }),
+    ).toEqual({ how: "queued", said: "Its queue is on hold, sir, so that will go once it's let carry on.", noted: Option.some("queued") })
+    // Steered into the turn under way, which has ended since.
+    expect(
+      await resent("running", (bounded) => {
+        bounded.runs[0]!.status = "completed"
+      }),
+    ).toEqual({ how: "steered", said: "On it, sir.", noted: Option.some("steered") })
   })
 
   test("asking to send again says sir once, however the line to ask it was written", () => {

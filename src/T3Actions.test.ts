@@ -97,11 +97,12 @@ describe("T3Actions", () => {
     expect(idle.sent).toEqual([])
   })
 
-  test("finds a message it sent by its id, how it went in, and the run it waits in", async () => {
+  test("finds a message it sent by its id, how it went in, and the run it waits in, held or not", async () => {
     const queued = projection({
       runs: [
         { id: "run-2", status: "running", ordinal: 2, userMessageId: "m-2" },
         { id: "run-3", status: "queued", ordinal: 3, userMessageId: "m-3" },
+        { id: "run-5", status: "queued", ordinal: 5, userMessageId: "m-5", queueHeld: true },
       ],
       messages: [{ id: "m-2", role: "user", text: "Fix it.", createdAt: "a" }],
       turnItems: [{ type: "user_message", messageId: "m-4", inputIntent: "steer", status: "completed" }],
@@ -109,10 +110,12 @@ describe("T3Actions", () => {
     const { actions } = transport(queued)
     const found = (messageId: string) =>
       Effect.runPromise(Effect.map(actions.message("t1", messageId), Option.map(({ intent, run }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run) }))))
-    expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued" } }))
+    expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued", held: false } }))
+    // In a queue a stop put on hold.
+    expect(await found("m-5")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-5", status: "queued", held: true } }))
     expect(await found("m-4")).toEqual(Option.some({ intent: "steer", run: null }))
     // A run it started that has no turn item yet, as right after it went in: a turn of its own.
-    expect(await found("m-2")).toEqual(Option.some({ intent: "turn_start", run: { id: "run-2", status: "running" } }))
+    expect(await found("m-2")).toEqual(Option.some({ intent: "turn_start", run: { id: "run-2", status: "running", held: false } }))
     expect(await Effect.runPromise(actions.has("t1", "m-9"))).toBe(false)
   })
 

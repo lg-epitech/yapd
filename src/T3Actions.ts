@@ -19,6 +19,8 @@ const Run = Schema.Struct({
   ordinal: Schema.Number,
   /** The message that started it, or waits in the queue to. */
   userMessageId: Schema.optional(Schema.NullOr(Schema.String)),
+  /** Waiting in a queue a stop put on hold, which starts nothing till it's let go. */
+  queueHeld: Schema.optional(Schema.Boolean),
 })
 
 const Option_ = Schema.Struct({ decision: Schema.String, label: Schema.String })
@@ -234,8 +236,8 @@ const intents: ReadonlyArray<string> = ["turn_start", "queued_turn", "steer", "p
 export interface Found {
   /** How it went in, when the thread says. */
   readonly intent: Option.Option<Intent>
-  /** The run it started, or waits in the queue to start, if there's one. */
-  readonly run: Option.Option<{ readonly id: string; readonly status: string }>
+  /** The run it started, or waits in the queue to start, if there's one, and whether that queue is on hold. */
+  readonly run: Option.Option<{ readonly id: string; readonly status: string; readonly held: boolean }>
   /** When T3 Code took it in, in ms by its own clock, when the thread shows the message itself. */
   readonly at: Option.Option<number>
 }
@@ -257,7 +259,7 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
         : run === undefined || run.status === "cancelled"
           ? Option.none()
           : Option.some(run.status === "queued" ? ("queued_turn" as const) : ("turn_start" as const)),
-    run: Option.map(Option.fromNullable(run), ({ id, status }) => ({ id, status })),
+    run: Option.map(Option.fromNullable(run), ({ id, status, queueHeld }) => ({ id, status, held: queueHeld === true })),
     at: Option.filter(Option.map(Option.fromNullable(message), ({ createdAt }) => Date.parse(createdAt)), (at) => !Number.isNaN(at)),
   })
 }
