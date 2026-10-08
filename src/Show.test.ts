@@ -145,8 +145,8 @@ describe("Show", () => {
     // A fence with a backtick after it opens no code block, so what follows is still read as markdown.
     expect(tamed("```x`\n[z](javascript:alert(1))")).toBe("\\`\\`\\`x\\`\nz")
     // What's kept: links to https pages, written out in full with where they go, code spans and code blocks as they are, and an image's description.
-    expect(tamed('See [the docs](https://ok.example/docs "Docs"), <https://ok.example/a>, `[x](javascript:1)` and ![chart](https://ok.example/c.png)')).toBe(
-      "See [the docs](<https://ok.example/docs>) (ok.example), <https://ok.example/a>, `[x](javascript:1)` and chart",
+    expect(tamed('See [the docs](https://ok.example/docs "Docs"), <https://ok.example/a>, `rm -rf ~/build` and ![chart](https://ok.example/c.png)')).toBe(
+      "See [the docs](<https://ok.example/docs>) (ok.example), <https://ok.example/a>, `rm -rf ~/build` and chart",
     )
     expect(tamed("[![build](https://ok.example/b.svg)](https://ok.example/run)")).toBe("[build](<https://ok.example/run>) (ok.example)")
     expect(tamed("```js\nconst link = [x](javascript:1)\n```\nThen [y](javascript:2)")).toBe("```\nconst link = [x](javascript:1)\n```\nThen y")
@@ -170,6 +170,17 @@ describe("Show", () => {
     // Fenced longer than the fence in it.
     expect(Show.tamed(messages[0]!)).toBe(`\`\`\`\`\nbuild ok\n    \`\`\`\n${lying}\n\`\`\`\``)
     expect(Show.tamed(messages[1]!)).toBe(`  \\~\\~\\~\n\`\`\`\n~~~\n${lying}\n\`\`\``)
+  })
+
+  test("a code span in a thread's message is kept only when nothing in it could link, since an address just before it can take in its backticks", () => {
+    const lying = "[github.com/lg-epitech/integration/pull/412](https://github.com.evil.example/login)"
+    // Some renderers make a link of the address, backticks and all, so no code span opens, and what yapd kept as it is in one is read as markdown.
+    for (const message of [`See https://ci.example.com/run\`\` ${lying} \`\``, `www.x.com\` ${lying} \``]) {
+      const { markdown } = Show.thread(listed, Option.some({ ...detail("Clean the build"), messages: [{ role: "assistant", text: message, createdAt: "x", streaming: false }] }), now)
+      expect(targets(markdown)).toEqual([])
+    }
+    // Text instead, as it was written, and one with nothing in it that could link is still a code span.
+    expect(Show.tamed("Run `[x](javascript:1)` then `npm test`, not `a | b` or `<b>`")).toBe("Run \\`\\[x\\](javascript:1)\\` then `npm test`, not \\`a \\| b\\` or \\`\\<b\\>\\`")
   })
 
   test("a link in a thread's message that names one address can't hide that it opens another", () => {

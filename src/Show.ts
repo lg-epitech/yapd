@@ -190,8 +190,9 @@ const where = (words: string, address: string) => {
  * A line of a thread's own markdown with nothing in it that could link but
  * the links to https pages, written again with where they go: every other
  * bracket, angle bracket and backtick is escaped, but in a code span, which
- * is kept as it is. Other links keep only their words, images only their
- * description, and a link's words, `linking` off, keep no link of their own.
+ * is kept as it is when nothing in it could link. Other links keep only their
+ * words, images only their description, and a link's words, `linking` off,
+ * keep no link of their own.
  */
 const unlinked = (line: string, linking = true): string => {
   // Each `[` with the `]` that closes it, nesting as markdown does.
@@ -212,12 +213,14 @@ const unlinked = (line: string, linking = true): string => {
     } else if (char === "`") {
       const length = run(line, at)
       const end = spanEnd(line, at + length, length)
-      // Not one with a pipe in it, which a table would split into cells that are read as markdown.
-      if (end === undefined || line.slice(at, end).includes("|")) {
+      if (end === undefined) {
         out += "\\`".repeat(length)
         at += length
       } else {
-        out += line.slice(at, end + length)
+        const span = line.slice(at, end + length)
+        // Only text, backticks and all, when it holds what could link: an address written just before it, which some renderers make a link
+        // of, can take in its backticks, and then it and every span after it are read as markdown. A pipe too, which a table splits cells at.
+        out += /[|[\]<]/.test(span) ? plainly(span) : span
         at = end + length
       }
     } else if (char === "[" || (char === "!" && line[at + 1] === "[")) {
