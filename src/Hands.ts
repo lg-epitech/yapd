@@ -441,13 +441,13 @@ export const make = (options: {
   /**
    * Sending it once more never left yapd, so it wasn't sent again: the step
    * is put back as it was, never offered again on its own, so the same words
-   * said again find it, and his yes can still send it under its ids.
+   * said again find it, and his yes can still send it under its ids. Both at
+   * once: put back first, it would be there to offer, for the same reason as
+   * the first time, to anything reading it in between, like a restart's late
+   * look at it.
    */
-  const unsent = (row: Ledger.Row, reason: string) =>
-    Effect.zipRight(
-      ledger.settle(row.commandId, row.state === "failed" ? "failed" : "unknown", { reason, from: ["abandoned"] }),
-      ledger.leave(row.commandId, "Sending it again never left yapd."),
-    )
+  const unsent = (row: Ledger.Row) =>
+    ledger.settle(row.commandId, row.state === "failed" ? "failed" : "unknown", { reason: Ledger.leftBe("Sending it again never left yapd."), from: ["abandoned"] })
 
   /**
    * The time he wants a message sent once more to go in at, when it isn't the
@@ -509,7 +509,7 @@ export const make = (options: {
         return yield* failing({ _tag: "Refused", reason } satisfies Outcome, `${what}, T3 Code turned it down`)
       }
       if (error.sent !== true) {
-        yield* last ? unsent(row, reason) : ledger.settle(row.commandId, "failed", { reason })
+        yield* last ? unsent(row) : ledger.settle(row.commandId, "failed", { reason })
         return yield* failing({ _tag: "NotSent", reason, again } satisfies Outcome, `${what}, it never went`)
       }
       // It went, and may have been done: looked for once, never sent again on its own.
@@ -900,7 +900,7 @@ export const make = (options: {
           const row = taken.value
           const reached = yield* reach(refOf(row))
           if (Either.isLeft(reached)) {
-            yield* unsent(row, reached.left)
+            yield* unsent(row)
             return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing[row.kind])
           }
           // T3 Code takes nothing into a turn that's waiting, so a message for now goes in its queue behind it, as one sent fresh does: under

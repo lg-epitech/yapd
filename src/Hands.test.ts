@@ -179,18 +179,37 @@ const restartOn = (
  * A restart's look at a message that may not have got there, which reads the
  * thread as it was then, without the message, or `fails` to, and is slow to
  * answer: it only does once `meanwhile` is done, with T3 Code answering
- * commands as `answer` says. What `meanwhile` came to, where the step stands
- * after, how many the look gave back to offer or to say it couldn't confirm,
- * and whether it's still to be offered.
+ * commands as `answer` says, or, `between` the writes that put back a
+ * message sent once more that never left, as soon as the first is done. The
+ * step was left as may have got there for `reason`. What `meanwhile` came to,
+ * where the step stands after, how many the look gave back to offer or to
+ * say it couldn't confirm, and whether it's still to be offered.
  */
 const lookedLate = (
   meanwhile: (hands: Hands.Hands["Type"], commandId: string) => Effect.Effect<string>,
-  { answer = takes(), fails = false }: { readonly answer?: Answer; readonly fails?: boolean } = {},
+  {
+    answer = takes(),
+    fails = false,
+    reason,
+    between = false,
+  }: { readonly answer?: Answer; readonly fails?: boolean; readonly reason?: string; readonly between?: boolean } = {},
 ) =>
   run(
     Effect.gen(function* () {
       yield* TestClock.setTime(now)
-      const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
+      const reading = yield* Deferred.make<void>()
+      const done = yield* Deferred.make<void>()
+      let looking: Fiber.Fiber<Hands.Reconciled> | undefined
+      const kept = Ledger.fromStore(yield* Store.make(":memory:"))
+      const ledger: Ledger.Ledger["Type"] = {
+        ...kept,
+        settle: (commandId, state, details) =>
+          Effect.tap(kept.settle(commandId, state, details), () =>
+            between && details?.from?.includes("abandoned") === true && looking !== undefined
+              ? Effect.zipRight(Deferred.succeed(done, undefined), Fiber.await(looking))
+              : Effect.void,
+          ),
+      }
       const { commandId } = yield* ledger.prepare({
         utterance: "u1",
         step: 0,
@@ -200,10 +219,8 @@ const lookedLate = (
         body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
         message: true,
       })
-      yield* ledger.settle(commandId, "unknown")
+      yield* ledger.settle(commandId, "unknown", reason === undefined ? {} : { reason })
       const bounded: Bounded = { runs: [], messages: [], turnItems: [] }
-      const reading = yield* Deferred.make<void>()
-      const done = yield* Deferred.make<void>()
       let reads = 0
       const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
         api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
@@ -219,11 +236,12 @@ const lookedLate = (
       })
       const actions = T3Actions.make(reach)
       const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions) } })
-      const looking = yield* Effect.fork(back.reconcile)
+      const look = yield* Effect.fork(back.reconcile)
+      looking = look
       yield* Deferred.await(reading)
       const came = yield* meanwhile(back, commandId)
       yield* Deferred.succeed(done, undefined)
-      const { undelivered, unconfirmed } = yield* Fiber.join(looking)
+      const { undelivered, unconfirmed } = yield* Fiber.join(look)
       return {
         meanwhile: came,
         state: Option.map(yield* ledger.get(commandId), ({ state }) => state),
@@ -944,6 +962,14 @@ describe("Hands", () => {
     // Nor is a look that failed said as one that couldn't confirm it, once what came of it was said already.
     expect(await lookedLate(no, { fails: true })).toEqual({ meanwhile: "Left", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
     expect(await lookedLate(yes, { fails: true })).toEqual({ meanwhile: "Done", state: Option.some("sent"), undelivered: 0, unconfirmed: 0, offered: false })
+  })
+
+  test("a restart's look that comes back as a yes to sending it again is put back, never having left, for the same reason as the first time, never offers it again", async () => {
+    const yes = (hands: Hands.Hands["Type"], commandId: string) => Effect.map(hands.again(commandId), ({ _tag }) => _tag)
+    // T3 Code went offline as the first try was sent, and was still when sending it again, which never left yapd.
+    const offline = { answer: () => Effect.fail(new Server.Trouble({ reason: "T3 Code is offline." })), reason: "T3 Code is offline.", between: true }
+    expect(await lookedLate(yes, offline)).toEqual({ meanwhile: "NotSent", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    expect(await lookedLate(yes, { ...offline, fails: true })).toEqual({ meanwhile: "NotSent", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
   })
 
   test("a different message to the same thread goes straight through", async () => {

@@ -59,6 +59,9 @@ export const digest = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}
 /** How the reason of a step that's never to be offered again on its own starts. */
 const unoffered = "Not to be offered again"
 
+/** The reason of a step that's never to be offered again on its own, for why, as `leave` notes it. */
+export const leftBe = (why: string) => `${unoffered}: ${why.charAt(0).toLowerCase()}${why.slice(1)}`
+
 /** The reason of a message he took back while it was still in the queue, which never reached the thread. */
 export const withdrawn = "Withdrawn."
 
@@ -247,7 +250,7 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
       store.transaction((database: Database) => {
         database
           .query("update actions set reason = ?, settled_at = ? where command_id = ? and state in ('prepared', 'failed', 'unknown')")
-          .run(`${unoffered}: ${why.charAt(0).toLowerCase()}${why.slice(1)}`, at, commandId)
+          .run(leftBe(why), at, commandId)
       }),
     ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note that ${commandId} is left be`, error))),
   resending: (commandId) =>
