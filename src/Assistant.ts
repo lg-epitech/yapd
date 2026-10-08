@@ -339,7 +339,7 @@ export const make = (options: {
      * request put up and no other. Each is let go of as its line is said, and
      * all of them once yapd is turned off, which drops what's waiting.
      */
-    const waiting = new Set<{ readonly request: string; down: boolean }>()
+    const cards = new Set<{ readonly request: string; down: boolean }>()
     /**
      * What yapd said last of its own accord, which "it" may mean, when it
      * started saying it, how many times yapd had been turned on or off then,
@@ -1440,7 +1440,7 @@ export const make = (options: {
         case "show":
           // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
           return Effect.flatMap(options.show.present(decision.how, target, thought.situation, said), ({ say, card, about, hides, unseen }) => {
-            if (hides === true) for (const kept of waiting) if (at.step === 0 || kept.request === thought.utterance.id) kept.down = true
+            if (hides === true) for (const kept of cards) if (at.step === 0 || kept.request === thought.utterance.id) kept.down = true
             return onward(
               thought,
               {
@@ -1630,7 +1630,7 @@ export const make = (options: {
         const line = subject._tag === "Nothing" ? outcome.say : subject.said
         // Taken down by voice before it's said, like by the rest of its request said on its own, its card never goes up.
         const kept = card === undefined ? undefined : { request: utterance.id, down: false }
-        if (kept !== undefined) waiting.add(kept)
+        if (kept !== undefined) cards.add(kept)
         // Told while an app was there to show its card, it's said as it is with none watching if none is by the time it's played, or the card won't go up.
         const { unseen } = outcome
         const off = Effect.map(options.show.watched, (watched) => !watched || kept?.down === true)
@@ -1660,7 +1660,7 @@ export const make = (options: {
               Effect.zipRight(
                 Effect.suspend(() => {
                   if (kept === undefined || card === undefined) return Effect.void
-                  waiting.delete(kept)
+                  cards.delete(kept)
                   return kept.down ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns }))
                 }),
               ),
@@ -1917,7 +1917,7 @@ export const make = (options: {
       open: Effect.map(Clock.currentTimeMillis, current),
       drop: Effect.gen(function* () {
         dropped = (yield* options.power).turns
-        waiting.clear()
+        cards.clear()
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
         // No answer is on its way any more, and the dictations they were for are dropped too.
         const kept = [...presses.values()]
