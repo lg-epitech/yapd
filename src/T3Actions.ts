@@ -21,7 +21,14 @@ const Question = Schema.Struct({
   header: Schema.optionalWith(Schema.String, { default: () => "" }),
   question: Schema.String,
   options: Schema.optionalWith(
-    Schema.Array(Schema.Struct({ label: Schema.String, description: Schema.optionalWith(Schema.String, { default: () => "" }) })),
+    Schema.Array(
+      Schema.Struct({
+        label: Schema.String,
+        description: Schema.optionalWith(Schema.String, { default: () => "" }),
+        /** What the answer carries when it isn't the label, as some forms have. */
+        value: Schema.optional(Schema.String),
+      }),
+    ),
     { default: () => [] },
   ),
   multiSelect: Schema.optionalWith(Schema.Boolean, { default: () => false }),
@@ -73,6 +80,9 @@ export type Request =
       readonly id: string
       readonly questions: ReadonlyArray<typeof Question.Type>
     }
+
+/** What answering with an option sends: its value when it has one, which isn't always its label. */
+export const choice = (option: { readonly label: string; readonly value?: string | undefined }) => option.value ?? option.label
 
 /** Where a thread got to: its latest messages, and what it waits on, if anything. */
 export interface Detail {

@@ -59,6 +59,13 @@ describe("T3Actions", () => {
     )
     expect(Option.map(T3Actions.request([question], "r2"), (found) => found._tag)).toEqual(Option.some("Question"))
     expect(T3Actions.request([approval], "other")).toEqual(Option.none())
+    // An option whose answer isn't its label answers with its value.
+    const form = T3Actions.request(
+      [{ ...question, questions: [{ id: "env", question: "Which environment?", options: [{ label: "Production", value: "prod" }, { label: "Staging" }] }] }],
+      "r2",
+    )
+    const options = Option.match(form, { onNone: () => [], onSome: (found) => (found._tag === "Question" ? found.questions[0]!.options : []) })
+    expect(options.map(T3Actions.choice)).toEqual(["prod", "Staging"])
     // An approval that names no decisions takes the usual ones.
     const bare = T3Actions.request([{ ...approval, options: undefined }], "r1")
     expect(Option.map(bare, (found) => (found._tag === "Approval" ? found.decisions.map(({ decision }) => decision) : []))).toEqual(
