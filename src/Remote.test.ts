@@ -95,7 +95,7 @@ describe("Remote", () => {
     expect(sent).toEqual(["Merge it."])
 
     expect(await Effect.runPromise(Remote.serve(Relay.make([]), input))).toBe(
-      JSON.stringify({ reason: "I can't reach that session from here." }),
+      JSON.stringify({ reason: "I can't reach that work from here." }),
     )
     expect(JSON.parse(await Effect.runPromise(Remote.serve(sending, "{}")))).toHaveProperty("reason")
   })

@@ -72,6 +72,10 @@ export const make = Effect.gen(function* () {
   const generations = new WeakMap<Conversation.Update, { readonly chain: object }>()
   /** When yapd was last turned on as each update started being read, so what comes of it later can tell. */
   const readSince = new WeakMap<Conversation.Update, number>()
+  /** Each update's entry in the journal, to note there once the user has heard it. */
+  const rows = new WeakMap<Conversation.Update, number>()
+  /** The update being read, or the last one that was, and when, which is what "it" means to the user. */
+  let latest: { readonly update: Conversation.Update; at: number; playing: boolean } | undefined
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   interface FollowUp {
     readonly update: Conversation.Update
@@ -129,7 +133,14 @@ export const make = Effect.gen(function* () {
   const late = (update: Conversation.Update, spoken: string, failed: boolean) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
       tell(
-        { id: `late:${crypto.randomUUID()}`, priority: failed ? "needs-you" : "done", spoken: introduce(update.project, spoken), at, stale: Effect.succeed(false) },
+        {
+          id: `late:${crypto.randomUUID()}`,
+          kind: "notice",
+          priority: failed ? "needs-you" : "done",
+          spoken: introduce(update.project, spoken),
+          at,
+          stale: Effect.succeed(false),
+        },
         readSince.get(update),
       ),
     )
@@ -169,7 +180,7 @@ export const make = Effect.gen(function* () {
       yield* journal.write({
         at: yield* Clock.currentTimeMillis,
         kind: "sent",
-        machine: pending.thread.origin.host,
+        host: pending.thread.origin.host,
         project: update.project,
         thread: session,
         directory: pending.thread.cwd,
@@ -216,7 +227,7 @@ export const make = Effect.gen(function* () {
     const channel = followed.get(session)
     followed.delete(session)
     for (const queued of channel?.queued ?? []) {
-      yield* Effect.forkIn(late(queued.update, `The session moved on, so I didn't send the queued message "${queued.message}".`, true), lifetime)
+      yield* Effect.forkIn(late(queued.update, `That work moved on, so I didn't send the queued message "${queued.message}".`, true), lifetime)
     }
   })
 
@@ -225,7 +236,7 @@ export const make = Effect.gen(function* () {
     moved: (update) => Effect.sync(() => moved(update)),
     send: (update, message) => Effect.gen(function* () {
       const pending = yield* Effect.gen(function* () {
-        if (moved(update)) return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
+        if (moved(update)) return yield* new RelayError({ reason: Conversation.movedOn })
         const { on } = yield* switched
         if (!on) return yield* new RelayError({ reason: "yapd is off, so I didn't send it." })
         const session = update.session
@@ -289,10 +300,10 @@ export const make = Effect.gen(function* () {
         yield* release(hook)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
       }
-      yield* journal.write({
+      const row = yield* journal.write({
         at: arrivedAt,
         kind: "update",
-        machine: thread.origin.host,
+        host: thread.origin.host,
         project,
         thread: session,
         directory: thread.cwd,
@@ -300,6 +311,7 @@ export const make = Effect.gen(function* () {
         text: turn.message,
         detail: { priority, ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }) },
       })
+      if (Option.isSome(row)) rows.set(update, row.value)
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
       workers.withPermits(1),
@@ -420,7 +432,9 @@ export const make = Effect.gen(function* () {
   /**
    * Puts back what a dictation cut off, to be said again from the start: an
    * update unless the session has moved on or been answered since, even by a
-   * follow-up that's still on its way, and a notice unless it has been dealt with.
+   * follow-up that's still on its way, and a notice unless it has been dealt
+   * with. Never a question yapd asked: what's dictated is the answer to it, or
+   * takes its place.
    */
   const keep = (ready: Inbox.Entry, dealtWith: boolean, turns: number) =>
     Effect.gen(function* () {
@@ -430,7 +444,7 @@ export const make = Effect.gen(function* () {
           ? activity.get(ready.update.session) !== generations.get(ready.update) ||
             followed.get(ready.update.session)?.current !== undefined ||
             (yield* conversation.sending(ready.update.session, ready.update))
-          : dealtWith
+          : dealtWith || ready.notice.open !== undefined
       if (over) return false
       // Not if yapd was turned off meanwhile, which dropped everything waiting.
       return yield* STM.commit(
@@ -526,9 +540,12 @@ export const make = Effect.gen(function* () {
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
+      latest = { update: ready.update, at: yield* Clock.currentTimeMillis, playing: true }
     }
     let kept = false
     let dealtWith = false
+    /** Played to the end, or answered: the user heard it. */
+    let through = false
     const reading =
       "update" in ready
         ? conversation.converse(ready.update)
@@ -539,6 +556,9 @@ export const make = Effect.gen(function* () {
             }),
           )
     yield* reading.pipe(
+      Effect.tap(() => {
+        through = true
+      }),
       Effect.catchAllCause((cause) =>
         Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Could not speak update", cause),
       ),
@@ -567,6 +587,15 @@ export const make = Effect.gen(function* () {
         ),
       ),
       Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
+      Effect.ensuring(
+        Effect.gen(function* () {
+          if (!("update" in ready)) return
+          const at = yield* Clock.currentTimeMillis
+          if (latest?.update === ready.update) latest = { update: ready.update, at, playing: false }
+          const row = rows.get(ready.update)
+          if (through && row !== undefined) yield* journal.markHeard([row], at)
+        }),
+      ),
     )
     yield* Effect.sleep("400 millis")
   })
@@ -654,16 +683,11 @@ export const make = Effect.gen(function* () {
     recent: Effect.flatMap(Clock.currentTimeMillis, (now) =>
       journal.since(now - Recent.lifetime, { most: Recent.most, kinds: ["update", "started"] }),
     ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
-    /** Notes something yapd did itself, for the user to build on like they do on updates. */
-    note: (heard: Recent.Heard) =>
-      journal.write({
-        at: heard.at,
-        kind: heard.started === true ? "started" : "action",
-        machine: heard.host,
-        project: heard.project,
-        directory: heard.directory,
-        said: heard.spoken,
-        text: heard.message,
-      }),
+    /** Whether yapd is on, and how many times it was turned on or off, so what was heard before can tell. */
+    power: switched,
+    /** The update being read, or the last one the user heard, and when. */
+    lastHeard: Effect.sync(() => Option.fromNullable(latest)),
+    /** Something is about to be said, like an answer being worked out, so the speaker gets ready meanwhile. */
+    coming: soon,
   }
 })

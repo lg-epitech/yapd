@@ -96,7 +96,7 @@ const dictation = (
     )
     const context = yield* Layer.build(layer)
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).transcripts, (text) => Effect.sync(() => void transcripts.push(text))),
+      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ heard }) => Effect.sync(() => void transcripts.push(heard))),
     )
     const floor = Context.get(context, Floor.Floor)
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.

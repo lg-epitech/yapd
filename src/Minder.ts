@@ -205,7 +205,7 @@ export const makeStart = (
           closeSync(output)
         }
       },
-      catch: (cause) => new MindError({ reason: "I couldn't start anything to mind the session.", cause }),
+      catch: (cause) => new MindError({ reason: "I couldn't start anything to look after that work.", cause }),
     })
     const named = Sessions.read(session.launch, root).pipe(
       Effect.flatMap(Option.filter((found) => found.state !== "starting")),
@@ -221,7 +221,7 @@ export const makeStart = (
     if (found.state === "unstarted") return yield* new MindError({ reason: found.error ?? "It stopped before it started." })
     return found
   }).pipe(
-    Effect.catchTag("StorageError", (cause) => Effect.fail(new MindError({ reason: `I couldn't save the session record at ${cause.path}.`, cause }))),
+    Effect.catchTag("StorageError", (cause) => Effect.fail(new MindError({ reason: "I couldn't save my record of that work.", cause }))),
   )
 
 export const start: Start = makeStart()

@@ -75,7 +75,7 @@ export const prompt = ({ project, turn, needsYou, lines, heard }: Interruption, 
   ].join("\n\n")
 
 /** What's said, as it's compared: lowercase words, without the "um" and "sir" around them. */
-const gist = (heard: string) =>
+export const gist = (heard: string) =>
   heard
     .toLowerCase()
     .replace(/[^\p{L}\p{N}' ]+/gu, " ")
@@ -84,7 +84,7 @@ const gist = (heard: string) =>
     .join(" ")
 
 /** Hearing enough, however it's put. Said to any update, it never goes to the agent. */
-const enough = new Set([
+export const enough: ReadonlySet<string> = new Set([
   "stop", "quiet", "be quiet", "shut up", "silence", "mute", "skip", "skip it", "next", "enough", "that's enough", "never mind",
 ])
 
@@ -96,7 +96,7 @@ const noted = new Set([
 ])
 
 /** Going ahead with what was asked. Only ever taken as that after a question. */
-const agreed = new Set([
+export const agreed: ReadonlySet<string> = new Set([
   "yes", "yeah", "yep", "yup", "sure", "go ahead", "do it", "yes do it", "yes go ahead", "go for it", "yes go for it",
   "absolutely", "of course", "yes of course", "yeah do it", "yeah go ahead", "sure go ahead", "ok do it", "okay do it",
   "ok go ahead", "okay go ahead", "yes yes", "yeah yeah", "sounds good do it", "sounds good go ahead", "yes that's fine",

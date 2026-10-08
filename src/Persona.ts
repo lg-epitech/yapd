@@ -18,6 +18,12 @@ export const Lines = Schema.Struct({
   misheard: Schema.String,
   /** Something is being looked into before it can be answered. */
   checking: Schema.String,
+  /** A question yapd asked is left unanswered for good. */
+  leaving: Schema.String,
+  /** What the user meant could be any of several threads, and asking wouldn't help. */
+  cantTell: Schema.String,
+  /** How the user is addressed, like "sir", or nothing. Lines made up on the spot use it too. */
+  address: Schema.String,
 })
 export type Lines = typeof Lines.Type
 
@@ -26,7 +32,16 @@ export const plain: Lines = {
   queued: "Noted. I'll get to it once the current task is done.",
   misheard: "Sorry, I didn't catch that.",
   checking: "One moment.",
+  leaving: "I'll leave that one.",
+  cantTell: "I couldn't tell which one you meant.",
+  address: "",
 }
+
+/** The lines that are said on their own, to render ahead. */
+export const sayable = (lines: Lines) => [lines.onIt, lines.queued, lines.misheard, lines.checking, lines.leaving, lines.cantTell]
+
+/** ", sir" before a line's last mark, when the user is addressed at all. */
+export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
 
 export class Persona extends Context.Tag("yapd/Persona")<
   Persona,
@@ -45,6 +60,9 @@ export const prompt = (style: string) =>
     `- "queued": that you'll do it as soon as the current task is done, like "${plain.queued}"`,
     `- "misheard": that you didn't catch what they said, like "${plain.misheard}"`,
     `- "checking": that you're looking into something before answering, like "${plain.checking}"`,
+    `- "leaving": that you'll let a question you asked go, since it wasn't answered, like "${plain.leaving}"`,
+    `- "cantTell": that you couldn't tell which of their threads they meant, like "${plain.cantTell}"`,
+    `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")
 
 const stored = Schema.parseJson(Schema.Struct({ style: Schema.String, lines: Lines }))
@@ -57,7 +75,7 @@ export const layer = Layer.scoped(
     const warmth = yield* Warmth
     const ref = yield* SubscriptionRef.make(plain)
     if (Option.isNone(style)) {
-      yield* Effect.forkScoped(warmth.warm(Object.values(plain)))
+      yield* Effect.forkScoped(warmth.warm(sayable(plain)))
       return { lines: SubscriptionRef.get(ref) }
     }
     const settings = yield* Settings.Settings
@@ -74,13 +92,13 @@ export const layer = Layer.scoped(
           Effect.tap((lines) =>
             settings.write("persona", JSON.stringify({ style: style.value, lines })).pipe(Effect.ignore),
           ),
-          Effect.tap((lines) => Effect.logInfo(`Wrote my usual lines in your style: ${Object.values(lines).join(" | ")}`)),
+          Effect.tap((lines) => Effect.logInfo(`Wrote my usual lines in your style: ${sayable(lines).join(" | ")}`)),
         ),
     })
     // In the background, so nothing waits on it, and the plain lines stand in meanwhile.
     yield* written.pipe(
       Effect.tap((lines) => SubscriptionRef.set(ref, lines)),
-      Effect.flatMap((lines) => warmth.warm(Object.values(lines))),
+      Effect.flatMap((lines) => warmth.warm(sayable(lines))),
       Effect.catchAll((error) => Effect.logWarning("Could not write my usual lines in your style, so they stay plain", error)),
       Effect.forkScoped,
     )

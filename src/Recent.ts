@@ -18,19 +18,10 @@ export interface Heard {
   readonly at: number
 }
 
-export type Recent = ReadonlyArray<Heard>
-
-export const empty: Recent = []
-
 /** How many are kept. */
 export const most = 6
 /** Older than this, the user would say more than "what it just finished". */
 export const lifetime = 3 * 60 * 60_000
-
-/** Newest first. */
-export const add = (recent: Recent, heard: Heard): Recent => [heard, ...recent].slice(0, most)
-
-export const since = (recent: Recent, now: number): Recent => recent.filter(({ at }) => now - at < lifetime)
 
 /** What the journal kept of it. */
 export const fromJournal = (entry: Journal.Kept): Heard => ({

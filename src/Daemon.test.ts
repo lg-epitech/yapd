@@ -153,10 +153,12 @@ const make = (says?: string, options: {
       )
       yield* flush
     })
-  /** Something yapd has to say for itself, which as a question records how it went. */
+  /** Something yapd has to say for itself, which as a question, the one open, records how it went. */
   const notice = (id: string, spoken: string, options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean } = {}) =>
     tell({
       id,
+      kind: options.question === undefined ? "notice" : "question",
+      ...(options.question === undefined ? {} : { open: `open-${id}` }),
       priority: options.question !== undefined || options.needsYou === true ? "needs-you" : "done",
       spoken,
       at: 0,
@@ -442,7 +444,7 @@ describe("Daemon", () => {
       }),
     )
     expect(deliveries).toBe(0)
-    expect(result).toBe("That session has moved on since, so I didn't send it.")
+    expect(result).toBe("You've moved on from that since, so I held it back.")
   })
 
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {
@@ -491,25 +493,26 @@ describe("Daemon", () => {
     expect(result.asked).toEqual(["question unanswered"])
   })
 
-  test("asks a question again after the dictation that cut it off, without counting it unanswered", async () => {
+  test("a clarification cut off by a dictation is not put back", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { notice, wait, dictate, played } = yield* daemon
         const asked: Array<string> = []
-        yield* notice("question", "Which project is the loader fix for?", { question: asked })
+        yield* notice("question", "The Tezos migration or the Mina tickets, sir?", { question: asked })
+        yield* notice("started", "Started in yapd, on Fable, in a worktree.")
         yield* wait(2)
         const dictation = yield* dictate
         yield* wait(30)
-        const during = { played: [...played], asked: [...asked] }
         yield* Scope.close(dictation, Exit.void)
         yield* wait(0)
         yield* wait(11)
-        return { during, played: [...played], asked }
+        yield* wait(11)
+        return { played: [...played], asked }
       }),
     )
-    expect(result.during).toEqual({ played: ["Which project is the loader fix for?"], asked: [] })
-    expect(result.played).toEqual(["Which project is the loader fix for?", "Which project is the loader fix for?"])
-    expect(result.asked).toEqual(["question unanswered"])
+    // What was dictated answers it or takes its place, so it's never asked again, nor counted unanswered.
+    expect(result.played).toEqual(["The Tezos migration or the Mina tickets, sir?", "Started in yapd, on Fable, in a worktree."])
+    expect(result.asked).toEqual([])
   })
 
   test("turned off, stops at once, drops what waits and lets its hooks go, and never says what finishes meanwhile", async () => {
@@ -576,7 +579,7 @@ describe("Daemon", () => {
       }),
     )
     expect(deliveries).toBe(0)
-    expect(result).toBe("That session has moved on since, so I didn't send it.")
+    expect(result).toBe("You've moved on from that since, so I held it back.")
   })
 
   test("stops what it's reading when turned off, even if it's on again before the reading hears of it", async () => {
@@ -762,7 +765,7 @@ describe("Daemon", () => {
       } else {
         if (ending === "takeover") {
           yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "a", cwd: "/tmp", prompt: "Instead of 'Merge it.', start unrelated work." }, { project: "yapd" }, false)
-          yield* nextEvent("Ready: yapd. The session moved on")
+          yield* nextEvent("Ready: yapd. That work moved on")
         }
         if (ending === "off") {
           yield* power(false)
@@ -782,7 +785,7 @@ describe("Daemon", () => {
     expect(result.queued).toBe("Noted. I'll get to it once the current task is done.")
     expect(result.dispatches).toBe(ending === "failure" ? 2 : 1)
     expect(result.sent).toEqual(ending === "failure" ? ["a sent: Deploy it."] : ["a sent: Merge it."])
-    if (ending === "empty") expect(result.retry).toBe("That session has moved on since, so I didn't send it.")
+    if (ending === "empty") expect(result.retry).toBe("You've moved on from that since, so I held it back.")
   })
 
   test.each([false, true])("settles the queued Claude hook after a trivial update, turned off before dispatch: %s", async (off) => {

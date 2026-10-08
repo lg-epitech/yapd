@@ -55,8 +55,8 @@ export class ThreadsError extends Data.TaggedError("ThreadsError")<{ readonly re
 export class Threads extends Context.Tag("yapd/Threads")<
   Threads,
   {
-    /** Ranked shortlist from memory only: no listing, no SSH. */
-    readonly desk: (focus: Option.Option<Ref>, pending: ReadonlyArray<Ref>, most: number) => Effect.Effect<Desk>
+    /** Ranked shortlist from memory only: no listing, no SSH. `found` are threads a search just turned up. */
+    readonly desk: (focus: Option.Option<Ref>, pending: ReadonlyArray<Ref>, most: number, found?: ReadonlyArray<Ref>) => Effect.Effect<Desk>
     readonly find: (ref: Ref) => Effect.Effect<Option.Option<T3Live.Thread>>
     readonly changes: Stream.Stream<{ readonly machine: string; readonly change: T3Live.Change }>
     readonly actions: (machine: string) => Option.Option<T3Actions.Actions>
@@ -151,13 +151,16 @@ interface Started {
  * The desk: every thread in order of how likely the user means it, an
  * ordering that never leaves one out, cut to the `most` first. The question's
  * candidates come first, so "the first" is t1, then what "it" means, then what
- * waits on the user, what's running, what failed, and on down to the newest.
+ * a search for their words found, what waits on the user, what's running,
+ * what failed, and on down to the newest.
  */
 export const shortlist = (input: {
   readonly machine: string
   readonly view: T3Live.View
   readonly focus: Option.Option<Ref>
   readonly pending: ReadonlyArray<Ref>
+  /** Threads whose messages have the words the user said. */
+  readonly found?: ReadonlyArray<Ref>
   readonly most: number
   readonly started: ReadonlyMap<string, Started>
   /** The latest line yapd said about each thread, by id. */
@@ -170,6 +173,7 @@ export const shortlist = (input: {
     const candidate = pending.findIndex((ref) => ref.machine === machine && ref.id === thread.id)
     if (candidate >= 0) return candidate / 100
     if (Option.isSome(focus) && focus.value.machine === machine && focus.value.id === thread.id) return 1
+    if ((input.found ?? []).some((ref) => ref.machine === machine && ref.id === thread.id)) return 1.5
     if (doing === "approval" || doing === "question") return 2
     if (doing === "running" || doing === "finishing" || doing === "queued") return 3
     const settled = thread.settledOverride === "settled"
@@ -288,7 +292,7 @@ export const make = (options: {
     const refreshing = asking.withPermits(1)(Effect.flatMap(old, (old) => (old ? refresh : Effect.void)))
 
     return {
-      desk: (focus, pending, most) =>
+      desk: (focus, pending, most, found = []) =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis
           const away = options.others.map((other) => ({ machine: other, reason: `I can't see ${other}'s threads yet.` }))
@@ -300,7 +304,7 @@ export const make = (options: {
             return { threads: [], away: [{ machine, reason }, ...away] }
           }
           const [started, entries] = [yield* startedWork, yield* journal.since(now - days(7), { most: 500 })]
-          const threads = shortlist({ machine, view: view.value, focus, pending, most, started, said: latest(entries, machine), now })
+          const threads = shortlist({ machine, view: view.value, focus, pending, found, most, started, said: latest(entries, machine), now })
           return { threads, away }
         }),
       find: (ref) =>

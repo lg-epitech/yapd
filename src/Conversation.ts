@@ -84,6 +84,9 @@ export const unfinished = (heard: string) => /(\.\.\.|…|,)$/.test(heard) || da
 export const together = (before: string, after: string) =>
   after === "" ? before : `${before.replace(/\s*(\.\.\.|…)$/, "")} ${after}`
 
+/** What's said of a reply held back because the work it answers has been given something else since. */
+export const movedOn = "You've moved on from that since, so I held it back."
+
 /** The part of `text` heard in `fraction` of its audio, marked when it's cut short. */
 export const cut = (text: string, fraction: number) => {
   if (fraction >= 1) return text
@@ -388,9 +391,7 @@ export const make = (options: {
     const follow = (update: Update, message: string) =>
       Effect.gen(function* () {
         // Typing into a session that started something else would steer it, or answer one of its prompts.
-        if (yield* options.moved(update)) {
-          return yield* new RelayError({ reason: "That session has moved on since, so I didn't send it." })
-        }
+        if (yield* options.moved(update)) return yield* new RelayError({ reason: movedOn })
         const text = plain(message)
         const result = yield* options.send(update, text)
         yield* Effect.logInfo(`${result === "queued" ? "Queued" : "Sent"}: ${text}`)
@@ -456,7 +457,7 @@ export const make = (options: {
               yield* journal.write({
                 at: yield* Clock.currentTimeMillis,
                 kind: "reply",
-                machine: update.thread.origin.host,
+                host: update.thread.origin.host,
                 project: update.project,
                 thread: update.session,
                 directory: update.thread.cwd,

@@ -27,6 +27,13 @@ export interface Replay {
  */
 export interface Notice {
   readonly id: string
+  /**
+   * An answer to what the user asked, or a question about it, which they're
+   * waiting for, so it goes before anything else; or a notice of yapd's own.
+   */
+  readonly kind: "answer" | "question" | "notice"
+  /** The open question it asks, which is never asked again once it's cut off. */
+  readonly open?: string
   readonly priority: Exclude<Priority, "trivial">
   readonly spoken: string
   /** When what it's about came up, like when the user sent the dictation, which is where it goes among updates. */
@@ -66,17 +73,15 @@ export const remove = (inbox: Inbox, session: string): Inbox => {
   return next
 }
 
-const rank = { "needs-you": 0, done: 1 } as const
+/** What the user asked for first, then what needs them, then the rest. */
+const rank = (entry: Entry) =>
+  "notice" in entry && entry.notice.kind !== "notice" ? 0 : entry.priority === "needs-you" ? 1 : 2
 
-/** What to say next: anything that needs the user first, then oldest first. */
+/** What to say next: what the user asked for, then anything that needs them, then oldest first. */
 export const next = (inbox: Inbox): Entry | undefined => {
   let best: Entry | undefined
   for (const ready of inbox.values()) {
-    if (
-      best === undefined ||
-      rank[ready.priority] < rank[best.priority] ||
-      (rank[ready.priority] === rank[best.priority] && ready.arrivedAt < best.arrivedAt)
-    ) {
+    if (best === undefined || rank(ready) < rank(best) || (rank(ready) === rank(best) && ready.arrivedAt < best.arrivedAt)) {
       best = ready
     }
   }
