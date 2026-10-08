@@ -230,4 +230,29 @@ describe("Server", () => {
       expect(response.status).toBe(403)
     })))
   })
+
+  test("turns away what a web page elsewhere sends, as a browser does without asking first, and takes the rest", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api, watching } = yield* stateful
+      const typed: Array<string> = []
+      const server = yield* Server.serve(0, { ...api, utter: (text) => Effect.zipRight(Effect.sync(() => typed.push(text)), api.utter(text)) })
+      const url = `http://127.0.0.1:${server.port}`
+      // What `fetch(url, {method: "POST", mode: "no-cors", body})` sends from a page: a simple request, so nothing asks yapd first.
+      const utter = (headers: Record<string, string>) =>
+        Effect.promise(() => fetch(`${url}/utterances`, { method: "POST", headers: { "content-type": "text/plain;charset=UTF-8", ...headers }, body: '{"text": "Open that PR."}' }))
+      for (const origin of ["https://evil.example", "null", "http://127.0.0.1.evil.example:4747"]) {
+        expect((yield* utter({ origin })).status).toBe(403)
+      }
+      expect((yield* utter({ "sec-fetch-site": "cross-site" })).status).toBe(403)
+      // Like an image or a frame that follows the state for as long as the page is open, which would pass for an app showing cards.
+      const followed = yield* Effect.promise(() => fetch(`${url}/state/stream?cards`, { headers: { "sec-fetch-site": "cross-site" } }))
+      expect(followed.status).toBe(403)
+      expect(watching()).toBe(0)
+      expect(typed).toEqual([])
+      // The hooks, curl and the menu bar app say nowhere, and a page on this machine is as much here as they are.
+      expect((yield* utter({})).status).toBe(202)
+      expect((yield* utter({ origin: "http://localhost:5173" })).status).toBe(202)
+      expect(typed).toEqual(["Open that PR.", "Open that PR."])
+    })))
+  })
 })

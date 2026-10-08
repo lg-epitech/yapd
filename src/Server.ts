@@ -149,6 +149,21 @@ const decoded = Option.liftThrowable(decodeURIComponent)
 /** Names for this machine, so a web page can't reach the API through a DNS name of its own that points here. */
 const local = new Set(["127.0.0.1", "localhost", "[::1]"])
 
+/**
+ * Whether a browser sent this from a web page that isn't on this machine.
+ * Addressed here, a page from anywhere can still send some requests without
+ * asking first, like a form's POST, which could have yapd say, start or open
+ * things. Browsers say where those come from, and nothing yapd trusts does:
+ * not the hooks, curl or the menu bar app. A sandboxed page or a file says
+ * "null", which is no page here either.
+ */
+const elsewhere = (request: Request) => {
+  const origin = request.headers.get("origin")
+  if (origin !== null) return !(URL.canParse(origin) && local.has(new URL(origin).hostname))
+  // A request with no origin, like an image's, still says it's from another site.
+  return request.headers.get("sec-fetch-site") === "cross-site"
+}
+
 const failed = (what: string) => (error: unknown) =>
   Effect.logWarning(`Could not ${what}`, error).pipe(Effect.as(new Response(null, { status: 500 })))
 
@@ -163,7 +178,7 @@ export const serve = (port: number, api: Api) =>
     const receive = (request: Request, server: Bun.Server<undefined>) =>
       Effect.gen(function* () {
         const url = new URL(request.url)
-        if (!local.has(url.hostname)) return new Response(null, { status: 403 })
+        if (!local.has(url.hostname) || elsewhere(request)) return new Response(null, { status: 403 })
         const route = `${request.method} ${url.pathname}`
         if (route === "GET /health") return new Response("ok")
         if (route === "POST /events") return yield* event(request, url, server)
