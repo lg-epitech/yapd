@@ -278,6 +278,7 @@ const run = Effect.gen(function* () {
               usage: Option.none(),
               second: Option.none(),
               asked: [],
+              acted: Option.none(),
               now,
             }
             const began = Date.now()

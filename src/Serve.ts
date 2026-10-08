@@ -1,4 +1,4 @@
-import { Clock, Effect, Layer, Logger, Option, Stream } from "effect"
+import { Clock, Effect, Layer, Logger, Option, Schedule, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
@@ -12,7 +12,9 @@ import * as Daemon from "./Daemon.ts"
 import { Dictation, WhisperDictation } from "./Dictation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
+import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
+import * as Ledger from "./Ledger.ts"
 import { machines } from "./Machines.ts"
 import { ProviderModel } from "./Model.ts"
 import * as Persona from "./Persona.ts"
@@ -61,34 +63,46 @@ const Relays = Layer.effect(
 
 /** How long the journal is kept: a year of it is about forty thousand entries. */
 const remembered = 365 * 24 * 60 * 60_000
+/** How long what yapd did to threads is kept. */
+const done = 90 * 24 * 60 * 60_000
+/** How long a restart waits for T3 Code to catch up before it looks at what never said what came of it, which is too old to look at by then. */
+const catchingUp = "15 minutes"
 
 export const serve = Effect.gen(function* () {
   const daemon = yield* Daemon.make
   const preferences = yield* Preferences.path
   const everywhere = yield* machines
   const journal = yield* Journal.Journal
-  yield* Effect.forkScoped(Effect.flatMap(Clock.currentTimeMillis, (now) => journal.prune(now - remembered)))
+  const ledger = yield* Ledger.Ledger
+  yield* Effect.forkScoped(
+    Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.zipRight(journal.prune(now - remembered), ledger.prune(now - done))),
+  )
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),
     recent: daemon.recent,
     expect: (yield* Vocabulary).expect,
+    ledger,
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
   const token = yield* Config.t3codeToken
+  const live = yield* T3Live.T3Live
   const threads = yield* Threads.make({
     // As the machine is called when yapd starts, which is what its threads are known by while it runs.
     machine: everywhere.find(({ here }) => here)?.name ?? hostname(),
-    live: yield* T3Live.T3Live,
+    live,
     actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
     others: everywhere.filter(({ here }) => !here).map(({ name }) => name),
     journal,
     store: yield* Store.Store,
   })
+  const hands = Hands.make({ threads, ledger })
   const assistant = yield* Assistant.make({
     threads,
     journal,
     drafts,
+    hands,
+    ledger,
     tell: daemon.tell,
     power: daemon.power,
     lastHeard: daemon.lastHeard,
@@ -96,6 +110,16 @@ export const serve = Effect.gen(function* () {
     awaiting: daemon.awaiting,
     queued: daemon.queued,
   })
+  // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
+  yield* Effect.forkScoped(
+    live.view.pipe(
+      Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
+      Effect.timeoutFail({ duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }),
+      Effect.zipRight(hands.reconcile),
+      Effect.flatMap(assistant.undelivered),
+      Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent before restarting: ${reason}`)),
+    ),
+  )
   const shortcut = yield* Shortcut
   const dictation = yield* Dictation
   const settings = yield* Settings.Settings
@@ -169,7 +193,7 @@ export const serve = Effect.gen(function* () {
       Relays,
     ).pipe(
       Layer.provideMerge(
-        Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer, T3Live.layer),
+        Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer, T3Live.layer, Ledger.layer),
       ),
       Layer.provideMerge(Layer.mergeAll(ClaudeCode.WaitingLive, Store.layer)),
     ),

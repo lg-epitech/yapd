@@ -67,6 +67,7 @@ const situation = (heard: string, overrides: Partial<Brain.Situation> = {}): Bra
   usage: Option.none(),
   second: Option.none(),
   asked: [],
+  acted: Option.none(),
   now,
   ...overrides,
 })
@@ -126,10 +127,21 @@ describe("Brain", () => {
   })
 
   test("a bare stop never stops a thread", () => {
-    for (const heard of ["Stop.", "Stop", "Quiet!", "Shut up.", "Enough."]) expect(Brain.fast(situation(heard), lines)?.act).toBe("dismiss")
-    // Even when the model takes it to mean the thread, stopping one isn't something yapd does yet.
-    const stopped = Brain.check(Brain.decision({ act: "stop", target: "t1" }), situation("Stop the Mina one."), lines)
-    expect(stopped).toEqual({ _tag: "Say", spoken: "I can't do that yet, sir." })
+    const busy: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
+    // Not even while he's hearing about one that's running.
+    for (const heard of ["Stop.", "Stop", "Quiet!", "Shut up.", "Enough."]) {
+      expect(Brain.fast(situation(heard), lines)?.act).toBe("dismiss")
+      expect(Brain.fast(situation(heard, { subject: busy }), lines)?.act).toBe("dismiss")
+    }
+    // Saying to stop the work does, at once, for the one he's hearing about.
+    const working = Brain.fast(situation("Stop working.", { subject: busy }), lines)
+    expect(working === undefined ? undefined : desk().threads.find(({ handle }) => handle === working.target)?.thread.title).toBe("Migrate Tezos Integration")
+    expect(working?.act).toBe("stop")
+    const idle = desk().threads.find(({ thread }) => thread.id === mina.id)!
+    expect(Brain.check(Brain.decision({ act: "stop", target: idle.handle }), situation("Stop the Mina one."), lines)).toEqual({
+      _tag: "Say",
+      spoken: "Open Mina SSV2 Bug Tickets isn't doing anything right now, sir.",
+    })
   })
 
   test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {

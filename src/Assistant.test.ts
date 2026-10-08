@@ -1,16 +1,18 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Layer, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Effect, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import * as Drafts from "./Drafts.ts"
+import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
+import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
-import type * as T3CodeServer from "./T3CodeServer.ts"
+import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 import { type Decision as Written, type Material, Writer } from "./Writer.ts"
@@ -107,25 +109,63 @@ const lines: Persona.Lines = {
   onIt: "On it, sir.",
   leaving: "I'll leave that one, sir.",
   cantTell: "I couldn't tell which one you meant, sir.",
+  stopped: "Stopped, sir.",
+  carrying: "Carrying on, sir.",
   address: "sir",
 }
 
-/** A T3 Code that answers reads, has nothing pending, and finds for each word what `search` says, in its order. */
-const transport = (search: (query: string) => ReadonlyArray<string>): Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> =>
-  Effect.succeed({
-    api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
-      Schema.decodeUnknown(schema)({
-        projection: { runs: [{ id: "run-3", status: "running", ordinal: 3 }], messages: [{ role: "assistant", text: "Comparing fee tables.", createdAt: "x" }], turnItems: [] },
-      }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
-    call: (<A, I>(method: string, params: { readonly query?: string }, schema: Schema.Schema<A, I>) =>
-      Schema.decodeUnknown(schema)(
-        method === "server.getConfig"
-          ? { providers: [] }
-          : {
-              matches: search(params.query ?? "").map((threadId) => ({ threadId, projectId: "p", source: "message", snippet: params.query, messageCreatedAt: null })),
-            },
-      ).pipe(Effect.orDie)) as T3CodeServer.Transport["call"],
+/** What a thread's bounded read gives, which what it's sent adds to. */
+interface Bounded {
+  runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string }>
+  messages: Array<{ id?: string; role: string; text: string; createdAt: string }>
+  turnItems: Array<Record<string, unknown>>
+}
+
+/** How T3 Code answers a command, by default taking it in as it does. */
+type Answer = (payload: Record<string, unknown>, bounded: Bounded) => Effect.Effect<unknown, T3CodeServer.Trouble | T3CodeServer.Refusal>
+
+/** Takes a message in as T3 Code does: into the run under way. */
+const takes: Answer = (payload, bounded) =>
+  Effect.sync(() => {
+    if (payload.type === "message.dispatch") {
+      bounded.messages.push({ id: String(payload.messageId), role: "user", text: String(payload.text), createdAt: "x" })
+      bounded.turnItems.push({ type: "user_message", messageId: payload.messageId, inputIntent: "steer" })
+    }
+    return { sequence: 1 }
   })
+
+/**
+ * A T3 Code that answers reads, has nothing pending, finds for each word what
+ * `search` says, in its order, and answers commands as `answer` says, keeping
+ * them in `dispatched`.
+ */
+const transport = (
+  search: (query: string) => ReadonlyArray<string>,
+  dispatched: Array<Record<string, unknown>> = [],
+  answer: () => Answer = () => takes,
+): Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> => {
+  const bounded: Bounded = {
+    runs: [{ id: "run-3", status: "running", ordinal: 3 }],
+    messages: [{ role: "assistant", text: "Comparing fee tables.", createdAt: "x" }],
+    turnItems: [],
+  }
+  return Effect.succeed({
+    api: (<A, I>(_: string, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
+    call: (<A, I>(method: string, params: Record<string, unknown> & { readonly query?: string }, schema: Schema.Schema<A, I>) =>
+      method === "orchestration.dispatchCommand"
+        ? Effect.suspend(() => {
+            dispatched.push(params)
+            return answer()(params, bounded)
+          }).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(Effect.orDie)))
+        : Schema.decodeUnknown(schema)(
+            method === "server.getConfig"
+              ? { providers: [] }
+              : {
+                  matches: search(params.query ?? "").map((threadId) => ({ threadId, projectId: "p", source: "message", snippet: params.query, messageCreatedAt: null })),
+                },
+          ).pipe(Effect.orDie)) as T3CodeServer.Transport["call"],
+  })
+}
 
 /** The handle the model was shown a thread by. */
 const handle = (situation: Brain.Situation, of: T3Live.Thread) => situation.desk.threads.find(({ ref }) => ref.id === of.id)?.handle ?? ""
@@ -151,12 +191,18 @@ const assistant = (
     readonly search?: (query: string) => ReadonlyArray<string>
     /** What's waiting to be said already, like an update a dictation cut off. */
     readonly queued?: ReadonlySet<string>
+    /** How T3 Code answers commands, when not as it usually does. */
+    readonly answer?: () => Answer
+    /** How long the model takes, in seconds. */
+    readonly thinking?: number
   } = {},
 ) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
     const store = yield* Store.make(":memory:")
     const journal = Journal.fromStore(store)
+    const ledger = Ledger.fromStore(store)
+    const dispatched: Array<Record<string, unknown>> = []
     // yapd started the last of them, and described it.
     yield* store.transaction((database) =>
       database.run("insert into threads (machine, id, prompt, dictated, description, started, at) values ('Rosie', ?, ?, ?, ?, 1, ?)", [
@@ -173,11 +219,12 @@ const assistant = (
         view: Effect.succeed(Option.some({ ...view, threads: new Map([...view.threads, ...(given.others ?? []).map((other) => [other.id, other] as const)]) })),
         changes: Stream.never,
       },
-      actions: Option.some(T3Actions.make(transport(given.search ?? (() => [])))),
+      actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer))),
       others: [],
       journal,
       store,
     })
+    const hands = Hands.make({ threads, ledger })
     const started: Array<Request> = []
     const said: Array<Notice> = []
     const seen: Array<Brain.Situation> = []
@@ -205,6 +252,7 @@ const assistant = (
         },
       ],
       rules: Effect.succeed(Option.none()),
+      ledger,
       recent: Effect.succeed([]),
     }).pipe(
       Effect.provideService(Writer, {
@@ -218,6 +266,8 @@ const assistant = (
       threads,
       journal,
       drafts,
+      hands,
+      ledger,
       // Said at once, as when nothing else is being said.
       tell: (notice) => Effect.zipRight(Effect.sync(() => void said.push(notice)), given.waiting === true ? Effect.void : (notice.saying ?? Effect.void)),
       power: Effect.sync(() => power),
@@ -234,7 +284,7 @@ const assistant = (
                 seen.push(situation)
                 const decided = model(situation)
                 return decided === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(decided)
-              }),
+              }).pipe(Effect.delay(`${given.thinking ?? 0} seconds`)),
           }),
           Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines) }),
         ),
@@ -245,6 +295,8 @@ const assistant = (
     const questions = () => said.filter(({ kind }) => kind === "question")
     return {
       ...made,
+      dispatched,
+      ledger,
       started,
       seen,
       journal,
@@ -383,7 +435,7 @@ describe("Assistant", () => {
       "Can you please go and look at what I did for the migration process for Mina and start another thread in integration on the main worktree to start working on the migration for Tezos, so I have a ticket open for that as well in my linear."
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, spoken, questions, started, journal } = yield* assistant(
+        const { dictate, spoken, questions, started, journal, ledger } = yield* assistant(
           () => Brain.decision({ act: "start", text: dictated }),
           ({ lines }) =>
             written({
@@ -397,13 +449,16 @@ describe("Assistant", () => {
         )
         yield* dictate(dictated)
         const kept = yield* journal.since(0, { kinds: ["started"] })
-        return { spoken: spoken(), questions: questions().length, started, kept: kept.map(({ thread, utterance }) => [thread, utterance !== undefined]) }
+        const row = yield* ledger.latest("1 hour", { kinds: ["start"] })
+        return { spoken: spoken(), questions: questions().length, started, kept: kept.map(({ thread, utterance }) => [thread, utterance !== undefined]), row }
       }),
     )
     expect(result.questions).toBe(0)
     expect(result.started.map(({ project }) => project)).toEqual(["/code/integration"])
     expect(result.spoken).toEqual(["Started in integration, on Opus, without a worktree."])
     expect(result.kept).toEqual([["new-thread", true]])
+    // Written down first, and asked for under the ids it was written down with.
+    expect(Option.map(result.row, ({ state, commandId }) => ({ state, commandId }))).toEqual(Option.some({ state: "sent", commandId: result.started[0]!.ids!.command }))
   })
 
   test("\"say that again\" says the last answer once more, and nothing when it's about to be said again anyway", async () => {
@@ -780,5 +835,152 @@ describe("Assistant", () => {
       "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
       "I couldn't work that out just now, sir. What you said is in my log.",
     ])
+  })
+
+  /** What the model logged for a message to the Tezos thread by a misheard name: the right thread, as sure as the test says. */
+  const tezosMessage = (sure: Brain.Sure) => (situation: Brain.Situation) =>
+    Brain.decision({
+      act: "send",
+      target: handle(situation, tezos),
+      sure,
+      others: sure === "high" ? "" : handle(situation, mina),
+      text: "Use the fee table from the Mina work.",
+      how: "now",
+      pending: Option.isNone(situation.open) ? "" : "replaces",
+    })
+
+  /** Where each command went, and what it said. */
+  const sent = (dispatched: ReadonlyArray<Record<string, unknown>>) => dispatched.map(({ type, threadId, text, commandId }) => ({ type, threadId, text, commandId }))
+
+  test("a misheard thread name in a message goes to the right thread first time, with no question", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, questions, dispatched, journal } = yield* assistant(tezosMessage("high"))
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const kept = yield* journal.since(0, { kinds: ["sent"] })
+        return { spoken: spoken(), questions: questions().length, sent: sent(dispatched), kept: kept.map(({ thread, text, said }) => ({ thread, text, said })) }
+      }),
+    )
+    expect(result.questions).toBe(0)
+    expect(result.sent).toEqual([{ type: "message.dispatch", threadId: tezos.id, text: "Use the fee table from the Mina work.", commandId: expect.stringMatching(/^yapd:u\w+:0$/) }])
+    // It isn't the thread he was hearing about, so it's named: his one-word chance to put it right.
+    expect(result.spoken).toEqual(["On it, sir: Migrate Tezos Integration."])
+    expect(result.kept).toEqual([{ thread: tezos.id, text: "Use the fee table from the Mina work.", said: "On it, sir: Migrate Tezos Integration." }])
+  })
+
+  test("a write at medium confidence about a thread that isn't the focus asks once, naming both", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, spoken, questions, dispatched } = yield* assistant(tezosMessage("medium"))
+        yield* dictate("Tell the migration one to use the fee table from the Mina work.")
+        const before = dispatched.length
+        yield* answer("The first.")
+        return { before, spoken: spoken(), questions: questions().length, sent: sent(dispatched) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.questions).toBe(1)
+    expect(result.spoken).toEqual(["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?", "On it, sir: Migrate Tezos Integration."])
+    expect(result.sent.map(({ threadId }) => threadId)).toEqual([tezos.id])
+  })
+
+  test("a write at medium confidence about the focus thread goes ahead", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, questions, dispatched } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing fee tables, sir." })
+            : tezosMessage("medium")(situation),
+        )
+        yield* dictate("What's the Tezos one doing?")
+        // "It" is the thread he just heard about, which is all medium needs.
+        yield* dictate("Tell it to use the fee table from the Mina work.")
+        return { spoken: spoken(), questions: questions().length, sent: sent(dispatched) }
+      }),
+    )
+    expect(result.questions).toBe(0)
+    expect(result.spoken).toEqual(["The Tezos migration is comparing fee tables, sir.", "On it, sir."])
+    expect(result.sent.map(({ threadId }) => threadId)).toEqual([tezos.id])
+  })
+
+  test("nothing is dispatched for a dictation heard before yapd was turned off and on", async () => {
+    const sending = (toggled: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { heard, toggle, wait, flush, dispatched, spoken } = yield* assistant(tezosMessage("high"), undefined, { thinking: 3 })
+          const dictated = yield* Effect.fork(heard({ heard: "Tell the Tesla's migration to use the fee table.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+          yield* flush
+          // Off and on again while the model works it out.
+          if (toggled) yield* Effect.zipRight(toggle(false), toggle(true))
+          yield* wait(3)
+          yield* Fiber.join(dictated)
+          return { dispatched: dispatched.length, spoken: spoken().length }
+        }),
+      )
+    // Left alone, it goes, so it's the off and on that stops it.
+    expect(await sending(false)).toEqual({ dispatched: 1, spoken: 1 })
+    expect(await sending(true)).toEqual({ dispatched: 0, spoken: 0 })
+  })
+
+  test("a message that didn't go is said with why, logged and journaled with it", async () => {
+    const warned: Array<string> = []
+    const logger = Logger.make(({ logLevel, message }) => {
+      if (logLevel._tag === "Warning") warned.push(String(Array.isArray(message) ? message.join(" ") : message))
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, questions, journal } = yield* assistant(tezosMessage("high"), undefined, {
+          answer: () => () => Effect.fail(new T3CodeServer.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "The provider is offline." })),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        const kept = yield* journal.since(0, { kinds: ["sent"] })
+        return { spoken: spoken(), questions: questions().length, reasons: kept.map(({ detail }) => (detail as { reason?: string }).reason) }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result.spoken).toEqual(["That didn't go to Migrate Tezos Integration, sir: the provider is offline."])
+    expect(result.questions).toBe(0)
+    expect(result.reasons).toEqual(["The provider is offline."])
+    expect(warned.some((line) => line.includes("The provider is offline."))).toBe(true)
+  })
+
+  test("a message that may not have got there is offered again, and yes sends it once more under the same ids", async () => {
+    let lost = true
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, spoken, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
+          answer: () => (payload, bounded) =>
+            lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes(payload, bounded),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        lost = false
+        yield* answer("Yes.")
+        // A second yes, to nothing asked, sends nothing more.
+        yield* dictate("Yes.")
+        return { spoken: spoken(), ids: dispatched.map(({ commandId, messageId }) => [commandId, messageId]) }
+      }),
+    )
+    expect(result.spoken.slice(0, 2)).toEqual(["I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?", "On it, sir: Migrate Tezos Integration."])
+    expect(result.ids).toHaveLength(2)
+    expect(result.ids[1]).toEqual(result.ids[0])
+  })
+
+  test("the rest of a request is done as its next step, once the first is", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, dispatched } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("Stop")
+            ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest: "tell it to use the Mina table instead" })
+            : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the Mina table instead.", how: "now" }),
+        )
+        yield* dictate("Stop the Tezos one and tell it to use the Mina table instead.")
+        return { spoken: spoken(), sent: dispatched.map(({ type, commandId }) => [type, String(commandId).replace(/^yapd:u\w+:/, "")]) }
+      }),
+    )
+    expect(result.sent).toEqual([
+      ["run.interrupt", "0"],
+      ["message.dispatch", "1"],
+    ])
+    // One line for the lot, and "sir" once.
+    expect(result.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration. On it."])
   })
 })

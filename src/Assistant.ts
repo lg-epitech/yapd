@@ -2,8 +2,10 @@ import { Cause, Clock, Context, type Duration, Effect, Either, Fiber, Option } f
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
+import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Journal, Kept } from "./Journal.ts"
+import * as Ledger from "./Ledger.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import type { Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -124,6 +126,8 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly open: Effect.Effect<Option.Option<Open>>
     /** yapd was turned off: the open question is closed, and what was being written up stops. */
     readonly drop: Effect.Effect<void>
+    /** Messages a restart found didn't get there: each is offered to be sent again once, one at a time. */
+    readonly undelivered: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
   }
 >() {}
 
@@ -148,6 +152,10 @@ const cap = "100 millis"
 const day = 24 * 60 * 60_000
 /** Dictations are dropped after five minutes, so one pressed for longer ago than this has ended, whether or not anything came of it. */
 const longest = 6 * 60_000
+/** What "scratch that" can take back: what was done this long ago at most. */
+const scratchable = "2 minutes"
+/** Steps one request can take at most, so a "rest" that never runs out can't go on for ever. */
+const steps = 4
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
 
@@ -169,6 +177,10 @@ export const make = (options: {
   readonly threads: Threads.Threads["Type"]
   readonly journal: Journal["Type"]
   readonly drafts: Drafts.Drafts
+  /** What it does to threads, each step once. */
+  readonly hands: Hands.Hands["Type"]
+  /** What it did lately, for "scratch that". */
+  readonly ledger: Ledger.Ledger["Type"]
   /** Queues something to say, unless yapd was turned off since `since`. */
   readonly tell: (notice: Notice, since?: number) => Effect.Effect<void>
   /** Whether yapd is on, and how many times it was turned on or off. */
@@ -190,7 +202,7 @@ export const make = (options: {
     const brain = yield* Brain.Brain
     const persona = yield* Persona
     const scope = yield* Effect.scope
-    const { threads, journal, drafts } = options
+    const { threads, journal, drafts, hands, ledger } = options
     /** One request at a time, from working it out to what's said of it. */
     const turn = yield* Effect.makeSemaphore(1)
 
@@ -215,6 +227,8 @@ export const make = (options: {
     const jobs = new Set<Fiber.RuntimeFiber<unknown, unknown>>()
     /** Work being started, which the journal only has once T3 Code has it ready, so the model knows not to start it again meanwhile. */
     const starting = new Set<Kept>()
+    /** Messages a restart found didn't get there, waiting their turn to be offered again. */
+    const lost: Array<Ledger.Row> = []
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
@@ -269,25 +283,29 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, acted] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
-          journal.since(now - lately.span, { most: lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent"] }),
+          journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action"] }),
           journal.since(now - day, { most: 1, kinds: ["dictation", "reply"] }),
           threads.usage,
           askedLately,
+          ledger.latest(scratchable, { kinds: ["message", "stop"], states: ["sent", "unknown"] }),
         ])
         const missed = yield* journal.unheard(spoke.at(-1)?.at ?? now - day, unheard)
+        // What was done, like a stop, but not the bookkeeping of questions closed, which says nothing.
+        const done = recent.filter(({ kind, said }) => kind !== "action" || said !== undefined).slice(-lately.most)
         return {
           utterance,
           subject: about,
           lines,
           open,
           desk: shortlist,
-          lately: [...recent, ...starting].toSorted((one, other) => one.at - other.at),
+          lately: [...done, ...starting].toSorted((one, other) => one.at - other.at),
           unheard: missed,
           usage,
           second: Option.none(),
           asked,
+          acted,
           now,
         } satisfies Brain.Situation
       })
@@ -356,10 +374,16 @@ export const make = (options: {
           utterance: open.utterance,
           detail: { open: how, asked: open.asked, ...(by === undefined ? {} : { by }) },
         })
+        // Offered once: not taken up, it's never offered or sent again.
+        if (how !== "answered") yield* forgo(open, `Not sent again: the question was ${how}.`)
       })
 
+    /** A message offered to be sent again that he didn't take up, which is never offered or sent again. */
+    const forgo = (open: Open, reason: string) =>
+      Option.match(open.resend, { onNone: () => Effect.void, onSome: (commandId) => hands.leave(commandId, reason) })
+
     /** Opens a question in place of any other, unless yapd was turned off since what it's about was said. */
-    const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Utterance) =>
+    const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Pick<Utterance, "turns">) =>
       Effect.gen(function* () {
         const power = yield* options.power
         if (!power.on || power.turns !== utterance.turns) return quiet({ _tag: "Nothing" })
@@ -386,6 +410,7 @@ export const make = (options: {
         yield* close(open, "dropped: unanswered")
         const { turns } = yield* options.power
         yield* deliver(reply(Brain.dropped(open, yield* persona.lines), { _tag: "Nothing" }), { id: open.utterance, turns })
+        yield* offering
       })
 
     /**
@@ -423,24 +448,24 @@ export const make = (options: {
         yield* deliver(yield* reask(yield* persona.lines), { id: utterance, turns: power.turns })
       })
 
-    /** Whether it's only ever asked once, like an offer, so it lapses when its window ends rather than being asked again. */
-    const lapses = (open: Open) => open.kind !== "which" && open.kind !== "project"
-
     /** Asks it again, or lets it go, a minute from now, unless something said meanwhile closes it first. */
     const later = (id: string) =>
       Effect.gen(function* () {
         if (asking?.open.id !== id || asking.held || asking.repeat !== undefined) return
-        if (lapses(asking.open)) return yield* close(asking.open, "dropped: unanswered")
         const repeat = yield* Effect.sleep(again).pipe(Effect.zipRight(turn.withPermits(1)(due(id))), Effect.interruptible, Effect.forkIn(scope))
         if (asking?.open.id === id) asking.repeat = repeat
       })
 
-    /** Its listening window ended without an answer: asked again a minute later the first time, let go with a word the second. */
+    /**
+     * Its listening window ended without an answer: asked again in other
+     * words a minute later the first time, let go with a word the second,
+     * whatever it asks, as he wants it.
+     */
     const unanswered = (id: string): Effect.Effect<void> =>
       Effect.gen(function* () {
         // Not while something's being said that may answer it, nor twice over.
         if (asking?.open.id !== id || asking.held || asking.repeat !== undefined) return
-        if (asking.asks >= asks && !lapses(asking.open)) return yield* letGo(asking.open)
+        if (asking.asks >= asks) return yield* letGo(asking.open)
         yield* later(id)
       })
 
@@ -632,15 +657,16 @@ export const make = (options: {
         return !power.on || power.turns !== utterance.turns ? Option.none() : Option.some(prompt)
       })
 
-    /** Starts new work. Whether it is new work, the brain decided; where it goes and what it says, the writer. */
-    const start = (thought: Thought, said: Lines) =>
+    /** Starts new work, as a step of its request. Whether it is new work, the brain decided; where it goes and what it says, the writer. */
+    const start = (thought: Thought, said: Lines, step: number) =>
       Effect.gen(function* () {
         const { utterance } = thought
         const ready = yield* written(utterance, [{ speaker: "user", text: utterance.heard }])
         if (Option.isNone(ready)) return quiet(thought.subject)
         const prompt = ready.value
         if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
-        return yield* begun(yield* drafts.start(prompt.right, noting(utterance, utterance.heard)), utterance, said, false)
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance.heard), undefined, { utterance: utterance.id, step })
+        return yield* begun(outcome, utterance, said, false)
       })
 
     /** An answer to which project new work is for: the prompt is written again with it, and a second question isn't asked. */
@@ -659,7 +685,7 @@ export const make = (options: {
           yield* Effect.logInfo(`Leaving it, since that didn't settle the project. ${prompt.right.decision.why}`)
           return reply(said.leaving, thought.subject)
         }
-        const outcome = yield* drafts.start(prompt.right, noting(utterance, open.heard))
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, open.heard), undefined, { utterance: utterance.id, step: 0 })
         if (outcome._tag === "Asked") {
           yield* Effect.logInfo("Leaving it, since that didn't settle the project")
           return reply(said.leaving, thought.subject)
@@ -667,10 +693,196 @@ export const make = (options: {
         return yield* begun(outcome, utterance, said, true)
       })
 
-    /** Does what was decided and checked. */
-    const perform = (plan: Brain.Plan, thought: Thought, said: Lines): Effect.Effect<Outcome> => {
+    /** What a thread is called in what's said, unless it's the one he's on about, which goes without saying. */
+    const naming = (ref: Threads.Ref, situation: Brain.Situation) =>
+      Option.exists(Brain.focused(situation), ({ ref: focus }) => Threads.same(focus, ref))
+        ? Option.none<string>()
+        : Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called)
+
+    /** Two steps' lines as one, "sir" said once. */
+    const joined = (first: string, then: string, said: Lines) => {
+      const sir = addressed(said)
+      return `${first} ${sir !== "" && first.includes(sir) ? then.replace(sir, "") : then}`.trim()
+    }
+
+    /** What a decision to change a thread asks of the hands, if it says enough to do it. */
+    const acted = (decision: Brain.Decision, target: Option.Option<Threads.Listed>, heard: string): Hands.Act | undefined => {
+      const to = Option.map(target, ({ ref }) => ref)
+      switch (decision.act) {
+        case "send":
+          return Option.isNone(to)
+            ? undefined
+            : { _tag: "Message", to: to.value, text: decision.text.trim() || heard, how: decision.how === "after" || decision.how === "restart" ? decision.how : "now" }
+        case "stop":
+          return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
+        case "undo":
+          return { _tag: "Undo", to, carry: decision.how === "carry" }
+        default:
+          return undefined
+      }
+    }
+
+    /**
+     * Says what came of changing a thread, and notes it, why too when it
+     * didn't go: as a question when there's one to ask, like whether to send
+     * again what may not have got there, under the same ids. Once a step is
+     * done, the rest of the request is worked out and done as the next step.
+     */
+    const told = (
+      act: Hands.Act,
+      outcome: Hands.Outcome,
+      thought: Thought,
+      said: Lines,
+      at: { readonly step: number; readonly commandId: string; readonly rest: boolean },
+    ): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        const { utterance, situation, decision } = thought
+        const ref =
+          outcome._tag === "Done"
+            ? outcome.to
+            : outcome._tag === "Twin" || outcome._tag === "Read"
+              ? { machine: outcome.row.machine, id: outcome.row.thread }
+              : act._tag === "Undo"
+                ? Option.getOrUndefined(act.to)
+                : act.to
+        const called = ref === undefined ? Option.none<string>() : naming(ref, situation)
+        // In a question it's always named, since the question has to say what it's about.
+        const name = (ref === undefined ? undefined : situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called) ?? "it"
+        const subject: Subject = { _tag: "Answer", said: "", about: Option.fromNullable(ref) }
+        const now = yield* Clock.currentTimeMillis
+        /** The entry it's noted in: what went, or didn't and why, and what's said of it. What only asks first sent nothing. */
+        const noting = (line: string | undefined, detail: Record<string, unknown>, sent = true) =>
+          journal.write({
+            at: now,
+            kind: act._tag === "Message" && sent ? "sent" : "action",
+            ...(ref === undefined ? {} : { machine: ref.machine, thread: ref.id }),
+            ...(act._tag === "Message" ? { text: act.text } : {}),
+            ...(line === undefined ? {} : { said: line }),
+            utterance: utterance.id,
+            detail: { commandId: at.commandId, act: act._tag, outcome: outcome._tag, ...detail },
+          })
+        const asking = (open: Omit<Open, "id" | "version" | "at">) => opening(open, utterance)
+        const base = { utterance: utterance.id, heard: utterance.heard, material: Option.none(), candidates: ref === undefined ? [] : [ref] }
+        switch (outcome._tag) {
+          case "Done": {
+            const line = Hands.done(act, outcome.how, said, called)
+            yield* noting(line, { how: outcome.how })
+            const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
+            // Taking a stop back is two steps: letting go of the queue, then the message to carry on.
+            const next = at.step + (act._tag === "Undo" ? 2 : 1)
+            return at.rest && decision.rest.trim() !== "" && next < steps ? yield* rest(thought, first, outcome.to, next, said) : first
+          }
+          case "Twin": {
+            // One that may not have got there is offered again under its own ids; one that did, to a thread that hasn't answered since, is asked about.
+            const doing = `send that to ${name} again`
+            yield* noting(undefined, { twin: outcome.row.commandId }, false)
+            if (outcome.row.state !== "sent") {
+              const asked = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}. ${said.again}`
+              return yield* asking({ ...base, kind: "resend", decision, asked, about: doing, resend: Option.some(outcome.row.commandId) })
+            }
+            return yield* asking({ ...base, kind: "confirm", decision, asked: Hands.twice(outcome.row.at, now, said, called), about: doing, resend: Option.none() })
+          }
+          case "Read": {
+            const text = typeof outcome.row.body === "object" && outcome.row.body !== null && "text" in outcome.row.body ? String(outcome.row.body.text) : ""
+            yield* noting(undefined, { read: outcome.row.commandId }, false)
+            return yield* asking({
+              ...base,
+              kind: "offer",
+              decision: Brain.decision({ act: "send", text: Hands.ignore(text), how: "now" }),
+              asked: Hands.read(said, called),
+              about: `tell ${name} to ignore that`,
+              resend: Option.none(),
+            })
+          }
+          default: {
+            const line = Hands.failed(act, outcome, said, called)
+            yield* noting(line, { reason: outcome.reason })
+            const again = "again" in outcome ? outcome.again : Option.none<string>()
+            if (Option.isSome(again) && act._tag === "Message") {
+              return yield* asking({ ...base, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: again })
+            }
+            return { say: line, subject: { ...subject, said: line }, kind: "done" } satisfies Outcome
+          }
+        }
+      })
+
+    /**
+     * The rest of a request with several steps, worked out again now that the
+     * step before is done, with "it" the thread that was, and done as the next
+     * step. One line covers the lot; a failure stops the rest, and says so.
+     */
+    const rest = (thought: Thought, first: Outcome, on: Threads.Ref, step: number, said: Lines): Effect.Effect<Outcome> =>
+      Effect.gen(function* () {
+        const utterance: Utterance = { ...thought.utterance, heard: thought.decision.rest }
+        yield* Effect.logInfo(`Then: ${utterance.heard}`)
+        const next = yield* think(utterance, { _tag: "Answer", said: first.say, about: Option.some(on) }, [
+          { speaker: "user", text: thought.utterance.heard },
+          { speaker: "yapd", text: first.say },
+        ])
+        if (next.source === "failed") return { ...first, say: joined(first.say, `I couldn't work out the rest${addressed(said)}.`, said) }
+        if (next.decision.act === "dismiss" || next.decision.act === "resume") return first
+        const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, { step, twice: false })
+        if (after.say === "") return first
+        return { ...after, say: joined(first.say, after.say, said) }
+      })
+
+    /** Changes a thread as decided, once, unless yapd was turned off and on since it was said (I8). */
+    const write = (plan: Brain.Plan, thought: Thought, said: Lines, at: { readonly step: number; readonly twice: boolean }) =>
+      Effect.gen(function* () {
+        const { utterance } = thought
+        const power = yield* options.power
+        if (!power.on || power.turns !== utterance.turns) {
+          yield* Effect.logInfo("Not doing it, since yapd was turned off after it was said")
+          return quiet(thought.subject)
+        }
+        const act = acted(plan.decision, plan.target, utterance.heard)
+        if (act === undefined) return reply(said.cantTell, thought.subject)
+        const outcome = yield* hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice })
+        return yield* told(act, outcome, thought, said, { step: at.step, commandId: Ledger.ids(utterance.id, at.step, false).commandId, rest: true })
+      })
+
+    /**
+     * A yes to doing what was asked about: the same thing on the same thread,
+     * as it's known now, never asked about a second time. To sending again,
+     * it's the same step under the same ids, once.
+     */
+    const agreeing = (open: Open, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { utterance, situation } = thought
+        const target = Option.fromNullable(open.candidates[0]).pipe(
+          Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
+        )
+        const to = open.candidates[0]
+        if (Option.isSome(open.resend) && to !== undefined) {
+          const power = yield* options.power
+          if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
+          const outcome = yield* hands.again(open.resend.value)
+          const act: Hands.Act = { _tag: "Message", to, text: open.decision.text, how: "now" }
+          return yield* told(act, outcome, { ...thought, decision: open.decision }, said, { step: 0, commandId: open.resend.value, rest: false })
+        }
+        const decision = Brain.decision({
+          ...open.decision,
+          target: Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle }),
+          sure: "high",
+          others: "",
+          pending: "answers",
+        })
+        const checked = Brain.check(decision, situation, said)
+        if (checked._tag === "Ask") {
+          yield* Effect.logInfo("Leaving it, rather than ask again")
+          return reply(said.leaving, thought.subject)
+        }
+        return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: true })
+      })
+
+    /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
+    const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: { readonly step: number; readonly twice: boolean } = { step: 0, twice: false }): Effect.Effect<Outcome> => {
       const { decision, target } = plan
       switch (decision.act) {
+        case "send":
+        case "stop":
+        case "undo":
+          return write(plan, thought, said, at)
         case "answer":
           return answer(decision.spoken, target, thought, said)
         case "look":
@@ -689,7 +901,7 @@ export const make = (options: {
             return { say: decision.spoken.trim() || last, subject, kind: "answer" } satisfies Outcome
           })
         case "start":
-          return start(thought, said)
+          return start(thought, said, at.step)
         case "dismiss":
         case "resume":
           return Effect.succeed(quiet(thought.subject))
@@ -698,14 +910,19 @@ export const make = (options: {
       }
     }
 
-    const follow = (checked: Brain.Checked, thought: Thought, said: Lines): Effect.Effect<Outcome> => {
+    const follow = (
+      checked: Brain.Checked,
+      thought: Thought,
+      said: Lines,
+      at: { readonly step: number; readonly twice: boolean } = { step: 0, twice: false },
+    ): Effect.Effect<Outcome> => {
       switch (checked._tag) {
         case "Say":
           return Effect.succeed(reply(checked.spoken, thought.subject))
         case "Ask":
           return opening(checked.open, thought.utterance)
         case "Do":
-          return perform(checked.plan, thought, said)
+          return perform(checked.plan, thought, said, at)
       }
     }
 
@@ -748,8 +965,12 @@ export const make = (options: {
         const answers = decision.pending === "answers" && decision.act !== "resume"
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : answers ? "answered" : "replaced", utterance.id)
         if (!answers) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
-        if (decision.act === "dismiss") return reply(said.leaving, decided.subject)
+        if (decision.act === "dismiss") {
+          yield* forgo(open, "He said not to send it again.")
+          return reply(said.leaving, decided.subject)
+        }
         if (open.kind === "project") return yield* project(open, decided, said)
+        if (open.kind !== "which") return yield* agreeing(open, decided, said)
         const checked = Brain.check(decision, decided.situation, said)
         // At most one question: one the answer doesn't settle is let go.
         if (checked._tag === "Ask") {
@@ -792,6 +1013,7 @@ export const make = (options: {
                   const outcome = yield* acting(thought)
                   yield* note(thought, outcome, at)
                   yield* deliver(outcome, utterance)
+                  yield* offering
                 }),
               ).pipe(Effect.ensuring(arrived), Effect.annotateLogs({ utterance: utterance.id })),
             ),
@@ -868,6 +1090,42 @@ export const make = (options: {
         yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
       })
 
+    /**
+     * Offers to send again the next message a restart found didn't get
+     * there, once nothing else is asked and he isn't dictating: one question
+     * at a time, each offered once.
+     */
+    const offering: Effect.Effect<void> = Effect.gen(function* () {
+      while (asking === undefined && presses.length === 0) {
+        const row = lost.shift()
+        if (row === undefined) return
+        const power = yield* options.power
+        const sent = typeof row.body === "object" && row.body !== null && "text" in row.body ? String(row.body.text) : ""
+        const ref = { machine: row.machine, id: row.thread }
+        const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
+        if (!power.on || listed === undefined || sent === "") {
+          yield* hands.leave(row.commandId, power.on ? "Its thread is gone." : "yapd was off when it could have been offered.")
+          continue
+        }
+        const said = yield* persona.lines
+        const offered = yield* opening(
+          {
+            kind: "resend",
+            utterance: row.utterance,
+            heard: sent,
+            decision: Brain.decision({ act: "send", text: sent, how: "now" }),
+            candidates: [ref],
+            asked: Hands.lost(said, Option.some(listed.called)),
+            about: `send that to ${listed.called} again`,
+            material: Option.none(),
+            resend: Option.some(row.commandId),
+          },
+          power,
+        )
+        yield* deliver(offered, { id: row.utterance, turns: power.turns })
+      }
+    }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not offer to send it again", cause)))
+
     /** Works out what he said and acts on it, then says what came of it, one request at a time. */
     const respond = (utterance: Utterance) =>
       Effect.gen(function* () {
@@ -913,6 +1171,7 @@ export const make = (options: {
         )
         yield* note(thought, outcome, began)
         yield* deliver(outcome, utterance)
+        yield* offering
         return utterance.id
       }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
 
@@ -959,5 +1218,10 @@ export const make = (options: {
         yield* Effect.forEach(presses.splice(0), ({ arrived }) => arrived, { discard: true })
         yield* Effect.forEach([...writing.values(), ...jobs], Fiber.interruptFork, { discard: true })
       }),
+      undelivered: (rows) =>
+        Effect.gen(function* () {
+          lost.push(...rows)
+          yield* turn.withPermits(1)(offering)
+        }),
     } satisfies Assistant["Type"]
   })
