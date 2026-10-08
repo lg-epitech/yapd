@@ -106,7 +106,11 @@ final class Yapd {
       shown = status.showing?.id
       if let showing = status.showing {
         last = showing.id
-        if !connecting || showing.fresh, let card = await fetch(showing.id), shown == card.id {
+        if connecting && !showing.fresh {
+          // Put up while the app wasn't there to show it, so it isn't on screen: yapd takes it down too, and it's kept to show again.
+          panel.hide()
+          send("DELETE", "cards/current")
+        } else if let card = await fetch(showing.id), shown == card.id {
           panel.show(card, talking: true)
         }
       } else {
