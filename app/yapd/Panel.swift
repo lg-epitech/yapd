@@ -231,7 +231,8 @@ private enum Block {
   case code(String)
   case paragraph(String)
 
-  /// Splits markdown into blocks. A code block ends only at a fence at least as long as the one it began with.
+  /// Splits markdown into blocks, with code blocks where yapd sees them: one opens only at the very start of a line,
+  /// and ends only at a fence at least as long as the one it began with, indented three spaces at most.
   static func parse(_ markdown: String) -> [Block] {
     var blocks: [Block] = []
     var paragraph: [String] = []
@@ -244,7 +245,9 @@ private enum Block {
     for line in markdown.components(separatedBy: "\n") {
       let trimmed = line.trimmingCharacters(in: .whitespaces)
       if let open = fence {
-        if trimmed.count >= open.length, trimmed.allSatisfy({ $0 == open.mark }) {
+        // One indented further is a line of the code, so what follows it, which yapd left as it is, isn't read as markdown.
+        if let closing = line.firstMatch(of: /^ {0,3}(`+|~+)[ \t]*$/)?.output.1,
+           closing.first == open.mark, closing.count >= open.length {
           blocks.append(.code(code.joined(separator: "\n")))
           fence = nil
           code = []
@@ -253,13 +256,12 @@ private enum Block {
         }
         continue
       }
-      if let mark = trimmed.first, mark == "`" || mark == "~" {
-        let run = trimmed.prefix { $0 == mark }.count
-        if run >= 3 {
-          flush()
-          fence = (mark, run)
-          continue
-        }
+      // Not an indented one, which yapd escapes, nor one with a backtick after its backticks, which is a code span.
+      if let opening = line.firstMatch(of: /^(`{3,})[^`]*$|^(~{3,})/),
+         let mark = opening.output.1 ?? opening.output.2, let first = mark.first {
+        flush()
+        fence = (first, mark.count)
+        continue
       }
       if trimmed.isEmpty {
         flush()
