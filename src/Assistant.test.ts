@@ -260,6 +260,7 @@ const assistant = (
       awaiting: given.awaiting ?? Effect.succeed(Effect.void),
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
       skip: () => Effect.void,
+      upcoming: Effect.succeed([]),
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

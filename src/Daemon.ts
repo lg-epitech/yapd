@@ -804,6 +804,13 @@ export const make = Effect.gen(function* () {
         STM.map(TRef.get(inbox), (waiting) => [...waiting.values()].some((entry) => ("update" in entry ? entry.update.spoken : entry.notice.spoken) === spoken)),
       ),
     skip,
+    /** The updates waiting to be read, like one a dictation cut off, by their entry in the journal: coming up, so not missed. */
+    upcoming: Effect.map(STM.commit(TRef.get(inbox)), (queued) =>
+      [...queued.values()].flatMap((entry): ReadonlyArray<number> => {
+        const row = "update" in entry ? rows.get(entry.update) : undefined
+        return row === undefined ? [] : [row]
+      }),
+    ),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
   }

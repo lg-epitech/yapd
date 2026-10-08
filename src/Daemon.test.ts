@@ -277,6 +277,7 @@ const assisted = (model: (situation: Brain.Situation) => Brain.Decision, options
       awaiting: made.awaiting,
       queued: made.queued,
       skip: made.skip,
+      upcoming: made.upcoming,
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -1171,6 +1172,36 @@ describe("Daemon", () => {
       }),
     )
     expect(result).toEqual({ played: ["yapd. The PR is ready."], stopped: ["yapd. The PR is ready."], asked: 0, unheard: 0 })
+  })
+
+  test("what he missed leaves out the updates waiting to be read, like the one his asking cut off, which he's told are coming up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, dictating, played, asked, journal } = yield* assisted((situation) => {
+          // As the model is asked to: what he missed, from what he hasn't heard.
+          const told = situation.unheard.map(({ said }) => said).join(" ")
+          return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+        })
+        yield* finish("a", "The loader fix is ready.")
+        yield* wait(2)
+        // Turned off and on before it's read to the end, so he missed it.
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* finish("b", "The tests pass.")
+        yield* wait(2)
+        yield* dictating("What did I miss?")
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { told: asked.at(-1)?.unheard.map(({ said }) => said), played: [...played], unheard: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result.told).toEqual(["yapd. The loader fix is ready."])
+    expect(result.played).toEqual([
+      "yapd. The loader fix is ready.",
+      "yapd. The tests pass.",
+      "You missed this: yapd. The loader fix is ready. One more update is coming up.",
+      "yapd. The tests pass.",
+    ])
+    expect(result.unheard).toBe(0)
   })
 
   test("anything else dictated over an update, even thanks, has it read again from the start once it's dealt with", async () => {

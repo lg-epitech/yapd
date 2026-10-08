@@ -164,6 +164,13 @@ const day = 24 * 60 * 60_000
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
 
+/** Small counts as words, from one, the way a line starts with them. */
+const counted = ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve"]
+
+/** What ends a catch-up while updates wait to be read next, which it leaves to them: how many are coming up. */
+const comingUp = (count: number, said: Lines) =>
+  count === 0 ? "" : ` ${counted[count - 1] ?? count} more ${count === 1 ? "update is" : "updates are"} coming up${addressed(said)}.`
+
 /** Something said back that isn't about a thread. */
 const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _tag: "Answer", said: say, about: Option.none() }, kind: say === "" ? "none" : "answer" })
 
@@ -219,6 +226,8 @@ export const make = (options: {
   readonly queued: (spoken: string) => Effect.Effect<boolean>
   /** Drops an update he told to stop, even one a dictation cut off to be read again, which then counts as heard. */
   readonly skip: (update: Conversation.Update) => Effect.Effect<void>
+  /** The updates waiting to be read, like one a dictation cut off, by their entry in the journal: coming up, so not missed. */
+  readonly upcoming: Effect.Effect<ReadonlyArray<number>>
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -328,16 +337,19 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           journal.since(now - lately.span, { most: lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent"] }),
           journal.since(now - day, { most: 20, kinds: ["dictation", "reply"] }),
           threads.usage,
           askedLately,
+          options.upcoming,
         ])
         // What he hasn't heard since he last said something, other than catching up, which he may never have heard the
-        // answer to, or something only heard as noise, like a cough taken for "Thank you.".
-        const missed = yield* journal.unheard(spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day, unheard)
+        // answer to, or something only heard as noise, like a cough taken for "Thank you.". Not what's waiting to be
+        // read, like an update his asking cut off: he's told of that as it's read, not twice.
+        const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
+        const missed = (yield* journal.unheard(since, unheard + coming.length)).filter(({ id }) => !coming.includes(id)).slice(-unheard)
         return {
           utterance,
           subject: about,
@@ -530,11 +542,13 @@ export const make = (options: {
 
     /** An answer, which what he said next can be about, decided at once or on a `second` look. */
     const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines, second?: Brain.Decision) =>
-      Effect.sync(() => {
-        const text = spoken.trim() === "" ? said.misheard : spoken.trim()
-        // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
+      Effect.gen(function* () {
         const { how } = second ?? thought.decision
-        const missed = Brain.catchingUp(thought.utterance.heard) || how === "missed" ? thought.situation.unheard.map(({ id }) => id) : []
+        const catching = Brain.catchingUp(thought.utterance.heard) || how === "missed"
+        // What's waiting to be read was left out of a catch-up, so he's told it's coming up rather than told it twice.
+        const text = `${spoken.trim() === "" ? said.misheard : spoken.trim()}${catching ? comingUp((yield* options.upcoming).length, said) : ""}`
+        // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
+        const missed = catching ? thought.situation.unheard.map(({ id }) => id) : []
         return {
           say: text,
           subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref), ...(missed.length === 0 ? {} : { missed }) },
