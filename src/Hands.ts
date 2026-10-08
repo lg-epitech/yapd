@@ -837,11 +837,14 @@ export const make = (options: {
    * the same words said again find it, and are offered under its own ids.
    * Only while it's as it was read: what came of it since, like his yes or no
    * to sending it again, stands, and was said then, so nothing is given back.
+   * A message is noted as never to be offered in the same write: noted
+   * first, it would be there to offer, for this reason, to anything reading
+   * it in between. What's said is the reason as it is.
    */
   const unverified = (row: Ledger.Row, reason: string) =>
     Effect.gen(function* () {
-      if (!(yield* ledger.settle(row.commandId, row.kind === "message" ? "unknown" : "abandoned", { reason, as: row }))) return Option.none<Ledger.Row>()
-      if (row.kind === "message") yield* ledger.leave(row.commandId, reason)
+      const noted = row.kind === "message" ? { state: "unknown" as const, reason: Ledger.leftBe(reason) } : { state: "abandoned" as const, reason }
+      if (!(yield* ledger.settle(row.commandId, noted.state, { reason: noted.reason, as: row }))) return Option.none<Ledger.Row>()
       yield* Effect.logWarning(`Couldn't confirm ${row.commandId} went through before restarting: ${reason}`)
       return Option.some<Ledger.Row>({ ...row, reason })
     })

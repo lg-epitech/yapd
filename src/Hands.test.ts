@@ -848,6 +848,41 @@ describe("Hands", () => {
     expect(result.dispatched).toBe(0)
   })
 
+  test("a message a restart couldn't look for is never to be offered from the moment it's noted, so nothing reading it then offers it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(now)
+        const kept = Ledger.fromStore(yield* Store.make(":memory:"))
+        const { commandId } = yield* kept.prepare({
+          utterance: "u1",
+          step: 0,
+          kind: "message",
+          machine: "rig",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        yield* kept.settle(commandId, "unknown")
+        // Whether it could be offered as each write the restart makes lands, as anything reading it just then would find it.
+        const offerable: Array<boolean> = []
+        const ledger: Ledger.Ledger["Type"] = {
+          ...kept,
+          settle: (commandId, state, details) =>
+            Effect.tap(kept.settle(commandId, state, details), () =>
+              Effect.map(kept.get(commandId), (row) => offerable.push(Option.exists(row, Ledger.offerable))),
+            ),
+          leave: (commandId, why) =>
+            Effect.tap(kept.leave(commandId, why), () => Effect.map(kept.get(commandId), (row) => offerable.push(Option.exists(row, Ledger.offerable)))),
+        }
+        // Its machine can't be reached, so it can't be looked for.
+        const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.none()), actions: () => Option.none() } })
+        const { unconfirmed } = yield* back.reconcile
+        return { offerable, said: unconfirmed.map(({ reason }) => reason), offered: Option.isSome(yield* back.still(commandId)) }
+      }),
+    )
+    expect(result).toEqual({ offerable: [false], said: ["I can't reach the threads on rig right now."], offered: false })
+  })
+
   test("a restart takes new work as started only once T3 Code shows it begun, waiting while it's being got ready as long after it was asked for as a launch would, and says what didn't start or can't be told yet", async () => {
     const didnt = "Before I restarted, I asked for new work, sir, but T3 Code couldn't make the worktree, so the thread it made didn't start."
     expect(await restartOn(preparing, begun)).toEqual({ state: "sent", said: [], dispatched: 0 })
