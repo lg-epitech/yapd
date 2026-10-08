@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer, Option, Queue, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Deferred, Effect, Layer, Option, Queue, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import { Condenser } from "./Condenser.ts"
 import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
@@ -69,12 +69,19 @@ const notices = (
     readonly bounded: Readonly<Record<string, Bounded>>
     readonly stops?: ReadonlyMap<string, ReadonlyArray<Notices.Stop>>
     readonly store?: Store.Store["Type"]
+    /** Reading the journal, as reading the desk does, waits for `resume` once it's begun, which `reading` says. */
+    readonly slow?: { readonly reading: Deferred.Deferred<void>; readonly resume: Deferred.Deferred<void> }
   },
 ) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
     const store = given.store ?? (yield* Store.make(":memory:"))
-    const journal = Journal.fromStore(store)
+    const kept = Journal.fromStore(store)
+    const { slow } = given
+    const journal: Journal.Journal["Type"] =
+      slow === undefined
+        ? kept
+        : { ...kept, since: (at, options) => Deferred.succeed(slow.reading, undefined).pipe(Effect.zipRight(Deferred.await(slow.resume)), Effect.zipRight(kept.since(at, options))) }
     const changes = yield* Queue.unbounded<T3Live.Change>()
     let view: T3Live.View = {
       projects: new Map([["p", { id: "p", title: "integration", workspaceRoot: "/code/integration" }]]),
@@ -336,6 +343,37 @@ describe("Notices", () => {
       }),
     )
     expect(result).toEqual([])
+  })
+
+  test("a turn no hook told of isn't said once its thread started again while it was being looked into, however long that took", async () => {
+    const old = thread("loader", "Fix the loader", { latestRunId: "run-1" })
+    const next = thread("loader", "Fix the loader", { latestRunId: "run-2", activeRunId: "run-2", status: "running" })
+    const result = await run(
+      Effect.gen(function* () {
+        const reading = yield* Deferred.make<void>()
+        const resume = yield* Deferred.make<void>()
+        const made = yield* notices({
+          view: [old],
+          bounded: {
+            loader: {
+              runs: [{ id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), userMessageId: "m1" }],
+              messages: [{ id: "a1", runId: "run-1", role: "assistant", text: "The loader is fixed.", createdAt: minutes(0) }],
+            },
+          },
+          slow: { reading, resume },
+        })
+        yield* made.hear(ended(old, "run-1"))
+        yield* made.wait(20)
+        // It's read as the latest, then the desk is slow to say what it's called, and meanwhile he follows it up in T3 Code.
+        yield* Deferred.await(reading)
+        yield* made.becomes(next)
+        yield* made.hear({ _tag: "Started", thread: next })
+        yield* Deferred.succeed(resume, undefined)
+        yield* made.flush
+        return { finished: made.finished, overtaken: made.overtaken }
+      }),
+    )
+    expect(result).toEqual({ finished: [], overtaken: ["loader"] })
   })
 
   test("a turn no hook told of isn't said once its thread started again or went, as a hook's update isn't once the next prompt comes", async () => {

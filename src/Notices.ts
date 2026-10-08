@@ -329,9 +329,10 @@ export const composer = (threads: Threads.Threads["Type"]) =>
 
 /**
  * A turn that finished with no hook to tell of it, to be said like a hook's
- * update, once under `key`, unless yapd was turned off since `turns`: with
- * what tells a Stop of its own from another's, which takes its place
- * whenever one comes.
+ * update, once under `key`, unless yapd was turned off since `turns`: what
+ * tells a Stop of its own from another's, which takes its place whenever one
+ * comes, and whether it's still the thread's `current` run, which its
+ * starting again or going ends.
  */
 export interface Finished {
   readonly about: Threads.Ref
@@ -342,6 +343,7 @@ export interface Finished {
   readonly key: string
   readonly turns: number
   readonly run: Pick<T3Actions.Ran, "final" | "others" | "natives"> & { readonly startedAt: number }
+  readonly current: Effect.Effect<boolean>
 }
 
 /**
@@ -376,6 +378,9 @@ export const make = (options: {
     const running = yield* FiberSet.make()
     /** Requests being worded now, so one heard of twice at once, from the stream and on starting, isn't worded twice. */
     const wording = new Set<string>()
+    /** How many times each thread started again or went, so a turn of it looked into since knows it's no longer its latest. */
+    const generations = new Map<string, number>()
+    const generation = (ref: Threads.Ref) => generations.get(`${ref.machine}:${ref.id}`) ?? 0
 
     /** What goes wrong looking into a change is only logged: nothing else waits on it. */
     const trouble = <A, E>(looking: Effect.Effect<A, E>) =>
@@ -466,9 +471,10 @@ export const make = (options: {
     /**
      * Once a run is over and its hook has had time to come, says it failed,
      * or hit a limit, or, when no hook told of a turn that went well, what it
-     * said, as a hook's update would be. Nothing for a run he stopped.
+     * said, as a hook's update would be, while it's still the thread's
+     * `current` run. Nothing for a run he stopped.
      */
-    const ran = (ref: Threads.Ref, runId: string, turns: number, at: number) =>
+    const ran = (ref: Threads.Ref, runId: string, turns: number, at: number, current: Effect.Effect<boolean>) =>
       Effect.gen(function* () {
         yield* Effect.sleep(failing)
         const actions = threads.actions(ref.machine)
@@ -486,8 +492,10 @@ export const make = (options: {
         if (Option.isNone(thread) || Option.isNone(shown)) return
         const { called, project } = shown.value
         if (status === "failed") return yield* failed(ref, run.value, thread.value, called, project, turns, at)
-        // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes.
-        if (thread.value.latestRunId !== null && thread.value.latestRunId !== runId) return yield* Effect.logInfo("Not saying a turn no hook told of, since it started again")
+        // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes, even when
+        // that was while what's read of it here was on its way.
+        const latest = thread.value.latestRunId === null || thread.value.latestRunId === runId
+        if (!latest || !(yield* current)) return yield* Effect.logInfo("Not saying a turn no hook told of, since it started again")
         if (quick(run.value, at, options.shortest)) return yield* Effect.logInfo("Skipped quick turn, with no hook")
         if (run.value.said === "") return
         yield* options.finished({
@@ -499,6 +507,7 @@ export const make = (options: {
           key: key.done(ref.machine, runId),
           turns,
           run: { final: run.value.final, others: run.value.others, natives, startedAt },
+          current,
         })
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
 
@@ -558,8 +567,13 @@ export const make = (options: {
     /** Looks into what a change to a thread comes to, in the background, unless yapd is off. */
     const hear = (machine: string, change: T3Live.Change) =>
       Effect.gen(function* () {
-        // Started again, or gone, a turn of it no hook told of that's still to be said isn't, as a hook's update isn't once the next prompt comes.
-        if (change._tag === "Started" || change._tag === "Removed") yield* options.overtaken({ machine, id: change.thread.id })
+        // Started again, or gone, a turn of it no hook told of that's still to be said isn't, as a hook's update isn't once the next
+        // prompt comes, nor one still being looked into.
+        if (change._tag === "Started" || change._tag === "Removed") {
+          const ref = { machine, id: change.thread.id }
+          generations.set(`${machine}:${ref.id}`, generation(ref) + 1)
+          yield* options.overtaken(ref)
+        }
         const news = verdict(change)
         if (Option.isNone(news)) return
         if (news.value._tag === "Settled") {
@@ -573,7 +587,10 @@ export const make = (options: {
         if (!on) return
         const at = yield* Clock.currentTimeMillis
         const ref = { machine, id: news.value.thread.id }
-        const looking = news.value._tag === "Asked" ? asked(ref, news.value.requestId, at) : ran(ref, news.value.runId, turns, at)
+        // The thread's run as it is now, which it no longer is once it starts again or goes.
+        const since = generation(ref)
+        const current = Effect.sync(() => generation(ref) === since)
+        const looking = news.value._tag === "Asked" ? asked(ref, news.value.requestId, at) : ran(ref, news.value.runId, turns, at, current)
         yield* FiberSet.run(running, looking.pipe(trouble, Effect.annotateLogs({ thread: news.value.thread.title })))
       })
 

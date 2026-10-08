@@ -272,9 +272,9 @@ const daemon = make()
 /**
  * The loader's turn T3 Code said finished, with no hook to tell of it, as of
  * when yapd had been turned on or off `turns` times: it said `message` last,
- * in its session `native-loader`.
+ * in its session `native-loader`, and is its thread's run while `current` says.
  */
-const unhooked = (message: string, runId: string, turns: number) => ({
+const unhooked = (message: string, runId: string, turns: number, current: Effect.Effect<boolean> = Effect.succeed(true)) => ({
   about: { machine: "Rosie", id: "t-loader" },
   project: "yapd",
   cwd: "/code/yapd",
@@ -283,6 +283,7 @@ const unhooked = (message: string, runId: string, turns: number) => ({
   key: `done:Rosie:${runId}`,
   turns,
   run: { final: message, others: [], natives: ["native-loader"], startedAt: -60_000 },
+  current,
 })
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
@@ -1159,6 +1160,27 @@ describe("Daemon", () => {
       }),
     )
     expect(late).toEqual(["yapd. The loader is fixed."])
+  })
+
+  test("a turn no hook told of isn't said once its thread is no longer on that run, whether it's found as it's queued or as its turn to be said comes", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, wait, played, finish, nextEvent } = yield* make()
+        const { turns } = yield* made.power
+        let current = true
+        yield* finish("a", "Something else first.")
+        // Started again just before it was handed on.
+        yield* made.finished(unhooked("The loader's old turn.", "run-1", turns, Effect.succeed(false)))
+        // Started again while it waits its turn, before T3 Code has said so to what drops it.
+        yield* made.finished({ ...unhooked("The loader is fixed.", "run-2", turns, Effect.sync(() => current)), about: { machine: "Rosie", id: "t-other" } })
+        yield* nextEvent("Ready: yapd. The loader is fixed.")
+        current = false
+        yield* wait(11)
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Something else first."])
   })
 
   test("says what yapd has to say for itself in turn, questions first", async () => {

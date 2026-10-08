@@ -131,6 +131,8 @@ export const make = (
     readonly session: string
     readonly key: string
     readonly run: Notices.Finished["run"]
+    /** Whether it's still the thread's run, which ends once the thread starts again or goes. */
+    readonly current: Effect.Effect<boolean>
     readonly at: number
     begun: boolean
     /** Its entry in the journal, once it's kept, to note as dealt with if a Stop of its own takes its place. */
@@ -520,10 +522,10 @@ export const make = (
         yield* removeFile(audio)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
       }
-      // Given way since to a Stop of its own, it isn't said.
-      if (fallback !== undefined && fallbacks.get(fallback.key) !== fallback) {
+      // Given way since to a Stop of its own, or its thread started again or went, it isn't said.
+      if (fallback !== undefined && (fallbacks.get(fallback.key) !== fallback || !(yield* fallback.current))) {
         yield* removeFile(audio)
-        return yield* Effect.logInfo("Skipped a turn no hook told of, since its hook came")
+        return yield* Effect.logInfo("Skipped a turn no hook told of, since its hook came or its thread started again")
       }
       // Its entry is noted as it's kept, so giving way to a Stop of its own notes it as dealt with, however soon that comes.
       const claimed =
@@ -631,12 +633,16 @@ export const make = (
   /**
    * A turn said in its hook's place, as its turn to be said comes: begun, it's
    * the turn's, so a Stop of its own coming later isn't said too; unless it
-   * gave way to one already. Taken with the event lock held, so it's one or
-   * the other.
+   * gave way to one already, or its thread is on another run by now. Taken
+   * with the event lock held, so it's one or the other.
    */
   const begin = (fallback: Fallback) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       if (fallbacks.get(fallback.key) !== fallback) return false
+      if (!(yield* fallback.current)) {
+        fallbacks.delete(fallback.key)
+        return false
+      }
       fallback.begun = true
       return true
     }).pipe(events.withPermits(1))
@@ -645,14 +651,16 @@ export const make = (
    * A turn T3 Code says one of its threads finished, which no hook told of,
    * like one run by an agent yapd has no hooks for: summed up and said like a
    * hook's update, once ever under its `key`, unless a Stop of its own came,
-   * said or skipped. It's the thread's own session to yapd, and a reply to
-   * it can only go through T3 Code. The turn is its, or its Stop's, as
-   * decided with the event lock held, so neither is said once the other is.
+   * said or skipped, or its thread started again or went. It's the thread's
+   * own session to yapd, and a reply to it can only go through T3 Code. The
+   * turn is its, or its Stop's, as decided with the event lock held, so
+   * neither is said once the other is.
    */
   const finished = (input: Notices.Finished) =>
     Effect.gen(function* () {
       // Not what notices about the thread go under, so neither takes the other's place.
       const session = `finished:${input.about.machine}:${input.about.id}`
+      if (!(yield* input.current)) return yield* Effect.logInfo("Not saying a turn no hook told of, since its thread started again")
       // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands.
       if (Notices.hooked(stopsOf(input.run.natives), input.run, input.run.startedAt)) return yield* Effect.logInfo("Left to its hook")
       // Heard of twice, as after a reconnect, it's said the once.
@@ -662,6 +670,7 @@ export const make = (
         session,
         key: input.key,
         run: input.run,
+        current: input.current,
         at: yield* Clock.currentTimeMillis,
         begun: false,
       }
@@ -997,12 +1006,12 @@ export const make = (
     // What was about to be ready never came, so the speaker rests again, the next time round.
     if (Option.isNone(next)) return
     const { ready, turns } = next.value
-    // A turn said in its hook's place is the turn's once it's begun, unless it gave way to a Stop of its own by now.
+    // A turn said in its hook's place is the turn's once it's begun, unless it gave way to a Stop of its own, or its thread was on another run, by now.
     const fallback = "update" in ready ? standing.get(ready.update) : undefined
     if (fallback !== undefined && !(yield* begin(fallback))) {
       yield* removeFile(Inbox.audio(ready))
       yield* STM.commit(TRef.set(floor.reading, false))
-      return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came")
+      return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came or its thread started again")
     }
     if ("update" in ready) {
       readSince.set(ready.update, turns)
