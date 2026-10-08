@@ -1,58 +1,48 @@
 import AppKit
 
-/// yapd's own mark for the menu bar: a speech bubble with a letter in it, struck through while yapd is off.
+/// yapd's own mark for the menu bar: an arc reactor, for a voice that's a bit like Jarvis. Off, its coils and core go
+/// dark and only the casing is left.
 @MainActor
 enum Mark {
-  static let on = image("y")
-  static let off = image("y", struck: true)
-  /// When yapd isn't running.
-  static let down = image("!")
+  static let on = image()
+  static let off = image(powered: false)
+  /// When yapd isn't running: the reactor, faded.
+  static let down = image(alpha: 0.35)
 
-  private static func image(_ letter: String, struck: Bool = false) -> NSImage {
+  private static func image(powered: Bool = true, alpha: CGFloat = 1) -> NSImage {
     let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
-      let line: CGFloat = 1.4
-      let (left, right, top, bottom, radius): (CGFloat, CGFloat, CGFloat, CGFloat, CGFloat) = (1.7, 16.3, 1.7, 12.6, 3.8)
-      let bubble = NSBezierPath()
-      bubble.move(to: NSPoint(x: (left + right) / 2, y: top))
-      bubble.appendArc(from: NSPoint(x: right, y: top), to: NSPoint(x: right, y: bottom), radius: radius)
-      bubble.appendArc(from: NSPoint(x: right, y: bottom), to: NSPoint(x: left, y: bottom), radius: radius)
-      // The tail, down and to the left.
-      bubble.line(to: NSPoint(x: 8.6, y: bottom))
-      bubble.line(to: NSPoint(x: 3.6, y: 16.6))
-      bubble.line(to: NSPoint(x: 5.2, y: bottom))
-      bubble.appendArc(from: NSPoint(x: left, y: bottom), to: NSPoint(x: left, y: top), radius: radius)
-      bubble.appendArc(from: NSPoint(x: left, y: top), to: NSPoint(x: right, y: top), radius: radius)
-      bubble.close()
-      bubble.lineWidth = line
-      bubble.lineJoinStyle = .round
-      NSColor.black.setStroke()
-      bubble.stroke()
+      let centre = NSPoint(x: 9, y: 9)
+      let line: CGFloat = 1.3
+      NSColor.black.withAlphaComponent(alpha).set()
 
-      let font = NSFont.systemFont(ofSize: 10.5, weight: .heavy)
-      let rounded = font.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 10.5) } ?? font
-      let text = NSAttributedString(string: letter, attributes: [.font: rounded, .foregroundColor: NSColor.black])
-      // Centred on its ink, in the body of the bubble.
-      let ink = text.boundingRect(with: .zero, options: [.usesDeviceMetrics])
-      let baseline = (top + bottom) / 2 + ink.midY
-      text.draw(at: NSPoint(x: (left + right) / 2 - ink.midX, y: baseline - rounded.ascender))
+      let casing = circle(centre, radius: 7.9)
+      casing.lineWidth = line
+      casing.stroke()
 
-      if struck {
-        let slash = NSBezierPath()
-        slash.move(to: NSPoint(x: 2, y: 16.5))
-        slash.line(to: NSPoint(x: 16.5, y: 2))
-        slash.lineCapStyle = .round
-        // A gap either side, so it reads as struck through rather than drawn over.
-        NSGraphicsContext.current?.compositingOperation = .clear
-        slash.lineWidth = 4
-        slash.stroke()
-        NSGraphicsContext.current?.compositingOperation = .sourceOver
-        slash.lineWidth = line
-        slash.stroke()
+      guard powered else {
+        let core = circle(centre, radius: 2.3)
+        core.lineWidth = line
+        core.stroke()
+        return true
       }
+      // Eight coils around the core, set off the vertical so none points straight up.
+      for coil in 0..<8 {
+        let angle = CGFloat(coil) * 45 - 67.5
+        let block = NSBezierPath()
+        block.appendArc(withCenter: centre, radius: 6.3, startAngle: angle - 15, endAngle: angle + 15)
+        block.appendArc(withCenter: centre, radius: 3.9, startAngle: angle + 15, endAngle: angle - 15, clockwise: true)
+        block.close()
+        block.fill()
+      }
+      circle(centre, radius: 2.5).fill()
       return true
     }
     // Drawn in black, and tinted to match the menu bar.
     image.isTemplate = true
     return image
+  }
+
+  private static func circle(_ centre: NSPoint, radius: CGFloat) -> NSBezierPath {
+    NSBezierPath(ovalIn: NSRect(x: centre.x - radius, y: centre.y - radius, width: radius * 2, height: radius * 2))
   }
 }
