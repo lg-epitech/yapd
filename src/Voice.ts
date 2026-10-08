@@ -423,8 +423,9 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
                   child.stop()
                 }).pipe(Effect.zipRight(Effect.fail(new KokoroError({ cause: "Kokoro's process didn't answer" })))),
               ),
-              // A first part nobody heard about is nobody else's to remove.
-              Effect.tapError(() => (handed ? Effect.void : remove([first]))),
+              // A first part nobody heard about is nobody else's to remove, and nor is any file of one given up on,
+              // since whoever gave up may have stopped before they heard where its part was.
+              Effect.tapError(() => (abandoned ? remove([path, first]) : handed ? Effect.void : remove([first]))),
               Effect.ensuring(Effect.zipRight(Effect.sync(() => child.renders.delete(id)), lock.release(1))),
               Effect.interruptible,
               Effect.forkIn(scope),

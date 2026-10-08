@@ -307,16 +307,25 @@ const fakeKokoro = () => {
     if (request.type !== "render") return
     if (mode === "crash") process.exit(1)
     if (mode === "failing") send({ type: "failed", id: request.id, reason: "No voice" })
+    const rendered = () => {
+      writeFileSync(request.path, "audio")
+      record({ rendered: request.id })
+      send({ type: "rendered", id: request.id })
+    }
+    // Its first part comes a moment later, then the rest fails, or the process dies, like on a GPU giving way.
+    if (mode === "breaking" || mode === "dying") {
+      if (request.first === undefined) return rendered()
+      return void setTimeout(() => {
+        writeFileSync(request.first!, "part")
+        send({ type: "part", id: request.id, path: request.first })
+        setTimeout(() => (mode === "dying" ? process.exit(1) : send({ type: "failed", id: request.id, reason: "GPU" })), 50)
+      }, 100)
+    }
     // Asked for one, the first sentence comes at once when there's more after it.
     if (request.first !== undefined && request.text.includes(". ")) {
       writeFileSync(request.first, "part")
       record({ part: request.id })
       send({ type: "part", id: request.id, path: request.first })
-    }
-    const rendered = () => {
-      writeFileSync(request.path, "audio")
-      record({ rendered: request.id })
-      send({ type: "rendered", id: request.id })
     }
     // Busy rendering, it only hears it was given up on once it's done.
     if (mode === "deaf") setTimeout(rendered, 200)
@@ -504,6 +513,21 @@ describe("kokoro", () => {
         expect(requests("cancel")(yield* entries(log)).map((entry) => entry.request)).toEqual([{ type: "cancel", id: 1 }])
       }),
     ))
+
+  test("leaves no first part behind of a render given up on before it was heard of, whose rest then failed", async () => {
+    for (const mode of ["breaking", "dying"])
+      await withKokoro(mode, (voice, log, file) =>
+        Effect.gen(function* () {
+          const scope = yield* Scope.make()
+          yield* voice.renderFirst("The tests pass. Nothing needs you.", file).pipe(Scope.extend(scope))
+          yield* until(log, (recorded) => requests("render")(recorded).length === 1)
+          yield* Scope.close(scope, Exit.void)
+          // Its turn only ends once the process is done with the one given up on.
+          yield* Effect.either(voice.render("Two.", `${file}.2`))
+          expect(yield* Effect.promise(() => Bun.file(`${file}.first.wav`).exists())).toBe(false)
+        }),
+      )
+  })
 
   test("fails a render the process couldn't do, and keeps the process", () =>
     withKokoro("failing", (voice, log, file) =>
