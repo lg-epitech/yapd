@@ -110,15 +110,22 @@ const lines: Persona.Lines = {
   address: "sir",
 }
 
-/** A T3 Code that answers reads, and has nothing pending. */
-const transport: Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> = Effect.succeed({
-  api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
-    Schema.decodeUnknown(schema)({
-      projection: { runs: [{ id: "run-3", status: "running", ordinal: 3 }], messages: [{ role: "assistant", text: "Comparing fee tables.", createdAt: "x" }], turnItems: [] },
-    }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
-  call: (<A, I>(method: string, _: unknown, schema: Schema.Schema<A, I>) =>
-    Schema.decodeUnknown(schema)(method === "server.getConfig" ? { providers: [] } : { matches: [] }).pipe(Effect.orDie)) as T3CodeServer.Transport["call"],
-})
+/** A T3 Code that answers reads, has nothing pending, and finds for each word what `search` says, in its order. */
+const transport = (search: (query: string) => ReadonlyArray<string>): Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> =>
+  Effect.succeed({
+    api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
+      Schema.decodeUnknown(schema)({
+        projection: { runs: [{ id: "run-3", status: "running", ordinal: 3 }], messages: [{ role: "assistant", text: "Comparing fee tables.", createdAt: "x" }], turnItems: [] },
+      }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
+    call: (<A, I>(method: string, params: { readonly query?: string }, schema: Schema.Schema<A, I>) =>
+      Schema.decodeUnknown(schema)(
+        method === "server.getConfig"
+          ? { providers: [] }
+          : {
+              matches: search(params.query ?? "").map((threadId) => ({ threadId, projectId: "p", source: "message", snippet: params.query, messageCreatedAt: null })),
+            },
+      ).pipe(Effect.orDie)) as T3CodeServer.Transport["call"],
+  })
 
 /** The handle the model was shown a thread by. */
 const handle = (situation: Brain.Situation, of: T3Live.Thread) => situation.desk.threads.find(({ ref }) => ref.id === of.id)?.handle ?? ""
@@ -133,7 +140,18 @@ const handle = (situation: Brain.Situation, of: T3Live.Thread) => situation.desk
 const assistant = (
   model: (situation: Brain.Situation) => Brain.Decision | undefined,
   write: (material: Material) => Written = () => written({}),
-  given: { readonly writing?: number; readonly launching?: number; readonly hanging?: boolean; readonly waiting?: boolean } = {},
+  given: {
+    readonly writing?: number
+    readonly launching?: number
+    readonly hanging?: boolean
+    readonly waiting?: boolean
+    /** Threads besides those in the view, or in place of them. */
+    readonly others?: ReadonlyArray<T3Live.Thread>
+    /** The ids of the threads T3 Code's search finds for a word, best first. */
+    readonly search?: (query: string) => ReadonlyArray<string>
+    /** What's waiting to be said already, like an update a dictation cut off. */
+    readonly queued?: ReadonlySet<string>
+  } = {},
 ) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
@@ -151,8 +169,11 @@ const assistant = (
     )
     const threads = yield* Threads.make({
       machine: "Rosie",
-      live: { view: Effect.succeed(Option.some(view)), changes: Stream.never },
-      actions: Option.some(T3Actions.make(transport)),
+      live: {
+        view: Effect.succeed(Option.some({ ...view, threads: new Map([...view.threads, ...(given.others ?? []).map((other) => [other.id, other] as const)]) })),
+        changes: Stream.never,
+      },
+      actions: Option.some(T3Actions.make(transport(given.search ?? (() => [])))),
       others: [],
       journal,
       store,
@@ -203,7 +224,7 @@ const assistant = (
       lastHeard: Effect.succeed(Option.none()),
       coming: Effect.void,
       awaiting: Effect.succeed(Effect.void),
-      queued: () => Effect.succeed(false),
+      queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -296,6 +317,32 @@ describe("Assistant", () => {
     expect(result.questions).toBe(0)
     expect(result.spoken).toEqual(heard.map(() => "The Tezos migration is comparing both request formats, sir."))
     expect(result.about).toEqual(heard.map(() => tezos.id))
+  })
+
+  test("a thread named by one word reaches the model when thirty newer ones are about another word he said", async () => {
+    // Settled three days ago, behind thirty newer threads, seven of which mention grades, as on his machine.
+    const settled = thread(tezos.id, tezos.title, "integration", { updatedAt: new Date(now - 3 * 24 * 60 * 60_000).toISOString() })
+    const newer = Array.from({ length: 30 }, (_, index) =>
+      thread(`e${index}-0000-4000-8000-${String(index).padStart(12, "0")}`, `Grades export part ${index + 1}`, "std", {
+        updatedAt: new Date(now - (index + 1) * 60_000).toISOString(),
+      }),
+    )
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, seen } = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration finished three days ago, sir." }),
+          undefined,
+          {
+            others: [settled, ...newer],
+            search: (query) => (query === "grades" ? newer.slice(0, 7).map(({ id }) => id) : query === "tezos" ? [distractors[9]!.id, tezos.id] : []),
+          },
+        )
+        yield* dictate("My grades tezos.")
+        return { shown: seen[0]!.desk.threads.some(({ ref }) => ref.id === tezos.id), spoken: spoken() }
+      }),
+    )
+    expect(result.shown).toBe(true)
+    expect(result.spoken).toEqual(["The Tezos migration finished three days ago, sir."])
   })
 
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {

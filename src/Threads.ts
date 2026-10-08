@@ -212,9 +212,9 @@ export const shortlist = (input: {
     })
 }
 
-/** Words searched for at most, and threads a search adds to the desk at most. */
+/** Words searched for at most, and threads a search adds to the desk at most: a third of it. */
 const searches = 4
-const added = 5
+const added = 10
 /** Words too common to tell threads apart. */
 const common: ReadonlySet<string> = new Set([
   "what", "what's", "whats", "status", "with", "that", "this", "have", "please", "could", "would", "about", "going", "doing",
@@ -232,9 +232,11 @@ export type Search<E> = (words: string) => Effect.Effect<ReadonlyArray<{ readonl
 
 /**
  * Threads whose messages have the words that tell threads apart, one search
- * each, since T3 Code matches a phrase only as it's written: those with most
- * of the words first, each with what was found. It fails only when no search
- * could be made at all.
+ * each, since T3 Code matches a phrase only as it's written, each with what
+ * was found. Those with most of the words come first, then each word's best
+ * hits in turn, as T3 Code ranked them, the rarer word's first: a common word
+ * he said can't crowd out the one that names the thread. It fails only when
+ * no search could be made at all.
  */
 export const matching = <E>(text: string, search: Search<E>) =>
   Effect.gen(function* () {
@@ -243,20 +245,29 @@ export const matching = <E>(text: string, search: Search<E>) =>
     const all = yield* Effect.forEach(sought, (word) => Effect.either(search(word)), { concurrency: "unbounded" })
     const failed = all.find(Either.isLeft)
     if (failed !== undefined && all.every(Either.isLeft)) return yield* failed
-    const hits = new Map<string, { readonly ref: Ref; readonly snippet: string; count: number }>()
-    for (const matches of all.flatMap((searched) => (Either.isRight(searched) ? [searched.right] : []))) {
-      // Once for each word, however many of its messages have it.
-      const seen = new Set<string>()
-      for (const { ref, snippet } of matches) {
+    // Each word's threads in T3 Code's order, once each however many of their messages have it.
+    const lists = all.flatMap((searched) =>
+      Either.isRight(searched)
+        ? [searched.right.filter(({ ref }, index, matches) => matches.findIndex((other) => same(other.ref, ref)) === index)]
+        : [],
+    )
+    const hits = new Map<string, { readonly ref: Ref; readonly snippet: string; count: number; place: number; among: number }>()
+    for (const matches of lists) {
+      for (const [place, { ref, snippet }] of matches.entries()) {
         const key = `${ref.machine}\n${ref.id}`
-        if (seen.has(key)) continue
-        seen.add(key)
         const hit = hits.get(key)
-        if (hit === undefined) hits.set(key, { ref, snippet, count: 1 })
-        else hit.count++
+        if (hit === undefined) {
+          hits.set(key, { ref, snippet, count: 1, place, among: matches.length })
+          continue
+        }
+        hit.count++
+        if (place < hit.place || (place === hit.place && matches.length < hit.among)) {
+          hit.place = place
+          hit.among = matches.length
+        }
       }
     }
-    return [...hits.values()].toSorted((one, other) => other.count - one.count)
+    return [...hits.values()].toSorted((one, other) => other.count - one.count || one.place - other.place || one.among - other.among)
   })
 
 /** The threads a search for what he said puts on the desk, those with most of his words first. */
