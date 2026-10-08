@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, type Duration, Effect, Exit, Layer, Logger, Option, Redacted, TestClock, TestContext } from "effect"
+import { Clock, type Duration, Effect, Exit, Layer, Logger, Option, Redacted, Scope, TestClock, TestContext } from "effect"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ProcessError } from "./Process.ts"
@@ -199,6 +199,24 @@ describe("Tunnel", () => {
         expect(rig.calls.filter((line) => line.includes(" -M "))).toEqual([])
         expect(rig.calls.filter((line) => line.includes(" -O forward "))).toHaveLength(1)
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("closes the connection with its scope, even when it was opened where nothing can be interrupted", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine()
+        const scope = yield* Scope.make()
+        // Like acquireRelease's acquisition.
+        const opening = Effect.uninterruptible(Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder))
+        const tunnel = yield* Scope.extend(opening, scope)
+        yield* flush
+        expect(yield* tunnel.status).toEqual({ _tag: "Up" })
+        // Not the test's own fiber, which would wait for it, however long.
+        const closing = yield* Effect.forkDaemon(Scope.close(scope, Exit.void))
+        yield* flush
+        expect(Option.isSome(yield* closing.poll)).toBe(true)
+        expect(rig.calls.filter((line) => line.includes(" -O exit "))).toHaveLength(1)
+      }).pipe(Effect.provide(TestContext.TestContext)),
     ))
 
   test("never puts the token in the log, even when what came back can't be read", async () => {

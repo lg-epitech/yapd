@@ -283,7 +283,9 @@ export const forward = (host: string, destination: string, exec: Remote.Exec = s
 
     // Closed with yapd, rather than left running in the background after it.
     yield* Effect.addFinalizer(() => Effect.exit(control("-O", "exit")))
-    yield* Effect.forkScoped(loop)
+    // A fork takes after where it starts, and opening the tunnel where nothing can be interrupted, like a layer's
+    // or acquireRelease's acquisition, would leave closing the scope waiting forever on the loop, and SSH open.
+    yield* Effect.forkScoped(Effect.interruptible(loop))
 
     /** How it stands while yapd has just started and the first try isn't over. */
     const connecting = { _tag: "Down", reason: `I'm still connecting to ${host}.`, outage: 0 } as const
