@@ -1032,6 +1032,39 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a message whose words the model left out goes in the words of his request, never those of his answer to a question about it", async () => {
+    const request = "Tell the migration one to rebase on master."
+    const unworded = (answered: (situation: Brain.Situation) => Brain.Decision | undefined, reply: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, answer, dispatched } = yield* assistant((situation) =>
+            situation.utterance.via === "reply"
+              ? answered(situation)
+              : Brain.decision({ act: "send", target: handle(situation, tezos), sure: "medium", others: handle(situation, mina), how: "now" }),
+          )
+          yield* dictate(request)
+          yield* answer(reply)
+          return dispatched.map(({ threadId, text }) => [threadId, text])
+        }),
+      )
+    // By position, which needs no model, and by name, as the model takes it, leaving the words out again.
+    expect(await unworded(() => undefined, "The first.")).toEqual([[tezos.id, request]])
+    expect(await unworded((situation) => Brain.decision({ act: "send", target: handle(situation, tezos), pending: "answers" }), "The Tezos migration, I mean.")).toEqual([
+      [tezos.id, request],
+    ])
+    // Said twice, and yes to sending it again.
+    const twice = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, dispatched } = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, tezos), how: "now" }))
+        yield* dictate("Tell the Tesla's migration to rebase on master.")
+        yield* dictate("Tell the Tesla's migration to rebase on master.")
+        yield* answer("Yes.")
+        return dispatched.map(({ text }) => text)
+      }),
+    )
+    expect(twice).toEqual(["Tell the Tesla's migration to rebase on master.", "Tell the Tesla's migration to rebase on master."])
+  })
+
   test("nothing is dispatched for a dictation heard before yapd was turned off and on", async () => {
     const sending = (toggled: boolean) =>
       run(

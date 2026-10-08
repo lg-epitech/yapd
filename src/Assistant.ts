@@ -181,6 +181,16 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 const askedAbout = (open: Pick<Open, "kind" | "candidates">) =>
   Brain.yesNo(open.kind) ? Option.fromNullable(open.candidates[0]) : Option.none<Threads.Ref>()
 
+/**
+ * An answer to a question about a message, with the words it left out taken
+ * from what was asked about, or failing those from the request itself: never
+ * the answer's own, like "The first." or "Yes.", which aren't for the thread.
+ */
+const worded = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard">): Brain.Decision =>
+  decision.act === "send" && decision.text.trim() === "" && open.decision.act === "send"
+    ? { ...decision, text: open.decision.text.trim() || open.heard }
+    : decision
+
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
 
@@ -777,7 +787,9 @@ export const make = (options: {
       at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean },
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
-        const { utterance, situation, decision } = thought
+        const { utterance, situation } = thought
+        // A question about it is about the words that went, or were to, which an answer can't stand in for.
+        const decision = act._tag === "Message" ? { ...thought.decision, text: act.text } : thought.decision
         const ref =
           outcome._tag === "Done"
             ? outcome.to
@@ -925,8 +937,7 @@ export const make = (options: {
         if (!Brain.agrees(open, thought.decision, situation.desk)) {
           yield* forgo(open, "He asked for something else instead.")
           // Words left out are the ones asked about, as for "no, the Mina one".
-          const answered = thought.decision
-          const instead = answered.act === open.decision.act && answered.text.trim() === "" ? { ...answered, text: open.decision.text } : answered
+          const instead = worded(thought.decision, open)
           const checked = Brain.check(instead, situation, said)
           if (checked._tag === "Ask") {
             yield* Effect.logInfo("Leaving it, rather than ask again")
@@ -938,13 +949,16 @@ export const make = (options: {
         const target = Option.fromNullable(open.candidates[0]).pipe(
           Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
         )
-        const decision = Brain.decision({
-          ...open.decision,
-          target: Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle }),
-          sure: "high",
-          others: "",
-          pending: "answers",
-        })
+        const decision = worded(
+          Brain.decision({
+            ...open.decision,
+            target: Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle }),
+            sure: "high",
+            others: "",
+            pending: "answers",
+          }),
+          open,
+        )
         const checked = Brain.check(decision, situation, said)
         const resend = Option.filter(open.resend, () => checked._tag === "Do" && checked.plan.decision.act === "send" && Option.isSome(target))
         if (Option.isNone(resend)) yield* forgo(open, "His yes didn't stand.")
@@ -956,8 +970,8 @@ export const make = (options: {
           const power = yield* options.power
           if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
           const outcome = yield* hands.again(resend.value)
-          const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: open.decision.text, how: "now" }
-          return yield* told(act, outcome, { ...thought, decision: open.decision }, said, { step: 0, commandId: resend.value })
+          const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: decision.text, how: "now" }
+          return yield* told(act, outcome, { ...thought, decision }, said, { step: 0, commandId: resend.value })
         }
         return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: true })
       })
@@ -1063,13 +1077,14 @@ export const make = (options: {
         }
         if (open.kind === "project") return yield* project(open, decided, said)
         if (open.kind !== "which") return yield* agreeing(open, decided, said)
-        const checked = Brain.check(decision, decided.situation, said)
+        const picked = worded(decision, open)
+        const checked = Brain.check(picked, decided.situation, said)
         // At most one question: one the answer doesn't settle is let go.
         if (checked._tag === "Ask") {
           yield* Effect.logInfo("Leaving it, since the answer didn't settle which one")
           return reply(said.leaving, decided.subject)
         }
-        return yield* follow(checked, decided, said)
+        return yield* follow(checked, { ...decided, decision: picked }, said)
       }).pipe(
         Effect.catchAllCause((cause) =>
           Cause.isInterruptedOnly(cause)
