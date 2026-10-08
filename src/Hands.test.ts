@@ -674,6 +674,22 @@ describe("Hands", () => {
     ).toEqual({ again: "Twin", dispatched: 1 })
   })
 
+  test("a queued message he took out himself, which T3 Code still shows cancelled, is withdrawn, so the same words go as new", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { send, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* send("u1", "When it's done, open a PR.", "after")
+        // He took it out of the queue in T3 Code's app, which still shows its run, cancelled, and the message.
+        bounded.runs[1]!.status = "cancelled"
+        yield* TestClock.adjust("1 minute")
+        const again = yield* send("u2", "When it's done, open a PR.", "after")
+        return { again: again._tag, dispatched: dispatched.map(({ commandId }) => commandId) }
+      }),
+    )
+    expect(result).toEqual({ again: "Done", dispatched: ["yapd:u1:0", "yapd:u2:0"] })
+  })
+
   test("a queued message he promoted to steer in T3 Code's app is still the message that went, so the same words are asked about", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -913,6 +929,42 @@ describe("Hands", () => {
         return { sequence: 8 }
       })
     expect((await restarting(at("running"), true, queues)).said).toBe("Stopped it, sir, but that's waiting in its queue.")
+  })
+
+  test("a message in place of the turn under way worked out again is the stop and the message it was, whatever came of them, and nothing goes twice", async () => {
+    const twice = (shows: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+          const { send, answering, becomes, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          answering((payload, bounded) => {
+            if (payload.type !== "run.interrupt") return takes()(payload, bounded)
+            bounded.runs[0]!.status = "interrupted"
+            return Effect.succeed({ sequence: 7 })
+          })
+          const sending = yield* Effect.fork(send("u1", "Drop that and fix the loader instead.", "restart"))
+          yield* TestClock.adjust("2 seconds")
+          if (shows) becomes(thread(tezos.id, { status: "interrupted" }))
+          yield* TestClock.adjust("14 seconds")
+          const first = yield* Fiber.join(sending)
+          // Worked out again as he carried on talking.
+          const again = yield* send("u1", "Drop that and fix the loader instead.", "restart")
+          const what = (outcome: Hands.Outcome) =>
+            outcome._tag === "Done" ? [outcome._tag, outcome.how, outcome.stopped] : "reason" in outcome ? [outcome._tag, outcome.reason, outcome.stopped] : [outcome._tag]
+          return { first: what(first), again: what(again), dispatched: dispatched.map(({ type, commandId }) => [type, commandId]) }
+        }),
+      )
+    expect(await twice(true)).toEqual({
+      first: ["Done", "now", true],
+      again: ["Done", "now", true],
+      dispatched: [
+        ["run.interrupt", "yapd:u1:0"],
+        ["message.dispatch", "yapd:u1:1"],
+      ],
+    })
+    // Not told, it's the same reason again, never told on the second go.
+    const winding = ["NotSent", "It was still winding down fifteen seconds later.", true]
+    expect(await twice(false)).toEqual({ first: winding, again: winding, dispatched: [["run.interrupt", "yapd:u1:0"]] })
   })
 
   test("a turn that ended just before it was stopped to be told something in its place is told at once, whether yapd's look or T3 Code finds it ended", async () => {
