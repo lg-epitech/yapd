@@ -176,7 +176,9 @@ Archived threads and the ones a thread runs for itself aren't listed. Nothing he
 ```
 
 - `kind`: `update` for an agent's turn yapd summed up, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, and `action` for anything else it did, like turning off.
-- `said` is what yapd said, `text` the words it was about, like what you said or an agent's message, and `heard` when you heard it through. Each is there only when there's one.
+- `said` is what yapd said, `text` the words it was about, like what you said or an agent's message, and `heard` when you heard it through.
+- `machine` and `project` are where it happened, `thread` the id of the T3 Code thread it's about, as [`/threads`](#threads) has it, and `utterance` the id of the request it came from, as [`/utterances`](#asking-yapd-something) gives it.
+- Each is there only when there's one.
 
 | Query | |
 | --- | --- |
