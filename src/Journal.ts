@@ -36,6 +36,12 @@ export interface Entry {
   readonly said?: string | undefined
   /** The words it's about: the agent's message, the user's, or a prompt. */
   readonly text?: string | undefined
+  /** The request of the user's it belongs to. */
+  readonly utterance?: string | undefined
+  /** Set on what must only ever be said once, like a thread's question. */
+  readonly key?: string | undefined
+  /** When the user heard it through, answered it or was briefed on it. */
+  readonly heardAt?: number | undefined
   /** Anything else worth keeping, as JSON. */
   readonly detail?: unknown
 }
@@ -64,6 +70,9 @@ interface Row {
   readonly directory: string | null
   readonly said: string | null
   readonly text: string | null
+  readonly utterance: string | null
+  readonly key: string | null
+  readonly heard_at: number | null
   readonly detail: string | null
 }
 
@@ -86,6 +95,9 @@ const kept = (row: Row): Kept => ({
   ...(row.directory === null ? {} : { directory: row.directory }),
   ...(row.said === null ? {} : { said: row.said }),
   ...(row.text === null ? {} : { text: row.text }),
+  ...(row.utterance === null ? {} : { utterance: row.utterance }),
+  ...(row.key === null ? {} : { key: row.key }),
+  ...(row.heard_at === null ? {} : { heardAt: row.heard_at }),
   ...Option.match(Option.fromNullable(parse(row.detail)), { onNone: () => ({}), onSome: (detail) => ({ detail }) }),
 })
 
@@ -100,7 +112,7 @@ export const fromStore = (store: Store.Store["Type"]): Journal["Type"] => ({
       .transaction((database: Database) => {
         database
           .query(
-            "insert into journal (at, kind, machine, project, thread, directory, said, text, detail) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "insert into journal (at, kind, machine, project, thread, directory, said, text, utterance, key, heard_at, detail) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
             entry.at,
@@ -111,6 +123,9 @@ export const fromStore = (store: Store.Store["Type"]): Journal["Type"] => ({
             entry.directory ?? null,
             clip(entry.said),
             clip(entry.text),
+            entry.utterance ?? null,
+            entry.key ?? null,
+            entry.heardAt ?? null,
             entry.detail === undefined ? null : JSON.stringify(entry.detail),
           )
       })

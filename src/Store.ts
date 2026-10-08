@@ -57,9 +57,10 @@ export const migrations: ReadonlyArray<string> = [
   // What yapd remembers for the user: a journal of everything heard, said and
   // done, oldest first, so it can be recalled after a restart and built on:
   // what each update said, what the user answered or asked for, and what came
-  // of it. Times are milliseconds since 1970, and `machine` is the hostname
-  // the machine's hooks report. Settings came before the steps, so an older
-  // database may have them already.
+  // of it. Times are milliseconds since 1970. `key` is set on what must only
+  // ever be said once, like a thread's question, and `heard_at` once the user
+  // heard it through, answered it or was briefed on it. Settings came before
+  // the steps, so an older database may have them already.
   `create table if not exists settings (name text primary key, value text not null);
   create table journal (
     id integer primary key,
@@ -71,11 +72,16 @@ export const migrations: ReadonlyArray<string> = [
     directory text,
     said text,
     text text,
+    utterance text,
+    key text,
+    heard_at integer,
     detail text
   ) strict;
   create index journal_at on journal (at);
   create index journal_kind_at on journal (kind, at);
-  create index journal_thread on journal (thread, at) where thread is not null;`,
+  create index journal_thread on journal (machine, thread, at) where thread is not null;
+  create unique index journal_key on journal (key) where key is not null;
+  create index journal_unheard on journal (at) where heard_at is null and kind in ('update', 'notice');`,
 ]
 
 export class Store extends Context.Tag("yapd/Store")<
