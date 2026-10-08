@@ -307,6 +307,50 @@ describe("Hands", () => {
     expect(result.dispatched).toBe(2)
   })
 
+  test("sending once more what never left, when that never leaves either, isn't sending it again: said again, it's offered under its own ids, and goes", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, answering, ids } = yield* hands()
+        // T3 Code is restarting, the first time and when he says yes.
+        answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." })))
+        yield* send("u1", "Use the fee table.")
+        const resent = yield* again("yapd:u1:0")
+        // It's back a minute on, and he says it again.
+        answering(takes())
+        yield* TestClock.adjust("1 minute")
+        const said = yield* send("u2", "Use the fee table.")
+        const yes = said._tag === "Twin" ? yield* again(said.row.commandId) : said
+        return { resent: resent._tag === "NotSent" ? [resent.reason, Option.isSome(resent.again)] : resent._tag, said: said._tag, yes: yes._tag, ids: ids() }
+      }),
+    )
+    expect(result.resent).toEqual(["T3 Code isn't answering.", false])
+    expect(result.said).toBe("Twin")
+    expect(result.yes).toBe("Done")
+    expect(new Set(result.ids.map((pair) => pair.join(" ")))).toEqual(new Set(["yapd:u1:0 yapd:u1:0:m"]))
+  })
+
+  test("a message taken back while it was still queued is new again when said again, whether or not T3 Code still shows it", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    const withdrawn = (forgotten: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { send, run: act, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          yield* send("u1", "When it's done, open a PR.", "after")
+          yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+          if (forgotten) {
+            bounded.runs.splice(1)
+            bounded.messages.splice(0)
+          }
+          yield* TestClock.adjust("1 minute")
+          const again = yield* send("u3", "When it's done, open a PR.", "after")
+          return { again: again._tag, dispatched: dispatched.map(({ type }) => type) }
+        }),
+      )
+    for (const forgotten of [false, true]) {
+      expect(await withdrawn(forgotten)).toEqual({ again: "Done", dispatched: ["message.dispatch", "queued-run.cancel", "message.dispatch"] })
+    }
+  })
+
   test("asking to send again says sir once, however the line to ask it was written", () => {
     const unknown: Hands.Outcome = { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }
     for (const again of ["Shall I send it again, sir?", "Sir, shall I send it again?"]) {

@@ -227,9 +227,21 @@ export const make = (options: {
     })
 
   /**
+   * Sending it once more never left yapd, so it wasn't sent again: the step
+   * is put back as it was, never offered again on its own, so the same words
+   * said again find it, and his yes can still send it under its ids.
+   */
+  const unsent = (row: Ledger.Row, reason: string) =>
+    Effect.zipRight(
+      ledger.settle(row.commandId, row.state === "failed" ? "failed" : "unknown", { reason, from: ["abandoned"] }),
+      ledger.leave(row.commandId, "Sending it again never left yapd."),
+    )
+
+  /**
    * Sends a step written in the ledger and notes what came of it. When it
    * may have got there, it's looked for once. `last` is for the one time
-   * it's sent again, after which it's never offered again.
+   * it's sent again, after which it's never offered again, unless it never
+   * left yapd, which isn't sending it.
    */
   const dispatch = (row: Ledger.Row, actions: T3Actions.Actions, wasBusy: boolean, last = false): Effect.Effect<Outcome> =>
     Effect.gen(function* () {
@@ -255,7 +267,7 @@ export const make = (options: {
         return yield* failing({ _tag: "Refused", reason } satisfies Outcome, `${what}, T3 Code turned it down`)
       }
       if (error.sent !== true) {
-        yield* ledger.settle(row.commandId, last ? "abandoned" : "failed", { reason })
+        yield* last ? unsent(row, reason) : ledger.settle(row.commandId, "failed", { reason })
         return yield* failing({ _tag: "NotSent", reason, again } satisfies Outcome, `${what}, it never went`)
       }
       // It went, and may have been done: looked for once, never sent again on its own.
@@ -422,7 +434,7 @@ export const make = (options: {
         const runId = run.value.id
         const cancelled = yield* once(step, "undo", ref, () => ({ _tag: "Cancel", runId }), reached.right)
         // Withdrawn, it's nothing to take back again, nor what "I sent that a minute ago" means.
-        if (cancelled._tag === "Done") yield* ledger.settle(row.commandId, "abandoned", { reason: "Withdrawn." })
+        if (cancelled._tag === "Done") yield* ledger.settle(row.commandId, "abandoned", { reason: Ledger.withdrawn })
         return cancelled
       }
       yield* Effect.logInfo(`${row.commandId} was read already, so it can only be told to ignore it`)
@@ -454,7 +466,7 @@ export const make = (options: {
         const row = taken.value
         const reached = yield* reach(refOf(row))
         if (Either.isLeft(reached)) {
-          yield* ledger.settle(row.commandId, "abandoned", { reason: reached.left })
+          yield* unsent(row, reached.left)
           return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing[row.kind])
         }
         yield* Effect.logInfo(`Sending ${row.commandId} once more, as you said`)

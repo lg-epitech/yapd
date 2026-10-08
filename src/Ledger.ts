@@ -59,6 +59,9 @@ export const digest = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}
 /** How the reason of a step that's never to be offered again on its own starts. */
 const unoffered = "Not to be offered again"
 
+/** The reason of a message he took back while it was still in the queue, which never reached the thread. */
+export const withdrawn = "Withdrawn."
+
 /** Whether a step may still be offered to go again: it didn't get through, or may not have, and he hasn't been offered it, or taken it back, already. */
 export const offerable = (row: Row) => (row.state === "failed" || row.state === "unknown") && !(row.reason ?? "").startsWith(unoffered)
 
@@ -100,12 +103,16 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
     readonly leave: (commandId: string, why: string) => Effect.Effect<void>
     /**
      * Takes a step that didn't get through, or may not have, to send once
-     * more on the user's yes: none if it isn't waiting for that, or was sent
-     * again already. It's given up on as it's taken, so it's never taken
-     * twice, even if yapd stops before it's settled.
+     * more on the user's yes, as it was before it was taken: none if it isn't
+     * waiting for that, or was sent again already. It's given up on as it's
+     * taken, so it's never taken twice, even if yapd stops before it's settled.
      */
     readonly resending: (commandId: string) => Effect.Effect<Option.Option<Row>>
-    /** The latest message with these words to this thread since `at`, unless it was turned down: one given up on may still have got there. */
+    /**
+     * The latest message with these words to this thread since `at`, unless
+     * it was turned down or withdrawn, neither of which reached it: one given
+     * up on otherwise may still have got there.
+     */
     readonly twin: (machine: string, thread: string, digest: string, since: number) => Effect.Effect<Option.Option<Row>>
     /** The latest step within this long, of those the filter lets through. */
     readonly latest: (within: Duration.DurationInput, filter?: Filter) => Effect.Effect<Option.Option<Row>>
@@ -207,14 +214,15 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
     reading(
       Effect.flatMap(Clock.currentTimeMillis, (at) =>
         store.transaction((database: Database) => {
+          // As it was, so it goes out again exactly as it did, and can be put back if it never leaves.
+          const was = one(database, commandId)
           const taken = database
             .query(
               `update actions set state = 'abandoned', reason = 'Sending it again.', settled_at = ?
                where command_id = ? and state in ('prepared', 'failed', 'unknown')`,
             )
             .run(at, commandId).changes
-          // As it was, so it goes out again exactly as it did.
-          return taken === 0 ? Option.none<Row>() : Option.map(one(database, commandId), (taken) => ({ ...taken, state: "prepared" as const }))
+          return taken === 0 ? Option.none<Row>() : was
         }),
       ),
     ),
@@ -224,11 +232,11 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
         Option.map(
           Option.fromNullable(
             database
-              .query<Stored, [string, string, string, number]>(
+              .query<Stored, [string, string, string, number, string]>(
                 `select * from actions where kind = 'message' and machine = ? and thread = ? and digest = ? and at >= ?
-                 and state != 'refused' order by at desc limit 1`,
+                 and state != 'refused' and not (state = 'abandoned' and coalesce(reason, '') = ?) order by at desc limit 1`,
               )
-              .get(machine, thread, digest, since),
+              .get(machine, thread, digest, since, withdrawn),
           ),
           row,
         ),
