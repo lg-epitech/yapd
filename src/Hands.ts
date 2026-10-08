@@ -160,6 +160,8 @@ export const gettingReady = "T3 Code is still getting it ready."
 const readies: ReadonlyArray<ReturnType<typeof T3CodeLauncher.progress>> = ["empty", "preparing"]
 /** Why a message that may not have got there isn't offered to go again. */
 export const tooLong = "It's too long ago to send it again now."
+/** Why a message a restart didn't find where it went isn't offered to go again: yapd's database couldn't be written to keep track of it. */
+export const unnoted = "I couldn't note it down, so I can't offer to send it again."
 /** What a stop is noted with once it's been let carry on, so it's never let carry on twice. */
 const carried = "Carried on since."
 /** Why what was to follow a step that went, like telling a turn yapd stopped what to do instead, never did: yapd restarted between the two. */
@@ -902,12 +904,14 @@ export const make = (options: {
    * to sending it again, stands, and was said then, so nothing is given back.
    * A message is noted as never to be offered in the same write: noted
    * first, it would be there to offer, for this reason, to anything reading
-   * it in between. What's said is the reason as it is.
+   * it in between. What's said is the reason as it is. One yapd's database
+   * couldn't write is said all the same, since nothing else will say it,
+   * and stays as it was, for the next restart to look at again.
    */
   const unverified = (row: Ledger.Row, reason: string) =>
     Effect.gen(function* () {
       const noted = row.kind === "message" ? { state: "unknown" as const, reason: Ledger.leftBe(reason) } : { state: "abandoned" as const, reason }
-      if (!(yield* ledger.settle(row.commandId, noted.state, { reason: noted.reason, as: row }))) return Option.none<Ledger.Row>()
+      if ((yield* ledger.settle(row.commandId, noted.state, { reason: noted.reason, as: row })) === "stale") return Option.none<Ledger.Row>()
       yield* Effect.logWarning(`Couldn't confirm ${row.commandId} went through before restarting: ${reason}`)
       return Option.some<Ledger.Row>({ ...row, reason })
     })
@@ -1019,9 +1023,17 @@ export const make = (options: {
         else if (now - row.at > recent) unconfirmed.push(...Option.toArray(yield* unverified(row, tooLong)))
         // Only while it's as it was read, since his no to sending it again, or a yes that never left yapd, only change its reason: that
         // stands, so it's never offered again.
-        else if (yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", as: row })) {
-          yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
-          undelivered.push(row)
+        else {
+          const noted = yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", as: row })
+          if (noted === "noted") {
+            yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
+            undelivered.push(row)
+          }
+          // Not written, a yes to sending it again couldn't be kept track of either, so it's only said, with why.
+          if (noted === "unwritten") {
+            yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, and I couldn't note it down to offer it`)
+            unconfirmed.push({ ...row, reason: unnoted })
+          }
         }
       }
       // A turn stopped to be told something in its place, or let go of its queue to be asked to carry on, that yapd restarted before

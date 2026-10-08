@@ -78,7 +78,8 @@ const takes =
 const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded["runs"]; readonly started?: number } = {}) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
-    const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
+    const store = yield* Store.make(":memory:")
+    const ledger = Ledger.fromStore(store)
     const bounded: Bounded = { runs: [...(given.runs ?? [])], messages: [], turnItems: [] }
     const dispatched: Array<Record<string, unknown>> = []
     let answer: Answer = takes()
@@ -108,6 +109,8 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
     return {
       ...made,
       ledger,
+      /** yapd's database the ledger is kept in, for a test to make it unwritable. */
+      store,
       bounded,
       dispatched,
       send,
@@ -1069,6 +1072,52 @@ describe("Hands", () => {
       }),
     )
     expect(result).toEqual({ offerable: [false], said: ["I can't reach the threads on rig right now."], offered: false })
+  })
+
+  test("a restart that can't write down what it found still says what it couldn't confirm, and offers nothing to send again it couldn't keep track of", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { ledger, store, restarted, dispatched } = yield* hands({ runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        const prepare = (utterance: string, kind: Ledger.Kind, machine = "Rosie") =>
+          ledger.prepare({
+            utterance,
+            step: 0,
+            kind,
+            machine,
+            thread: tezos.id,
+            body: ({ messageId }) => (kind === "message" ? { _tag: "Send", text: "Use the fee table.", messageId, how: "now" } : { _tag: "Stop" }),
+            message: kind === "message",
+          })
+        // A message to a machine it can't reach, a stop it can't vouch for, and a message that isn't in the thread.
+        yield* prepare("u1", "message", "rig")
+        yield* prepare("u2", "stop")
+        yield* prepare("u3", "message")
+        yield* TestClock.adjust("1 minute")
+        // yapd's database can still be read, but no longer written.
+        yield* store.transaction((database) => database.exec("PRAGMA query_only = ON"))
+        const { undelivered, unconfirmed } = yield* restarted(yield* Clock.currentTimeMillis).reconcile
+        const called = Option.some("Migrate Tezos Integration")
+        return {
+          undelivered: undelivered.length,
+          said: unconfirmed.map((row) =>
+            row.kind === "message" ? Hands.unoffered(lines, called, row.reason ?? "") : Hands.unsure(row, lines, called, row.reason ?? undefined),
+          ),
+          open: (yield* ledger.open(0)).map(({ commandId }) => commandId),
+          dispatched: dispatched.length,
+        }
+      }),
+    )
+    expect(result).toEqual({
+      undelivered: 0,
+      said: [
+        "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir, and I can't reach the threads on rig right now.",
+        "Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir.",
+        "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir, and I couldn't note it down, so I can't offer to send it again.",
+      ],
+      // Nothing could be kept of what it found, so the next restart looks again.
+      open: ["yapd:u1:0", "yapd:u2:0", "yapd:u3:0"],
+      dispatched: 0,
+    })
   })
 
   test("a restart takes new work as started only once T3 Code shows it begun, waiting while it's being got ready as long after it was asked for as a launch would, and says what didn't start or can't be told yet", async () => {
