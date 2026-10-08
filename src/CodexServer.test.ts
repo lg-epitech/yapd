@@ -201,7 +201,8 @@ const withServer = <A>(
   return Effect.runPromise(
     Effect.acquireUseRelease(
       Scope.make(),
-      (scope) => CodexServer.make(settings, codex(log)).pipe(
+      // Two ready threads, which is all these need to show how they're kept.
+      (scope) => CodexServer.make(settings, codex(log), 2).pipe(
         Effect.flatMap((server) => body(server, log, scope)),
         Scope.extend(scope),
       ),
