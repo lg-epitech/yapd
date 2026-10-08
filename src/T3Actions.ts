@@ -7,6 +7,8 @@ import * as Server from "./T3CodeServer.ts"
 
 const Message = Schema.Struct({
   id: Schema.optional(Schema.String),
+  /** The run it was said in. */
+  runId: Schema.optional(Schema.NullOr(Schema.String)),
   role: Schema.String,
   text: Schema.String,
   createdAt: Schema.String,
@@ -19,6 +21,8 @@ const Run = Schema.Struct({
   ordinal: Schema.Number,
   /** The message that started it, or waits in the queue to. */
   userMessageId: Schema.optional(Schema.NullOr(Schema.String)),
+  requestedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  startedAt: Schema.optional(Schema.NullOr(Schema.String)),
 })
 
 const Option_ = Schema.Struct({ decision: Schema.String, label: Schema.String })
@@ -42,9 +46,20 @@ const Question = Schema.Struct({
   allowCustomAnswer: Schema.optionalWith(Schema.Boolean, { default: () => true }),
 })
 
-/** What a thread waits on, as its turn items describe it. Anything else in them is left alone. */
+/** Why a run failed, as T3 Code classes it, like "usage_limit", and when the limit it hit resets, when it says. */
+const Failure = Schema.Struct({
+  class: Schema.String,
+  message: Schema.String,
+  resetAt: Schema.optionalWith(Schema.NullOr(Schema.String), { default: () => null }),
+})
+
+/** What a thread waits on, and what it ran into, as its turn items describe it. Anything else in them is left alone. */
 const Item = Schema.Struct({
   type: Schema.String,
+  id: Schema.optional(Schema.String),
+  runId: Schema.optional(Schema.NullOr(Schema.String)),
+  /** The agent's own id for what it did, which an approval shares with the command or change it's for. */
+  nativeItemRef: Schema.optional(Schema.NullOr(Schema.Struct({ nativeId: Schema.optional(Schema.NullOr(Schema.String)) }))),
   /** A user message's own id, and how it went in. */
   messageId: Schema.optional(Schema.String),
   inputIntent: Schema.optional(Schema.String),
@@ -56,6 +71,11 @@ const Item = Schema.Struct({
   options: Schema.optional(Schema.Array(Option_)),
   questions: Schema.optional(Schema.Array(Question)),
   input: Schema.optional(Schema.Unknown),
+  toolName: Schema.optional(Schema.NullOr(Schema.String)),
+  fileName: Schema.optional(Schema.String),
+  /** What a secret it asks for is called. */
+  label: Schema.optional(Schema.String),
+  failure: Schema.optional(Failure),
 })
 
 const Plan = Schema.Struct({
@@ -65,12 +85,21 @@ const Plan = Schema.Struct({
   steps: Schema.optional(Schema.Array(Schema.Struct({ text: Schema.String, status: Schema.String }))),
 })
 
+/** One of the agent conversations behind a thread, by the agent's own id for it: a bare id, or the one in a reference. */
+const ProviderThread = Schema.Struct({
+  nativeThreadRef: Schema.optionalWith(
+    Schema.NullOr(Schema.Union(Schema.String, Schema.Struct({ nativeId: Schema.optionalWith(Schema.NullOr(Schema.String), { default: () => null }) }))),
+    { default: () => null },
+  ),
+})
+
 const Bounded = Schema.Struct({
   projection: Schema.Struct({
     runs: Schema.Array(Run),
     messages: Schema.Array(Message),
     turnItems: Schema.Array(Schema.Unknown),
     plans: Schema.optionalWith(Schema.Array(Schema.Unknown), { default: () => [] }),
+    providerThreads: Schema.optionalWith(Schema.Array(Schema.Unknown), { default: () => [] }),
   }),
 })
 
@@ -84,12 +113,16 @@ export type Request =
       readonly kind: string
       /** The decisions it takes, like accept or decline. Every decision when the agent didn't say. */
       readonly decisions: ReadonlyArray<{ readonly decision: string; readonly label: string }>
+      /** The command it would run, the file it would change or the tool it would call, when the thread shows it. */
+      readonly command?: string
     }
   | {
       readonly _tag: "Question"
       readonly id: string
       readonly questions: ReadonlyArray<typeof Question.Type>
     }
+  /** A secret it asks for, like a key, which is only ever given in T3 Code. */
+  | { readonly _tag: "Secret"; readonly id: string; readonly label: string }
 
 /** What answering with an option sends: its value when it has one, which isn't always its label. */
 export const choice = (option: { readonly label: string; readonly value?: string | undefined }) => option.value ?? option.label
@@ -113,26 +146,119 @@ const every = [
   { decision: "decline", label: "Deny" },
 ]
 
-/** Reads what a thread waits on out of its turn items, by the request's id. */
+/** The turn items a thread waits on the user for. */
+const asking: ReadonlyArray<string> = ["approval_request", "user_input_request", "secret_request"]
+
+/** How much of a command or a tool's input is kept: enough to tell what it does. */
+const commandLength = 600
+
+/** What an approval is for, from the item it shares the agent's id with: the command, the file it changes, or the tool and what it's given. */
+const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.Type) => {
+  const native = approval.nativeItemRef?.nativeId
+  if (native === null || native === undefined) return undefined
+  const found = items.find((item) => item.type !== "approval_request" && item.nativeItemRef?.nativeId === native)
+  const text = (() => {
+    switch (found?.type) {
+      case "command_execution":
+        return typeof found.input === "string" ? found.input : undefined
+      case "file_change":
+        return found.fileName === undefined ? undefined : `change ${found.fileName}`
+      case "dynamic_tool":
+        return `${found.toolName ?? "a tool"} ${JSON.stringify(found.input ?? null)}`
+      default:
+        return undefined
+    }
+  })()
+  return text === undefined || text.trim() === "" ? undefined : text.trim().slice(0, commandLength)
+}
+
+/**
+ * Reads what a thread waits on out of its turn items, by the request's id. A
+ * secret it asks for goes by its item's own id, which is the one the thread
+ * says it waits on.
+ */
 export const request = (items: ReadonlyArray<unknown>, id: string): Option.Option<Request> => {
-  for (const item of items.toReversed().map((item) => decodeItem(item))) {
-    if (Option.isNone(item) || item.value.requestId !== id) continue
-    const found = item.value
+  const decoded = items.flatMap((item) => Option.toArray(decodeItem(item)))
+  for (const found of decoded.toReversed()) {
+    if (found.type === "secret_request" && found.id === id) return Option.some({ _tag: "Secret", id, label: found.label ?? "" })
+    if (found.requestId !== id) continue
     if (found.type === "user_input_request" && found.questions !== undefined) {
       return Option.some({ _tag: "Question", id, questions: found.questions })
     }
     if (found.type === "approval_request") {
-      const command = typeof found.input === "string" ? found.input : undefined
+      const runs = wouldRun(decoded, found)
       return Option.some({
         _tag: "Approval",
         id,
-        what: found.prompt ?? found.title ?? command ?? "something it needs your permission for",
+        what: found.prompt ?? found.title ?? runs ?? "something it needs your permission for",
         kind: found.requestKind ?? "permission",
         decisions: found.options !== undefined && found.options.length > 0 ? found.options : every,
+        ...(runs === undefined ? {} : { command: runs }),
       })
     }
   }
   return Option.none()
+}
+
+const decodeProviderThread = Schema.decodeUnknownOption(ProviderThread)
+
+/** The agent's own ids for the conversations behind a thread, which its hooks report as their session. */
+export const natives = (providerThreads: ReadonlyArray<unknown>): ReadonlyArray<string> =>
+  providerThreads.flatMap((thread) =>
+    Option.match(decodeProviderThread(thread), {
+      onNone: () => [],
+      onSome: ({ nativeThreadRef: ref }) => {
+        const id = typeof ref === "string" ? ref : ref?.nativeId
+        return id === null || id === undefined || id.trim() === "" ? [] : [id]
+      },
+    }),
+  )
+
+/** How a run of a thread went, as far as yapd tells of it. */
+export interface Ran {
+  readonly id: string
+  /** Like "completed", "waiting" (its turn is over, its checkpoint isn't taken yet), "failed" or "interrupted". */
+  readonly status: string
+  /** When it got going, in ms, or was asked for when it never did. */
+  readonly startedAt: Option.Option<number>
+  /** The message that started it: yapd's own have ids starting "yapd:". */
+  readonly userMessageId: Option.Option<string>
+  /** What it was asked, when that message is still among those read back. */
+  readonly prompt: Option.Option<string>
+  /** What it said back, oldest first, as one. */
+  readonly said: string
+  /** Why it failed, when it did. */
+  readonly failure: Option.Option<typeof Failure.Type>
+  /** The agent's own ids for the thread's conversations. */
+  readonly natives: ReadonlyArray<string>
+}
+
+const instant = (iso: string | null | undefined) =>
+  Option.filter(Option.map(Option.fromNullable(iso), Date.parse), (at) => !Number.isNaN(at))
+
+/** How one of the thread's runs went, by its id, out of a bounded read. */
+export const ran = (projection: (typeof Bounded.Type)["projection"], runId: string): Option.Option<Ran> => {
+  const run = projection.runs.find(({ id }) => id === runId)
+  if (run === undefined) return Option.none()
+  const failure = projection.turnItems
+    .flatMap((item) => Option.toArray(decodeItem(item)))
+    .filter((item) => item.type === "error" && item.runId === runId && item.status === "failed")
+    .at(-1)?.failure
+  const prompt = projection.messages.find(({ id, role }) => role === "user" && id !== undefined && id === run.userMessageId)?.text
+  return Option.some({
+    id: run.id,
+    status: run.status,
+    startedAt: Option.orElse(instant(run.startedAt), () => instant(run.requestedAt)),
+    userMessageId: Option.fromNullable(run.userMessageId),
+    prompt: Option.filter(Option.fromNullable(prompt), (text) => text.trim() !== ""),
+    said: projection.messages
+      .filter(({ role, runId: said, streaming }) => role === "assistant" && said === runId && !streaming)
+      .map(({ text }) => text.trim())
+      .filter((text) => text !== "")
+      .join("\n\n"),
+    failure: Option.fromNullable(failure),
+    natives: natives(projection.providerThreads),
+  })
 }
 
 /** A plan under way, as a few lines. */
@@ -338,13 +464,14 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
     detail: (threadId: string, pending?: string) =>
       Effect.gen(function* () {
         const { projection } = yield* bounded(threadId)
-        // Otherwise the newest that's still waiting.
+        // Otherwise the newest that's still waiting, a secret by its own id.
         const waiting =
           pending ??
           projection.turnItems
             .flatMap((item) => Option.toArray(decodeItem(item)))
-            .filter(({ type, status }) => (type === "approval_request" || type === "user_input_request") && (status === "waiting" || status === "pending"))
-            .at(-1)?.requestId
+            .filter(({ type, status }) => asking.includes(type) && (status === "waiting" || status === "pending"))
+            .map(({ type, id, requestId }) => (type === "secret_request" ? id : requestId))
+            .at(-1)
         return {
           messages: projection.messages.filter(({ role }) => role !== "system").slice(-recent),
           runs: projection.runs,
@@ -377,6 +504,12 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
 
     /** How a message yapd sent went into the thread, when it says. */
     inputIntent: (threadId: string, messageId: string) => Effect.map(message(threadId, messageId), Option.flatMap(({ intent }) => intent)),
+
+    /** How one of its runs went, or none when the thread doesn't have it. */
+    ran: (threadId: string, runId: string) => Effect.map(bounded(threadId), ({ projection }) => ran(projection, runId)),
+
+    /** The agent's own ids for the thread's conversations, which its hooks report as their session. */
+    sessions: (threadId: string) => Effect.map(bounded(threadId), ({ projection }) => natives(projection.providerThreads)),
 
     /** Whether a run is still going in the thread, which a stop ends. */
     running: (threadId: string) => Effect.map(bounded(threadId), ({ projection }) => projection.runs.some(({ status }) => going.includes(status))),

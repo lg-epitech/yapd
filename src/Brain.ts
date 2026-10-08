@@ -975,8 +975,10 @@ const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situ
       onNone: () => [],
       onSome: (request) => [
         request._tag === "Approval"
-          ? `Waiting for his approval to: ${fenced(request.what, 300)}`
-          : `Asking him: ${request.questions.map(({ question }) => fenced(question, 200)).join(" ")}`,
+          ? `Waiting for his approval to: ${fenced(request.what, 300)}${request.command === undefined ? "" : `, that is ${fenced(request.command, 300)}`}`
+          : request._tag === "Question"
+            ? `Asking him: ${request.questions.map(({ question }) => fenced(question, 200)).join(" ")}`
+            : `Waiting for a secret from him, ${fenced(request.label, 100)}, which he only ever gives in T3 Code, never by voice`,
       ],
     }),
     ...Option.match(plan, { onNone: () => [], onSome: (plan) => [`Its plan: ${fenced(plan, 600)}`] }),

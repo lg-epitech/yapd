@@ -71,6 +71,17 @@ describe("T3Actions", () => {
     expect(Option.map(bare, (found) => (found._tag === "Approval" ? found.decisions.map(({ decision }) => decision) : []))).toEqual(
       Option.some(["accept", "acceptForSession", "decline"]),
     )
+    // What it would run comes from the command it shares the agent's id with.
+    const command = { type: "command_execution", status: "pending", nativeItemRef: { nativeId: "toolu_1" }, input: "git push --force origin main" }
+    const pushing = T3Actions.request([command, { ...approval, prompt: "Push the branch", nativeItemRef: { nativeId: "toolu_1" } }], "r1")
+    expect(Option.map(pushing, (found) => (found._tag === "Approval" ? [found.what, found.command] : []))).toEqual(
+      Option.some(["Push the branch", "git push --force origin main"]),
+    )
+    // A secret goes by its own item's id, which is what the thread says it waits on.
+    const secret = { type: "secret_request", id: "turn-item:secret-request:t1:deploy", status: "waiting", label: "Deploy key", reason: "To deploy", secretStatus: "pending" }
+    expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(
+      Option.some({ _tag: "Secret", id: "turn-item:secret-request:t1:deploy", label: "Deploy key" }),
+    )
   })
 
   test("gives back a thread's last messages, its plan and what it waits on", async () => {
