@@ -166,6 +166,10 @@ const assistant = (
     readonly search?: (query: string) => ReadonlyArray<string>
     /** What's waiting to be said already, like an update a dictation cut off. */
     readonly queued?: ReadonlySet<string>
+    /** How the speaker is got ready for what's about to be said, which can take a while. */
+    readonly coming?: Effect.Effect<void>
+    /** How updates are held for an answer, which can take a while to set up. */
+    readonly awaiting?: Effect.Effect<Effect.Effect<void>>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -243,8 +247,8 @@ const assistant = (
         ),
       power: Effect.sync(() => power),
       lastHeard: Effect.sync(() => listening),
-      coming: Effect.void,
-      awaiting: Effect.succeed(Effect.void),
+      coming: given.coming ?? Effect.void,
+      awaiting: given.awaiting ?? Effect.succeed(Effect.void),
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
     }).pipe(
       Effect.provide(
@@ -434,7 +438,7 @@ describe("Assistant", () => {
         yield* wait(90)
         const askedMeanwhile = questions().length
         // The second comes to nothing too: only now is it waited on again, and asked once more a minute later.
-        yield* nothing(2, 1)
+        yield* nothing(2)
         yield* wait(61)
         return { heldByTheSecond, askedMeanwhile, askedAfter: questions().length }
       }),
@@ -442,6 +446,61 @@ describe("Assistant", () => {
     expect(result.heldByTheSecond).toBe(true)
     expect(result.askedMeanwhile).toBe(1)
     expect(result.askedAfter).toBe(2)
+  })
+
+  test("a request stopped while it waits its turn lets go of the question it held", async () => {
+    let coming = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, heard, unanswered, wait, questions } = yield* assistant(
+          (situation) => Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          undefined,
+          // The first request after the question takes a while, and the next waits its turn behind it.
+          { coming: Effect.suspend(() => (++coming === 2 ? Effect.sleep("10 seconds") : Effect.void)) },
+        )
+        yield* dictate("Which migration is running?")
+        yield* unanswered()
+        const first = yield* Effect.fork(heard({ heard: "Thank you.", via: "shortcut", at: now, voiced: 0.2, turns: 1 }))
+        yield* wait(0)
+        const queued = yield* Effect.fork(heard({ heard: "Thank you.", via: "typed", at: now, voiced: 0.2, turns: 1 }))
+        yield* wait(0)
+        yield* Fiber.interrupt(queued)
+        yield* wait(11)
+        yield* Fiber.join(first)
+        yield* wait(61)
+        return questions().length
+      }),
+    )
+    // Nothing holds it once both are done with, so it's asked once more.
+    expect(result).toBe(2)
+  })
+
+  test("a press got ready across yapd being turned off and on holds no question asked since", async () => {
+    let awaited = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { prepare, heard, toggle, unanswered, wait, questions } = yield* assistant(
+          (situation) => Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          undefined,
+          // Holding updates for the first press takes a while to set up.
+          { awaiting: Effect.suspend(() => (++awaited === 1 ? Effect.sleep("2 seconds").pipe(Effect.as(Effect.void)) : Effect.succeed(Effect.void))) },
+        )
+        const preparing = yield* Effect.fork(prepare(1, 1))
+        yield* wait(0)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* heard({ heard: "Which migration is running?", via: "typed", at: now, voiced: 3, turns: 3 })
+        yield* unanswered()
+        yield* wait(3)
+        yield* Fiber.join(preparing)
+        // What that press heard comes from before yapd was turned off, and isn't worked out.
+        yield* heard({ heard: "Fix the loader in yapd.", via: "shortcut", at: now, voiced: 3, turns: 1 }, 1)
+        yield* wait(90)
+        return questions().length
+      }),
+    )
+    // The question asked since was never held by it, so it's asked once more.
+    expect(result).toBe(2)
   })
 
   test("starting new work that mentions an existing thread starts new work", async () => {
@@ -704,7 +763,7 @@ describe("Assistant", () => {
         yield* wait(5)
         const during = spoken().length
         // ...and cancels, so it's waited on again, and asked a minute later.
-        yield* nothing(1, 1)
+        yield* nothing(1)
         yield* wait(60)
         const cancelled = spoken()
         // Asked afresh, then he answers an update instead, which takes its place.
@@ -803,7 +862,7 @@ describe("Assistant", () => {
         const before = yield* questions()[0]!.stale
         // ...unlike his press to answer it, which its dictation coming to nothing doesn't let go of.
         yield* prepare(3, 3)
-        yield* nothing(2, 1)
+        yield* nothing(2)
         const held = yield* questions()[0]!.stale
         // And what he said before, which would start work.
         const taken = yield* heard({ heard: "Fix the loader in yapd.", via: "shortcut", at: now, voiced: 3, turns: 1 }, 1)

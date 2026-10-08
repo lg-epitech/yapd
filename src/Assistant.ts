@@ -133,7 +133,7 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /** The shortcut was pressed to start a dictation, when yapd had been turned on or off `turns` times: the open question waits for what's dictated. */
     readonly prepare: (press: number, turns: number) => Effect.Effect<void>
     /** The dictation a press began came to nothing, like one cancelled, failed or with no words in it: the open question is waited on again. */
-    readonly nothing: (press: number, turns: number) => Effect.Effect<void>
+    readonly nothing: (press: number) => Effect.Effect<void>
     /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
     readonly replied: Effect.Effect<void>
     readonly open: Effect.Effect<Option.Option<Open>>
@@ -423,9 +423,10 @@ export const make = (options: {
       })
 
     /** Something being said may answer the open question, so it isn't said meanwhile, nor asked again until that's known. */
-    const hold = (key: string) =>
+    const hold = (key: string, since?: number) =>
       Effect.suspend(() => {
-        if (asking === undefined) return Effect.void
+        // What began before the question was asked can't be answering it.
+        if (asking === undefined || (since !== undefined && since < asking.open.at)) return Effect.void
         const repeat = asking.repeat
         asking.held.add(key)
         asking.repeat = undefined
@@ -959,7 +960,7 @@ export const make = (options: {
       })
 
     /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
-    const respond = (utterance: Utterance, pressed: Subject | undefined, holding: string) =>
+    const respond = (utterance: Utterance, pressed: Subject | undefined) =>
       Effect.gen(function* () {
         // Checked again once it's its turn: yapd may have been turned off and on while it waited behind another.
         if (yield* outdated(utterance.turns)) {
@@ -1008,7 +1009,7 @@ export const make = (options: {
         yield* note(thought, outcome, began)
         yield* deliver(outcome, utterance)
         return Option.some(utterance.id)
-      }).pipe(Effect.ensuring(release(holding)), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
+      }).pipe(turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
 
     /** The dictation a press began has ended, however long it took: what was kept for it, let go of. */
     const ended = (press: number | undefined) =>
@@ -1020,16 +1021,19 @@ export const make = (options: {
       })
 
     const heard = (input: Omit<Utterance, "id">, press?: number) =>
-      Effect.gen(function* () {
+      Effect.suspend(() => {
         const utterance: Utterance = { ...input, id: mint(input.at, "u") }
-        // A dictation's answer was awaited from when the shortcut was pressed, and "it" is what he was listening to then.
-        const kept = yield* ended(press)
-        // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
-        if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
-        const arrived = kept?.arrived ?? (yield* options.awaiting)
-        // Held by its press since it began, or from now for a typed request.
+        // Held by its press since it began, or from now for a typed request, and let go of however it ends, even
+        // stopped while it waits its turn.
         const holding = press === undefined ? `request:${utterance.id}` : `press:${press}`
-        return yield* Effect.zipRight(hold(holding), respond(utterance, kept?.subject, holding)).pipe(Effect.ensuring(arrived))
+        return Effect.gen(function* () {
+          // A dictation's answer was awaited from when the shortcut was pressed, and "it" is what he was listening to then.
+          const kept = yield* ended(press)
+          // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
+          if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
+          const arrived = kept?.arrived ?? (yield* options.awaiting)
+          return yield* Effect.zipRight(hold(holding), respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived))
+        }).pipe(Effect.ensuring(release(holding)))
       })
 
     return {
@@ -1038,19 +1042,24 @@ export const make = (options: {
       heard,
       prepare: (press, turns) =>
         Effect.gen(function* () {
+          const at = yield* Clock.currentTimeMillis
           // Pressed before yapd was turned off, however late it's handed on, there's nothing to get ready for.
           if (yield* outdated(turns)) return
           // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
-          presses.set(press, { subject: yield* subject, arrived: yield* options.awaiting })
-          yield* hold(`press:${press}`)
+          const about = yield* subject
+          const arrived = yield* options.awaiting
+          // Turned off and on while that was found out: dropping cleared what was kept, so this keeps and holds nothing.
+          if (yield* outdated(turns)) return yield* arrived
+          presses.set(press, { subject: about, arrived })
+          yield* hold(`press:${press}`, at)
           const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
           yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
           yield* Effect.forkIn(threads.refreshUsage, scope)
         }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
-      // Begun before yapd was turned off, it held nothing that's open now.
-      nothing: (press, turns) =>
+      // Whatever it held is let go of: a press from before yapd was turned off holds nothing that's open now anyway.
+      nothing: (press) =>
         Effect.zipRight(
-          Effect.unlessEffect(release(`press:${press}`), outdated(turns)),
+          release(`press:${press}`),
           Effect.flatMap(ended(press), (kept) => kept?.arrived ?? Effect.void),
         ),
       // Not one he hasn't heard yet, which what he said can't have been about.

@@ -153,7 +153,7 @@ export const serve = Effect.gen(function* () {
   // Each with the press it began with, which keeps what "it" meant then, however long the dictation took.
   yield* Effect.forkScoped(
     Stream.runForEach(dictation.transcripts, ({ press, turns, heard: text, voiced }) =>
-      text === "" ? assistant.nothing(press, turns) : heard(text, "shortcut", voiced, turns, press),
+      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, turns, press),
     ),
   )
   // Whatever he says over an update takes the place of a question yapd asked before.
