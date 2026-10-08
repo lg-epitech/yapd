@@ -35,6 +35,18 @@ describe("Provider", () => {
     expect(providers.codex.command(call).argv.join(" ")).not.toContain("service_tier")
   })
 
+  test("keeps Claude Code to the call itself, also when it reads through a project", () => {
+    const env = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", CLAUDE_CODE_DISABLE_ADVISOR_TOOL: "1" }
+    expect(providers.claude.command(call).env).toEqual(env)
+    expect(providers.claude.research?.(call).env).toEqual(env)
+  })
+
+  test("points Claude's JSON reply at its structured output tool", () => {
+    for (const { argv } of [providers.claude.command(call), providers.claude.research!(call)]) {
+      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("StructuredOutput")
+    }
+  })
+
   test("reads replies wrapped in a JSON envelope", () => {
     expect(providers.claude.reply?.(JSON.stringify({ result: "", structured_output: summary }))).toEqual(summary)
     expect(providers.gemini.reply?.(JSON.stringify({ response: JSON.stringify(summary) }))).toEqual(summary)

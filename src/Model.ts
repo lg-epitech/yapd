@@ -104,12 +104,12 @@ const once = (chosen: Chosen, command: Provider["command"], schema: object, prom
     Effect.sync(() => join(tmpdir(), `yapd-schema-${crypto.randomUUID()}.json`)),
     (path) => Effect.gen(function* () {
       yield* Effect.tryPromise(() => Bun.write(path, inline)).pipe(Effect.uninterruptible)
-      const { argv, stdin } = command({ prompt, ...chosen, schema: { json: inline, path } })
+      const { argv, stdin, env } = command({ prompt, ...chosen, schema: { json: inline, path } })
       // YAPD_INTERNAL keeps the call from triggering yapd's own hooks.
       return yield* run(argv, {
         ...(stdin === undefined ? {} : { stdin }),
         ...(cwd === undefined ? {} : { cwd }),
-        env: { YAPD_INTERNAL: "1" },
+        env: { ...env, YAPD_INTERNAL: "1" },
       }).pipe(Effect.flatMap((stdout) => Effect.try(() => (provider.reply ?? json)(stdout))))
     }),
     (path) => Effect.tryPromise(() => rm(path, { force: true })).pipe(

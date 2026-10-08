@@ -46,6 +46,32 @@ describe("Model", () => {
     }
   })
 
+  test("runs the CLI with what its provider adds to the environment", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "yapd-model-test-"))
+    const path = process.env.PATH
+    const claude = join(folder, "claude")
+    await Bun.write(claude, `#!${process.execPath}
+      const seen = { traffic: process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, internal: process.env.YAPD_INTERNAL }
+      console.log(JSON.stringify({ structured_output: { answer: JSON.stringify(seen) } }))
+    `)
+    await chmod(claude, 0o755)
+    process.env.PATH = folder
+    try {
+      const { answer } = await Effect.runPromise(Effect.gen(function* () {
+        const model = yield* Model
+        return yield* model.ask(Schema.Struct({ answer: Schema.String }), "test")
+      }).pipe(
+        Effect.provide(ProviderModel),
+        Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_PROVIDER", "claude"]]))),
+      ))
+      expect(JSON.parse(answer)).toEqual({ traffic: "1", internal: "1" })
+    } finally {
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+      await rm(folder, { recursive: true, force: true })
+    }
+  })
+
   test("uses codex exec when an initialized app-server stops answering thread requests", async () => {
     const folder = await mkdtemp(join(tmpdir(), "yapd-model-test-"))
     const path = process.env.PATH
