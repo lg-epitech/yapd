@@ -132,8 +132,16 @@ export const went = (row: Pick<Ledger.Row, "body">) =>
 /** A word that's an id, quoted or not: letters and digits run together with _ or :, or long and mostly digits. */
 const id = String.raw`['"‘“]?(?=[\w:.-]*\d)(?:[\w.-]*[_:][\w:.-]*|(?=(?:[a-z-]*\d){4})[\w-]{8,})['"’”]?`
 
+/** What T3 Code says in its own terms, and what's said instead. */
+const reasons: ReadonlyArray<readonly [RegExp, string]> = [
+  // It takes a message into a turn, or restarts one, only while the turn is at it, not getting going or waiting.
+  [/\bcannot be steered\b/i, "It isn't at a point where it can take that yet."],
+]
+
 /** A reason T3 Code gave, fit to say: no ids, nothing unreadable, the work never put down to an agent or a session, and a full stop. */
 export const plainly = (reason: string) => {
+  const known = reasons.find(([pattern]) => pattern.test(reason))
+  if (known !== undefined) return known[1]
   const stripped = reason
     .replace(/\b(run|thread|command|message|request)\s+(?:['"‘“][^'"’”\s]+['"’”]|(?=[\w:.-]*[\d_:-])[\w:.-]+)/gi, (_, what: string) => `that ${what.toLowerCase()}`)
     .replace(/\byapd:\S+/g, "it")
