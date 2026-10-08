@@ -5,7 +5,7 @@ import * as Brain from "./Brain.ts"
 import * as Drafts from "./Drafts.ts"
 import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
-import type { Catalog, Request, Started } from "./Launcher.ts"
+import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import * as Store from "./Store.ts"
@@ -126,13 +126,13 @@ const handle = (situation: Brain.Situation, of: T3Live.Thread) => situation.desk
 /**
  * The assistant over that view, with a model that picks what the test says,
  * as the real one did in the log, or can't be asked when it says nothing, a
- * writer and a launcher for new work, which take as long as the test says,
- * and what it says kept in order rather than spoken.
+ * writer and a launcher for new work, which take as long as the test says or
+ * never answer, and what it says kept in order rather than spoken.
  */
 const assistant = (
   model: (situation: Brain.Situation) => Brain.Decision | undefined,
   write: (material: Material) => Written = () => written({}),
-  slow: { readonly writing?: number; readonly launching?: number } = {},
+  slow: { readonly writing?: number; readonly launching?: number; readonly hanging?: boolean } = {},
 ) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
@@ -168,7 +168,9 @@ const assistant = (
           launcher: {
             catalog: Effect.succeed(catalog),
             start: (request) =>
-              Effect.sleep(`${slow.launching ?? 0} seconds`).pipe(
+              // Like T3 Code preparing a worktree that never gets ready, which its launcher gives up on after six minutes.
+              (slow.hanging === true ? Effect.never : Effect.sleep(`${slow.launching ?? 0} seconds`)).pipe(
+                Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started." }) }),
                 Effect.zipRight(
                   Effect.sync(() => {
                     started.push(request)
@@ -609,6 +611,28 @@ describe("Assistant", () => {
     expect(result.started).toEqual(["/code/std"])
     expect(result.kept).toEqual(["new-thread"])
     expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?"])
+  })
+
+  test("a launch that never answers is given up on with its reason, and what's asked next is still answered", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { heard, wait, spoken, started } = yield* assistant(() => Brain.decision({ act: "start", text: "Fix the loader in yapd." }), () => written({}), {
+          hanging: true,
+        })
+        const dictated = yield* Effect.fork(heard({ heard: "Fix the loader in yapd.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+        yield* wait(1)
+        const typed = yield* Effect.fork(heard({ heard: "Who needs me?", via: "typed", at: now, voiced: 3, turns: 1 }))
+        yield* wait(60)
+        const meanwhile = spoken()
+        yield* wait(5 * 60)
+        yield* Fiber.join(dictated)
+        yield* Fiber.join(typed)
+        return { meanwhile, spoken: spoken(), started: [...started] }
+      }),
+    )
+    expect(result.meanwhile).toEqual([])
+    expect(result.spoken).toEqual(["About the loader fix: T3 Code is taking too long, so I don't know if it started.", "Nothing needs you right now, sir."])
+    expect(result.started).toEqual([])
   })
 
   test("when the model can't be asked, what he missed stays unheard and the question stays open", async () => {

@@ -190,7 +190,10 @@ export const make = (options: {
     /**
      * Starts it, and says what started, or why nothing did. Once it's asked
      * for, it's started and noted whatever happens meanwhile, like yapd being
-     * turned off: cut off halfway, a launch could leave a thread half made.
+     * turned off: cut off halfway, a launch could leave a thread half made. So
+     * it goes on by itself, and whoever asked for it only waits for it. It's
+     * never made uninterruptible, since then its own time limits couldn't end
+     * it, and a launch that never answered would hold everything up for good.
      */
     const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string) =>
       Effect.gen(function* () {
@@ -202,27 +205,26 @@ export const make = (options: {
           }${request.baseBranch === undefined ? "" : ` from ${request.baseBranch}`}. ${why}`,
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
-        return yield* Effect.uninterruptible(
-          Effect.gen(function* () {
-            const outcome = yield* Effect.either(machine.launcher.start(request))
-            if (Either.isLeft(outcome)) {
-              yield* Effect.logWarning("Could not start", outcome.left)
-              return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
-            }
-            const started = outcome.right
-            yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
-            const begun = {
-              _tag: "Started",
-              spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
-              started,
-              machine,
-              request,
-              about,
-            } satisfies Outcome
-            yield* noted(begun)
-            return begun
-          }),
-        )
+        const launching = yield* Effect.gen(function* () {
+          const outcome = yield* Effect.either(machine.launcher.start(request))
+          if (Either.isLeft(outcome)) {
+            yield* Effect.logWarning("Could not start", outcome.left)
+            return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
+          }
+          const started = outcome.right
+          yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
+          const begun = {
+            _tag: "Started",
+            spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
+            started,
+            machine,
+            request,
+            about,
+          } satisfies Outcome
+          yield* noted(begun)
+          return begun
+        }).pipe(Effect.interruptible, Effect.forkIn(scope))
+        return yield* Fiber.join(launching)
       })
 
     /** Reads through the project before writing the prompt, for a request that leans on something in it. */
