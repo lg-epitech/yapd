@@ -50,6 +50,8 @@ const Item = Schema.Struct({
   /** A user message's own id, and how it went in. */
   messageId: Schema.optional(Schema.String),
   inputIntent: Schema.optional(Schema.String),
+  /** The run it belongs to: for a message steered into a turn, even from the queue, the run whose turn it went into. */
+  runId: Schema.optional(Schema.NullOr(Schema.String)),
   status: Schema.optional(Schema.String),
   requestId: Schema.optional(Schema.String),
   requestKind: Schema.optional(Schema.String),
@@ -225,7 +227,7 @@ export const command = (threadId: string, what: Command, runId: string | undefin
 }
 
 /** Runs that are still going, and can be stopped. */
-const going: ReadonlyArray<string> = ["preparing", "starting", "running", "waiting"]
+export const going: ReadonlyArray<string> = ["preparing", "starting", "running", "waiting"]
 
 /** How a message went into a thread, as T3 Code says: starting a turn, into the turn under way, or in the queue behind it. */
 export type Intent = "turn_start" | "queued_turn" | "steer" | "promoted_queued_to_steer"
@@ -238,6 +240,12 @@ export interface Found {
   readonly intent: Option.Option<Intent>
   /** The run it started, or waits in the queue to start, if there's one, and whether that queue is on hold. */
   readonly run: Option.Option<{ readonly id: string; readonly status: string; readonly held: boolean }>
+  /**
+   * The run its turn item belongs to, when the read has it: for one steered
+   * into the turn under way, even from the queue, the run whose turn it went
+   * into, which T3 Code names on it, never the run it waited in.
+   */
+  readonly into: Option.Option<{ readonly id: string; readonly status: string }>
   /** When T3 Code took it in, in ms by its own clock, when the thread shows the message itself. */
   readonly at: Option.Option<number>
 }
@@ -251,6 +259,7 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
   const message = projection.messages.find(({ id }) => id === messageId)
   if (run === undefined && item === undefined && message === undefined) return Option.none()
   const intent = item?.inputIntent
+  const into = Option.flatMap(Option.fromNullable(item?.runId), (runId) => Option.fromNullable(projection.runs.find(({ id }) => id === runId)))
   return Option.some({
     // One with no turn item yet still has its run to say: one it started is a turn of its own, unless it waits in the queue or was taken out of it.
     intent:
@@ -260,6 +269,7 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
           ? Option.none()
           : Option.some(run.status === "queued" ? ("queued_turn" as const) : ("turn_start" as const)),
     run: Option.map(Option.fromNullable(run), ({ id, status, queueHeld }) => ({ id, status, held: queueHeld === true })),
+    into: Option.map(into, ({ id, status }) => ({ id, status })),
     at: Option.filter(Option.map(Option.fromNullable(message), ({ createdAt }) => Date.parse(createdAt)), (at) => !Number.isNaN(at)),
   })
 }

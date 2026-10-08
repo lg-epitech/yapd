@@ -271,13 +271,18 @@ const ends: Readonly<Partial<Record<string, Ended>>> = { completed: "finished", 
  * How the turn a message went into at `at` has ended, if it has. One that
  * started a turn of its own ended as its run did. One steered into the turn
  * under way started none, and the run it waited in, if it was taken out of
- * the queue, says nothing of it: that turn has ended once the thread's latest
- * run completed after it went in, as `answered` has it, and ended as that
- * latest run did only when that run was already going when it went in, since
- * a later one may have run since.
+ * the queue, says nothing of it, since T3 Code cancels that run as it takes
+ * it out: the turn it went into is the run T3 Code names on it, which has
+ * ended as that run did, once it isn't still going. Only without that run
+ * in the read is the thread's latest run looked to, which may be another,
+ * like the one it waited in, or one begun since: that turn has ended once
+ * the thread's latest run completed after it went in, as `answered` has it,
+ * and ended as that latest run did only when that run was already going
+ * when it went in, since a later one may have run since.
  */
-const over = ({ intent, run }: T3Actions.Found, thread: T3Live.Thread, at: number): Ended | undefined => {
+const over = ({ intent, run, into }: T3Actions.Found, thread: T3Live.Thread, at: number): Ended | undefined => {
   if (!Option.exists(intent, steeredIn)) return Option.getOrUndefined(Option.flatMap(run, ({ status }) => Option.fromNullable(ends[status])))
+  if (Option.isSome(into)) return T3Actions.going.includes(into.value.status) ? undefined : (ends[into.value.status] ?? "ended")
   const when = (iso: string | null) => (iso === null ? Number.NaN : Date.parse(iso))
   if (!(when(thread.latestRunCompletedAt) > at)) return undefined
   return when(thread.latestRunStartedAt) <= at ? (ends[thread.status] ?? "ended") : "ended"

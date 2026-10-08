@@ -62,7 +62,10 @@ const takes =
         if (!going || queued) {
           bounded.runs.push({ id: `run-${bounded.runs.length + 1}`, status: going ? "queued" : "running", ordinal: bounded.runs.length + 1, userMessageId: messageId })
         }
-        if (!going || !queued) bounded.turnItems.push({ type: "user_message", messageId, inputIntent: going ? "steer" : "turn_start" })
+        // Each in the run T3 Code names on it: the turn of its own it started, or the one it was steered into.
+        if (!going || !queued) {
+          bounded.turnItems.push({ type: "user_message", messageId, inputIntent: going ? "steer" : "turn_start", runId: going ? active.id : bounded.runs.at(-1)?.id })
+        }
       }
       if (payload.type === "queued-run.cancel") {
         const run = bounded.runs.find(({ id }) => id === payload.runId)
@@ -641,12 +644,12 @@ describe("Hands", () => {
         bounded.runs[1]!.queueHeld = true
       }),
     ).toEqual({ how: "queued", said: "Its queue is on hold, sir, so that will go once it's let carry on.", noted: Option.some("queued") })
-    // Steered into the turn under way, its run since completed in the read, but with no turn of the thread's shown completed since it went in.
+    // Steered into the turn under way, which has ended since: never said as a turn of its own, nor as being worked on.
     expect(
       await resent("running", (bounded) => {
         bounded.runs[0]!.status = "completed"
       }),
-    ).toEqual({ how: "steered", said: "On it, sir.", noted: Option.some("steered") })
+    ).toEqual({ how: "steered", said: "That went in, sir, and it's been dealt with.", noted: Option.some("steered") })
   })
 
   test("a yes to sending again a message T3 Code answers for from what it kept, whose own turn has ended since, says it went in and how that turn ended, never that it's being worked on", async () => {
@@ -735,27 +738,32 @@ describe("Hands", () => {
 
   test("a yes to sending again a message T3 Code answers for from what it kept, steered into the turn under way or taken out of the queue into it, once that turn has ended, says it went in and how that turn ended, never that it's being worked on", async () => {
     const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    const started = "2026-10-08T21:58:00.000Z"
+    const promotedAt = "2026-10-08T22:01:00.000Z"
     /**
-     * A message for now to a thread whose turn is `doing`, so it's steered in, or waits behind it till it's `promoted` into it, its answer lost,
-     * then sent again with the thread's latest run `latest` and ended as `status` says.
+     * A message for now to a thread whose turn is `doing`, so it's steered in, or waits behind it till he takes it out of the queue into it a
+     * minute on, its answer lost, then sent again once the thread's runs are as `then` leaves them, and the thread is shown as `shows`.
      */
-    const resent = (doing: "running" | "preparing", latest: Record<string, unknown>, promoted = false) =>
+    const resent = (doing: "running" | "preparing", then: (bounded: Bounded) => void, shows: Record<string, unknown>) =>
       run(
         Effect.gen(function* () {
           const { send, again, answering, reads, bounded, becomes, ledger } = yield* hands({
-            thread: thread(tezos.id, { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: doing, status: doing, latestRunStartedAt: "2026-10-08T21:58:00.000Z" }),
+            thread: thread(tezos.id, { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: doing, status: doing, latestRunStartedAt: started }),
             runs: [{ id: "run-1", status: doing, ordinal: 1 }],
           })
           answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
           reads(false)
           yield* send("u1", "Open a PR.")
-          // Taken out of the queue into the turn by his hand in T3 Code's app, which cancels the run it waited in.
-          if (promoted) {
+          // Taken out of the queue into the turn by his hand in T3 Code's app, once it's running, as T3 Code does it: the run it waited in is cancelled
+          // there and then, and the message is the turn's from then, named on it as that turn's run.
+          if (doing === "preparing") {
+            bounded.runs[0]!.status = "running"
             bounded.runs[1]!.status = "cancelled"
-            bounded.turnItems.push({ type: "user_message", messageId: bounded.runs[1]!.userMessageId, inputIntent: "promoted_queued_to_steer" })
+            bounded.messages[0]!.createdAt = promotedAt
+            bounded.turnItems.push({ type: "user_message", messageId: "yapd:u1:0:m", inputIntent: "promoted_queued_to_steer", runId: "run-1" })
           }
-          bounded.runs[0]!.status = String(latest.status ?? "completed")
-          becomes(thread(tezos.id, { latestRunId: "run-1", latestRunStartedAt: "2026-10-08T21:58:00.000Z", ...latest }))
+          then(bounded)
+          becomes(thread(tezos.id, shows))
           reads(true)
           answering(() => Effect.succeed({ sequence: 7 }))
           const outcome = yield* again("yapd:u1:0")
@@ -767,33 +775,66 @@ describe("Hands", () => {
           }
         }),
       )
-    const ended = (status: string) => ({ status, latestRunCompletedAt: "2026-10-08T22:05:00.000Z" })
-    for (const promoted of [false, true]) {
-      const doing = promoted ? "preparing" : "running"
-      // The turn it went into completed after it did, with nothing going now.
-      expect(await resent(doing, ended("completed"), promoted)).toEqual({
-        how: "steered",
-        said: ["That went in, sir, and it's been dealt with.", "That went to the Tezos migration, sir, and it's been dealt with."],
-        noted: Option.some("sent"),
-      })
-      for (const status of ["interrupted", "failed"]) {
-        expect(await resent(doing, ended(status), promoted)).toEqual({
-          how: "steered",
-          said: ["That went in, sir, but the turn it went into was cut short.", "That went to the Tezos migration, sir, but the turn it went into was cut short."],
-          noted: Option.some("sent"),
-        })
+    /** The turn's run, `run-1`, as `status`, and any `others` begun since. */
+    const runs =
+      (status: string, ...others: Bounded["runs"]) =>
+      (bounded: Bounded) => {
+        bounded.runs[0]!.status = status
+        bounded.runs.push(...others)
       }
-      // The latest run started after it went in, so it isn't the one it went into: that ended before, but how isn't known.
-      expect(await resent(doing, { ...ended("failed"), latestRunId: "run-3", latestRunStartedAt: "2026-10-08T22:03:00.000Z" }, promoted)).toEqual({
-        how: "steered",
-        said: ["That went in, sir.", "That went to the Tezos migration, sir."],
-        noted: Option.some("sent"),
-      })
+    /**
+     * How T3 Code shows the thread: by its newest run, which, once he's taken a message out of the queue into the turn, is the run it waited in,
+     * cancelled as it was, whatever that turn does after, unless another has begun since; with the turn's own run still `going`, it's shown at it.
+     */
+    const shown = (latest: Record<string, unknown>, going?: string) => ({
+      ...latest,
+      ...(going === undefined ? {} : { activeRunId: going === "waiting" ? null : "run-1", activityRunStatus: going }),
+    })
+    const taken = (going?: string) => shown({ latestRunId: "run-2", status: "cancelled", latestRunStartedAt: null, latestRunCompletedAt: promotedAt }, going)
+    const ended = (status: string) => ({ latestRunId: "run-1", status, latestRunStartedAt: started, latestRunCompletedAt: "2026-10-08T22:05:00.000Z" })
+    const atIt = (going: string, completed: string | null = null) =>
+      shown({ latestRunId: "run-1", status: going, latestRunStartedAt: started, latestRunCompletedAt: completed }, going)
+    // Another begun since, and still at it, so the thread shows nothing completed.
+    const newer = { id: "run-3", status: "running", ordinal: 3 }
+    const since = { ...atIt("running"), latestRunId: "run-3", activeRunId: "run-3", latestRunStartedAt: "2026-10-08T22:06:00.000Z" }
+    const finished = {
+      how: "steered" as const,
+      said: ["That went in, sir, and it's been dealt with.", "That went to the Tezos migration, sir, and it's been dealt with."],
+      noted: Option.some<Ledger.State>("sent"),
     }
-    // Still at it, it's being worked on, as it says.
+    const cut = {
+      how: "steered" as const,
+      said: ["That went in, sir, but the turn it went into was cut short.", "That went to the Tezos migration, sir, but the turn it went into was cut short."],
+      noted: Option.some<Ledger.State>("sent"),
+    }
+    const onIt = { how: "steered" as const, said: ["On it, sir.", "On it, sir: the Tezos migration."], noted: Option.some<Ledger.State>("sent") }
+    for (const doing of ["running", "preparing"] as const) {
+      const promoted = doing === "preparing"
+      // The turn it went into has ended, as its own run says, however the thread shows it.
+      expect(await resent(doing, runs("completed"), promoted ? taken() : ended("completed"))).toEqual(finished)
+      for (const status of ["interrupted", "failed"]) expect(await resent(doing, runs(status), promoted ? taken() : ended(status))).toEqual(cut)
+      expect(await resent(doing, runs("completed", newer), since)).toEqual(finished)
+      // Still at it, or finishing off, it's being worked on.
+      for (const going of ["running", "waiting"]) {
+        expect(await resent(doing, runs(going), promoted ? taken(going) : atIt(going))).toEqual(onIt)
+      }
+    }
+    // Not named on it, as by a T3 Code that doesn't say whose turn it went into, the thread's newest run says what it can.
+    const unnamed = (status: string, others: Bounded["runs"] = []) => (bounded: Bounded) => {
+      runs(status, ...others)(bounded)
+      for (const item of bounded.turnItems) delete item.runId
+    }
+    expect(await resent("running", unnamed("completed"), ended("completed"))).toEqual(finished)
+    expect(await resent("running", unnamed("failed"), ended("failed"))).toEqual(cut)
+    // The newest run started after it went in, so it isn't the one it went into: that ended before, but how isn't known.
     expect(
-      await resent("running", { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "running", status: "running", latestRunCompletedAt: "2026-10-08T21:30:00.000Z" }),
-    ).toEqual({ how: "steered", said: ["On it, sir.", "On it, sir: the Tezos migration."], noted: Option.some("sent") })
+      await resent("running", unnamed("completed", [{ id: "run-3", status: "failed", ordinal: 3 }]), {
+        ...ended("failed"),
+        latestRunId: "run-3",
+        latestRunStartedAt: "2026-10-08T22:03:00.000Z",
+      }),
+    ).toEqual({ how: "steered", said: ["That went in, sir.", "That went to the Tezos migration, sir."], noted: Option.some("sent") })
+    expect(await resent("running", unnamed("running"), atIt("running", "2026-10-08T21:30:00.000Z"))).toEqual(onIt)
   })
 
   test("a yes to sending again a message T3 Code answers for from what it kept, with the thread still unread, says why it can't tell it's there", async () => {
