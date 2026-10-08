@@ -173,6 +173,8 @@ const unchanged = (how: T3Actions.When) => `${mayHave}, so it can only go again 
 const takenOut = "It was taken out of the queue since, so it won't run."
 /** Why a message sent once more may not be read: T3 Code had it from the first time, and it's gone from the thread. */
 const notThere = "It isn't in the thread now, so it may have been taken out of the queue."
+/** How the reason a message sent once more may not be read starts, when T3 Code has it but the thread couldn't be read to look for it. */
+const unchecked = "I couldn't check it's still in the thread"
 /** What a stopped thread is told when it's let carry on. */
 export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
@@ -429,7 +431,7 @@ export const make = (options: {
         yield* ledger.settle(row.commandId, "abandoned", { reason: Ledger.withdrawn })
         return Option.some<Went>(yield* failing({ _tag: "Refused", reason: takenOut } satisfies Outcome, `${doing.message} again`))
       }
-      const reason = Either.isLeft(look) ? `I couldn't look for it after sending it again: ${after(plainly(look.left.reason))}` : notThere
+      const reason = Either.isLeft(look) ? `${unchecked}: ${after(plainly(look.left.reason))}` : notThere
       yield* ledger.settle(row.commandId, "sent", { reason })
       return Option.some<Went>(
         yield* failing({ _tag: "Unknown", reason, again: Option.none() } satisfies Outcome, `${doing.message} again, and couldn't tell whether it's still to be read`),
@@ -1055,6 +1057,8 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
       }
       // Sent once more, T3 Code had it from the first time, so what's said is what became of it since.
       if (outcome.reason === takenOut || outcome.reason === notThere) return `That got ${name === undefined ? "there" : `to ${name}`} the first time${sir}, but ${reason}`
+      // Sent once more, T3 Code has it, from the first time or now, but whether it's still to be read couldn't be looked at, and why is said.
+      if (outcome.reason.startsWith(unchecked)) return `That got ${name === undefined ? "there" : `to ${name}`}${sir}, but ${reason}`
       // Not sent again at another time, it's left, which isn't something that went wrong.
       if (outcome._tag === "Refused" && outcome.reason.startsWith(mayHave)) return `I left ${name === undefined ? "it" : `your message to ${name}`}${sir}: ${reason}`
       return outcome._tag === "Refused"

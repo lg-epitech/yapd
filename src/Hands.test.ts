@@ -631,6 +631,31 @@ describe("Hands", () => {
     ).toEqual({ how: "steered", said: "On it, sir.", noted: Option.some("steered") })
   })
 
+  test("a yes to sending again a message T3 Code answers for from what it kept, with the thread still unread, says why it can't tell it's there", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, answering, reads, ledger } = yield* hands()
+        // T3 Code takes it, but its answer is lost, and the thread can't be read to look for it.
+        answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+        reads(false)
+        yield* send("u1", "Use the fee table.")
+        // Sent again under the same ids, T3 Code answers as it did the first time, and the thread still can't be read.
+        answering(() => Effect.succeed({ sequence: 7 }))
+        const resent = yield* again("yapd:u1:0")
+        const said = (called: Option.Option<string>) => (resent._tag === "Unknown" ? Hands.failed(message, resent, lines, called) : resent._tag)
+        return { said: [said(Option.none()), said(Option.some("the Tezos migration"))], state: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state) }
+      }),
+    )
+    expect(result).toEqual({
+      said: [
+        "That got there, sir, but I couldn't check it's still in the thread: T3 Code is taking too long.",
+        "That got to the Tezos migration, sir, but I couldn't check it's still in the thread: T3 Code is taking too long.",
+      ],
+      state: Option.some("sent"),
+    })
+  })
+
   test("asking to send again says sir once, however the line to ask it was written", () => {
     const unknown: Hands.Outcome = { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }
     for (const again of ["Shall I send it again, sir?", "Sir, shall I send it again?"]) {
