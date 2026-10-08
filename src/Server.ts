@@ -115,7 +115,7 @@ export interface Api {
   readonly back: (id: string) => Effect.Effect<boolean>
   readonly threads: Effect.Effect<ReadonlyArray<Machine>>
   readonly journal: (page: Page) => Effect.Effect<ReadonlyArray<Entry>>
-  /** Counts whoever follows the state as watching for as long as the scope lasts, so yapd knows what it shows is seen. */
+  /** Counts a UI that follows the state and shows cards as watching for as long as the scope lasts, so yapd knows what it shows is seen. */
   readonly watch: Effect.Effect<void, never, Scope.Scope>
 }
 
@@ -169,9 +169,11 @@ export const serve = (port: number, api: Api) =>
         if (route === "POST /events") return yield* event(request, url, server)
         if (route === "GET /state") return Response.json(yield* current)
         if (route === "GET /state/stream") {
-          // Open for as long as whoever watches wants it, and counted as watching until they go.
+          // Open for as long as whoever watches wants it. Only one that shows cards, like the menu bar app, is counted as
+          // watching until it goes: a status bar module, or a menu bar app from before cards, shows none of them.
           server.timeout(request, 0)
-          const events = Stream.unwrapScoped(Effect.as(api.watch, api.state)).pipe(
+          const watching = url.searchParams.has("cards") ? Stream.unwrapScoped(Effect.as(api.watch, api.state)) : api.state
+          const events = watching.pipe(
             Stream.map((state) => `data: ${JSON.stringify(state)}\n\n`),
             Stream.encodeText,
           )

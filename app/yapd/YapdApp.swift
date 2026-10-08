@@ -81,7 +81,8 @@ final class Yapd {
 
   /// Follows the state as it changes, and tries again every couple of seconds while yapd isn't running.
   private func watch() async {
-    var request = URLRequest(url: api.appending(path: "state/stream"))
+    // Asking for cards, so yapd says "it's on your screen" while the app is here to show them.
+    var request = URLRequest(url: api.appending(path: "state/stream").appending(queryItems: [URLQueryItem(name: "cards", value: nil)]))
     // The stream stays quiet for as long as nothing changes.
     request.timeoutInterval = .greatestFiniteMagnitude
     while true {

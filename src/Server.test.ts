@@ -146,17 +146,23 @@ describe("Server", () => {
     })))
   })
 
-  test("streams the state as it is, then each change, counting whoever follows it as watching until they go", async () => {
+  test("streams the state as it is, then each change, counting whoever follows it to show cards as watching until they go", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const { ref, api, watching } = yield* stateful
       const server = yield* Server.serve(0, api)
+      // A status bar module, or a menu bar app from before cards, which shows none of them.
+      const plain = new AbortController()
+      const following = yield* Effect.promise(() => fetch(`http://127.0.0.1:${server.port}/state/stream`, { signal: plain.signal }))
+      expect(yield* Effect.promise(() => following.body!.pipeThrough(new TextDecoderStream()).getReader().read())).toMatchObject({ done: false })
+      expect(watching()).toBe(0)
       const gone = new AbortController()
-      const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${server.port}/state/stream`, { signal: gone.signal }))
+      const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${server.port}/state/stream?cards`, { signal: gone.signal }))
       expect(response.headers.get("content-type")).toBe("text/event-stream")
       const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader()
       const next = Effect.promise(() => reader.read()).pipe(Effect.map(({ value }) => JSON.parse(value!.replace(/^data: /, ""))))
       expect(yield* next).toMatchObject({ on: true })
       expect(watching()).toBe(1)
+      plain.abort()
       yield* SubscriptionRef.update(ref, (state) => ({ ...state, activity: "speaking" as const }))
       expect(yield* next).toMatchObject({ on: true, activity: "speaking" })
       // Like the menu bar app quitting.
