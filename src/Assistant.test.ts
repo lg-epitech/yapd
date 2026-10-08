@@ -1402,6 +1402,28 @@ describe("Assistant", () => {
     expect(result.watched).toEqual({ said: `${answer} It's on your screen.`, up: Option.some({ kind: "thread", command: true }) })
   })
 
+  test("'say that again' also shows the line while an app watches, and only then", async () => {
+    const answer = "The Tezos migration is comparing fee tables, sir."
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, show } = yield* assistant((situation) => Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: answer }))
+        yield* dictate("What's the Tezos one doing?")
+        yield* dictate("Say that again.")
+        const unwatched = { said: spoken().at(-1), up: Option.flatten(yield* Stream.runHead(show.showing)) }
+        const watched = yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* show.watch
+            yield* dictate("Say that again.")
+            return { said: spoken().at(-1), up: Option.map(yield* show.seen, ({ kind, markdown }) => ({ kind, line: markdown.includes(answer) })) }
+          }),
+        )
+        return { unwatched, watched }
+      }),
+    )
+    expect(result.unwatched).toEqual({ said: answer, up: Option.none() })
+    expect(result.watched).toEqual({ said: answer, up: Option.some({ kind: "said", line: true }) })
+  })
+
   test("a pull request opened for any thread but the one just talked about is said with whose it is", async () => {
     const url = "https://github.com/lg-epitech/yapd/pull/7"
     const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader", "yapd", {

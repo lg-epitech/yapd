@@ -146,6 +146,23 @@ describe("Brain", () => {
     const tezosHandle = desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
     expect(shown("Show me that.")).toEqual({ act: "show", how: "thread", target: tezosHandle })
     expect(shown("Show me that P.R.")).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    // Its pull request while that's open, which opens it in the browser too, and the thread once it's merged.
+    const pulled = (state: string): Threads.Desk => ({
+      ...desk(),
+      threads: desk().threads.map((listed) =>
+        listed.ref.id !== tezos.id
+          ? listed
+          : {
+              ...listed,
+              thread: Schema.decodeUnknownSync(T3Live.Thread)({
+                ...listed.thread,
+                pullRequests: [{ number: 412, url: "https://github.com/lg-epitech/integration/pull/412", repository: "lg-epitech/integration", snapshot: { state, title: "Migrate Tezos" } }],
+              }),
+            },
+      ),
+    })
+    expect(shown("Show me that.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    expect(shown("Show me that.", { desk: pulled("MERGED") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
     expect(shown("Show me what's running.")).toEqual({ act: "show", how: "threads", target: "" })
     // Nothing "that" could be, so which thread is the model's to work out.
     expect(shown("Show me that.", { subject: { _tag: "Nothing" } })).toBeUndefined()
