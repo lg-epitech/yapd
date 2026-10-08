@@ -2929,6 +2929,62 @@ describe("Assistant", () => {
     ])
   })
 
+  test("the same words said again over the offer to send again a message that went at another time than they say, after a stop or behind a turn waiting on him, are a yes to it, so it's sent under its own ids and never asked twice", async () => {
+    const waiting = thread(tezos.id, tezos.title, "integration", {
+      activeRunId: null,
+      activityRunStatus: "waiting",
+      status: "waiting",
+      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-01T02:15:00.000Z" },
+    })
+    const repeated = (words: string, turn: T3Live.Thread, how: string) =>
+      run(
+        Effect.gen(function* () {
+          let lost = true
+          const others = [turn]
+          const { dictate, spoken, questions, dispatched } = yield* assistant(
+            (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how }),
+            undefined,
+            {
+              others,
+              answer: () => (payload, bounded) => {
+                // Stopped, the live view shows it idle; a message goes, but T3 Code doesn't say so.
+                if (payload.type === "run.interrupt") others[0] = thread(tezos.id, tezos.title, "integration")
+                return payload.type === "message.dispatch" && lost
+                  ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+                  : takes(payload, bounded)
+              },
+            },
+          )
+          yield* dictate(words)
+          lost = false
+          yield* dictate(words)
+          return {
+            spoken: spoken().slice(1),
+            questions: questions().length,
+            sent: dispatched.map(({ type, commandId, dispatchMode }) => [type, String(commandId).replace(/^yapd:u\w+:/, ""), (dispatchMode as { type?: string } | undefined)?.type]),
+            ids: dispatched.map(({ commandId }) => commandId),
+          }
+        }),
+      )
+    const restarted = await repeated("Stop the Tezos one and tell it to fix the loader instead.", tezos, "restart")
+    expect(restarted.spoken).toEqual(["On it, sir."])
+    expect(restarted.questions).toBe(1)
+    expect(restarted.sent).toEqual([
+      ["run.interrupt", "0", undefined],
+      ["message.dispatch", "1", "start_immediately"],
+      ["message.dispatch", "1", "start_immediately"],
+    ])
+    expect(restarted.ids[2]).toBe(restarted.ids[1])
+    const behind = await repeated("Tell the Tezos one to fix the loader instead.", waiting, "now")
+    expect(behind.spoken).toEqual(["On it, sir."])
+    expect(behind.questions).toBe(1)
+    expect(behind.sent).toEqual([
+      ["message.dispatch", "0", "queue_after_active"],
+      ["message.dispatch", "0", "queue_after_active"],
+    ])
+    expect(behind.ids[1]).toBe(behind.ids[0])
+  })
+
   test("a request said before a question asked since never asks in its place: the same words again aren't sent, nor is a message read already told to ignore it, and he's told what didn't happen and why", async () => {
     const before = (then: string) =>
       run(

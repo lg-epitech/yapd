@@ -1370,8 +1370,10 @@ export const make = (options: {
         }
         // He didn't catch the question, so it's asked again in other words, now rather than later.
         if (decision.act === "again" && decision.pending === "answers") return yield* reask(said)
-        // Saying again just what was asked about, like the same message to the same thread, is a yes to it.
-        const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, decision, decided.situation.desk)
+        // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
+        // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.
+        const same = open.kind === "resend" ? { ...decision, how: "" } : decision
+        const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, same, decided.situation.desk)
         const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume"
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : answers ? "answered" : "replaced", utterance.id)
         if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)
@@ -1381,7 +1383,8 @@ export const make = (options: {
           return yield* onward(decided, unfinished(reply(said.leaving, decided.subject), open.decision.rest, said), Option.none(), 1, said)
         }
         if (open.kind === "project") return yield* project(open, decided, said)
-        if (open.kind !== "which") return yield* agreeing(open, decided, said)
+        // Said again, rather than heard as an answer, like "yes, but once it's done", it's a plain yes.
+        if (open.kind !== "which") return yield* agreeing(open, decision.pending === "answers" ? decided : { ...decided, decision: same }, said)
         const picked = filled(decision, open)
         const checked = Brain.check(picked, decided.situation, said)
         // At most one question: one the answer doesn't settle is let go.
