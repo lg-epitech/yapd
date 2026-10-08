@@ -20,3 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: xcodebuild -project app/yapd.xcodeproj -configuration Release -quiet build
+      # The app's own checks, which only a Mac's swiftc builds.
+      - uses: oven-sh/setup-bun@v2
+      - run: bun test src/App.test.ts

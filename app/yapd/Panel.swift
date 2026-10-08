@@ -8,18 +8,6 @@ import SwiftUI
 // here to approve, deny or send. It never takes focus from what the user is
 // doing, and fades once yapd has finished talking about the card.
 
-/// What `GET /cards/{id}` returns.
-struct Card: Decodable, Equatable {
-  let id: String
-  let kind: String
-  let title: String
-  let markdown: String
-  /// Only ever an https address from T3 Code.
-  let url: String?
-  /// What yapd said with it.
-  let caption: String?
-}
-
 /// Floats a card under the menu bar icon, and fades it once yapd is done talking about it.
 @MainActor
 final class Panel {
@@ -182,7 +170,7 @@ private struct CardView: View {
     .padding(14)
     .frame(width: Panel.width, alignment: .leading)
     // Only https, as the card's own address is: a thread's message could hold a link of any other kind.
-    .environment(\.openURL, OpenURLAction { url in url.scheme?.lowercased() == "https" ? .systemAction : .discarded })
+    .environment(\.openURL, OpenURLAction { url in opens(url) ? .systemAction : .discarded })
   }
 }
 
@@ -194,90 +182,27 @@ private struct Blocks: View {
     VStack(alignment: .leading, spacing: 8) {
       ForEach(Array(Block.parse(markdown).enumerated()), id: \.offset) { _, block in
         switch block {
-        case .heading(let text):
-          Text(inline(text)).font(.subheadline.weight(.semibold))
-        case .item(let text):
+        case .heading:
+          Text(block.shown).font(.subheadline.weight(.semibold))
+        case .item:
           HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text("•").foregroundStyle(.secondary)
-            Text(inline(text)).fixedSize(horizontal: false, vertical: true)
+            Text(block.shown).fixedSize(horizontal: false, vertical: true)
           }
-        case .code(let text):
-          // As it is: what a thread waits on is only ever text, never a link. In no language, so a long word, like
-          // base64 in a command, wraps where it must without a hyphen that isn't in it.
-          Text(verbatim: text)
+        case .code:
+          // As it is, linking nowhere. In no language, so a long word, like base64 in a command, wraps where it must
+          // without a hyphen that isn't in it.
+          Text(block.shown)
             .font(.system(.callout, design: .monospaced))
             .typesettingLanguage(.explicit(Locale.Language(identifier: "zxx")))
             .textSelection(.enabled)
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-        case .paragraph(let text):
-          Text(inline(text)).fixedSize(horizontal: false, vertical: true)
+        case .paragraph:
+          Text(block.shown).fixedSize(horizontal: false, vertical: true)
         }
       }
     }
-  }
-
-  /// A line's own marks, like bold, code and links, through AttributedString's markdown.
-  private func inline(_ text: String) -> AttributedString {
-    (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
-  }
-}
-
-/// A block of a card's markdown.
-private enum Block {
-  case heading(String)
-  case item(String)
-  case code(String)
-  case paragraph(String)
-
-  /// Splits markdown into blocks, with code blocks where yapd sees them: one opens only at the very start of a line,
-  /// and ends only at a fence at least as long as the one it began with, indented three spaces at most.
-  static func parse(_ markdown: String) -> [Block] {
-    var blocks: [Block] = []
-    var paragraph: [String] = []
-    var fence: (mark: Character, length: Int)?
-    var code: [String] = []
-    func flush() {
-      if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))) }
-      paragraph = []
-    }
-    for line in markdown.components(separatedBy: "\n") {
-      let trimmed = line.trimmingCharacters(in: .whitespaces)
-      if let open = fence {
-        // One indented further is a line of the code, so what follows it, which yapd left as it is, isn't read as markdown.
-        if let closing = line.firstMatch(of: /^ {0,3}(`+|~+)[ \t]*$/)?.output.1,
-           closing.first == open.mark, closing.count >= open.length {
-          blocks.append(.code(code.joined(separator: "\n")))
-          fence = nil
-          code = []
-        } else {
-          code.append(line)
-        }
-        continue
-      }
-      // Not an indented one, which yapd escapes, nor one with a backtick after its backticks, which is a code span.
-      if let opening = line.firstMatch(of: /^(`{3,})[^`]*$|^(~{3,})/),
-         let mark = opening.output.1 ?? opening.output.2, let first = mark.first {
-        flush()
-        fence = (first, mark.count)
-        continue
-      }
-      if trimmed.isEmpty {
-        flush()
-      } else if let heading = trimmed.firstMatch(of: /^#{1,6}\s+(.*)$/) {
-        flush()
-        blocks.append(.heading(String(heading.output.1)))
-      } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
-        flush()
-        blocks.append(.item(String(trimmed.dropFirst(2))))
-      } else {
-        paragraph.append(line)
-      }
-    }
-    flush()
-    // One left open, like a message cut short, still shows what it has.
-    if fence != nil { blocks.append(.code(code.joined(separator: "\n"))) }
-    return blocks
   }
 }
