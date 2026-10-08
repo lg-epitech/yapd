@@ -1262,6 +1262,32 @@ describe("Assistant", () => {
     expect(refused.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration.", "That didn't go to Open Mina SSV2 Bug Tickets, sir: the provider is offline."])
   })
 
+  test("nothing is dispatched for the rest of a request when yapd was turned off and on while it was worked out", async () => {
+    const sending = (toggled: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { heard, toggle, wait, flush, dispatched } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Stop")
+                ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest: "tell the Mina one to use its fee table" })
+                : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
+            undefined,
+            { thinking: 0.5 },
+          )
+          const dictated = yield* Effect.fork(heard({ heard: "Stop the Tezos one and tell the Mina one to use its fee table.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+          yield* flush
+          yield* wait(0.5)
+          // Off and on again while the rest is worked out.
+          if (toggled) yield* Effect.zipRight(toggle(false), toggle(true))
+          yield* wait(0.5)
+          yield* Fiber.join(dictated)
+          return dispatched.map(({ type }) => type)
+        }),
+      )
+    expect(await sending(false)).toEqual(["run.interrupt", "message.dispatch"])
+    expect(await sending(true)).toEqual(["run.interrupt"])
+  })
+
   test("the rest of a request follows an answer, and a yes to sending again, and is said as left after starting new work", async () => {
     const rest = "tell the Mina one to use its fee table"
     const toMina = (situation: Brain.Situation) => Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
