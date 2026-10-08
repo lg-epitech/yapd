@@ -15,7 +15,7 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 - Tell a thread something ("tell the Tezos one to use the Mina fee table"): a busy one gets it in the turn under way, or in T3 Code's own queue when you say "when it's done" or the turn is waiting on you, and yapd says which. It names the thread when it isn't the one you were just hearing about, and asks first only when it isn't sure which.
 - "Stop the Tezos one" or "stop working", then "carry on" if you change your mind; "scratch that" withdraws a message still in the queue. "Stop and do this instead" stops its turn, then tells it once it shows stopped; still busy fifteen seconds on, it isn't told, and yapd says so. If T3 Code holds it in the queue the stop held, yapd says so, and "carry on" lets it go. A bare "stop" still only stops yapd talking.
 - "No, the Mina one" to its question does that instead, and "yes, but once it's done" or "yes, and then tell it…" does what you add. Two things in one breath ("stop the Tezos one and tell the Mina one…") are done in order, the first said at once; if one doesn't go, it says what it left.
-- Nothing is ever sent twice behind your back: the same words to a thread that hasn't answered since get "I sent that a minute ago, sir. Again?", and a message yapd can't confirm got there, even across a restart, gets "Send it again?".
+- Nothing is ever sent twice behind your back: the same words to a thread that hasn't answered since get "I sent that a minute ago, sir. Again?", and a message yapd can't confirm got there, even across a restart, gets "Send it again?", to which saying the same words again is a yes.
 - Answers come before any update waiting to be read.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
 
@@ -31,7 +31,7 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 
 - A versioned SQLite store in `~/.yapd/yapd.sqlite`, with a journal of everything heard, said and done. It survives restarts and feeds "what did I miss".
 - A live link to T3 Code's threads that reconnects and catches up on its own, and actions on threads (message, steer, stop, approve, answer, archive, rename, snooze, search, usage). Messages, stops and starts by voice go through them now.
-- Every message, stop and start is written down before it goes out, under ids that make T3 Code do it once however often it's sent. A restart only looks; it never sends.
+- Every message, stop and start is written down before it goes out, under ids that make T3 Code do it once however often it's sent. A restart only looks; it never sends. Turned off and on, nothing more goes out for what you said before.
 - `scripts/m2-probe.ts` checks those T3 Code receipts once, on a thread it starts for itself; it sends nothing without `--send`, and `--thread` repeats only the restart check, on a thread it started.
 - Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
