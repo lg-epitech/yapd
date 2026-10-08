@@ -262,9 +262,11 @@ export const make = (options: {
     /**
      * Presses whose dictation has ended, from the last one got ready for on:
      * getting ready for one can take until after it's over, or only begin
-     * then, and must hold nothing once it is.
+     * then, and must hold nothing once it is. One that came to nothing keeps
+     * the question he'd heard by then, which it may have cut off, and which
+     * nothing else would wait on again.
      */
-    const over = new Set<number>()
+    const over = new Map<number, string | undefined>()
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way for a request, being worked out or in the background, stopped when yapd is turned off. */
@@ -1098,11 +1100,11 @@ export const make = (options: {
       }).pipe(Effect.ensuring(letGo), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
     }
 
-    /** The dictation a press began has ended, however long it took: what was kept for it, let go of. */
-    const ended = (press: number | undefined) =>
+    /** The dictation a press began has ended, however long it took: what was kept for it, let go of. `cut` is the question it may have cut off. */
+    const ended = (press: number | undefined, cut?: string) =>
       Effect.sync(() => {
         if (press === undefined) return undefined
-        over.add(press)
+        over.set(press, cut)
         const kept = presses.get(press)
         presses.delete(press)
         return kept
@@ -1132,7 +1134,7 @@ export const make = (options: {
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           // Presses are got ready for one at a time, in order, so none before this one will be again.
-          for (const before of over) if (before < press) over.delete(before)
+          for (const earlier of over.keys()) if (earlier < press) over.delete(earlier)
           // Pressed before yapd was turned off, however late it's handed on, there's nothing to get ready for.
           if (yield* outdated(turns)) return
           // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
@@ -1141,7 +1143,12 @@ export const make = (options: {
           // Turned off and on while that was found out: dropping cleared what was kept, so this keeps and holds nothing.
           if (yield* outdated(turns)) return yield* arrived
           // Its dictation is over already, dealt with or come to nothing, so there's nothing left to keep or hold for it.
-          if (over.has(press)) return yield* arrived
+          if (over.has(press)) {
+            // Come to nothing, it let go of nothing, so a question it would have held, which it may have cut off, is waited on again now instead.
+            const cut = over.get(press)
+            if (cut !== undefined && asking?.open.id === cut && at >= asking.open.at) yield* later(cut)
+            return yield* arrived
+          }
           presses.set(press, { subject: about, arrived })
           yield* hold(`press:${press}`, at)
           const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
@@ -1150,10 +1157,12 @@ export const make = (options: {
         }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
       // Whatever it held is let go of: a press from before yapd was turned off holds nothing that's open now anyway.
       nothing: (press) =>
-        Effect.zipRight(
-          release(`press:${press}`),
-          Effect.flatMap(ended(press), (kept) => kept?.arrived ?? Effect.void),
-        ),
+        Effect.gen(function* () {
+          yield* release(`press:${press}`)
+          // In case it isn't got ready for yet, so it held nothing, it keeps the question he'd heard by now, which it may have cut off.
+          const kept = yield* ended(press, asking?.said === true ? asking.open.id : undefined)
+          yield* kept?.arrived ?? Effect.void
+        }),
       // Not one he hasn't heard yet, which what he said can't have been about.
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),

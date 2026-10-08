@@ -545,6 +545,37 @@ describe("Assistant", () => {
     expect(result).toBe(2)
   })
 
+  test("a question cut off by a press whose dictation came to nothing before it was got ready for is asked again a minute on, then let go", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, cut, nothing, prepare, wait, spoken, open } = yield* assistant(
+          (situation) => Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          undefined,
+          { waiting: true },
+        )
+        yield* dictate("Which migration is running?")
+        // He presses the shortcut as it's said, which cuts it off, and what he dictates comes to nothing before the press is got ready for.
+        yield* cut()
+        yield* nothing(1)
+        yield* prepare(1, 1)
+        yield* wait(61)
+        const again = spoken()
+        // The same as it's asked again.
+        yield* cut()
+        yield* nothing(2)
+        yield* prepare(2, 1)
+        yield* wait(61)
+        return { again, spoken: spoken(), open: yield* open }
+      }),
+    )
+    expect(result.again).toEqual(["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?", "Which one, sir: Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?"])
+    expect(result.spoken).toEqual([
+      ...result.again,
+      "I didn't hear back about whether you meant Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, so I dropped it, sir.",
+    ])
+    expect(result.open).toEqual(Option.none())
+  })
+
   test("a request stopped while the model works it out stops writing the prompt begun in case it was new work", async () => {
     const result = await run(
       Effect.gen(function* () {
