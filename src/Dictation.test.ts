@@ -47,6 +47,8 @@ const dictation = (
     const ended: Array<number> = []
     /** When each transcript says it was said, in the order they were handed on. */
     const spoken: Array<number> = []
+    /** When each press says the shortcut was pressed, as they started. */
+    const began: Array<number> = []
     /** The same, each with how many times yapd had been turned on or off as it was pressed, as they carry it. */
     const turned = { pressed: [] as Array<readonly [number, number]>, ended: [] as Array<readonly [number, number]> }
     let turns = 1
@@ -122,9 +124,10 @@ const dictation = (
       ),
     )
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).presses, ({ press, turns }) =>
+      Stream.runForEach(Context.get(context, Dictation).presses, ({ press, turns, began: at }) =>
         Effect.sync(() => {
           presses.push(press)
+          began.push(at)
           turned.pressed.push([press, turns])
         }),
       ),
@@ -158,6 +161,7 @@ const dictation = (
       presses,
       ended,
       spoken,
+      began,
       turned,
       cancelled: () => cancelled,
       listening: () => open,
@@ -388,6 +392,24 @@ describe("Dictation", () => {
       }),
     )
     expect(result).toEqual([0, 1000])
+  })
+
+  test("each press says when the shortcut was pressed, whenever it's got ready for", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, wait, began } = yield* dictation(["First.", "Second."])
+        const start = yield* TestClock.currentTimeMillis
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* press("Sent")
+        yield* wait(3)
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* press("Sent")
+        return began.map((at) => at - start)
+      }),
+    )
+    expect(result).toEqual([0, 3000])
   })
 
   test("hands on a dictation as said when it was sent, though voice detection was still loading then", async () => {

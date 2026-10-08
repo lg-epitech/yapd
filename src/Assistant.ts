@@ -131,8 +131,12 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
      * worked out or acted on, it stops there, and is none too.
      */
     readonly heard: (utterance: Omit<Utterance, "id">, press?: number) => Effect.Effect<Option.Option<string>>
-    /** The shortcut was pressed to start a dictation, when yapd had been turned on or off `turns` times: the open question waits for what's dictated. */
-    readonly prepare: (press: number, turns: number) => Effect.Effect<void>
+    /**
+     * The shortcut was pressed to start a dictation, `began` then, or now if not
+     * known, when yapd had been turned on or off `turns` times: the open question
+     * asked by then waits for what's dictated.
+     */
+    readonly prepare: (press: number, turns: number, began?: number) => Effect.Effect<void>
     /** The dictation a press began came to nothing, like one cancelled, failed or with no words in it: the open question is waited on again. */
     readonly nothing: (press: number) => Effect.Effect<void>
     /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
@@ -1134,9 +1138,10 @@ export const make = (options: {
       think,
       act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought.utterance), outcome))),
       heard,
-      prepare: (press, turns) =>
+      prepare: (press: number, turns: number, began?: number) =>
         Effect.gen(function* () {
-          const at = yield* Clock.currentTimeMillis
+          // Pressed then, however late it's got ready for: a question asked after can't be what it answers.
+          const at = began ?? (yield* Clock.currentTimeMillis)
           // Presses are got ready for one at a time, in order, so none before this one will be again.
           for (const earlier of over.keys()) if (earlier < press) over.delete(earlier)
           // Pressed before yapd was turned off, however late it's handed on, there's nothing to get ready for.

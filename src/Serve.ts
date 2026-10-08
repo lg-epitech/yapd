@@ -152,7 +152,7 @@ export const serve = Effect.gen(function* () {
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns }) => assistant.prepare(press, turns)))
+  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))
   // Each with the press it began with, which keeps what "it" meant then, however long the dictation took.
   yield* Effect.forkScoped(
     Stream.runForEach(dictation.transcripts, ({ press, turns, heard: text, voiced, at }) =>

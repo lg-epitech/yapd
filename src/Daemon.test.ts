@@ -1263,6 +1263,40 @@ describe("Daemon", () => {
     expect(result).toEqual({ saying: [], heard: [], question: ["q unanswered"] })
   })
 
+  test("a press got ready for late holds no question asked after the shortcut was pressed", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const answered = yield* Deferred.make<void>()
+        const handle = (situation: Brain.Situation, id: string) => situation.desk.threads.find(({ ref }) => ref.id === id)!.handle
+        const { assistant, made, dictate, wait, flush, played } = yield* assisted(
+          (situation) =>
+            situation.utterance.heard === "Which fix?"
+              ? Brain.decision({ act: "clarify", target: handle(situation, "loader"), others: handle(situation, "parser"), sure: "low" })
+              : Brain.decision({ act: "answer", spoken: "Here is a separate answer." }),
+          {},
+          [thread("loader", "Fix loader"), thread("parser", "Fix parser")],
+          (situation) => (situation.utterance.heard === "Which fix?" ? Effect.void : Deferred.await(answered)),
+        )
+        const { turns } = yield* made.power
+        const floor = yield* dictate
+        yield* wait(2)
+        yield* assistant.heard({ heard: "Which fix?", via: "shortcut", at: 0, voiced: 2, turns })
+        // The second press, half a second in, is only got ready for now, behind a slow first.
+        yield* assistant.prepare(2, turns, 500)
+        const second = yield* Effect.fork(assistant.heard({ heard: "Tell me something unrelated.", via: "shortcut", at: 1000, voiced: 2, turns }, 2))
+        yield* flush
+        yield* Scope.close(floor, Exit.void)
+        yield* flush
+        yield* wait(1)
+        const asked = [...played]
+        yield* Deferred.succeed(answered, undefined)
+        yield* Fiber.join(second)
+        return asked
+      }),
+    )
+    expect(result).toEqual(["Fix loader or Fix parser?"])
+  })
+
   test.each([false, true])("an update whose playback breaks off midway isn't heard, and that's noted once, with a microphone: %s", async (microphone) => {
     const result = await run(
       Effect.gen(function* () {

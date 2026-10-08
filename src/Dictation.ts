@@ -24,6 +24,8 @@ import { extension, Voice } from "./Voice.ts"
 export interface Press {
   readonly press: number
   readonly turns: number
+  /** When the shortcut was pressed, however late whoever gets ready for it gets to it. */
+  readonly began: number
 }
 
 /** How many times yapd has been turned on or off by now, which each press keeps. */
@@ -405,7 +407,7 @@ export const WhisperDictation = Layer.scoped(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           if (event._tag === "Started") {
-            const press: Press = { press: ++pressed, turns: yield* turns }
+            const press: Press = { press: ++pressed, turns: yield* turns, began: yield* Clock.currentTimeMillis }
             const ended = yield* Deferred.make<Ending>()
             const done = yield* Deferred.make<void>()
             const before = last
