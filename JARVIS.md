@@ -2,6 +2,8 @@
 
 A running list of what this branch changed and what yapd can do now, for review. Newest at the bottom of each section.
 
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until it comes back with nothing to fix, and is then merged into `dev`, which the installed yapd (`~/projects/yapd`) runs. The first batch took eight review rounds and went live on 2026-10-08. The database was backed up first, to `~/.yapd/yapd.before-jarvis.sqlite`.
+
 ## Faster
 
 - Short lines it says over and over, like "On it, sir.", are rendered once and kept, so they play at once instead of waiting about a second for Kokoro each time.
@@ -12,9 +14,14 @@ A running list of what this branch changed and what yapd can do now, for review.
 
 - The speaker gets ready while an update is still being rendered, instead of after, which took macOS about a second on nearly every update. If nothing comes after all, it rests again within fifteen seconds.
 
+- Nothing in a short line's speech cache can be left half-rendered, leak files, or hold shutdown up (found and fixed in review).
+
 ## Smarter
 
 ## More capable
+
+- yapd can follow every T3 Code thread live: what's running, what's waiting on you, what just failed, and when a thread asks something mid-turn, which no hook reports. It reconnects on its own and catches up on what happened while it was away. Not used yet: the assistant that speaks from it comes next.
+- yapd can act on T3 Code threads: read where one got to and what it's asking, message it (into the running turn, or after it), stop it, approve or deny what it asks, answer its questions, archive, rename, snooze, search them, and read your usage limits. Not used by voice yet either.
 
 ## Under the hood
 
