@@ -337,13 +337,20 @@ describe("Hands", () => {
         bounded.messages.push({ id: "yapd:u1:0:m", role: "user", text: "Use the fee table.", createdAt: "now" })
         yield* prepare("u2", "message")
         yield* prepare("u3", "stop")
-        const undelivered = yield* reconcile
+        const { undelivered, unconfirmed } = yield* reconcile
         const states = yield* Effect.forEach(["u0", "u1", "u2", "u3"], (utterance) => Effect.map(ledger.get(`yapd:${utterance}:0`), Option.map(({ state }) => state)))
-        return { undelivered: undelivered.map(({ commandId }) => commandId), states: states.map(Option.getOrNull), dispatched: dispatched.length }
+        return {
+          undelivered: undelivered.map(({ commandId }) => commandId),
+          unconfirmed: unconfirmed.map((row) => [row.commandId, Hands.unsure(row, lines, Option.some("Migrate Tezos Integration"))]),
+          states: states.map(Option.getOrNull),
+          dispatched: dispatched.length,
+        }
       }),
     )
     expect(result.dispatched).toBe(0)
     expect(result.undelivered).toEqual(["yapd:u2:0"])
+    // The stop that can't be confirmed is said so, never done again.
+    expect(result.unconfirmed).toEqual([["yapd:u3:0", "Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir."]])
     expect(result.states).toEqual(["abandoned", "sent", "unknown", "abandoned"])
   })
 

@@ -128,6 +128,8 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly drop: Effect.Effect<void>
     /** Messages a restart found didn't get there: each is offered to be sent again once, one at a time. */
     readonly undelivered: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
+    /** Steps a restart couldn't confirm, like a stop: each is said once, with why, and never done again. */
+    readonly unconfirmed: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
   }
 >() {}
 
@@ -1320,5 +1322,30 @@ export const make = (options: {
           lost.push(...rows)
           yield* turn.withPermits(1)(offering)
         }),
+      unconfirmed: (rows) =>
+        turn.withPermits(1)(
+          Effect.forEach(
+            rows,
+            (row) =>
+              Effect.gen(function* () {
+                const ref = { machine: row.machine, id: row.thread }
+                const listed = (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
+                const line = Hands.unsure(row, yield* persona.lines, Option.fromNullable(listed?.called))
+                const reason = row.reason ?? "I couldn't tell whether it went through before I restarted."
+                const { on, turns } = yield* options.power
+                yield* journal.write({
+                  at: yield* Clock.currentTimeMillis,
+                  kind: "action",
+                  machine: row.machine,
+                  thread: row.thread,
+                  ...(on ? { said: line } : {}),
+                  utterance: row.utterance,
+                  detail: { commandId: row.commandId, act: row.kind, outcome: "Unknown", reason },
+                })
+                yield* deliver({ say: line, subject: { _tag: "Answer", said: line, about: Option.some(ref) }, kind: "done" }, { id: row.utterance, turns })
+              }),
+            { discard: true },
+          ),
+        ).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not say what I couldn't confirm before restarting", cause))),
     } satisfies Assistant["Type"]
   })

@@ -37,6 +37,14 @@ export type Outcome =
   /** The message to withdraw was read already, so it can only be told to ignore it. */
   | { readonly _tag: "Read"; readonly row: Ledger.Row }
 
+/** What a restart's look found never said what came of it. */
+export interface Reconciled {
+  /** Messages that didn't get there, each to be offered once to go again. */
+  readonly undelivered: ReadonlyArray<Ledger.Row>
+  /** Other steps, like a stop, that couldn't be confirmed, each to be said once, and never done again. */
+  readonly unconfirmed: ReadonlyArray<Ledger.Row>
+}
+
 /** Which step of which request something is. */
 export interface Step {
   readonly utterance: string
@@ -57,8 +65,12 @@ export class Hands extends Context.Tag("yapd/Hands")<
      * offered again under its ids rather than sent under new ones.
      */
     readonly leave: (commandId: string, reason: string) => Effect.Effect<void>
-    /** At startup: looks at what never said what came of it lately, and never sends anything (I6). Gives back the messages found not to have got there. */
-    readonly reconcile: Effect.Effect<ReadonlyArray<Ledger.Row>>
+    /**
+     * At startup: looks at what never said what came of it lately, and never
+     * sends anything (I6). Gives back the messages found not to have got
+     * there, to offer, and the other steps it couldn't confirm, to say so.
+     */
+    readonly reconcile: Effect.Effect<Reconciled>
     /** A message a restart found didn't get there, while it's still to be offered: nothing came of it since, and it's recent enough to. */
     readonly still: (commandId: string) => Effect.Effect<Option.Option<Ledger.Row>>
   }
@@ -444,6 +456,7 @@ export const make = (options: {
       const now = yield* Clock.currentTimeMillis
       const open = yield* ledger.open(0)
       const undelivered: Array<Ledger.Row> = []
+      const unconfirmed: Array<Ledger.Row> = []
       // What this run did is settled, or offered again, as it happens.
       for (const row of open.filter(({ at }) => at < started)) {
         // Only from where it was, in case something came of it since it was read.
@@ -478,9 +491,10 @@ export const make = (options: {
         } else {
           yield* ledger.settle(row.commandId, "abandoned", { reason: "I couldn't tell whether it went through before I restarted.", from })
           yield* Effect.logWarning(`Couldn't tell whether ${row.commandId} went through before restarting, so it's left be`)
+          unconfirmed.push(row)
         }
       }
-      return undelivered
+      return { undelivered, unconfirmed } satisfies Reconciled
     }),
   }
 }
@@ -551,6 +565,21 @@ export const twice = (sent: number, now: number, lines: Lines, called: Option.Op
 /** Offered when a message he wants back was read already. */
 export const read = (lines: Lines, called: Option.Option<string>) =>
   `${Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} has` })} already read it${addressed(lines)}. Shall I tell it to ignore that?`
+
+/** Said after a restart, for a step other than a message that couldn't be confirmed, which isn't done again. */
+export const unsure = (row: Pick<Ledger.Row, "kind" | "body">, lines: Lines, called: Option.Option<string>) => {
+  const name = Option.getOrUndefined(called)
+  const sent = command(row.body)
+  const what =
+    row.kind === "stop"
+      ? `${name ?? "the work"} stopped`
+      : Option.exists(sent, ({ _tag }) => _tag === "Resume")
+        ? `${name ?? "the work"} was going again`
+        : Option.exists(sent, ({ _tag }) => _tag === "Cancel")
+          ? `your message${name === undefined ? "" : ` to ${name}`} was withdrawn`
+          : `what I last did${name === undefined ? "" : ` to ${name}`} went through`
+  return `Before I restarted, I couldn't confirm ${what}${addressed(lines)}.`
+}
 
 /** Offered after a restart, for a message that wasn't found where it went. */
 export const lost = (lines: Lines, called: Option.Option<string>) =>

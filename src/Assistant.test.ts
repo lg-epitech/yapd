@@ -1273,6 +1273,21 @@ describe("Assistant", () => {
     expect(result.states).toEqual(["unknown", "sent"])
   })
 
+  test("a stop a restart couldn't confirm is said once, with why, and journaled, never done again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { unconfirmed, spoken, dispatched, ledger, journal } = yield* assistant(() => undefined)
+        const row = yield* ledger.prepare({ utterance: "u-old", step: 0, kind: "stop", machine: "Rosie", thread: tezos.id, body: () => ({ _tag: "Stop" }), message: false })
+        yield* unconfirmed([{ ...row, state: "abandoned", reason: "I couldn't tell whether it went through before I restarted." }])
+        const kept = yield* journal.since(0, { kinds: ["action"] })
+        return { spoken: spoken(), dispatched: dispatched.length, kept: kept.map(({ said, detail }) => [said, (detail as { reason?: string }).reason]) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir."])
+    expect(result.dispatched).toBe(0)
+    expect(result.kept).toEqual([["Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir.", "I couldn't tell whether it went through before I restarted."]])
+  })
+
   test("the first step is said at once when the rest takes longer than a second to work out, and the rest is said only if it doesn't go", async () => {
     const twoSteps = (refusing: boolean) =>
       run(

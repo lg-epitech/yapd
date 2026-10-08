@@ -118,7 +118,7 @@ export const serve = Effect.gen(function* () {
       Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
       Effect.timeoutFail({ duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }),
       Effect.zipRight(hands.reconcile),
-      Effect.flatMap(assistant.undelivered),
+      Effect.flatMap(({ undelivered, unconfirmed }) => Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered))),
       Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent before restarting: ${reason}`)),
     ),
   )
