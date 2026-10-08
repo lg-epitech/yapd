@@ -6,7 +6,7 @@ import type { Notice } from "./Inbox.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import type { Line } from "./Responder.ts"
-import type * as Show from "./Show.ts"
+import * as Show from "./Show.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 import { ago, type Material } from "./Writer.ts"
@@ -792,7 +792,8 @@ export const make = (options: {
             const last = subject._tag === "Nothing" ? Brain.nothingSaid(said) : subject.said
             // Said again, what he missed that it told him is heard once he's heard it to the end this time.
             const missed = subject._tag === "Answer" ? subject.missed : undefined
-            const say = decision.spoken.trim() || last
+            // Whether what was asked to be seen is on his screen is told only as it goes up.
+            const say = Show.offScreen(decision.spoken.trim() || last, said)
             // Shown too while an app watches, for what's still not caught the second time.
             const card = subject._tag === "Nothing" ? Option.none() : yield* options.show.caption(say, thought.situation)
             return {

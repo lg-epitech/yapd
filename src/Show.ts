@@ -513,6 +513,13 @@ const unaddressed = (line: string, { address }: Pick<Lines, "address">) => {
   return Brain.capital(line.replace(new RegExp(`^${word},\\s*`, "i"), "").replace(new RegExp(`,\\s*${word}(?=[.!?]*$)`, "i"), ""))
 }
 
+/** A line said with a card, without "it's on your screen", which is only true while an app shows it: what's said of it again. */
+export const offScreen = (line: string, lines: Lines) =>
+  [lines.onScreen, unaddressed(lines.onScreen, lines)]
+    .reduce((rest, phrase) => (phrase.trim() === "" ? rest : rest.replace(phrase, "")), line)
+    .replace(/\s+/g, " ")
+    .trim()
+
 /** What yapd said last, when there's anything to say again. */
 const lastSaid = (situation: Brain.Situation) =>
   situation.subject._tag === "Nothing"
@@ -667,7 +674,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
             return yield* shown(gist, missed(situation.unheard, now), lines)
           }
           case "said": {
-            const line = lastSaid(situation)
+            const line = Option.filter(Option.map(lastSaid(situation), (line) => offScreen(line, lines)), (line) => line !== "")
             if (Option.isNone(line)) return { say: Brain.nothingSaid(lines), card: Option.none(), about: Option.none() }
             const draft = said(line.value, lastHeard(situation))
             return yield* shown(() => line.value, draft, lines)

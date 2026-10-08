@@ -1292,23 +1292,30 @@ describe("Assistant", () => {
             yield* dictate("Show me what's running.")
             const said = spoken().at(-1)
             const up = Option.map(yield* show.seen, ({ kind, caption }) => ({ kind, caption }))
+            // Once, for the card of what was said, not once more for what was said with the last.
+            yield* dictate("Show me what you said.")
+            const shownSaid = spoken().at(-1)
             const before = spoken().length
             yield* dictate("Hide that.")
-            return { said, up, hidden: Option.isNone(yield* show.seen), quiet: spoken().length === before }
+            return { said, up, shownSaid, hidden: Option.isNone(yield* show.seen), quiet: spoken().length === before }
           }),
         )
-        // The app went away.
+        // The app went away, so what was on his screen isn't, and saying it again doesn't say it is.
+        yield* dictate("Say that again.")
+        const again = spoken().at(-1)
         yield* dictate("Show me what's running.")
-        return { unwatched, watched, after: spoken().at(-1) }
+        return { unwatched, watched, again, after: spoken().at(-1) }
       }),
     )
     expect(result.unwatched).toBe("One running, sir.")
     expect(result.watched).toEqual({
       said: "It's on your screen. One running.",
       up: Option.some({ kind: "threads", caption: "One running, sir." }),
+      shownSaid: "It's on your screen. One running.",
       hidden: true,
       quiet: true,
     })
+    expect(result.again).toBe("One running.")
     expect(result.after).toBe("One running, sir.")
   })
 
