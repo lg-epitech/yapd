@@ -213,8 +213,12 @@ export const make = (options: {
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
     const jobs = new Set<Fiber.RuntimeFiber<unknown, unknown>>()
-    /** Work being started, which the journal only has once T3 Code has it ready, so the model knows not to start it again meanwhile. */
-    const starting = new Set<Kept>()
+    /**
+     * Work being started, by the request it's for, which the journal only has
+     * once T3 Code has it ready: from when yapd starts reading through its
+     * project, if it does, so the model knows not to start it again meanwhile.
+     */
+    const starting = new Map<string, Kept>()
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
@@ -283,7 +287,7 @@ export const make = (options: {
           lines,
           open,
           desk: shortlist,
-          lately: [...recent, ...starting].toSorted((one, other) => one.at - other.at),
+          lately: [...recent, ...starting.values()].toSorted((one, other) => one.at - other.at),
           unheard: missed,
           usage,
           second: Option.none(),
@@ -547,6 +551,28 @@ export const make = (options: {
         })
 
     /**
+     * Shows work as being started for a request, in place of whatever was
+     * shown for it before, and gives back what stops showing it, unless
+     * something else is shown for it by then.
+     */
+    const underWay = (utterance: Utterance, where: { readonly project: string; readonly machine: Drafts.Machine }, said: string) =>
+      Effect.gen(function* () {
+        const shown: Kept = {
+          id: 0,
+          at: yield* Clock.currentTimeMillis,
+          kind: "started",
+          machine: where.machine.name,
+          project: where.project,
+          said,
+          utterance: utterance.id,
+        }
+        starting.set(utterance.id, shown)
+        return Effect.sync(() => {
+          if (starting.get(utterance.id) === shown) starting.delete(utterance.id)
+        })
+      })
+
+    /**
      * What's said of new work. `asked` is whether the request was asked about
      * already, which it never is twice: neither then, nor when reading the
      * project, which comes back later, would ask while another question is open.
@@ -586,31 +612,29 @@ export const make = (options: {
           case "Launching": {
             // T3 Code can take minutes to get a worktree ready, so what comes of it is said when it's ready, and nothing else waits for it meanwhile.
             const arrived = yield* options.awaiting
-            const under: Kept = {
-              id: 0,
-              at: yield* Clock.currentTimeMillis,
-              kind: "started",
-              machine: outcome.machine.name,
-              project: outcome.project,
-              said: `Starting ${outcome.about || "it"}, which T3 Code is still getting ready.`,
-              utterance: utterance.id,
-            }
-            starting.add(under)
+            const settled = yield* underWay(utterance, outcome, `Starting ${outcome.about || "it"}, which T3 Code is still getting ready.`)
             yield* background(
               outcome.then.pipe(
                 Effect.flatMap((after) => begun(after, utterance, said, asked)),
                 Effect.flatMap((told) => deliver(told, utterance)),
-                Effect.ensuring(Effect.zipRight(Effect.sync(() => starting.delete(under)), arrived)),
+                Effect.ensuring(Effect.zipRight(settled, arrived)),
                 Effect.annotateLogs({ utterance: utterance.id }),
               ),
             )
             return quiet({ _tag: "Nothing" })
           }
           case "Looking": {
-            // Reading the project takes a while, so what comes of it is said when it's ready.
+            // Reading the project takes a while, so what comes of it is said when it's ready. It's under way from now, so asking for it again meanwhile doesn't start it twice.
+            const settled = yield* underWay(utterance, outcome, `Starting ${outcome.about || "it"}, once I've read through ${outcome.project}.`)
             yield* background(
               outcome.then.pipe(
-                Effect.flatMap((after) => turn.withPermits(1)(Effect.flatMap(begun(after, utterance, said, asked), (told) => deliver(told, utterance)))),
+                Effect.flatMap((after) =>
+                  // A launch takes the reading's place at once, rather than once it's this request's turn, so nothing in between can hide it.
+                  (after._tag === "Launching" ? begun(after, utterance, said, asked) : turn.withPermits(1)(begun(after, utterance, said, asked))).pipe(
+                    Effect.flatMap((told) => deliver(told, utterance)),
+                  ),
+                ),
+                Effect.ensuring(settled),
                 Effect.annotateLogs({ utterance: utterance.id }),
               ),
             )

@@ -131,7 +131,14 @@ export type Outcome =
   /** Which project it's for has to be asked, and the material kept for the answer. */
   | { readonly _tag: "Asked"; readonly question: string; readonly about: string; readonly material: Material }
   /** The project is being read through first, which takes a while: `then` is what comes of it. */
-  | { readonly _tag: "Looking"; readonly spoken: string; readonly about: string; readonly then: Effect.Effect<Outcome> }
+  | {
+      readonly _tag: "Looking"
+      readonly spoken: string
+      readonly about: string
+      readonly project: string
+      readonly machine: Machine
+      readonly then: Effect.Effect<Outcome>
+    }
   /** It was asked for, and T3 Code is getting it ready, which takes minutes for a worktree: `then` is what comes of it. */
   | { readonly _tag: "Launching"; readonly about: string; readonly project: string; readonly machine: Machine; readonly then: Effect.Effect<Outcome> }
   /** Nothing started, and this says why, or that there was nothing to start. */
@@ -284,8 +291,9 @@ export const make = (options: {
               return asking(resolved.left)
             }
             if (decision.action === "start") return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, warning)
-            const spoken = decision.spoken.trim() || `Looking through ${resolved.right.project.name} first.`
-            return { _tag: "Looking", spoken, about, then: look(material, resolved.right, decision, noted) } satisfies Outcome
+            const { project, machine } = resolved.right
+            const spoken = decision.spoken.trim() || `Looking through ${project.name} first.`
+            return { _tag: "Looking", spoken, about, project: project.name, machine, then: look(material, resolved.right, decision, noted) } satisfies Outcome
           }
           case "none":
           case "drop":
