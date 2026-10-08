@@ -335,6 +335,14 @@ const risky = new RegExp(
     String.raw`\baws\s+[\w-]+\s+(?:delete|terminate|remove|deregister)-[\w-]+`,
     String.raw`\b(?:gcloud|az)\b[^\n;|&]*\sdelete\b`,
     String.raw`\b(?:docker|podman)\s+(?:[\w-]+\s+)?prune\b`,
+    // Resetting or dropping a database, emptying a cache, tearing down a stack, mirroring with deletes, and deleting as root.
+    String.raw`\b(?:migrate|db)[\s:]+(?:reset|drop)\b`,
+    String.raw`\bflush(?:all|db)\b`,
+    String.raw`\bpulumi\s+destroy\b`,
+    String.raw`\brsync\b[^\n;|&]*\s--delete`,
+    String.raw`\bsudo\s+rm\b`,
+    // A tool that deletes, by its name, like mcp__github__delete_repository.
+    String.raw`__(?:delete|destroy|drop|remove|purge|wipe)|\b(?:delete|destroy|drop|remove|purge|wipe)_\w+`,
     String.raw`\bprod(?:uction)?\b`,
     String.raw`\bdeploy\w*`,
     String.raw`chmod\s+-R\s+777`,
