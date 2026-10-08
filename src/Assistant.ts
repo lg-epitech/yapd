@@ -1470,7 +1470,9 @@ export const make = (options: {
           return start(thought, said, at.step)
         case "show": {
           // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
-          const shown = Effect.flatMap(afresh(thought.situation), (situation) => options.show.present(decision.how, target, situation, said))
+          // A later step of the request takes down only a card it put up, like "show me everything, then hide that", never one asked for after it.
+          const mine = at.step === 0 ? undefined : thought.utterance.id
+          const shown = Effect.flatMap(afresh(thought.situation), (situation) => options.show.present(decision.how, target, situation, said, mine))
           return Effect.flatMap(shown, ({ say, card, about, hides, unseen }) => {
             if (hides === true) for (const kept of cards) if (at.step === 0 || kept.request === thought.utterance.id) kept.down = true
             return onward(
@@ -1695,7 +1697,7 @@ export const make = (options: {
                 Effect.suspend(() => {
                   if (kept === undefined || card === undefined) return Effect.void
                   cards.delete(kept)
-                  return kept.down ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns }))
+                  return kept.down ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns, request: utterance.id }))
                 }),
               ),
             ),

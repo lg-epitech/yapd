@@ -44,6 +44,8 @@ export type Draft = Omit<Card, "id" | "at">
 export interface Line {
   readonly said: string
   readonly turns: number
+  /** The request it was said for, whose later steps take down no card but one it put up. */
+  readonly request?: string
 }
 
 /** What showing something comes to: what's said, the card put up as it's said, and the thread it's about. */
@@ -85,8 +87,12 @@ export class Show extends Context.Tag("yapd/Show")<
     readonly watch: Effect.Effect<void, never, Scope.Scope>
     /** Opens a thread's pull request in the browser, only ever at its https address from T3 Code. Says whether it did. */
     readonly open: (thread: T3Live.Thread) => Effect.Effect<boolean>
-    /** What showing what he asked for comes to: `how` is the decision's. */
-    readonly present: (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines) => Effect.Effect<Shown>
+    /**
+     * What showing what he asked for comes to: `how` is the decision's. As a
+     * later step of the request `mine`, "hide that" takes down only a card
+     * that request put up, never one asked for after it.
+     */
+    readonly present: (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines, mine?: string) => Effect.Effect<Shown>
     /**
      * A thread's card to go with an answer about it, when what it waits on
      * can't be read aloud, and the answer with "it's on your screen" while an
@@ -688,6 +694,8 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
   Effect.gen(function* () {
     const up = yield* SubscriptionRef.make(Option.none<Card>())
     const recent = new Map<string, Card>()
+    /** The request each of those cards was put up for, when it went up with what was said for one. */
+    const requests = new Map<string, string>()
     let watching = 0
     // Whether the card that's up went up while an app was there to show it: one put up before isn't on his screen, even once an app is.
     let shownTo = false
@@ -699,7 +707,11 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         const at = yield* Clock.currentTimeMillis
         const card: Card = { ...draft, id: `c${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`, at }
         recent.set(card.id, card)
-        for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) recent.delete(id)
+        if (line?.request !== undefined) requests.set(card.id, line.request)
+        for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) {
+          recent.delete(id)
+          requests.delete(id)
+        }
         shownTo = watching > 0
         if (line !== undefined) withLine = { line, draft }
         yield* SubscriptionRef.set(up, Option.some(card))
@@ -711,11 +723,17 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
 
     const seen = Effect.flatMap(watched, (watching) => (watching && shownTo ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>())))
 
-    const hide = Effect.gen(function* () {
-      const was = yield* SubscriptionRef.getAndSet(up, Option.none())
-      if (Option.isSome(was)) yield* Effect.logInfo(`Took down ${was.value.kind}: ${was.value.title}`)
-      return Option.isSome(was)
-    })
+    /** Takes the card down, or only one put up for the request `mine`, and says whether it did. */
+    const takeDown = (mine?: string) =>
+      Effect.gen(function* () {
+        const was = yield* SubscriptionRef.modify(up, (card) =>
+          mine === undefined || Option.exists(card, ({ id }) => requests.get(id) === mine) ? [card, Option.none<Card>()] : [Option.none<Card>(), card],
+        )
+        if (Option.isSome(was)) yield* Effect.logInfo(`Took down ${was.value.kind}: ${was.value.title}`)
+        return Option.isSome(was)
+      })
+
+    const hide = takeDown()
 
     /** Opens a thread's pull request, and says whether it did, or why not: its address isn't https, or the browser didn't open it in time. */
     const opening = (thread: T3Live.Thread) =>
@@ -746,12 +764,12 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         return watching ? { say: `${lines.onScreen} ${gist("")}`, card, about, unseen: plain } : { say: plain, card, about }
       })
 
-    const present = (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines): Effect.Effect<Shown> =>
+    const present = (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines, mine?: string): Effect.Effect<Shown> =>
       Effect.gen(function* () {
         const { now } = situation
         switch (how) {
           case "hide":
-            yield* hide
+            yield* takeDown(mine)
             return { say: "", card: Option.none(), about: Option.none(), hides: true }
           case "threads":
             return yield* shown((address) => tally(situation.desk, address, now), overview(situation.desk, now), lines)

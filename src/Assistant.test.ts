@@ -4192,6 +4192,44 @@ describe("Assistant", () => {
     expect(result.alone).toEqual(Option.none())
   })
 
+  test("the rest of a request that takes its card down, worked out once its card is up, takes it down, but leaves one asked for after it up", async () => {
+    const shown = (later: boolean) =>
+      run(
+        Effect.gen(function* () {
+          // Each waits its turn behind something else being said, until the test plays it, and the model takes two seconds.
+          const { heard, wait, flush, play, notices, spoken, show } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Hide that")
+                ? Brain.decision({ act: "show", how: "hide" })
+                : Brain.decision({ act: "show", how: "threads", rest: "Hide that." }),
+            undefined,
+            { waiting: true, thinking: 2 },
+          )
+          const up = Effect.map(Stream.runHead(show.showing), (up) => Option.map(Option.flatten(up), ({ kind }) => kind))
+          yield* show.watch
+          const dictated = yield* Effect.fork(heard({ heard: "Show me everything, then hide that.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+          yield* flush
+          yield* wait(2)
+          yield* wait(1)
+          yield* Fiber.join(dictated)
+          // His usage needs no model, so it's answered while the rest of the request before it is worked out.
+          if (later) yield* heard({ heard: "Show me my usage.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 })
+          // What's said of each is played, and its card goes up, before the rest is worked out and takes a card down.
+          for (const notice of notices()) yield* play(notice)
+          const before = yield* up
+          yield* wait(2)
+          return { told: spoken(), before, after: yield* up }
+        }).pipe(Effect.scoped),
+      )
+    expect(await shown(false)).toEqual({ told: ["It's on your screen. One running."], before: Option.some("threads"), after: Option.none() })
+    // "That" was the card of what's running, which is gone already, never the one he asked for after.
+    expect(await shown(true)).toEqual({
+      told: ["It's on your screen. One running.", "It's on your screen. I can't read your usage right now."],
+      before: Option.some("usage"),
+      after: Option.some("usage"),
+    })
+  })
+
   test("a pull request opened for any thread but the one just talked about is said with whose it is", async () => {
     const url = "https://github.com/lg-epitech/yapd/pull/7"
     const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader", "yapd", {
