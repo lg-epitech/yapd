@@ -12,7 +12,7 @@ Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6
 - "It" means what you were just listening to. Work it started in the last half hour isn't started twice.
 - Tell a thread something ("tell the Tezos one to use the Mina fee table"): a busy one gets it in the turn under way, or in T3 Code's own queue when you say "when it's done", and yapd says which. It names the thread when it isn't the one you were just hearing about, and asks first only when it isn't sure which.
 - "Stop the Tezos one" or "stop working", then "carry on" if you change your mind; "scratch that" withdraws a message still in the queue. A bare "stop" still only stops yapd talking.
-- "No, the Mina one" to its question does that instead. Two things in one breath ("stop the Tezos one and tell the Mina one…") are done in order, the first said at once.
+- "No, the Mina one" to its question does that instead, and "yes, but once it's done" or "yes, and then tell it…" does what you add. Two things in one breath ("stop the Tezos one and tell the Mina one…") are done in order, the first said at once; if one doesn't go, it says what it left.
 - Nothing is ever sent twice behind your back: the same words to a thread that hasn't answered since get "I sent that a minute ago, sir. Again?", and a message yapd can't confirm got there, even across a restart, gets "Send it again?".
 - Answers come before any update waiting to be read.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
