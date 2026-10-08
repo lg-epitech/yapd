@@ -1,11 +1,11 @@
-import { Cause, Clock, Context, type Duration, Effect, Either, Fiber, FiberSet, Option } from "effect"
+import { Cause, Clock, Context, type Duration, Effect, Either, Exit, Fiber, FiberSet, Option } from "effect"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
-import type { Line } from "./Responder.ts"
+import { enough, gist, type Line } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -130,7 +130,8 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
      * A dictation, begun with the shortcut `press`, or a typed request: worked
      * out and acted on, then what came of it said ahead of anything else. None
      * when yapd is off or was turned off since it was said, however late it's
-     * handed on: then nothing is done for it at all.
+     * handed on: then nothing is done for it at all. Turned off while it's
+     * worked out or acted on, it stops there, and is none too.
      */
     readonly heard: (utterance: Omit<Utterance, "id">, press?: number) => Effect.Effect<Option.Option<string>>
     /** The shortcut was pressed to start a dictation, when yapd had been turned on or off `turns` times: the open question waits for what's dictated. */
@@ -140,7 +141,7 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
     readonly replied: Effect.Effect<void>
     readonly open: Effect.Effect<Option.Option<Open>>
-    /** yapd was turned off: the open question is closed, and what was being written up stops. */
+    /** yapd was turned off: the open question is closed, and whatever was being worked out, written up or done for a request stops. */
     readonly drop: Effect.Effect<void>
   }
 >() {}
@@ -167,8 +168,18 @@ const day = 24 * 60 * 60_000
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
 
+/** Small counts as words, from one, the way a line starts with them. */
+const counted = ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve"]
+
+/** What ends a catch-up while updates wait to be read next, which it leaves to them: how many are coming up. */
+const comingUp = (count: number, said: Lines) =>
+  count === 0 ? "" : ` ${counted[count - 1] ?? count} more ${count === 1 ? "update is" : "updates are"} coming up${addressed(said)}.`
+
 /** Something said back that isn't about a thread. */
 const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _tag: "Answer", said: say, about: Option.none() }, kind: say === "" ? "none" : "answer" })
+
+/** What's said of something left rather than asked about, since a question is open already. */
+const unasked = (about: string, said: Lines) => `I left ${about || "that"} for now, since I'd have to ask you something about it${addressed(said)}.`
 
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
@@ -184,6 +195,9 @@ const catchUp = (kept: Kept) => {
   const { decision, second } = kept.detail as { readonly decision?: Partial<Brain.Decision>; readonly second?: Partial<Brain.Decision> }
   return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again"
 }
+
+/** Whether he only told yapd to stop what it's saying, like "skip" or "stop, stop", rather than taking it in, like "thanks". */
+const hushed = (heard: string) => enough.has([...new Set(gist(heard).split(" "))].join(" "))
 
 /** Whether what was heard was taken for noise rather than anything he said to yapd. */
 const noise = (kept: Kept) =>
@@ -219,6 +233,10 @@ export const make = (options: {
   readonly awaiting: Effect.Effect<Effect.Effect<void>>
   /** Whether these words are waiting to be said, like an update or work that started, which a dictation cut off. */
   readonly queued: (spoken: string) => Effect.Effect<boolean>
+  /** Drops an update he told to stop, even one a dictation cut off to be read again, which then counts as heard. */
+  readonly skip: (update: Conversation.Update) => Effect.Effect<void>
+  /** The updates waiting to be read, like one a dictation cut off, by their entry in the journal: coming up, so not missed. */
+  readonly upcoming: Effect.Effect<ReadonlyArray<number>>
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -249,12 +267,14 @@ export const make = (options: {
     /**
      * Presses whose dictation has ended, from the last one got ready for on:
      * getting ready for one can take until after it's over, or only begin
-     * then, and must hold nothing once it is.
+     * then, and must hold nothing once it is. One that came to nothing keeps
+     * the question he'd heard by then, which it may have cut off, and which
+     * nothing else would wait on again.
      */
-    const over = new Set<number>()
+    const over = new Map<number, string | undefined>()
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
-    /** What's under way in the background for a request, stopped when yapd is turned off. */
+    /** What's under way for a request, being worked out or in the background, stopped when yapd is turned off. */
     const jobs = yield* FiberSet.make()
     /** How many times yapd had been turned on or off when it was last turned off, so what's begun after for a request heard by then is stopped too. */
     let dropped = Number.NEGATIVE_INFINITY
@@ -272,26 +292,51 @@ export const make = (options: {
     const outdated = (turns: number) => Effect.map(options.power, (power) => !power.on || power.turns !== turns)
 
     /**
-     * In the background for a request heard when yapd had been turned on or
-     * off `turns` times, and stoppable even when begun from what can't be
+     * Under way for a request heard when yapd had been turned on or off
+     * `turns` times, and stoppable even when begun from what can't be
      * stopped, like an answer being taken in. It's among the jobs from when
      * it's begun, not from when it starts running, so turning yapd off just
      * after can't miss it; and begun as yapd is being turned off, it's
      * stopped like the rest.
      */
-    const background = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
+    const job = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
       Effect.gen(function* () {
-        const job = yield* effect.pipe(
-          Effect.catchAllCause((cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Something went wrong", cause))),
-          Effect.interruptible,
-          FiberSet.run(jobs),
-        )
-        if (turns <= dropped) yield* Fiber.interruptFork(job)
+        const fiber = yield* effect.pipe(Effect.interruptible, FiberSet.run(jobs))
+        if (turns <= dropped) yield* Fiber.interruptFork(fiber)
+        return fiber
+      })
+
+    /** In the background for a request, which nothing waits for. */
+    const background = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
+      Effect.asVoid(
+        job(
+          Effect.catchAllCause(effect, (cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Something went wrong", cause))),
+          turns,
+        ),
+      )
+
+    /**
+     * A request being worked out and acted on, which turning yapd off stops
+     * like what's in the background for it, from the model to the prompt
+     * being written: then nothing comes of it, as if it had been said before,
+     * and what's asked once yapd is on again doesn't wait for it. Stopped too
+     * when whatever waits for it is.
+     */
+    const stoppable = (request: Effect.Effect<Option.Option<string>>, utterance: Utterance) =>
+      Effect.gen(function* () {
+        const fiber = yield* job(request, utterance.turns)
+        const exit = yield* Fiber.await(fiber).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)))
+        if (Exit.isSuccess(exit) || !Cause.isInterruptedOnly(exit.cause)) return yield* exit
+        yield* Effect.logInfo("Stopped working on it, since yapd was turned off").pipe(Effect.annotateLogs({ utterance: utterance.id }))
+        return Option.none<string>()
       })
 
     /** The open question, unless it's been open so long it no longer counts. */
     const current = (now: number) =>
       asking !== undefined && now - asking.open.at < fresh ? Option.some(asking.open) : Option.none<Open>()
+
+    /** The open question, if it was asked by the time this was said: one asked after can't be what it's about, so it never answers, dismisses or closes it. */
+    const before = (utterance: Pick<Utterance, "at">) => (asking !== undefined && asking.open.at <= utterance.at ? asking : undefined)
 
     /** What "it" means now: what's playing, or the latest heard lately, an update or an answer. */
     const subject = Effect.gen(function* () {
@@ -321,23 +366,26 @@ export const make = (options: {
     const situate = (utterance: Utterance, about: Subject, lines: ReadonlyArray<Line>) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        // One he hasn't heard yet can't be what he's answering.
-        const open = Option.filter(current(now), () => asking?.said === true)
+        // One he hasn't heard yet can't be what he's answering, nor one asked after he said this.
+        const open = Option.filter(current(now), () => before(utterance)?.said === true)
         const focus =
           about._tag === "Thread" ? Option.some(about.ref) : about._tag === "Answer" ? about.about : Option.none<Threads.Ref>()
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           journal.since(now - lately.span, { most: lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent"] }),
           journal.since(now - day, { most: 20, kinds: ["dictation", "reply"] }),
           threads.usage,
           askedLately,
+          options.upcoming,
         ])
         // What he hasn't heard since he last said something, other than catching up, which he may never have heard the
-        // answer to, or something only heard as noise, like a cough taken for "Thank you.".
-        const missed = yield* journal.unheard(spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day, unheard)
+        // answer to, or something only heard as noise, like a cough taken for "Thank you.". Not what's waiting to be
+        // read, like an update his asking cut off: he's told of that as it's read, not twice.
+        const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
+        const missed = (yield* journal.unheard(since, unheard + coming.length)).filter(({ id }) => !coming.includes(id)).slice(-unheard)
         const seen = yield* options.show.seen
         return {
           utterance,
@@ -421,11 +469,20 @@ export const make = (options: {
         })
       })
 
-    /** Opens a question in place of any other, unless yapd was turned off since what it's about was said. */
+    /**
+     * Opens a question in place of any other, unless yapd was turned off
+     * since what it's about was said, or another was asked since, which stays
+     * open: only one ever is, so this one is left with a word instead.
+     */
     const opening = (open: Omit<Open, "id" | "version" | "at">, utterance: Utterance) =>
       Effect.gen(function* () {
         const power = yield* options.power
         if (!power.on || power.turns !== utterance.turns) return quiet({ _tag: "Nothing" })
+        if (asking !== undefined && before(utterance) === undefined) {
+          yield* Effect.logInfo(`Leaving it, rather than ask in place of a question asked since: ${open.asked}`)
+          const said = yield* persona.lines
+          return reply(open.kind === "which" ? said.cantTell : unasked(open.about, said), { _tag: "Nothing" })
+        }
         if (asking !== undefined) yield* close(asking.open, "replaced")
         const at = yield* Clock.currentTimeMillis
         version++
@@ -532,11 +589,13 @@ export const make = (options: {
 
     /** An answer, which what he said next can be about, decided at once or on a `second` look. */
     const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines, second?: Brain.Decision) =>
-      Effect.sync(() => {
-        const text = spoken.trim() === "" ? said.misheard : spoken.trim()
-        // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
+      Effect.gen(function* () {
         const { how } = second ?? thought.decision
-        const missed = Brain.catchingUp(thought.utterance.heard) || how === "missed" ? thought.situation.unheard.map(({ id }) => id) : []
+        const catching = Brain.catchingUp(thought.utterance.heard) || how === "missed"
+        // What's waiting to be read was left out of a catch-up, so he's told it's coming up rather than told it twice.
+        const text = `${spoken.trim() === "" ? said.misheard : spoken.trim()}${catching ? comingUp((yield* options.upcoming).length, said) : ""}`
+        // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
+        const missed = catching ? thought.situation.unheard.map(({ id }) => id) : []
         return {
           say: text,
           subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref), ...(missed.length === 0 ? {} : { missed }) },
@@ -666,7 +725,7 @@ export const make = (options: {
             const about = outcome.about || "that"
             if (asked || asking !== undefined) {
               yield* Effect.logInfo(`Leaving it, rather than ask: ${outcome.question}`)
-              return reply(`I left ${about} for now, since I'd have to ask you something about it${addressed(said)}.`, { _tag: "Nothing" })
+              return reply(unasked(outcome.about, said), { _tag: "Nothing" })
             }
             const words = Brain.unrepeated({ kind: "project", asked: outcome.question, about: outcome.about }, yield* askedLately, said)
             if (words === undefined) return reply(`I still can't tell which project ${about} goes in, so I left it${addressed(said)}.`, { _tag: "Nothing" })
@@ -731,7 +790,8 @@ export const make = (options: {
     const written = (utterance: Utterance, lines: ReadonlyArray<Line>, answering?: Material) =>
       Effect.gen(function* () {
         const ahead = writing.get(utterance.id)
-        const prompt = yield* Fiber.join(ahead ?? (yield* Effect.forkIn(drafts.begin(lines, answering), scope)))
+        // Written here when it wasn't begun ahead, so it stops with whatever stops this, like yapd being turned off.
+        const prompt = yield* ahead === undefined ? drafts.begin(lines, answering) : Fiber.join(ahead)
         const power = yield* options.power
         return !power.on || power.turns !== utterance.turns ? Option.none() : Option.some(prompt)
       })
@@ -849,15 +909,19 @@ export const make = (options: {
         const { decision } = decided
         // Nothing was really said, like words Whisper hears in silence: a question stays open.
         if (decided.source === "fast" && decision.act === "resume") return quiet(decided.subject)
+        // Told to stop the update he was hearing, it isn't read again once the dictation that cut it off is dealt with.
+        if (decision.act === "dismiss" && decided.subject._tag === "Session" && hushed(utterance.heard)) yield* options.skip(decided.subject.update)
         const said = yield* persona.lines
         // Nothing was made of it, so that's all that's said, and what he missed isn't marked heard. Still, he said something after the question he heard, which closes it.
         if (decided.source === "failed") {
-          if (asking?.said === true) yield* close(asking.open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
+          const heard = before(utterance)
+          if (heard?.said === true) yield* close(heard.open, utterance.via === "reply" ? "dropped: unclear" : "replaced", utterance.id)
           return reply(decision.spoken, decided.subject)
         }
         const now = yield* Clock.currentTimeMillis
         if (asking !== undefined && Option.isNone(current(now))) yield* close(asking.open, "dropped: unanswered")
-        const open = asking?.open
+        // One asked since he said this stays open, to be asked as usual, as if it weren't there.
+        const open = before(utterance)?.open
         if (open === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         // He never heard it, so what he said is something new, which takes its place, and he's told what was left for it.
         if (asking?.said === false) {
@@ -946,6 +1010,8 @@ export const make = (options: {
         }
         yield* Effect.logInfo(`Said: ${outcome.say}`)
         const { subject, missed, card } = outcome
+        /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
+        let unsaid: Effect.Effect<void> = Effect.void
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -956,8 +1022,16 @@ export const make = (options: {
             // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
               Effect.sync(() => {
-                answered = { subject, at: now }
+                const before = answered
+                // Asked again in other words, he may have heard it already.
+                const heard = asking?.said === true
+                const meant = { subject, at: now }
+                answered = meant
                 if (open !== undefined && asking?.open.id === open.id) asking.said = true
+                unsaid = Effect.sync(() => {
+                  if (answered === meant) answered = before
+                  if (open !== undefined && asking?.open.id === open.id) asking.said = heard
+                })
               }),
             ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(options.show.put(card)))),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
@@ -970,6 +1044,8 @@ export const make = (options: {
                   question: {
                     answer: listen(open),
                     unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),
+                    // Broken off, he can't be taken to have heard it, so what he says next is something new, as before it was said.
+                    unsaid: Effect.suspend(() => unsaid),
                   },
                 }),
           },
@@ -1053,11 +1129,11 @@ export const make = (options: {
       }).pipe(Effect.ensuring(letGo), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
     }
 
-    /** The dictation a press began has ended, however long it took: what was kept for it, let go of. */
-    const ended = (press: number | undefined) =>
+    /** The dictation a press began has ended, however long it took: what was kept for it, let go of. `cut` is the question it may have cut off. */
+    const ended = (press: number | undefined, cut?: string) =>
       Effect.sync(() => {
         if (press === undefined) return undefined
-        over.add(press)
+        over.set(press, cut)
         const kept = presses.get(press)
         presses.delete(press)
         return kept
@@ -1075,7 +1151,7 @@ export const make = (options: {
           // Said before yapd was turned off, it isn't even worked out, however late it's handed on.
           if (yield* outdated(utterance.turns)) return yield* Effect.as(kept?.arrived ?? Effect.void, Option.none<string>())
           const arrived = kept?.arrived ?? (yield* options.awaiting)
-          return yield* Effect.zipRight(hold(holding), respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived))
+          return yield* Effect.zipRight(hold(holding), stoppable(respond(utterance, kept?.subject), utterance)).pipe(Effect.ensuring(arrived))
         }).pipe(Effect.ensuring(release(holding)))
       })
 
@@ -1087,7 +1163,7 @@ export const make = (options: {
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           // Presses are got ready for one at a time, in order, so none before this one will be again.
-          for (const before of over) if (before < press) over.delete(before)
+          for (const earlier of over.keys()) if (earlier < press) over.delete(earlier)
           // Pressed before yapd was turned off, however late it's handed on, there's nothing to get ready for.
           if (yield* outdated(turns)) return
           // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
@@ -1096,7 +1172,12 @@ export const make = (options: {
           // Turned off and on while that was found out: dropping cleared what was kept, so this keeps and holds nothing.
           if (yield* outdated(turns)) return yield* arrived
           // Its dictation is over already, dealt with or come to nothing, so there's nothing left to keep or hold for it.
-          if (over.has(press)) return yield* arrived
+          if (over.has(press)) {
+            // Come to nothing, it let go of nothing, so a question it would have held, which it may have cut off, is waited on again now instead.
+            const cut = over.get(press)
+            if (cut !== undefined && asking?.open.id === cut && at >= asking.open.at) yield* later(cut)
+            return yield* arrived
+          }
           presses.set(press, { subject: about, arrived })
           yield* hold(`press:${press}`, at)
           const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
@@ -1105,10 +1186,12 @@ export const make = (options: {
         }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
       // Whatever it held is let go of: a press from before yapd was turned off holds nothing that's open now anyway.
       nothing: (press) =>
-        Effect.zipRight(
-          release(`press:${press}`),
-          Effect.flatMap(ended(press), (kept) => kept?.arrived ?? Effect.void),
-        ),
+        Effect.gen(function* () {
+          yield* release(`press:${press}`)
+          // In case it isn't got ready for yet, so it held nothing, it keeps the question he'd heard by now, which it may have cut off.
+          const kept = yield* ended(press, asking?.said === true ? asking.open.id : undefined)
+          yield* kept?.arrived ?? Effect.void
+        }),
       // Not one he hasn't heard yet, which what he said can't have been about.
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),

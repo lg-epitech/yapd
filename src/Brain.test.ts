@@ -4,6 +4,7 @@ import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
+import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -180,12 +181,62 @@ describe("Brain", () => {
   })
 
   test("only a limit or whose it is makes \"how much is left\" a usage question", () => {
-    const usage: Option.Option<T3Actions.Usage> = Option.some([{ provider: "Claude", windows: [] }, { provider: "Codex", windows: [] }])
+    const usage: Option.Option<Threads.Usage> = Option.some({ at: now, providers: [{ provider: "Claude", windows: [] }, { provider: "Codex", windows: [] }] })
     const usageAsked = (heard: string) => Brain.fast(situation(heard, { usage }), lines)?.act === "answer"
     expect(usageAsked("How much Claude have I got left?")).toBe(true)
     expect(usageAsked("How much of my quota is left?")).toBe(true)
     // About the work he just heard of, which only the model can answer.
     for (const heard of ["How much is left?", "How much work is left?", "How much time is left?", "How much of it is left?"]) expect(usageAsked(heard)).toBe(false)
+  })
+
+  test("a name said on its own is an answer, never silence, and \"Jarvis.\" picks the thread called that", () => {
+    const jarvis = thread("6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f", "Jarvis companion assistant", "p-std")
+    const latency = thread("7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d", "Latency audit", "p-std")
+    const named: T3Live.View = { ...view, threads: new Map([jarvis, latency].map((thread) => [thread.id, thread])) }
+    const candidates = [ref(jarvis), ref(latency)]
+    const listed = Threads.shortlist({ machine: "Rosie", view: named, focus: Option.none(), pending: candidates, most: 30, started: new Map(), said: new Map(), now })
+    const asking = { ...which(candidates), asked: "Jarvis companion assistant or Latency audit, sir?" }
+    const picked = Brain.fast(situation("Jarvis.", { open: Option.some(asking), desk: { threads: listed, away: [] } }), lines)
+    expect({ act: picked?.act, pending: picked?.pending, thread: listed.find(({ handle }) => handle === picked?.target)?.thread.title }).toEqual({
+      act: "look",
+      pending: "answers",
+      thread: "Jarvis companion assistant",
+    })
+    // Which project, with "Yapd." for an answer, is for the model, which hears it out.
+    const project: Assistant.Open = { ...which([]), kind: "project", asked: "For the loader fix, is that yapd or std?", about: "the loader fix" }
+    for (const heard of ["Yapd.", "yapd please", "Jarvis, um."]) expect(Brain.fast(situation(heard, { open: Option.some(project) }), lines)).toBeUndefined()
+    // Only what fills a pause, or asks nicely, is nothing said.
+    for (const heard of ["Um.", "Uh, sir.", "Please."]) expect(Brain.fast(situation(heard, { open: Option.some(project) }), lines)?.act).toBe("resume")
+  })
+
+  test("a message passed on to a thread shows in what happened lately in the words it was sent", () => {
+    const message = "Use mainnet first, then ghostnet."
+    // As the daemon keeps it once it's sent: the message, and nothing said aloud.
+    const sent: Kept = { id: 1, at: now - 60_000, kind: "sent", machine: "Rosie", project: "integration", thread: tezos.id, directory: "/code/integration", text: message }
+    const shown = Brain.prompt(situation("What did I just tell the Tezos one?", { lately: [sent] }), Option.none())
+    const handle = desk().threads.find(({ ref }) => ref.id === tezos.id)?.handle
+    expect(shown).toContain(`LATELY, oldest first:\n- 1 min ago, you sent his message to the thread (integration, ${handle}): «${message}»\n`)
+  })
+
+  test("usage read too long ago is never said or shown as what's used now, nor a window that has reset since", () => {
+    const clock = (at: number) => new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+    const read = now - 6 * 60 * 60_000
+    const week = now + 3 * 24 * 60 * 60_000
+    const resetting = `${new Date(week).toLocaleDateString("en-US", { weekday: "long" })} at ${clock(week)}`
+    const windows: ReadonlyArray<T3Actions.Window> = [
+      { kind: "session", label: "Session", minutes: 300, usedPercent: 95, resetsAt: new Date(now - 2 * 60 * 60_000).toISOString() },
+      { kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 40, resetsAt: new Date(week).toISOString() },
+    ]
+    const usage = (at: number, kept = windows) => Option.some({ at, providers: [{ provider: "Claude", windows: kept }] })
+    expect(Brain.used(usage(read), "usage", lines, now)).toBe(`As of ${clock(read)}, Claude was at 40 percent of its weekly window, resetting ${resetting}, sir.`)
+    expect(Brain.used(usage(read, windows.slice(0, 1)), "usage", lines, now)).toBe(`Claude's limits have reset since I read them at ${clock(read)}, sir.`)
+    // Read a few minutes ago, what's still to reset is what's used now.
+    expect(Brain.used(usage(now - 5 * 60_000), "usage", lines, now)).toBe(`Claude is at 40 percent of its weekly window, resetting ${resetting}, sir.`)
+    const shown = Brain.prompt(situation("What's left of my Claude week?", { usage: usage(read) }), Option.none()).split("USAGE:\n")[1]!.split("\n\n")[0]
+    expect(shown).toBe(
+      `As of ${clock(read)}, when T3 Code last answered, so never what's used now: say it's as of ${clock(read)}.\n` +
+        `- Claude: the five-hour window has reset since, so what it's at now isn't known, 40% of the weekly window (resets ${resetting})`,
+    )
   })
 
   test("a near-silence 'Thank you.' is ignored", () => {
@@ -201,17 +252,20 @@ describe("Brain", () => {
     const candidates = desk().threads
     const project = { kind: "project" as const, asked: "Which project is the retry fix for?", about: "the retry fix" }
     // As T3 Code labels them.
-    const usage: Option.Option<T3Actions.Usage> = Option.some([
-      {
-        provider: "Claude",
-        windows: [
-          { kind: "session", label: "Session", minutes: 300, usedPercent: 60.4, resetsAt: "2026-10-09T01:10:00.000Z" },
-          { kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 11, resetsAt: "2026-10-10T06:00:00.000Z" },
-          { kind: "weekly", label: "Weekly · Fable", minutes: 10080, usedPercent: 40, resetsAt: undefined },
-        ],
-      },
-      { provider: "Codex", windows: [{ kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 20, resetsAt: "2026-10-12T13:00:00.000Z" }] },
-    ])
+    const usage: Option.Option<Threads.Usage> = Option.some({
+      at: now - 60_000,
+      providers: [
+        {
+          provider: "Claude",
+          windows: [
+            { kind: "session", label: "Session", minutes: 300, usedPercent: 60.4, resetsAt: "2026-10-09T01:10:00.000Z" },
+            { kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 11, resetsAt: "2026-10-10T06:00:00.000Z" },
+            { kind: "weekly", label: "Weekly · Fable", minutes: 10080, usedPercent: 40, resetsAt: undefined },
+          ],
+        },
+        { provider: "Codex", windows: [{ kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 20, resetsAt: "2026-10-12T13:00:00.000Z" }] },
+      ],
+    })
     const resolved = Drafts.resolve(
       [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") }, researcher: Research.unavailable("") }],
       [{ machine: "rig", here: false, hosts: [], catalog: Option.some({ projects: [{ name: "trainer", path: "/home/me/trainer", repository: true, branch: "main", worktree: true, recent: [] }], models: [] }) }],
@@ -274,5 +328,26 @@ describe("Brain", () => {
     }
     expect(said[0]).toBe("Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?")
     expect(said[1]).toBe("Which one, sir: Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?")
+  })
+
+  test("hyphenated pairs like \"on-chain/off-chain\" or \"unit/end-to-end\" are said as written, with the word before them, and only branches become \"a branch\"", () => {
+    for (const line of [
+      "The on-chain/off-chain reconciliation is done.",
+      "The client/server-side split is in.",
+      "It added read/write-heavy tests.",
+      "The arm64/x86-64 builds pass, and UTF-8/UTF-16 decoding too.",
+      "The unit/end-to-end tests pass.",
+      "The client/peer-to-peer link works, and the in-band/out-of-band checks too.",
+      "The stale/up-to-date flags and the copy/copy-on-write split are in.",
+      "The Claude/Codex-style prompts are shorter.",
+      "The BTC/USD-1000 contract settled.",
+    ]) {
+      expect(Brain.speakable(line, desk())).toBe(line)
+    }
+    expect(Brain.speakable("It pushed the t3code/reactor-menu-bar-icon to origin.", desk())).toBe("It pushed a branch to origin.")
+    expect(Brain.speakable("It pushed t3code/fix-loader.", desk())).toBe("It pushed a branch.")
+    expect(Brain.speakable("It's on laurent/fix-loader now.", desk())).toBe("It's on a branch now.")
+    expect(Brain.speakable("It's on laurent/issue-412 now.", desk())).toBe("It's on a branch now.")
+    expect(Brain.speakable("It's on laurent/jarvis-companion-assistant now.", desk())).toBe("It's on a branch now.")
   })
 })

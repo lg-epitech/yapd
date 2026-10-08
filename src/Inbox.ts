@@ -41,12 +41,16 @@ export interface Notice {
   readonly at: number
   /** Whether it's no longer worth saying, asked as its turn comes. */
   readonly stale: Effect.Effect<boolean>
-  /** Run as it starts being said, which is when the user hears of it. */
+  /** Run as it starts being said, which is when the user hears of it: never when it can't be played, and for a question, undone if it breaks off. */
   readonly saying?: Effect.Effect<void>
   /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
   readonly heard?: Effect.Effect<void>
-  /** For a question: what to do with the answer, and when there's none. */
-  readonly question?: Pick<Question, "answer"> & { readonly unanswered: Effect.Effect<void> }
+  /**
+   * For a question: what to do with the answer, and when there's none; and
+   * when it can't be asked in full, like when the audio helper quits midway,
+   * what undoes its `saying`, since it counts as never said.
+   */
+  readonly question?: Pick<Question, "answer"> & { readonly unanswered: Effect.Effect<void>; readonly unsaid: Effect.Effect<void> }
 }
 
 /** A notice that is rendered, and waiting for its turn like updates do. */

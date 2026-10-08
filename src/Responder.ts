@@ -74,14 +74,26 @@ export const prompt = ({ project, turn, needsYou, lines, heard }: Interruption, 
     `What the user just said:\n${heard}`,
   ].join("\n\n")
 
-/** What's said, as it's compared: lowercase words, without the "um" and "sir" around them. */
-export const gist = (heard: string) =>
-  heard
+/** What only fills a pause or asks nicely, which is never what was said. */
+const padding = ["uh", "um", "erm", "oh", "ah", "hmm", "sir", "please"]
+
+/** What he calls yapd, which is only how he addresses it, unless it's all he said. */
+const names = ["jarvis", "yapd"]
+
+/**
+ * What's said, as it's compared: lowercase words, without the "um", "sir" and
+ * "Jarvis" around them. A name said on its own is kept, since "Yapd." can be
+ * the answer to which project, and is never silence.
+ */
+export const gist = (heard: string) => {
+  const words = heard
     .toLowerCase()
     .replace(/[^\p{L}\p{N}' ]+/gu, " ")
     .split(/\s+/)
-    .filter((word) => word !== "" && !["uh", "um", "erm", "oh", "ah", "hmm", "sir", "jarvis", "yapd", "please"].includes(word))
-    .join(" ")
+    .filter((word) => word !== "" && !padding.includes(word))
+  const said = words.filter((word) => !names.includes(word))
+  return (said.length > 0 ? said : words).join(" ")
+}
 
 /** Hearing enough, however it's put. Said to any update, it never goes to the agent. */
 export const enough: ReadonlySet<string> = new Set([

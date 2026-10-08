@@ -1,20 +1,28 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
-import { Audio } from "./Audio.ts"
+import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import * as Assistant from "./Assistant.ts"
+import { Audio, AudioError } from "./Audio.ts"
+import * as Brain from "./Brain.ts"
 import { Waiting, WaitingLive } from "./ClaudeCode.ts"
 import { Condenser, type Turn } from "./Condenser.ts"
 import * as Daemon from "./Daemon.ts"
+import * as Drafts from "./Drafts.ts"
 import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import { key } from "./Payload.ts"
 import { Responder } from "./Responder.ts"
 import type { Handle } from "./Server.ts"
+import * as Show from "./Show.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad, VadError } from "./Vad.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
+import * as Store from "./Store.ts"
+import * as T3Live from "./T3Live.ts"
+import * as Threads from "./Threads.ts"
 import { Voice } from "./Voice.ts"
+import { Writer } from "./Writer.ts"
 
 /**
  * Runs the daemon with updates that each take ten seconds to read, and no
@@ -30,6 +38,12 @@ const make = (says?: string, options: {
   readonly waitingHooks?: boolean
   readonly onHookOpen?: () => Effect.Effect<void>
   readonly trivialMessages?: ReadonlyArray<string>
+  /** A microphone, even when the user says nothing. */
+  readonly microphone?: boolean
+  /** Lines whose playback breaks off after so many seconds, as when the audio helper quits. */
+  readonly breaks?: Readonly<Record<string, number>>
+  /** Lines that can't be played at all, as when the audio helper is down. */
+  readonly unplayable?: ReadonlyArray<string>
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -40,6 +54,8 @@ const make = (says?: string, options: {
   const followUps: Array<string> = []
   const condensed: Array<Turn> = []
   const logs = yield* Queue.unbounded<string>()
+  /** What was logged as a warning, in order. */
+  const warnings: Array<string> = []
   const playbacks = yield* Queue.unbounded<string>()
   const nextEvent = (...prefixes: ReadonlyArray<string>) => Effect.gen(function* () {
     while (true) {
@@ -48,6 +64,7 @@ const make = (says?: string, options: {
     }
   })
   const microphone = yield* Queue.unbounded<Float32Array>()
+  const listening = says !== undefined || options.microphone === true
   const transcripts = [...options.transcripts ?? []]
   const waiting = options.waitingHooks ? yield* Waiting.pipe(Effect.provide(WaitingLive)) : undefined
   let handle: Handle
@@ -70,23 +87,28 @@ const make = (says?: string, options: {
       play: (path) =>
         Effect.gen(function* () {
           const text = rendered.get(path) ?? path
+          if (options.unplayable?.includes(text)) return yield* new AudioError({ message: "The audio helper didn't start playing" })
           played.push(text)
           yield* Queue.offer(playbacks, text)
           let done = false
           // Closing the scope stops it, as with the helper.
           yield* Effect.addFinalizer(() => Effect.sync(() => void (done || stopped.push(text))))
+          const breaks = options.breaks?.[text]
           return {
             duration: 10,
-            finished: Effect.sleep("10 seconds").pipe(
-              Effect.tap(() => {
-                done = true
-              }),
-            ),
+            finished:
+              breaks === undefined
+                ? Effect.sleep("10 seconds").pipe(
+                    Effect.tap(() => {
+                      done = true
+                    }),
+                  )
+                : Effect.sleep(`${breaks} seconds`).pipe(Effect.zipRight(new AudioError({ message: "The audio helper quit" }))),
             stop: Effect.succeed(2),
             volume: () => Effect.void,
           }
         }),
-      microphone: Effect.succeed(says === undefined ? Option.none() : Option.some(microphone)),
+      microphone: Effect.succeed(listening ? Option.some(microphone) : Option.none()),
       rest: Effect.sync(() => void rests++),
       warm: Effect.sync(() => void warms++),
     }),
@@ -99,7 +121,7 @@ const make = (says?: string, options: {
     } : { ...waiting, open: (session) => waiting.open(session).pipe(Effect.tap(() => options.onHookOpen?.() ?? Effect.void)) }),
     Layer.succeed(Vad, {
       // Each frame holds the probability that it's speech.
-      make: says === undefined ? Effect.fail(new VadError({ cause: "no microphone" })) : Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)),
+      make: listening ? Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) : Effect.fail(new VadError({ cause: "no microphone" })),
     }),
     Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? says ?? "") }),
     Layer.succeed(Responder, {
@@ -121,9 +143,11 @@ const make = (says?: string, options: {
         ),
     }),
     Floor.layer,
-    Logger.add(Logger.make(({ message }) => {
+    Logger.add(Logger.make(({ logLevel, message }) => {
       for (const line of Array.isArray(message) ? message : [message]) {
-        if (typeof line === "string") Queue.unsafeOffer(logs, line)
+        if (typeof line !== "string") continue
+        Queue.unsafeOffer(logs, line)
+        if (logLevel._tag === "Warning") warnings.push(line)
       }
     })),
   )
@@ -161,7 +185,10 @@ const make = (says?: string, options: {
       )
       yield* flush
     })
-  /** Something yapd has to say for itself, which as a question, the one open, records how it went, and in `heard` when it was heard to the end. */
+  /**
+   * Something yapd has to say for itself, which as a question, the one open, records how it went, in `saying` when it
+   * started being said, until that's undone, and in `heard` when it was heard to the end.
+   */
   const notice = (
     id: string,
     spoken: string,
@@ -171,6 +198,7 @@ const make = (says?: string, options: {
       readonly needsYou?: boolean
       readonly answer?: boolean
       readonly done?: boolean
+      readonly saying?: Array<string>
       readonly heard?: Array<string>
     } = {},
   ) =>
@@ -182,6 +210,7 @@ const make = (says?: string, options: {
       spoken,
       at: 0,
       stale: Effect.succeed(options.stale === true),
+      ...(options.saying === undefined ? {} : { saying: Effect.sync(() => void options.saying?.push(id)) }),
       ...(options.heard === undefined ? {} : { heard: Effect.sync(() => void options.heard?.push(id)) }),
       ...(options.question === undefined
         ? {}
@@ -189,6 +218,10 @@ const make = (says?: string, options: {
             question: {
               answer: () => Effect.succeed(Option.none()),
               unanswered: Effect.sync(() => void options.question?.push(`${id} unanswered`)),
+              unsaid: Effect.sync(() => {
+                const at = options.saying?.indexOf(id) ?? -1
+                if (at >= 0) options.saying?.splice(at, 1)
+              }),
             },
           }),
     }).pipe(Effect.zipRight(flush))
@@ -210,13 +243,101 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
 
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
   Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
+
+/** A thread T3 Code runs, idle in the yapd project. */
+const thread = (id: string, title: string) =>
+  Schema.decodeUnknownSync(T3Live.Thread)({
+    id,
+    projectId: "yapd",
+    title,
+    modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
+    activeRunId: null,
+    status: "idle",
+    pendingRuntimeRequest: null,
+    createdAt: "2026-10-01T12:00:00.000Z",
+    updatedAt: "2026-10-01T20:00:00.000Z",
+  })
+
+/**
+ * The daemon with the assistant on top, wired as yapd serves them, without
+ * T3 Code but for what it shows of the threads on the `desk`, and with a model
+ * that decides what `model` says, which isn't asked about what needs no model.
+ */
+const assisted = (
+  model: (situation: Brain.Situation) => Brain.Decision,
+  options: Parameters<typeof make>[1] = {},
+  desk: ReadonlyArray<T3Live.Thread> = [],
+) =>
+  Effect.gen(function* () {
+    const daemon = yield* make(undefined, options)
+    const { made, journal } = daemon
+    const view: T3Live.View = {
+      projects: new Map([["yapd", { id: "yapd", title: "yapd", workspaceRoot: "/code/yapd" }]]),
+      threads: new Map(desk.map((thread) => [thread.id, thread])),
+      sequence: 1,
+      synced: true,
+    }
+    const threads = yield* Threads.make({
+      machine: "Rosie",
+      live: { view: Effect.succeed(desk.length === 0 ? Option.none() : Option.some(view)), changes: Stream.never },
+      actions: Option.none(),
+      others: [],
+      journal,
+      store: yield* Store.make(":memory:"),
+    })
+    const drafts = yield* Drafts.make({ machines: [], rules: Effect.succeed(Option.none()), recent: Effect.succeed([]) }).pipe(
+      Effect.provideService(Writer, { decide: () => Effect.never, research: () => Effect.never, prepare: Effect.void }),
+    )
+    const asked: Array<Brain.Situation> = []
+    const assistant = yield* Assistant.make({
+      threads,
+      journal,
+      drafts,
+      show: yield* Show.make(threads.detail, () => Effect.void),
+      tell: made.tell,
+      power: made.power,
+      lastHeard: made.lastHeard,
+      coming: made.coming,
+      awaiting: made.awaiting,
+      queued: made.queued,
+      skip: made.skip,
+      upcoming: made.upcoming,
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(Brain.Brain, {
+            decide: (situation) =>
+              Effect.sync(() => {
+                asked.push(situation)
+                return model(situation)
+              }),
+          }),
+          Persona.Plain,
+        ),
+      ),
+    )
+    let presses = 0
+    /** He presses the shortcut over whatever is being read, says `heard` for a couple of seconds, and lets go. */
+    const dictating = (heard: string) =>
+      Effect.gen(function* () {
+        const press = ++presses
+        const { turns } = yield* made.power
+        yield* assistant.prepare(press, turns)
+        const dictation = yield* daemon.dictate
+        yield* daemon.wait(2)
+        yield* Scope.close(dictation, Exit.void)
+        yield* assistant.heard({ heard, via: "shortcut", at: yield* Clock.currentTimeMillis, voiced: 2, turns }, press)
+        yield* daemon.flush
+      })
+    return { ...daemon, assistant, asked, dictating }
+  })
 
 describe("Daemon", () => {
   test("gets the speaker ready while an update renders, and lets it rest again when nothing comes", async () => {
@@ -991,5 +1112,182 @@ describe("Daemon", () => {
     )
     expect(result.answers).toEqual({ dropped: "off", asked: "queued" })
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
+  })
+
+  test("an update read to the end is heard at once, so asked about in the time left for a reply, it isn't read again after the answer", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictate, notice, awaiting, lastHeard, played, journal } = yield* make(undefined, { microphone: true })
+        yield* finish("a", "The PR is ready.")
+        // Read to the end, and listening a moment for a reply, when he presses the shortcut to ask about it.
+        yield* wait(10)
+        yield* wait(1)
+        const lingering = (yield* journal.unheard(0, 12)).length
+        const subject = yield* lastHeard
+        const arrived = yield* awaiting
+        const dictation = yield* dictate
+        const dictating = (yield* journal.unheard(0, 12)).length
+        yield* wait(3)
+        yield* Scope.close(dictation, Exit.void)
+        yield* notice("answer", "It changes the parser.", { answer: true })
+        yield* arrived
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { lingering, dictating, subject: Option.map(subject, ({ said, playing }) => ({ said, playing })), played: [...played] }
+      }),
+    )
+    expect(result).toEqual({
+      lingering: 0,
+      dictating: 0,
+      subject: Option.some({ said: "yapd. The PR is ready.", playing: true }),
+      played: ["yapd. The PR is ready.", "It changes the parser."],
+    })
+  })
+
+  test.each([false, true])("an update whose playback breaks off midway isn't heard, and that's noted once, with a microphone: %s", async (microphone) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, played, warnings, journal } = yield* make(undefined, { microphone, breaks: { "yapd. The PR is ready.": 3 } })
+        yield* finish("a", "The PR is ready.")
+        for (let i = 0; i < 6; i++) yield* wait(3)
+        return { played: [...played], unheard: (yield* journal.unheard(0, 12)).length, warnings: [...warnings] }
+      }),
+    )
+    expect(result).toEqual({ played: ["yapd. The PR is ready."], unheard: 1, warnings: ["Could not speak update"] })
+  })
+
+  test.each([false, true])("what can't be played isn't said nor heard, and a question that can't goes unanswered, with a microphone: %s", async (microphone) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, played } = yield* make(undefined, {
+          microphone,
+          unplayable: ["The Tezos migration or the Mina tickets, sir?", "Nothing needs you right now, sir."],
+        })
+        const asked: Array<string> = []
+        const saying: Array<string> = []
+        const heard: Array<string> = []
+        yield* notice("question", "The Tezos migration or the Mina tickets, sir?", { question: asked, saying, heard })
+        yield* notice("answer", "Nothing needs you right now, sir.", { answer: true, saying, heard })
+        yield* wait(11)
+        yield* wait(11)
+        return { played: [...played], asked, saying, heard }
+      }),
+    )
+    expect(result).toEqual({ played: [], asked: ["question unanswered"], saying: [], heard: [] })
+  })
+
+  test.each([false, true])("a question whose playback breaks off goes unanswered, and counts as neither said nor heard, with a microphone: %s", async (microphone) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait } = yield* make(undefined, { microphone, breaks: { "The Tezos migration or the Mina tickets, sir?": 3 } })
+        const asked: Array<string> = []
+        const saying: Array<string> = []
+        const heard: Array<string> = []
+        yield* notice("question", "The Tezos migration or the Mina tickets, sir?", { question: asked, saying, heard })
+        for (let i = 0; i < 6; i++) yield* wait(3)
+        return { asked, saying, heard }
+      }),
+    )
+    // Begun, then broken off, so it's as if it was never said: what he says next isn't about it, and it's asked again later.
+    expect(result).toEqual({ asked: ["question unanswered"], saying: [], heard: [] })
+  })
+
+  test.each([false, true])("a question that breaks off as it's asked isn't what he answers next: it's left, and he's told, with a microphone: %s", async (microphone) => {
+    const loader = thread("1f0e8a7b-6c5d-4b7e-9d3c-2d5cee5c6a1f", "Fix the loader")
+    const parser = thread("6a5b4c3d-2e1f-4c1d-8e7f-850299f83b2a", "Fix the parser")
+    const question = "Fix the loader or Fix the parser?"
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictating, wait, played, asked, journal } = yield* assisted(
+          (situation) => {
+            const named = (of: T3Live.Thread) => situation.desk.threads.find(({ ref }) => ref.id === of.id)?.handle ?? ""
+            return situation.utterance.heard === "How's the fix going?"
+              ? Brain.decision({ act: "clarify", target: named(loader), sure: "low", others: named(parser) })
+              : Brain.decision({ act: "dismiss", pending: Option.isSome(situation.open) ? "answers" : "" })
+          },
+          { microphone, breaks: { [question]: 1 } },
+          [loader, parser],
+        )
+        yield* dictating("How's the fix going?")
+        // A second in, the audio helper quits, and he never hears which.
+        yield* wait(1)
+        yield* wait(2)
+        yield* dictating("No.")
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        const closed = yield* journal.since(0, { kinds: ["action"] })
+        const { open, subject } = asked.at(-1)!
+        return { played: [...played], open, subject, closed: closed.map(({ detail }) => (detail as { open: string }).open) }
+      }),
+    )
+    expect(result.played).toEqual([question, "I didn't ask whether you meant Fix the loader or Fix the parser, since you'd moved on."])
+    // Nor what "it" means.
+    expect(result.open).toEqual(Option.none())
+    expect(result.subject).toEqual({ _tag: "Nothing" })
+    expect(result.closed).toEqual(["replaced"])
+  })
+
+  test.each(["Stop.", "Skip.", "Enough.", "Next.", "Shut up.", "Stop, stop."])("told \"%s\" by the shortcut over an update, doesn't read it again, and counts it heard", async (said) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictating, played, stopped, asked, journal } = yield* assisted(() => Brain.decision({ act: "answer", spoken: "Asked." }))
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        yield* dictating(said)
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { played: [...played], stopped: [...stopped], asked: asked.length, unheard: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result).toEqual({ played: ["yapd. The PR is ready."], stopped: ["yapd. The PR is ready."], asked: 0, unheard: 0 })
+  })
+
+  test("what he missed leaves out the updates waiting to be read, like the one his asking cut off, which he's told are coming up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, dictating, played, asked, journal } = yield* assisted((situation) => {
+          // As the model is asked to: what he missed, from what he hasn't heard.
+          const told = situation.unheard.map(({ said }) => said).join(" ")
+          return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+        })
+        yield* finish("a", "The loader fix is ready.")
+        yield* wait(2)
+        // Turned off and on before it's read to the end, so he missed it.
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* finish("b", "The tests pass.")
+        yield* wait(2)
+        yield* dictating("What did I miss?")
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { told: asked.at(-1)?.unheard.map(({ said }) => said), played: [...played], unheard: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result.told).toEqual(["yapd. The loader fix is ready."])
+    expect(result.played).toEqual([
+      "yapd. The loader fix is ready.",
+      "yapd. The tests pass.",
+      "You missed this: yapd. The loader fix is ready. One more update is coming up.",
+      "yapd. The tests pass.",
+    ])
+    expect(result.unheard).toBe(0)
+  })
+
+  test("anything else dictated over an update, even thanks, has it read again from the start once it's dealt with", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, dictating, played, journal } = yield* assisted((situation) =>
+          situation.utterance.heard === "Thanks."
+            ? Brain.decision({ act: "dismiss" })
+            : Brain.decision({ act: "answer", spoken: "It changes the parser." }),
+        )
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        yield* dictating("Thanks.")
+        yield* wait(2)
+        yield* dictating("What does it change?")
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { played: [...played], unheard: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "It changes the parser.", "yapd. The PR is ready."])
+    // Heard to the end the last time.
+    expect(result.unheard).toBe(0)
   })
 })

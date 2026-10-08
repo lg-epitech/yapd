@@ -94,7 +94,7 @@ export interface Situation {
   readonly lately: ReadonlyArray<Kept>
   /** What he hasn't heard, for "what did I miss". */
   readonly unheard: ReadonlyArray<Kept>
-  readonly usage: Option.Option<T3Actions.Usage>
+  readonly usage: Option.Option<Threads.Usage>
   /** On a second look: what a thread is doing, or what a search found. */
   readonly second: Option.Option<{ readonly ref: Threads.Ref; readonly detail: T3Actions.Detail } | { readonly found: ReadonlyArray<string> }>
   /** Questions yapd asked in the last ten minutes, so none is asked in the same words again. */
@@ -145,7 +145,7 @@ export const both = (parts: ReadonlyArray<string>) =>
   parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`
 
 /** A time of day as it's said, like "4:10 PM". */
-const time = (at: number) => new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+export const time = (at: number) => new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
 
 /** What a thread is doing, in a few words that tell it from one called the same. */
 const telling: Readonly<Record<Threads.State, string>> = {
@@ -310,23 +310,42 @@ export const windowed = ({ kind, label, minutes }: T3Actions.Window) => {
   return { whose: owner === "" ? "its" : `${owner}'s`, name }
 }
 
-/** How much of each provider's limits is used, or only the one he asked about. "Sir" once, on the first line. */
-export const used = (usage: Option.Option<T3Actions.Usage>, heard: string, lines: Lines, now: number) => {
-  if (Option.isNone(usage) || usage.value.length === 0) return `I can't read your usage right now${addressed(lines)}.`
+/** Whether a window has reset since it was read, so what it was at says nothing of what it's at now. */
+const reset = ({ resetsAt }: T3Actions.Window, now: number) => resetsAt !== undefined && Date.parse(resetsAt) <= now
+
+/**
+ * How much of each provider's limits is used, or only the one he asked about.
+ * "Sir" once, on the first line. Read too long ago to be what's used now, as
+ * when T3 Code stopped answering, it's said as of when it was read, and a
+ * window that has reset since is left out.
+ */
+export const used = (usage: Option.Option<Threads.Usage>, heard: string, lines: Lines, now: number) => {
+  if (Option.isNone(usage) || usage.value.providers.length === 0) return `I can't read your usage right now${addressed(lines)}.`
+  const { at, providers: all } = usage.value
   const said = words(heard)
-  const asked = usage.value.filter(({ provider }) => words(provider).split(" ").some((word) => word.length > 2 && said.includes(word)))
-  const providers = asked.length > 0 ? asked : usage.value
-  return providers
-    .flatMap(({ provider, windows }) =>
-      windows.slice(0, 3).map((window, index) => {
+  const asked = all.filter(({ provider }) => words(provider).split(" ").some((word) => word.length > 2 && said.includes(word)))
+  const providers = asked.length > 0 ? asked : all
+  const dated = now - at > Threads.dated
+  const is = dated ? "was" : "is"
+  const told = providers.flatMap(({ provider, windows }) =>
+    windows
+      .filter((window) => !reset(window, now))
+      .slice(0, 3)
+      .map((window, index) => {
         const { whose, name } = windowed(window)
         const resets = window.resetsAt === undefined ? undefined : clock(window.resetsAt, now)
-        const at = `${Math.round(window.usedPercent)} percent`
+        const share = `${Math.round(window.usedPercent)} percent`
         const when = resets === undefined ? "" : `, resetting ${resets}`
-        return index === 0 ? `${provider} is at ${at} of ${whose} ${name} window${when}` : `${capital(whose)} ${name} window is at ${at}${when}`
+        return index === 0 ? `${provider} ${is} at ${share} of ${whose} ${name} window${when}` : `${capital(whose)} ${name} window ${is} at ${share}${when}`
       }),
-    )
-    .map((line, index) => `${line}${index === 0 ? addressed(lines) : ""}.`)
+  )
+  const since = dated ? ` at ${time(at)}` : ""
+  if (told.length === 0) {
+    const whose = providers.length === 1 ? `${providers[0]!.provider}'s` : "Your"
+    return `${whose} limits have reset since I read them${since}${addressed(lines)}.`
+  }
+  return told
+    .map((line, index) => `${index === 0 && dated ? `As of ${time(at)}, ${line}` : line}${index === 0 ? addressed(lines) : ""}.`)
     .join(" ")
 }
 
@@ -370,11 +389,11 @@ const limits: ReadonlySet<string> = new Set(["usage", "limit", "limits", "quota"
  * like "how much Claude is left". Anything else, like "how much is left" after
  * an update, is about the work, so it's for the model.
  */
-const askingUsage = (said: string, known: Option.Option<T3Actions.Usage>) => {
+const askingUsage = (said: string, known: Option.Option<Threads.Usage>) => {
   const asked = /^how much ((?:\w+ ){1,4})(?:have i got |do i have )?left$/.exec(said)
   if (asked === null) return false
   // Not "code" from "Claude Code", which "how much code is left" means otherwise.
-  const providers = Option.match(known, { onNone: () => [], onSome: (all) => all.flatMap(({ provider }) => words(provider).split(" ")) }).filter((word) => word.length > 2 && word !== "code")
+  const providers = Option.match(known, { onNone: () => [], onSome: ({ providers }) => providers.flatMap(({ provider }) => words(provider).split(" ")) }).filter((word) => word.length > 2 && word !== "code")
   return asked[1]!.trim().split(" ").some((word) => limits.has(word) || ["claude", "codex", ...providers].includes(word))
 }
 
@@ -620,12 +639,25 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
 
 // ---------------------------------------------------------------- speaking
 
+/** Words that join the parts of an everyday compound, like "end-to-end" or "state-of-the-art", and never a generated name's. */
+const joining = "(?:a|an|and|as|at|by|for|in|of|on|or|the|to)"
+
+/**
+ * How a branch is named after its slash: words joined by two dashes or more
+ * with no joining word among them, like "fix-loader-retry", a name started
+ * with what a branch is for, like "fix-loader", or a number or a hash after a
+ * dash, like "issue-412".
+ */
+const generated = `(?:(?![\\w.-]*\\b${joining}-)(?:[\\w.]*-){2}|(?:feat|fix|bugfix|hotfix|chore|bump|revert|wip)-|[\\w.]*-(?:\\d{3,}|(?=[\\da-f]{6,}\\b)[a-f]*\\d[\\da-f]*)\\b)`
+
 /**
  * Something only meant to be read, a link, a path, a branch, an id, an
  * address or a hash, and what's said for it, so the sentence still holds. A
- * branch is told from pairs like "and/or", "SSv1/SSv2" or "x86/arm64" by
- * being called one, by a prefix branches have, or by the dash every
- * generated one has after its slash.
+ * branch is told from pairs like "and/or", "SSv1/SSv2", "Claude/Codex" or
+ * "on-chain/off-chain" by being called one, by a prefix branches have, always
+ * written in lower case, or by how a generated one is named after a slash
+ * with only lower case before it, never a compound like "server-side",
+ * "write-heavy" or "end-to-end", nor a pair like "BTC/USD-1000".
  */
 const unreadable: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bhttps?:\/\/\S*[^\s.,;:!?)]/gi, "a link"],
@@ -633,8 +665,8 @@ const unreadable: ReadonlyArray<readonly [RegExp, string]> = [
   [/(?<![\w.])(?:~|\.{1,2})?(?:\/[\w.@-]+){2,}\/?/g, "a file"],
   [/\b[\w.-]+(?:\/[\w.@-]+)+\.[a-z]\w*\b/gi, "a file"],
   [/\b(?:the\s+)?[\w.-]+\/[\w./-]*\w\s+branch\b/gi, "a branch"],
-  [/\b(?:the\s+)?(?:t3|feat|feature|fix|bugfix|hotfix|release|origin|upstream|chore|claude|codex|cursor|dependabot|renovate)\/[\w./-]*\w/gi, "a branch"],
-  [/\b(?:the\s+)?[a-z][\w.-]{2,}\/(?=[\w.]*-)[\w./-]{2,}\w/gi, "a branch"],
+  [/\b(?:[Tt]he\s+)?(?:t3|t3code|feat|feature|fix|bugfix|hotfix|release|origin|upstream|chore|claude|codex|cursor|dependabot|renovate)\/[\w./-]*\w/g, "a branch"],
+  [new RegExp(`\\b(?:[Tt]he\\s+)?(?<![\\w./-])[a-z][a-z\\d_.]{2,}\\/(?=${generated})[\\w./-]*\\w`, "g"), "a branch"],
   [/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi, ""],
   [/\b(?:the\s+)?(?:wallet\s+|address\s+)?0x[\da-f]{6,}\b/gi, "an address"],
   [/\b(?:the\s+)?(?:commit\s+)?(?=[\da-f]*\d)(?=[\da-f]*[a-f])[\da-f]{7,}\b/gi, "a commit"],
@@ -817,6 +849,9 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
         return `he asked you: ${text}`
       case "started":
         return `you started work${where}: ${said}`
+      // What he had passed on to a thread, in the words it was sent, which yapd never said aloud.
+      case "sent":
+        return `you sent his message to the thread${where}: ${text}`
       default:
         return `you said${where}: ${said}`
     }
@@ -887,25 +922,30 @@ const how = (situation: Situation) => {
   }
 }
 
-/** The usage, as the model sees it. */
-const usageLines = (usage: Option.Option<T3Actions.Usage>, now: number) =>
+/** The usage, as the model sees it: as of when it was read, once that's too long ago to be what's used now. */
+const usageLines = (usage: Option.Option<Threads.Usage>, now: number) =>
   Option.match(usage, {
     onNone: () => "Not known right now.",
-    onSome: (usage) =>
-      usage.length === 0
+    onSome: ({ at, providers }) =>
+      providers.length === 0
         ? "No provider reports limits."
-        : usage
-            .map(
+        : [
+            ...(now - at > Threads.dated
+              ? [`As of ${time(at)}, when T3 Code last answered, so never what's used now: say it's as of ${time(at)}.`]
+              : []),
+            ...providers.map(
               ({ provider, windows }) =>
                 `- ${provider}: ${windows
                   .map((window) => {
                     const { whose, name } = windowed(window)
                     const { usedPercent, resetsAt } = window
-                    return `${Math.round(usedPercent)}% of ${whose === "its" ? "the" : whose} ${name} window${resetsAt === undefined ? "" : ` (resets ${clock(resetsAt, now) ?? resetsAt})`}`
+                    const which = `${whose === "its" ? "the" : whose} ${name} window`
+                    if (reset(window, now)) return `${which} has reset since, so what it's at now isn't known`
+                    return `${Math.round(usedPercent)}% of ${which}${resetsAt === undefined ? "" : ` (resets ${clock(resetsAt, now) ?? resetsAt})`}`
                   })
                   .join(", ")}`,
-            )
-            .join("\n"),
+            ),
+          ].join("\n"),
   })
 
 /**

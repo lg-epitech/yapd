@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, Layer, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
@@ -177,6 +177,8 @@ const assistant = (
     readonly deciding?: Effect.Effect<void>
     /** Told when writing a prompt begins, and when it stops, however it ends. */
     readonly writer?: { readonly begun: Effect.Effect<void>; readonly stopped: Effect.Effect<void> }
+    /** How long writing a prompt from what it's written from takes, on top of the rest, which can be for good. */
+    readonly writes?: (material: Material) => Effect.Effect<void>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -237,6 +239,7 @@ const assistant = (
         decide: (material) =>
           (given.writer?.begun ?? Effect.void).pipe(
             Effect.zipRight(Effect.sleep(`${given.writing ?? 0} seconds`)),
+            Effect.zipRight(given.writes?.(material) ?? Effect.void),
             Effect.zipRight(Effect.sync(() => write(material))),
             Effect.ensuring(given.writer?.stopped ?? Effect.void),
           ),
@@ -266,6 +269,8 @@ const assistant = (
       coming: given.coming ?? Effect.void,
       awaiting: given.awaiting ?? Effect.succeed(Effect.void),
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
+      skip: () => Effect.void,
+      upcoming: Effect.succeed([]),
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -549,6 +554,37 @@ describe("Assistant", () => {
     expect(result).toBe(2)
   })
 
+  test("a question cut off by a press whose dictation came to nothing before it was got ready for is asked again a minute on, then let go", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, cut, nothing, prepare, wait, spoken, open } = yield* assistant(
+          (situation) => Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          undefined,
+          { waiting: true },
+        )
+        yield* dictate("Which migration is running?")
+        // He presses the shortcut as it's said, which cuts it off, and what he dictates comes to nothing before the press is got ready for.
+        yield* cut()
+        yield* nothing(1)
+        yield* prepare(1, 1)
+        yield* wait(61)
+        const again = spoken()
+        // The same as it's asked again.
+        yield* cut()
+        yield* nothing(2)
+        yield* prepare(2, 1)
+        yield* wait(61)
+        return { again, spoken: spoken(), open: yield* open }
+      }),
+    )
+    expect(result.again).toEqual(["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?", "Which one, sir: Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?"])
+    expect(result.spoken).toEqual([
+      ...result.again,
+      "I didn't hear back about whether you meant Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, so I dropped it, sir.",
+    ])
+    expect(result.open).toEqual(Option.none())
+  })
+
   test("a request stopped while the model works it out stops writing the prompt begun in case it was new work", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -567,6 +603,104 @@ describe("Assistant", () => {
       }),
     )
     expect(result).toBe(true)
+  })
+
+  test("turned off while the prompt is written again with the project he named, it stops being written", async () => {
+    let writes = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const again = yield* Deferred.make<void>()
+        let stopped = 0
+        const { dictate, answer, toggle } = yield* assistant(
+          (situation) => Brain.decision({ act: "start", text: situation.utterance.heard, pending: Option.isNone(situation.open) ? "" : "answers" }),
+          ({ lines }) =>
+            lines.length === 1 ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" }) : written({ project: "std", evidence: "Std" }),
+          // Written again with his answer, it takes as long as it takes.
+          {
+            writer: {
+              begun: Effect.suspend(() => (++writes === 2 ? Effect.zipRight(Deferred.complete(again, Effect.void), Effect.never) : Effect.void)),
+              stopped: Effect.sync(() => void stopped++),
+            },
+          },
+        )
+        yield* dictate("Fix the loader.")
+        yield* Effect.fork(answer("Std."))
+        yield* Deferred.await(again)
+        yield* toggle(false)
+        return stopped
+      }),
+    )
+    expect(result).toBe(2)
+  })
+
+  test("turned off while the prompt is written for new work dictated over a question, it stops being written, and what's asked once yapd is on again doesn't wait for it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const hanging = yield* Deferred.make<void>()
+        let stopped = false
+        const { dictate, heard, toggle, wait, spoken } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("What")
+              ? minaStatus(situation)
+              : Brain.decision({ act: "start", text: situation.utterance.heard, pending: Option.isNone(situation.open) ? "" : "replaces" }),
+          ({ lines }) =>
+            lines.some(({ text }) => text.includes("loader"))
+              ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" })
+              : written({ project: "std", evidence: "Std", about: "the docs" }),
+          {
+            // Written from his words alone, once it's known not to answer the question, it takes as long as it takes.
+            writes: ({ lines }) =>
+              lines.length === 1 && lines[0]!.text.startsWith("Start")
+                ? Deferred.complete(hanging, Effect.void).pipe(
+                    Effect.zipRight(Effect.never),
+                    Effect.onInterrupt(() => Effect.sync(() => void (stopped = true))),
+                  )
+                : Effect.void,
+          },
+        )
+        yield* dictate("Fix the loader.")
+        // He dictates new work in another project instead of answering, which takes the question's place.
+        const instead = yield* Effect.fork(heard({ heard: "Start a thread in std to update the docs.", via: "shortcut", at: now, voiced: 3, turns: 1 }))
+        yield* Deferred.await(hanging)
+        yield* toggle(false)
+        const off = { stopped, taken: Option.map(yield* Fiber.poll(instead), Exit.getOrElse(() => "failed")) }
+        yield* toggle(true)
+        const next = yield* Effect.fork(heard({ heard: "What's the status on Mina?", via: "typed", at: now, voiced: 3, turns: 3 }))
+        yield* wait(5)
+        return { off, answered: Option.isSome(yield* Fiber.poll(next)), spoken: spoken() }
+      }),
+    )
+    expect(result.off).toEqual({ stopped: true, taken: Option.some(Option.none()) })
+    expect(result.answered).toBe(true)
+    expect(result.spoken).toEqual([
+      "For the loader fix, is that yapd or std?",
+      "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+    ])
+  })
+
+  test("turned off while the model works out what was typed, it's dropped with nothing said and nothing held, and what's typed once yapd is on again is answered", async () => {
+    let decisions = 0
+    let arrived = 0
+    const result = await run(
+      Effect.gen(function* () {
+        const { heard, toggle, wait, spoken } = yield* assistant(minaStatus, undefined, {
+          // The model never answers the first.
+          deciding: Effect.suspend(() => (++decisions === 1 ? Effect.never : Effect.void)),
+          awaiting: Effect.succeed(Effect.sync(() => void arrived++)),
+        })
+        const first = yield* Effect.fork(heard({ heard: "How are the Mina tickets doing?", via: "typed", at: now, voiced: 3, turns: 1 }))
+        yield* wait(1)
+        yield* toggle(false)
+        const off = { taken: Option.map(yield* Fiber.poll(first), Exit.getOrElse(() => "failed")), arrived }
+        yield* toggle(true)
+        const next = yield* Effect.fork(heard({ heard: "How are the Mina tickets doing?", via: "typed", at: now + 1_000, voiced: 3, turns: 3 }))
+        yield* wait(1)
+        return { off, answered: Option.isSome(yield* Fiber.poll(next)), spoken: spoken() }
+      }),
+    )
+    expect(result.off).toEqual({ taken: Option.some(Option.none()), arrived: 1 })
+    expect(result.answered).toBe(true)
+    expect(result.spoken).toEqual(["The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."])
   })
 
   test("starting new work that mentions an existing thread starts new work", async () => {
@@ -764,6 +898,36 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.none())
   })
 
+  test("a name on its own, like \"Yapd.\", answers the project question rather than being taken for silence", async () => {
+    const answered = (reply: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, answer, spoken, open, started } = yield* assistant(
+            (situation) => Brain.decision({ act: "start", text: situation.utterance.heard, pending: Option.isNone(situation.open) ? "" : "answers" }),
+            // It starts the work in whichever project his answer names, and asks until one does.
+            ({ lines }) => {
+              const said = lines.at(-1)!.text
+              const named = lines.length === 1 ? undefined : ["yapd", "std"].find((name) => said.toLowerCase().includes(name))
+              return named === undefined
+                ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" })
+                : written({ project: named, evidence: said.replace(/\W+$/, ""), spoken: `Started in ${named}, on Opus, without a worktree.` })
+            },
+          )
+          yield* dictate("Fix the loader.")
+          const taken = yield* answer(reply)
+          return { taken, spoken: spoken(), open: yield* open, started: started.map(({ project }) => project) }
+        }),
+      )
+    for (const reply of ["Yapd.", "yapd", "Yapd, please."]) {
+      expect(await answered(reply)).toEqual({
+        taken: true,
+        spoken: ["For the loader fix, is that yapd or std?", "Started in yapd, on Opus, without a worktree."],
+        open: Option.none(),
+        started: ["/code/yapd"],
+      })
+    }
+  })
+
   test("a request with fewer than two candidates says it couldn't tell, without asking", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -885,6 +1049,81 @@ describe("Assistant", () => {
       "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
     ])
     expect(result.open).toEqual(Option.none())
+  })
+
+  test("an answer to a question never answers or closes the one asked in its place while it waited its turn, said by then or not", async () => {
+    const first = "Which migration is running?"
+    const next = "What about the audio ones?"
+    const replying = (waiting: boolean) =>
+      run(
+        Effect.gen(function* () {
+          let taking = 0
+          const looked: Array<string> = []
+          const { prepare, heard, answer, cut, unanswered, wait, flush, spoken, questions, open, journal } = yield* assistant(
+            (situation) => {
+              taking = situation.utterance.heard === next ? 5 : situation.utterance.heard === first ? 2 : 0
+              if (Option.isSome(situation.second)) {
+                const second = situation.second.value
+                if ("ref" in second) looked.push(second.ref.id)
+                return Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir." })
+              }
+              // Without its question, "the second one" could be either it named.
+              const [target, other] = situation.utterance.heard === next ? [distractors[0]!, distractors[16]!] : [tezos, mina]
+              return Brain.decision({
+                act: "clarify",
+                target: handle(situation, target),
+                others: handle(situation, other),
+                sure: "low",
+                pending: Option.isNone(situation.open) ? "" : "replaces",
+              })
+            },
+            undefined,
+            { waiting, deciding: Effect.suspend(() => Effect.sleep(`${taking} seconds`)) },
+          )
+          // He asks something, and presses the shortcut again to ask something else before it's worked out.
+          yield* prepare(1, 1)
+          const asking = yield* Effect.fork(heard({ heard: first, via: "shortcut", at: now, voiced: 2, turns: 1 }, 1))
+          yield* flush
+          yield* prepare(2, 1)
+          yield* wait(2)
+          yield* Fiber.join(asking)
+          const question = questions()[0]!
+          // Asked as soon as the second dictation ends, before it's handed on.
+          if (waiting) yield* cut(question)
+          const asked = yield* Effect.fork(heard({ heard: next, via: "shortcut", at: now + 2_000, voiced: 2, turns: 1 }, 2))
+          yield* flush
+          // He answers it while the second is worked out, which asks something else in its place: he meant the Mina tickets.
+          const taken = yield* answer("The second one.", question)
+          yield* wait(6)
+          yield* Fiber.join(asked)
+          const closed = yield* journal.since(0, { kinds: ["action"] })
+          const kept = Option.map(yield* open, ({ asked }) => asked)
+          // Still open, it's asked again as usual once it goes unanswered.
+          yield* unanswered(questions()[1])
+          yield* wait(61)
+          return {
+            taken,
+            looked,
+            closed: closed.map(({ detail }) => [(detail as { open: string }).open, (detail as { asked: string }).asked]),
+            kept,
+            spoken: spoken(),
+          }
+        }),
+      )
+    const expected = {
+      taken: true,
+      looked: [],
+      closed: [["replaced", "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?"]],
+      kept: Option.some("Fix the audio level after speaking or Speech cut off at the end, sir?"),
+      spoken: [
+        "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
+        "Fix the audio level after speaking or Speech cut off at the end, sir?",
+        "I couldn't tell which one you meant, sir.",
+        "Which one, sir: Fix the audio level after speaking or Speech cut off at the end?",
+      ],
+    }
+    expect(await replying(false)).toEqual(expected)
+    expect(await replying(true)).toEqual(expected)
   })
 
   test("nothing is started for what was said before yapd was turned off and on", async () => {

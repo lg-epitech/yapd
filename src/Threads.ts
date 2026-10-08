@@ -76,8 +76,8 @@ export class Threads extends Context.Tag("yapd/Threads")<
     readonly detail: (ref: Ref, pending?: string) => Effect.Effect<T3Actions.Detail, ThreadsError>
     /** Threads whose messages mention the words. */
     readonly search: (words: string) => Effect.Effect<ReadonlyArray<{ readonly ref: Ref; readonly snippet: string }>, ThreadsError>
-    /** What each provider has used of its limits, as of at most a few minutes ago. */
-    readonly usage: Effect.Effect<Option.Option<T3Actions.Usage>>
+    /** What each provider has used of its limits, as of at most a few minutes ago unless T3 Code stopped answering. */
+    readonly usage: Effect.Effect<Option.Option<Usage>>
     /** Asks T3 Code for usage again, when what's known is getting old. */
     readonly refreshUsage: Effect.Effect<void>
     /** Notes work yapd started, so it's known by what it's about. What's noted is only ever filled in. */
@@ -247,14 +247,14 @@ const stem = (word: string) => {
 }
 
 /** Words too short or too common to say which thread a title is. */
-const filler: ReadonlySet<string> = new Set(["the", "and", "for", "you", "can", "tel", "status", "on", "with", "from", "into", "add", "new"])
+const filler: ReadonlySet<string> = new Set(["the", "and", "for", "you", "can", "tell", "status", "on", "with", "from", "into", "add", "new"])
 
 const stems = (text: string) =>
   new Set(
     text
       .split(/[^\p{L}\p{N}]+/u)
       .map(stem)
-      .filter((word) => word.length >= 3 && !filler.has(word) && !common.has(word)),
+      .filter((word) => word.length >= 3 && !ignored.has(word)),
   )
 
 /** Threads put among the likeliest by their titles at most. */
@@ -288,6 +288,9 @@ const common: ReadonlySet<string> = new Set([
   "where", "which", "will", "been", "were", "then", "than", "also", "it's", "thing", "things", "today", "right", "know",
   "need", "needs", "want", "start", "make", "does", "done", "still", "much", "many", "more",
 ])
+
+/** Those words and the filler as they're compared with a title's: by then "status" is "statu" and "still" is "stil". */
+const ignored: ReadonlySet<string> = new Set([...filler, ...common].map(stem))
 
 /** The words in what he said that tell threads apart: none too short or too common. */
 export const distinctive = (text: string) =>
@@ -343,6 +346,15 @@ export const searched = <E>(text: string, search: Search<E>) =>
 /** How long usage is good for before it's asked again. */
 const stale = 5 * 60_000
 
+/** Usage read longer ago than this is only ever said as of when it was read, never as what's used now. */
+export const dated = 15 * 60_000
+
+/** What each provider had used of its limits, and when T3 Code said so. */
+export interface Usage {
+  readonly at: number
+  readonly providers: T3Actions.Usage
+}
+
 /** What the user said they'd been told, as far back as the desk looks for it. */
 const latest = (entries: ReadonlyArray<Kept>, machine: string) => {
   const said = new Map<string, { readonly at: number; readonly said: string }>()
@@ -371,7 +383,7 @@ export const make = (options: {
   Effect.gen(function* () {
     const { machine, live, journal, store } = options
     const scope = yield* Effect.scope
-    let usage: { readonly at: number; readonly usage: T3Actions.Usage } | undefined
+    let usage: Usage | undefined
 
     const startedWork = store
       .transaction((database: Database) =>
@@ -410,7 +422,7 @@ export const make = (options: {
         Effect.gen(function* () {
           tried = yield* Clock.currentTimeMillis
           const fresh = yield* actions.usage
-          usage = { at: yield* Clock.currentTimeMillis, usage: fresh }
+          usage = { at: yield* Clock.currentTimeMillis, providers: fresh }
         }).pipe(
           Effect.timeout("3 seconds"),
           Effect.catchAll((error) => Effect.logWarning("Could not read your usage from T3 Code", error)),
@@ -454,12 +466,14 @@ export const make = (options: {
             Effect.mapError((error) => new ThreadsError({ reason: T3Actions.reason(error), cause: error })),
           ),
         ),
-      // What's known at once, asked again meanwhile when it's old: only with nothing known yet is it waited for.
+      // What's known at once, asked again meanwhile when it's old. With nothing known, or nothing recent enough to say as
+      // what's used now, it's waited for, even when it's being asked for already: what's dated is only for a T3 Code that
+      // can't answer.
       usage: Effect.gen(function* () {
-        if (!(yield* old)) return Option.map(Option.fromNullable(usage), ({ usage }) => usage)
-        if (usage === undefined) yield* refreshing
-        else yield* Effect.forkIn(refreshing, scope)
-        return Option.map(Option.fromNullable(usage), ({ usage }) => usage)
+        const now = yield* Clock.currentTimeMillis
+        if (usage === undefined || now - usage.at > dated) yield* refreshing
+        else if (yield* old) yield* Effect.forkIn(refreshing, scope)
+        return Option.fromNullable(usage)
       }),
       refreshUsage: Effect.flatMap(old, (old) => (old ? refreshing : Effect.void)),
       keep: (ref, work) =>

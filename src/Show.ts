@@ -7,7 +7,7 @@ import * as Process from "./Process.ts"
 import type * as Server from "./Server.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import type * as T3Live from "./T3Live.ts"
-import type * as Threads from "./Threads.ts"
+import * as Threads from "./Threads.ts"
 import { ago } from "./Writer.ts"
 
 // What yapd puts on the user's screen when they ask to see something: their
@@ -462,26 +462,33 @@ export const verdict = (listed: Threads.Listed, address: string, named = false) 
     },
   })
 
-/** His usage: each provider's windows, how much of each is used, and when it resets. */
-export const usage = (usage: Option.Option<T3Actions.Usage>, now: number): Draft => ({
+/**
+ * His usage: each provider's windows, how much of each is used, and when it
+ * resets. Read too long ago to be what's used now, it says when it was read,
+ * and a window that has reset since says only that.
+ */
+export const usage = (usage: Option.Option<Threads.Usage>, now: number): Draft => ({
   kind: "usage",
   title: "Usage",
-  markdown: Option.match(Option.filter(usage, (usage) => usage.length > 0), {
+  markdown: Option.match(Option.filter(usage, ({ providers }) => providers.length > 0), {
     onNone: () => "I can't read your usage right now.",
-    onSome: (usage) =>
-      usage
-        .map(({ provider, windows }) =>
+    onSome: ({ at, providers }) =>
+      [
+        ...(now - at > Threads.dated ? [`_As of ${Brain.time(at)}, when T3 Code last answered._`] : []),
+        ...providers.map(({ provider, windows }) =>
           [
             `**${plainly(provider)}**`,
             windows
               .map((window) => {
+                const name = plainly(Brain.capital(Brain.windowed(window).name))
+                if (window.resetsAt !== undefined && Date.parse(window.resetsAt) <= now) return `- ${name} window: reset since`
                 const resets = window.resetsAt === undefined ? undefined : Brain.clock(window.resetsAt, now)
-                return `- ${plainly(Brain.capital(Brain.windowed(window).name))} window: ${Math.round(window.usedPercent)}%${resets === undefined ? "" : `, resets ${resets}`}`
+                return `- ${name} window: ${Math.round(window.usedPercent)}%${resets === undefined ? "" : `, resets ${resets}`}`
               })
               .join("\n"),
           ].join("\n\n"),
-        )
-        .join("\n\n"),
+        ),
+      ].join("\n\n"),
   }),
 })
 
@@ -667,9 +674,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           case "threads":
             return yield* shown((address) => tally(situation.desk, address, now), overview(situation.desk, now), lines)
           case "usage": {
-            const first = Option.flatMap(situation.usage, (usage) => Option.fromNullable(usage[0]))
-            const gist = (address: string) =>
-              Brain.used(Option.map(first, ({ provider, windows }) => [{ provider, windows: windows.slice(0, 1) }]), "", { ...lines, address: address.replace(/^, /, "") }, now)
+            // The first provider's first window, which the card puts first too.
+            const first = Option.map(situation.usage, ({ at, providers }) => ({ at, providers: providers.slice(0, 1).map(({ provider, windows }) => ({ provider, windows: windows.slice(0, 1) })) }))
+            const gist = (address: string) => Brain.used(first, "", { ...lines, address: address.replace(/^, /, "") }, now)
             return yield* shown(gist, usage(situation.usage, now), lines)
           }
           case "missed": {
