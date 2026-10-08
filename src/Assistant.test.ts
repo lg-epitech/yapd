@@ -1087,6 +1087,39 @@ describe("Assistant", () => {
     expect(then.spoken).toBe("Stopped, sir. On it.")
   })
 
+  test("the same message dictated again over 'I sent that a minute ago' is a yes to it, so that's never asked twice, and a no that sends elsewhere leaves an offer to send again for good", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, questions, dispatched } = yield* assistant(tezosMessage("high"))
+        for (let times = 0; times < 3; times++) yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        return { spoken: spoken(), questions: questions().length, ids: dispatched.map(({ commandId }) => String(commandId)) }
+      }),
+    )
+    expect(result.questions).toBe(1)
+    expect(result.spoken).toEqual(["On it, sir: Migrate Tezos Integration.", "I sent that a minute ago, sir. Again?", "On it, sir."])
+    // The third time went as a step of its own.
+    expect(result.ids).toHaveLength(2)
+    expect(result.ids[1]).not.toBe(result.ids[0])
+    let lost = true
+    const redirected = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, dispatched, ledger } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("No") ? Brain.decision({ act: "send", target: handle(situation, mina), sure: "high", pending: "answers" }) : tezosMessage("high")(situation),
+          undefined,
+          { answer: () => (payload, bounded) => (lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes(payload, bounded)) },
+        )
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        lost = false
+        yield* answer("No, tell the Mina one instead.")
+        return { sent: dispatched.map(({ threadId }) => threadId), restart: yield* ledger.open(0) }
+      }),
+    )
+    expect(redirected.sent).toEqual([tezos.id, mina.id])
+    // Nor offered again after a restart.
+    expect(redirected.restart).toEqual([])
+  })
+
   test("a message whose words the model left out goes in the words of his request, never those of his answer to a question about it", async () => {
     const request = "Tell the migration one to rebase on master."
     const unworded = (answered: (situation: Brain.Situation) => Brain.Decision | undefined, reply: string) =>
