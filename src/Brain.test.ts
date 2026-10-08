@@ -164,6 +164,9 @@ describe("Brain", () => {
     })
     expect(shown("Show me that.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "pr", target: tezosHandle })
     expect(shown("Show me that.", { desk: pulled("MERGED") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    // Asked for by name, the thread is what's shown, never its pull request opened in its place.
+    expect(shown("Show me the thread.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me that thread.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
     expect(shown("Show me what's running.")).toEqual({ act: "show", how: "threads", target: "" })
     // Nothing "that" could be, so which thread is the model's to work out.
     expect(shown("Show me that.", { subject: { _tag: "Nothing" } })).toBeUndefined()

@@ -429,11 +429,11 @@ const shows: ReadonlyMap<string, string> = new Map([
   ...["show me what you said", "show me what you just said", "show me that line"].map((phrase) => [phrase, "said"] as const),
 ])
 
-/** Showing the thread "it" means: its pull request when it has one open, else the thread. */
-const showing: ReadonlySet<string> = new Set([
-  "show me that", "show me", "show that", "show it", "show me it", "show me this", "show me that one", "show me the thread",
-  "show me that thread", "show me this thread",
-])
+/** Showing what "it" means: its thread's pull request when it has one open, else the thread. */
+const showing: ReadonlySet<string> = new Set(["show me that", "show me", "show that", "show it", "show me it", "show me this", "show me that one"])
+
+/** Showing the thread "it" means itself, never its pull request: there's no other way to see a thread. */
+const threading: ReadonlySet<string> = new Set(["show me the thread", "show me that thread", "show me this thread", "show the thread", "show that thread"])
 
 /** Showing the pull request of the thread "it" means, which opens it too. */
 const pulling: ReadonlySet<string> = new Set([
@@ -497,11 +497,11 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   if (shown !== undefined) return decision({ act: "show", how: shown, pending: replacing })
   // "P.R." comes out of the gist as two letters.
   const pr = said.replace(/\bp r\b/g, "pr")
-  if (showing.has(said) || pulling.has(pr)) {
+  if (showing.has(said) || threading.has(said) || pulling.has(pr)) {
     const focus = focused(situation)
     // Without a thread "it" means, which one is the model's to work out.
     if (Option.isSome(focus)) {
-      const how = pulling.has(pr) || unmerged(focus.value.thread) ? "pr" : "thread"
+      const how = pulling.has(pr) || (showing.has(said) && unmerged(focus.value.thread)) ? "pr" : "thread"
       return decision({ act: "show", how, target: focus.value.handle, pending: replacing })
     }
   }
