@@ -1,4 +1,4 @@
-import { Deferred, Duration, Effect, Either, Option, Redacted, Schema } from "effect"
+import { Deferred, Duration, Effect, Either, Option, Redacted, Schedule, Schema } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import * as Home from "./Home.ts"
@@ -99,6 +99,17 @@ const kill = (pid: number) =>
     }
   })
 
+/** Whether a process is still running here. */
+const running = (pid: number) =>
+  Effect.sync(() => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  })
+
 /** The connection's process here, as `ssh -O check` gives it. Never 0 or 1, which would be yapd's own group, or launchd. */
 const pidOf = (said: string) => {
   const pid = Number(/Master running \(pid=(\d+)\)/.exec(said)?.[1])
@@ -146,8 +157,8 @@ const port = (origin: string) => {
 
 /**
  * Keeps `host`'s T3 Code reachable through an SSH connection to `destination`,
- * connecting again when it drops. `folder` holds the connection's socket, and
- * `end` kills a process here.
+ * connecting again when it drops. `folder` holds the connection's socket,
+ * `end` kills a process here, and `alive` says whether one still runs.
  */
 export const forward = (
   host: string,
@@ -156,6 +167,7 @@ export const forward = (
   free = unused,
   folder = Home.home,
   end: (pid: number) => Effect.Effect<void> = kill,
+  alive: (pid: number) => Effect.Effect<boolean> = running,
 ) =>
   Effect.gen(function* () {
     const socket = join(folder, `ssh-${host.toLowerCase().replace(/[^a-z0-9.-]/g, "_")}.sock`)
@@ -226,6 +238,15 @@ export const forward = (
       if (Either.isLeft(exited) && !missing(exited.left)) {
         if (pid === undefined) return yield* exited.left
         yield* end(pid)
+      } else if (Either.isRight(exited) && pid !== undefined) {
+        // SSH answers before it's gone, and removes the socket as it goes, which would take the next connection's.
+        const leaving = pid
+        const gone = yield* alive(leaving).pipe(
+          Effect.repeat({ until: (still) => !still, schedule: Schedule.spaced("50 millis") }),
+          Effect.timeoutOption("2 seconds"),
+          Effect.interruptible,
+        )
+        if (Option.isNone(gone)) yield* end(leaving)
       }
       forget()
       yield* Effect.ignore(Effect.tryPromise(() => rm(socket, { force: true })))

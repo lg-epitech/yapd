@@ -33,6 +33,20 @@ const machine = (
   let stalled = 0
   /** The connections that hang when told to exit. */
   const deaf = new Set<number>()
+  /** Connections that answer when told to exit but go a while later, by the test's clock, taking whatever socket is on the path then. */
+  const lingering = new Map<number, number>()
+  /** How long the connection on the socket takes to go once told to exit. */
+  let linger: number | undefined
+  /** Lets the lingering connections whose time has come go. */
+  const settle = Effect.map(Clock.currentTimeMillis, (now) => {
+    for (const [pid, at] of lingering) {
+      if (at > now) continue
+      lingering.delete(pid)
+      connections.delete(pid)
+      // SSH removes the socket's path as it goes, whichever connection's socket is there by then.
+      current = undefined
+    }
+  })
   /** The connections running here, by their process, each with its forwards listening here, as `-L` gives them. */
   const connections = new Map<number, Set<string>>()
   /** The one on the socket, that what's told through it reaches. */
@@ -56,6 +70,7 @@ const machine = (
   let tokens = 0
   const exec: Exec = (command) =>
     Effect.gen(function* () {
+      yield* settle
       const line = command.join(" ")
       calls.push(line)
       const fail = (code: number, stderr = "") => Effect.fail(new ProcessError({ command: line, code, stderr }))
@@ -71,7 +86,13 @@ const machine = (
         // SSH answers these on stderr, which comes back with the rest.
         if (command.includes("check")) return `Master running (pid=${current})\r\n`
         if (command.includes("exit")) {
-          end(current)
+          if (linger === undefined) end(current)
+          else {
+            // Answered, but not gone yet.
+            lingering.set(current, (yield* Clock.currentTimeMillis) + linger)
+            linger = undefined
+            current = undefined
+          }
           return "Exit request sent.\r\n"
         }
         if (command.includes("forward")) {
@@ -94,8 +115,11 @@ const machine = (
       const answer = answers.shift() ?? JSON.stringify({ origin: "http://127.0.0.1:3774", token: `token-${++tokens}` })
       return answer instanceof ProcessError ? yield* Effect.fail(answer) : `Welcome to rig\n${answer}\n`
     })
+  /** Whether a process still runs here. */
+  const alive = (pid: number) => Effect.zipRight(settle, Effect.sync(() => connections.has(pid)))
   return {
     exec,
+    alive,
     kill: (pid: number) =>
       Effect.sync(() => {
         killed.push(pid)
@@ -115,6 +139,10 @@ const machine = (
     deafen: () => {
       if (current !== undefined) deaf.add(current)
     },
+    /** The connection on the socket answers when told to exit, but goes only `millis` later. */
+    linger: (millis: number) => {
+      linger = millis
+    },
     /** The connection on the socket drops, like when the network does. */
     drop: () => {
       if (current !== undefined) end(current)
@@ -129,7 +157,8 @@ const ports = () => {
 }
 
 /** The tunnel to rig, where processes are only ever killed in the test's play. */
-const open = (rig: ReturnType<typeof machine>) => Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder, rig.kill)
+const open = (rig: ReturnType<typeof machine>) =>
+  Tunnel.forward("rig", "me@rig.example.com", rig.exec, ports(), folder, rig.kill, rig.alive)
 
 /** Lets the tunnel's fibers catch up, since the clock only moves when told to. */
 const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)))
@@ -224,6 +253,29 @@ describe("Tunnel", () => {
         }
         expect((yield* tunnel.locate).server.origin).toBe("http://127.0.0.1:50003")
         expect([rig.killed, rig.listening()]).toEqual([[102], ["127.0.0.1:50003:127.0.0.1:3775"]])
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ))
+
+  test("waits for a connection told to exit to be gone before opening the next, so it can't take the new one's socket", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const rig = machine()
+        const tunnel = yield* open(rig)
+        yield* tunnel.locate
+        // T3 Code there moved, and the connection it had answers when told to exit but takes a moment to go.
+        rig.linger(150)
+        const moved = JSON.stringify({ origin: "http://127.0.0.1:3775", token: "token-2" })
+        rig.answers.push(moved, moved)
+        const refreshing = yield* Effect.fork(tunnel.refresh)
+        for (let tick = 0; tick < 6; tick++) {
+          yield* flush
+          yield* TestClock.adjust("50 millis")
+        }
+        expect((yield* Fiber.join(refreshing)).server.origin).toBe("http://127.0.0.1:50002")
+        // Still reachable through the new one's socket, and only its forward listens.
+        expect(yield* tunnel.master).toEqual(Option.some(`${folder}/ssh-rig.sock`))
+        expect(rig.listening()).toEqual(["127.0.0.1:50002:127.0.0.1:3775"])
+        expect((yield* tunnel.refresh).server.origin).toBe("http://127.0.0.1:50002")
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
 
