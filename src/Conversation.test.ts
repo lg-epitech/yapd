@@ -84,6 +84,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
       replied: Effect.sync(() => void replies++),
       saying: (_, line) => Effect.sync(() => void saying.push(line)),
+      withholds: () => Effect.succeed(false),
     }).pipe(Effect.provide(context))
     const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.

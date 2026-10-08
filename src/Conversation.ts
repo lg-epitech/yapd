@@ -145,6 +145,8 @@ export const make = (options: {
   readonly replied: Effect.Effect<void>
   /** yapd starts saying something back over an update, like an answer or word of a follow-up, which is then what the user heard last. */
   readonly saying: (update: Update, line: string) => Effect.Effect<void>
+  /** Whether what the user said to send over an update would be held back as it could give a secret away, so their words are kept and logged nowhere. */
+  readonly withholds: (update: Update, message: string) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -479,11 +481,11 @@ export const make = (options: {
         return result
       })
 
-    const transcribe = (audio: Float32Array) =>
-      transcriber.transcribe(audio).pipe(
-        Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
-        Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))),
-      )
+    /** What the user said, logged once it's known it's fit to be, as what's said over an update may not be. */
+    const unlogged = (audio: Float32Array) =>
+      transcriber.transcribe(audio).pipe(Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))))
+
+    const transcribe = (audio: Float32Array) => unlogged(audio).pipe(Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))))
 
     /**
      * Reads an update out and talks it over. `through` runs as soon as the
@@ -514,7 +516,7 @@ export const make = (options: {
               from = Math.max(from, outcome.at - rewind)
             }
 
-            const first = yield* transcribe(outcome.audio)
+            const first = yield* unlogged(outcome.audio)
             if (first === "") {
               if (after) return
               carryOn()
@@ -522,7 +524,7 @@ export const make = (options: {
             }
 
             const said = cut(text, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
-            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, transcribe, (heard) =>
+            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, (heard) =>
               responder
                 .respond({
                   project: update.project,
@@ -540,6 +542,9 @@ export const make = (options: {
                   ),
                 ),
             )
+            // Held back as it could give a secret away, it's kept and logged nowhere: whether it is, is known before either.
+            const withheld = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
+            yield* Effect.logInfo(withheld ? "Heard something to send that could give a secret away, so it's held back" : `Heard: ${heard}`)
             yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
             if (reply.intent !== "resume") {
               yield* journal.write({
@@ -551,8 +556,8 @@ export const make = (options: {
                 ...(update.about === undefined ? { thread: update.session } : { machine: update.about.machine, thread: update.about.id }),
                 directory: update.thread.cwd,
                 said: reply.spoken,
-                text: heard,
-                detail: { intent: reply.intent, ...(reply.message === "" ? {} : { message: reply.message }) },
+                ...(withheld ? {} : { text: heard }),
+                detail: { intent: reply.intent, ...(reply.message === "" || withheld ? {} : { message: reply.message }), ...(withheld ? { withheld } : {}) },
               })
               yield* options.replied
             }

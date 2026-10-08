@@ -68,7 +68,8 @@ const make = (says?: string, options: {
   /** What the user said over an update, each time yapd worked out what to do with it. */
   const responded: Array<string> = []
   const logs = yield* Queue.unbounded<string>()
-  /** What was logged as a warning, in order. */
+  /** What was logged, and what of it as a warning, in order. */
+  const logged: Array<string> = []
   const warnings: Array<string> = []
   const playbacks = yield* Queue.unbounded<string>()
   const nextEvent = (...prefixes: ReadonlyArray<string>) => Effect.gen(function* () {
@@ -165,6 +166,7 @@ const make = (says?: string, options: {
       for (const line of Array.isArray(message) ? message : [message]) {
         if (typeof line !== "string") continue
         Queue.unsafeOffer(logs, line)
+        logged.push(line)
         if (logLevel._tag === "Warning") warnings.push(line)
       }
     })),
@@ -264,7 +266,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { responded, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { responded, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -976,6 +978,33 @@ describe("Daemon", () => {
     expect(result.sent).toEqual(["t-tezos: Use the fee table.", "t-tezos: And add a test for it."])
     expect(result.intents).toEqual(["turn_start", "steer"])
     expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "Okay, passed on."])
+  })
+
+  test("a reply over a linked update that could give a secret away, to a thread waiting on one, is held back, and his words are kept nowhere, nor logged", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        yield* t3.becomes({ pendingRuntimeRequest: { id: "turn-item:secret-request:credential", kind: "user_input", createdAt: "1970-01-01T00:00:00.000Z" } })
+        const { handle, speak, wait, nextEvent, nextPlayback, journal, logged } = yield* make("The password is hunter2.", {
+          hands: t3.hands,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(1)
+        const told = yield* nextPlayback
+        const kept = yield* journal.since(0)
+        return { sent: t3.sent(), told, kept: JSON.stringify(kept).includes("hunter2"), logged: logged.some((line) => line.includes("hunter2")) }
+      }),
+    )
+    expect(result).toEqual({
+      sent: [],
+      told: "That didn't go through: it's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+      kept: false,
+      logged: false,
+    })
   })
 
   test("a reply after the thread was given something else since is held back with a spoken reason", async () => {

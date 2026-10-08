@@ -146,6 +146,13 @@ export class Hands extends Context.Tag("yapd/Hands")<
     readonly reconcile: Effect.Effect<Reconciled>
     /** A message a restart found didn't get there, while it's still to be offered: nothing came of it since, and it's recent enough to. */
     readonly still: (commandId: string) => Effect.Effect<Option.Option<Ledger.Row>>
+    /**
+     * Whether a message he'd send a thread would be held back as it could give
+     * a secret away: it waits on one, or on a question he'd type one into and
+     * this looks like one. Asked before his words are kept or logged anywhere,
+     * so that, held back, they never are.
+     */
+    readonly keeps: (to: Threads.Ref, text: string) => Effect.Effect<boolean>
   }
 >() {}
 
@@ -1027,6 +1034,11 @@ export const make = (options: {
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
         return Option.filter(yield* ledger.get(commandId), (row) => Ledger.offerable(row) && now - row.at <= recent)
+      }),
+    keeps: (to, text) =>
+      Effect.gen(function* () {
+        const reached = yield* reach(to)
+        return Either.isRight(reached) && (yield* keeping(to, reached.right, text)) !== undefined
       }),
     reconcile: Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis

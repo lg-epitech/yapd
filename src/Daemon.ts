@@ -434,6 +434,9 @@ export const make = (
           if (latest?.update === update) latest = { update, said: line, at, playing: true }
         }),
       ),
+    // Only what goes to its thread by yapd's own hand, which is held back when it could give a secret away.
+    withholds: (update, message) =>
+      update.about !== undefined && options.hands !== undefined && steered(update) ? options.hands.keeps(update.about, message) : Effect.succeed(false),
   })
 
   const unsummarized = (project: string): Summary => ({
