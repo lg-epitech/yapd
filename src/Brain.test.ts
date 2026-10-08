@@ -144,9 +144,17 @@ describe("Brain", () => {
   test("spoken lines never carry a handle, an id, a path, 'the agent' or 'the session'", () => {
     const candidates = desk().threads
     const project = { kind: "project" as const, asked: "Which project is the retry fix for?", about: "the retry fix" }
+    // As T3 Code labels them.
     const usage: Option.Option<T3Actions.Usage> = Option.some([
-      { provider: "Claude", windows: [{ label: "5h", usedPercent: 60.4, resetsAt: "2026-10-08T20:10:00.000Z" }, { label: "Weekly · Fable", usedPercent: 40, resetsAt: undefined }] },
-      { provider: "Codex", windows: [{ label: "Weekly", usedPercent: 20, resetsAt: "2026-10-12T13:00:00.000Z" }] },
+      {
+        provider: "Claude",
+        windows: [
+          { kind: "session", label: "Session", minutes: 300, usedPercent: 60.4, resetsAt: "2026-10-09T01:10:00.000Z" },
+          { kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 11, resetsAt: "2026-10-10T06:00:00.000Z" },
+          { kind: "weekly", label: "Weekly · Fable", minutes: 10080, usedPercent: 40, resetsAt: undefined },
+        ],
+      },
+      { provider: "Codex", windows: [{ kind: "weekly", label: "Weekly", minutes: 10080, usedPercent: 20, resetsAt: "2026-10-12T13:00:00.000Z" }] },
     ])
     const resolved = Drafts.resolve(
       [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") }, researcher: Research.unavailable("") }],
@@ -198,6 +206,9 @@ describe("Brain", () => {
     const everything = Brain.used(usage, "usage", lines, now)
     expect(everything).toContain("resetting Monday at")
     expect(everything.match(/sir/g)).toHaveLength(1)
+    expect(everything).toContain("Claude is at 60 percent of its five-hour window")
+    expect(everything).toContain("Fable's weekly window is at 40 percent.")
+    expect(everything).not.toMatch(/session/i)
     expect(said[0]).toBe("Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?")
     expect(said[1]).toBe("Which one, sir: Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?")
   })

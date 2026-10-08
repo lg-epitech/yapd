@@ -274,15 +274,38 @@ const clock = (iso: string, now: number) => {
   return `${at - now > 6 * 24 * 60 * 60_000 ? "next " : ""}${weekday} at ${time(at)}`
 }
 
-/** A window's label as it's said, like "weekly" or "5 hour". */
-const windowed = (label: string) =>
-  label
-    .replace(/[·•_]+/g, " ")
-    .replace(/\b(\d+)\s*h\b/gi, "$1 hour")
-    .replace(/\b(\d+)\s*d\b/gi, "$1 day")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase()
+/** How long a window lasts, as it's said before "window", like "five-hour". */
+const lasting = (minutes: number) =>
+  minutes >= 24 * 60 && minutes % (24 * 60) === 0
+    ? `${count(minutes / (24 * 60))}-day`
+    : minutes % 60 === 0
+      ? `${count(minutes / 60)}-hour`
+      : `${count(minutes)}-minute`
+
+/**
+ * A window as it's said: by how often it resets, or how long it lasts, never
+ * as a "session", and with the model it's for when it's only one, like
+ * "Weekly · Fable", which is Fable's weekly window.
+ */
+const windowed = ({ kind, label, minutes }: T3Actions.Window) => {
+  const [first = "", ...rest] = label.split(/\s*[·•|]\s*/)
+  const owner = rest.join(" ").trim()
+  const name =
+    kind === "weekly" || kind === "monthly"
+      ? kind
+      : kind === "session" || /\bsession\b/i.test(first)
+        ? minutes === undefined
+          ? "current"
+          : lasting(minutes)
+        : first
+            .replace(/_+/g, " ")
+            .replace(/\b(\d+)\s*h\b/gi, "$1 hour")
+            .replace(/\b(\d+)\s*d\b/gi, "$1 day")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase()
+  return { whose: owner === "" ? "its" : `${owner}'s`, name }
+}
 
 /** How much of each provider's limits is used, or only the one he asked about. "Sir" once, on the first line. */
 export const used = (usage: Option.Option<T3Actions.Usage>, heard: string, lines: Lines, now: number) => {
@@ -292,11 +315,12 @@ export const used = (usage: Option.Option<T3Actions.Usage>, heard: string, lines
   const providers = asked.length > 0 ? asked : usage.value
   return providers
     .flatMap(({ provider, windows }) =>
-      windows.slice(0, 3).map(({ label, usedPercent, resetsAt }, index) => {
-        const resets = resetsAt === undefined ? undefined : clock(resetsAt, now)
-        const at = `${Math.round(usedPercent)} percent`
+      windows.slice(0, 3).map((window, index) => {
+        const { whose, name } = windowed(window)
+        const resets = window.resetsAt === undefined ? undefined : clock(window.resetsAt, now)
+        const at = `${Math.round(window.usedPercent)} percent`
         const when = resets === undefined ? "" : `, resetting ${resets}`
-        return index === 0 ? `${provider} is at ${at} of its ${windowed(label)} window${when}` : `Its ${windowed(label)} window is at ${at}${when}`
+        return index === 0 ? `${provider} is at ${at} of ${whose} ${name} window${when}` : `${capital(whose)} ${name} window is at ${at}${when}`
       }),
     )
     .map((line, index) => `${line}${index === 0 ? addressed(lines) : ""}.`)
@@ -765,7 +789,11 @@ const usageLines = (usage: Option.Option<T3Actions.Usage>, now: number) =>
             .map(
               ({ provider, windows }) =>
                 `- ${provider}: ${windows
-                  .map(({ label, usedPercent, resetsAt }) => `${Math.round(usedPercent)}% of ${windowed(label)}${resetsAt === undefined ? "" : ` (resets ${clock(resetsAt, now) ?? resetsAt})`}`)
+                  .map((window) => {
+                    const { whose, name } = windowed(window)
+                    const { usedPercent, resetsAt } = window
+                    return `${Math.round(usedPercent)}% of ${whose === "its" ? "the" : whose} ${name} window${resetsAt === undefined ? "" : ` (resets ${clock(resetsAt, now) ?? resetsAt})`}`
+                  })
                   .join(", ")}`,
             )
             .join("\n"),

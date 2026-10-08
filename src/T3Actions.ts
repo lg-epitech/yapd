@@ -224,6 +224,7 @@ const Limits = Schema.Struct({
                   label: Schema.String,
                   usedPercent: Schema.Number,
                   resetsAt: Schema.optional(Schema.NullOr(Schema.String)),
+                  windowDurationMins: Schema.optional(Schema.NullOr(Schema.Number)),
                 }),
               ),
               { default: () => [] },
@@ -235,11 +236,17 @@ const Limits = Schema.Struct({
   ),
 })
 
+/** One of a provider's limits: "session", "weekly", "monthly" or "other", as T3 Code labels it, and how long it lasts when it says. */
+export interface Window {
+  readonly kind: string
+  readonly label: string
+  readonly minutes: number | undefined
+  readonly usedPercent: number
+  readonly resetsAt: string | undefined
+}
+
 /** What T3 Code says each provider has used of its limits. */
-export type Usage = ReadonlyArray<{
-  readonly provider: string
-  readonly windows: ReadonlyArray<{ readonly label: string; readonly usedPercent: number; readonly resetsAt: string | undefined }>
-}>
+export type Usage = ReadonlyArray<{ readonly provider: string; readonly windows: ReadonlyArray<Window> }>
 
 /** Why T3 Code wouldn't, in words that can be read out. */
 export const reason = (error: Server.Trouble | Server.Refusal) =>
@@ -303,8 +310,10 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
           : [
               {
                 provider: displayName ?? instanceId,
-                windows: usageLimits.windows.map(({ label, usedPercent, resetsAt }) => ({
+                windows: usageLimits.windows.map(({ kind, label, windowDurationMins, usedPercent, resetsAt }) => ({
+                  kind,
                   label,
+                  minutes: windowDurationMins ?? undefined,
                   usedPercent,
                   resetsAt: resetsAt ?? undefined,
                 })),
