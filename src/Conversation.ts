@@ -219,8 +219,11 @@ export const make = (options: {
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
-        // Failing ends it too, or this could wait for a signal that never comes.
+        // Failing ends it too, or this could wait for a signal that never comes. Played to the end, it's heard
+        // there and then, even when a stop asked for just before is still being answered: only playing to the
+        // end finishes it, never being stopped.
         yield* playback.finished.pipe(
+          Effect.tap(() => through),
           Effect.match({
             onFailure: (error): Signal => ({ _tag: "Broke", id, error }),
             onSuccess: (): Signal => ({ _tag: "Finished", id }),
@@ -233,6 +236,8 @@ export const make = (options: {
         /** Between an onset and the end of what the user said. */
         let speaking = false
         let deaf = false
+        /** Why it broke off after being stopped for him to speak, like the helper quitting, which nothing after may hide. */
+        let broken: AudioError | undefined
         let stoppedAt: number | undefined
         let lingering: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
         const stopLingering = Effect.suspend(() => {
@@ -288,22 +293,28 @@ export const make = (options: {
                 ear,
               } satisfies Outcome
             case "Finished":
-              // Also arrives for a playback the user stopped, which is already dealt with.
+              // Heard already, as it finished. Also arrives for a playback the user stopped, which is already dealt with.
               if (signal.id !== id || !playing) break
               playing = false
-              yield* through
               if (deaf) return { _tag: "Finished" } satisfies Outcome
               if (!speaking) yield* startLingering
               break
             case "Broke":
+              if (signal.id !== id) break
+              // Stopped for him to speak, it waits on what he says, unless nothing comes of it.
+              if (!playing) {
+                broken = signal.error
+                break
+              }
               // As without a microphone: cut short, it wasn't heard, and there's nothing to wait for a reply to.
-              if (signal.id !== id || !playing) break
               return yield* Effect.fail(signal.error)
             case "Lingered":
               if (signal.id !== lingering?.id) break
+              if (broken !== undefined) return yield* Effect.fail(broken)
               return { _tag: "Finished" } satisfies Outcome
             case "Deaf":
               deaf = true
+              if (broken !== undefined) return yield* Effect.fail(broken)
               if (!playing) return { _tag: "Finished" } satisfies Outcome
               yield* playback.volume(1)
               break

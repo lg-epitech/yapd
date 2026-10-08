@@ -39,6 +39,8 @@ const make = (says?: string, options: {
   readonly trivialMessages?: ReadonlyArray<string>
   /** A microphone, even when the user says nothing. */
   readonly microphone?: boolean
+  /** How stopping playback goes, which the audio helper answers when it's ready, with how far it got. */
+  readonly stopping?: Effect.Effect<number>
   /** Lines whose playback breaks off after so many seconds, as when the audio helper quits. */
   readonly breaks?: Readonly<Record<string, number>>
   /** Lines that can't be played at all, as when the audio helper is down. */
@@ -103,7 +105,7 @@ const make = (says?: string, options: {
                     }),
                   )
                 : Effect.sleep(`${breaks} seconds`).pipe(Effect.zipRight(new AudioError({ message: "The audio helper quit" }))),
-            stop: Effect.succeed(2),
+            stop: options.stopping ?? Effect.succeed(2),
             volume: () => Effect.void,
           }
         }),
@@ -242,7 +244,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -273,6 +275,8 @@ const assisted = (
   model: (situation: Brain.Situation) => Brain.Decision,
   options: Parameters<typeof make>[1] = {},
   desk: ReadonlyArray<T3Live.Thread> = [],
+  /** How long the model takes over what was said, on top of deciding. */
+  deciding: (situation: Brain.Situation) => Effect.Effect<void> = () => Effect.void,
 ) =>
   Effect.gen(function* () {
     const daemon = yield* make(undefined, options)
@@ -315,7 +319,7 @@ const assisted = (
               Effect.sync(() => {
                 asked.push(situation)
                 return model(situation)
-              }),
+              }).pipe(Effect.zipLeft(deciding(situation))),
           }),
           Persona.Plain,
         ),
@@ -1139,6 +1143,52 @@ describe("Daemon", () => {
       subject: Option.some({ said: "yapd. The PR is ready.", playing: true }),
       played: ["yapd. The PR is ready.", "It changes the parser."],
     })
+  })
+
+  test("an update that plays to its end while a stop is still being answered is heard, so a dictation then doesn't read it again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, speak, dictate, played, journal } = yield* make("Thanks.", {
+          // Stopped a moment before its natural end, which the helper only answers once it has ended anyway.
+          stopping: Effect.sleep("200 millis").pipe(Effect.as(10)),
+          answer: "You're welcome.",
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(9.9)
+        yield* speak
+        yield* wait(0.15)
+        const unheard = (yield* journal.unheard(0, 12)).length
+        const floor = yield* dictate
+        yield* wait(0.2)
+        yield* Scope.close(floor, Exit.void)
+        yield* wait(15)
+        return { unheard, read: played.filter((line) => line === "yapd. The PR is ready.").length }
+      }),
+    )
+    expect(result).toEqual({ unheard: 0, read: 1 })
+  })
+
+  test("an update stopped for him to speak, whose playback then breaks off as the helper quits, isn't heard, and that's noted", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, microphone, warnings, journal } = yield* make(undefined, {
+          microphone: true,
+          breaks: { "yapd. The PR is ready.": 3 },
+          // A helper that quits answers a stop under way with nothing.
+          stopping: Effect.sleep("1 second").pipe(Effect.as(0)),
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        yield* Queue.offerAll(microphone, Array.from({ length: 4 }, () => new Float32Array([0.9])))
+        yield* wait(0)
+        yield* wait(1)
+        // And the microphone goes with it.
+        yield* Queue.shutdown(microphone)
+        yield* wait(1)
+        return { unheard: (yield* journal.unheard(0, 12)).length, warnings: [...warnings] }
+      }),
+    )
+    expect(result).toEqual({ unheard: 1, warnings: ["Could not speak update"] })
   })
 
   test.each([false, true])("an update whose playback breaks off midway isn't heard, and that's noted once, with a microphone: %s", async (microphone) => {
