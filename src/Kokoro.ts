@@ -5,7 +5,7 @@ import * as ort from "onnxruntime-node"
 import * as Hub from "./Hub.ts"
 import { run } from "./Process.ts"
 import { phonemize } from "./vendor/kokoro/phonemize.js"
-import { type Device, join, kokoroRepo as repo, type Reply, type Request, split, voices } from "./Voice.ts"
+import { type Device, head, join, kokoroRepo as repo, opening, type Reply, type Request, split, voices } from "./Voice.ts"
 
 // Kokoro, in a process of its own that the daemon starts. onnxruntime runs a
 // model on the thread that asks, and in the daemon that froze everything else
@@ -43,8 +43,15 @@ const load = Hub.load(repo, async () => {
   return { file, styles, tokenizer, device: gpu === undefined ? ("CPU" as Device) : device, session: gpu ?? (await open(file, "CPU")) }
 })
 
-const applyEffect = (raw: string, path: string) =>
-  run(["ffmpeg", "-loglevel", "error", "-y", "-i", raw, "-af", effect, path]).pipe(
+/** Applies the effect to `raw`, keeping only its first `samples` when given. */
+const applyEffect = (raw: string, path: string, samples?: number) =>
+  run([
+    "ffmpeg", "-loglevel", "error", "-y", "-i", raw, "-af", effect,
+    // ffmpeg rings echoes out past the end, which a first part mustn't: the whole carries on from exactly where it stops.
+    // Its effect is the very same up to there, since each filter only hears what came before.
+    ...(samples === undefined ? [] : ["-t", `${samples / rate}`]),
+    path,
+  ]).pipe(
     Effect.catchAll((error) =>
       Effect.sync(() => send({ type: "warning", message: `Could not apply the effect, playing it unprocessed: ${error.stderr}` })).pipe(
         Effect.zipRight(Effect.promise(() => rename(raw, path))),
@@ -109,24 +116,44 @@ const program = Effect.gen(function* () {
   })
   send({ type: "ready", device })
 
-  const render = (text: string, path: string) =>
+  /** Writes the audio with the effect. A first part keeps exactly its length, so the whole goes on from where it stops. */
+  const save = (audio: Float32Array, path: string, exact = false) =>
     Effect.gen(function* () {
       const raw = effect === "none" ? path : `${path}.raw.wav`
-      const parts = yield* Effect.forEach(yield* split(text, fits), (part) => Effect.tryPromise(() => speak(part)))
-      yield* Effect.tryPromise(() => new RawAudio(join(parts, rate), rate).save(raw))
-      if (raw !== path) yield* applyEffect(raw, path)
+      yield* Effect.tryPromise(() => new RawAudio(audio, rate).save(raw))
+      if (raw !== path) yield* applyEffect(raw, path, exact ? audio.length : undefined)
+    })
+
+  const speakAll = (parts: ReadonlyArray<string>) => Effect.forEach(parts, (part) => Effect.tryPromise(() => speak(part)))
+
+  /**
+   * Renders the text to `path`. Asked for a first part, it renders the first
+   * sentences, saves them as the whole will start and says so, then renders the
+   * rest: all in one request, so no other render can slip in between.
+   */
+  const render = ({ id, text, path, first }: Extract<Request, { type: "render" }>) =>
+    Effect.gen(function* () {
+      const opened = first === undefined ? undefined : yield* opening(text, fits)
+      if (first === undefined || opened === undefined) return yield* save(join(yield* speakAll(yield* split(text, fits)), rate), path)
+      const lead = yield* Effect.tryPromise(() => speak(opened.first))
+      yield* save(head(lead, rate), first, true)
+      send({ type: "part", id, path: first })
+      // Given up on while its first part rendered, so the rest isn't worth the wait.
+      if (cancelled.has(id)) return
+      yield* save(join([lead, ...(yield* speakAll(yield* split(opened.rest, fits)))], rate), path)
     })
 
   /** Answers every request, even one given up on, since the daemon holds the next back until this one is done. */
-  const answer = ({ id, text, path }: Extract<Request, { type: "render" }>) =>
-    cancelled.delete(id)
+  const answer = (request: Extract<Request, { type: "render" }>) => {
+    const { id, path, first } = request
+    return cancelled.delete(id)
       ? Effect.sync(() => send({ type: "cancelled", id }))
-      : render(text, path).pipe(
+      : render(request).pipe(
           Effect.matchCauseEffect({
             onSuccess: () =>
               // Given up on while it rendered, so nobody will remove it.
               cancelled.delete(id)
-                ? Effect.promise(() => rm(path, { force: true })).pipe(
+                ? Effect.promise(() => Promise.all([path, ...(first === undefined ? [] : [first])].map((file) => rm(file, { force: true })))).pipe(
                     Effect.zipRight(Effect.sync(() => send({ type: "cancelled", id }))),
                   )
                 : Effect.sync(() => send({ type: "rendered", id })),
@@ -139,6 +166,7 @@ const program = Effect.gen(function* () {
             }),
           ),
         )
+  }
 
   // One at a time: they'd only compete for the same GPU or cores.
   return yield* Queue.take(requests).pipe(Effect.flatMap(answer), Effect.forever)

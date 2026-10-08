@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
 import { ProcessError } from "./Process.ts"
-import { join, KokoroError, kokoro, remembering, split } from "./Voice.ts"
+import { head, join, KokoroError, kokoro, opening, remembering, split } from "./Voice.ts"
 
 /** Samples at `level`, with `rate` samples a second. */
 const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.round(seconds * rate)).fill(level)
@@ -66,6 +66,37 @@ describe("join", () => {
   test("leaves a single part alone", () => {
     const part = new Float32Array([...tone(0.25, 0), ...tone(1, 0.5), ...tone(0.25, 0)])
     expect(join([part], 100)).toEqual(part)
+  })
+
+  test("starts the whole exactly as its first part plays on its own", () => {
+    const first = new Float32Array([...tone(0.25, 0), ...tone(1, 0.5), ...tone(0.6, 0.01), ...tone(0.25, 0)])
+    const rest = new Float32Array([...tone(0.25, 0), ...tone(1, 0.4), ...tone(0.25, 0)])
+    const start = head(first, 100)
+    const whole = join([first, rest, rest], 100)
+    expect(start.length).toBeLessThan(whole.length)
+    expect(Array.from(whole.subarray(0, start.length))).toEqual(Array.from(start))
+  })
+})
+
+/** Where `opening` splits, with Kokoro's token count standing in as a number of characters. */
+const open = (text: string, limit = 250) => Effect.runSync(opening(text, (part) => Effect.succeed(part.length <= limit)))
+
+describe("opening", () => {
+  test("takes whole sentences from the start, enough to play while the rest renders", () => {
+    expect(open("yapd. The tests pass. I merged the fix, and nothing needs you.")).toEqual({
+      first: "yapd. The tests pass.",
+      rest: "I merged the fix, and nothing needs you.",
+    })
+    expect(open("Over in yapd, the loader is fixed and its tests pass. I merged it. Nothing needs you.")).toEqual({
+      first: "Over in yapd, the loader is fixed and its tests pass.",
+      rest: "I merged it. Nothing needs you.",
+    })
+  })
+
+  test("never ends a first part mid-sentence", () => {
+    expect(open("The tests pass, and nothing needs you.")).toBeUndefined()
+    // Too long for Kokoro in one go, it would have to break somewhere in the middle.
+    expect(open("The loader is fixed, its tests pass, and I merged it. Nothing needs you.", 30)).toBeUndefined()
   })
 })
 
@@ -251,12 +282,18 @@ const fakeKokoro = () => {
     return
   }
   const cancelled = new Set<number>()
-  process.on("message", (request: { type: string; id: number; path: string }) => {
+  process.on("message", (request: { type: string; id: number; text: string; path: string; first?: string }) => {
     record({ request })
     if (request.type === "cancel") cancelled.add(request.id)
     if (request.type !== "render") return
     if (mode === "crash") process.exit(1)
     if (mode === "failing") send({ type: "failed", id: request.id, reason: "No voice" })
+    // Asked for one, the first sentence comes at once when there's more after it.
+    if (request.first !== undefined && request.text.includes(". ")) {
+      writeFileSync(request.first, "part")
+      record({ part: request.id })
+      send({ type: "part", id: request.id, path: request.first })
+    }
     const rendered = () => {
       writeFileSync(request.path, "audio")
       record({ rendered: request.id })
@@ -285,6 +322,7 @@ type Entry = {
   readonly launched?: ReadonlyArray<string>
   readonly pid?: number
   readonly request?: any
+  readonly part?: number
   readonly rendered?: number
   readonly cancelled?: number
 }
@@ -394,6 +432,57 @@ describe("kokoro", () => {
         yield* voice.render("Two.", `${file}.2`)
         expect(yield* Effect.promise(() => Bun.file(`${file}.1`).exists())).toBe(false)
         expect(yield* Effect.promise(() => Bun.file(`${file}.2`).exists())).toBe(true)
+      }),
+    ))
+
+  test("has the first sentence ready early, in the same render, so no other render slips in before the rest", () =>
+    withKokoro("slow", (voice, log, file) =>
+      Effect.gen(function* () {
+        const text = "The tests pass. Nothing needs you."
+        const { first, whole } = yield* voice.renderFirst(text, file)
+        yield* until(log, (recorded) => requests("render")(recorded).length === 1)
+        const other = yield* Effect.fork(voice.render("Two.", `${file}.2`))
+        const part = yield* first
+        expect(part).toBe(`${file}.first.wav`)
+        expect(yield* Effect.promise(() => Bun.file(part).text())).toBe("part")
+        yield* whole
+        yield* Fiber.join(other)
+        const recorded = yield* entries(log)
+        expect(requests("render")(recorded)[0]?.request).toEqual({ type: "render", id: 1, text, path: file, first: part })
+        const order = recorded.flatMap((entry) =>
+          entry.request?.type === "render"
+            ? [`asked ${entry.request.id}`]
+            : entry.part !== undefined
+              ? [`part ${entry.part}`]
+              : entry.rendered !== undefined
+                ? [`rendered ${entry.rendered}`]
+                : [],
+        )
+        expect(order).toEqual(["asked 1", "part 1", "rendered 1", "asked 2", "rendered 2"])
+      }).pipe(Effect.scoped),
+    ))
+
+  test("plays a single sentence whole, as there's nothing to have early", () =>
+    withKokoro("", (voice, log, file) =>
+      Effect.gen(function* () {
+        const { first } = yield* voice.renderFirst("The tests pass.", file)
+        expect(yield* first).toBe(file)
+        expect(yield* Effect.promise(() => Bun.file(file).text())).toBe("audio")
+        expect((yield* entries(log)).some((entry) => entry.part !== undefined)).toBe(false)
+      }).pipe(Effect.scoped),
+    ))
+
+  test("removes both files of a render given up on after its first part", () =>
+    withKokoro("deaf", (voice, log, file) =>
+      Effect.gen(function* () {
+        const part = yield* Effect.gen(function* () {
+          const { first } = yield* voice.renderFirst("The tests pass. Nothing needs you.", file)
+          return yield* first
+        }).pipe(Effect.scoped)
+        yield* voice.render("Two.", `${file}.2`)
+        expect(yield* Effect.promise(() => Bun.file(part).exists())).toBe(false)
+        expect(yield* Effect.promise(() => Bun.file(file).exists())).toBe(false)
+        expect(requests("cancel")(yield* entries(log)).map((entry) => entry.request)).toEqual([{ type: "cancel", id: 1 }])
       }),
     ))
 
