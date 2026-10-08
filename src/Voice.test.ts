@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
 import { ProcessError } from "./Process.ts"
-import { early, head, join, KokoroError, kokoro, opening, remembering, split, type Voice, withFallback } from "./Voice.ts"
+import { early, head, join, KokoroError, kokoro, opening, remembering, split, startRender, type Voice, withFallback } from "./Voice.ts"
 
 /** Samples at `level`, with `rate` samples a second. */
 const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.round(seconds * rate)).fill(level)
@@ -559,6 +559,25 @@ describe("kokoro", () => {
         expect(yield* Effect.promise(() => Bun.file(file).exists())).toBe(false)
         expect(requests("cancel")(yield* entries(log)).map((entry) => entry.request)).toEqual([{ type: "cancel", id: 1 }])
       }),
+    ))
+
+  test("abandons a started render nobody took, freeing Kokoro for the next and removing both its files", () =>
+    withKokoro("slow", (voice, log, file) =>
+      Effect.gen(function* () {
+        const lifetime = yield* Effect.scope
+        const plain: Voice["Type"] = { render: () => Effect.die("Rendered with no first part"), renderFirst: voice.renderFirst }
+        const text = "The tests pass. Nothing needs you."
+        // Like an update yapd was turned off for once its first part was there, and one only refused once it was all rendered.
+        const refused = yield* startRender(plain, text, file, lifetime)
+        const part = yield* refused.first
+        yield* refused.abandon
+        const rendered = yield* startRender(plain, text, `${file}.2`, lifetime)
+        yield* rendered.whole
+        yield* rendered.abandon
+        for (const left of [part, file, `${file}.2.first.wav`, `${file}.2`])
+          expect(yield* Effect.promise(() => Bun.file(left).exists())).toBe(false)
+        expect(requests("cancel")(yield* entries(log)).map((entry) => entry.request)).toEqual([{ type: "cancel", id: 1 }])
+      }).pipe(Effect.scoped),
     ))
 
   test("leaves no first part behind of a render given up on before it was heard of, whose rest then failed", async () => {

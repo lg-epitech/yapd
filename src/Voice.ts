@@ -1,5 +1,5 @@
 import type { Subprocess } from "bun"
-import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Fiber, FiberId, Layer, Runtime, type Scope } from "effect"
+import { Cause, Clock, Context, Data, Deferred, Effect, ExecutionStrategy, Exit, Fiber, FiberId, Layer, Option, Runtime, Scope } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
@@ -58,6 +58,9 @@ const rendering =
       const givenUp = Exit.fail(new KokoroError({ cause: "Given up" }))
       yield* Effect.addFinalizer(() => settle(givenUp))
       yield* render(text, path, (part) => Deferred.unsafeDone(first, Exit.succeed(part))).pipe(
+        // A fork takes after where it starts, and `startRender` starts it where nothing can be interrupted, which
+        // would leave closing the scope waiting for the whole render rather than giving it up.
+        Effect.interruptible,
         Effect.onExit((exit) => settle(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause) ? givenUp : exit)),
         Effect.forkScoped,
       )
@@ -67,6 +70,35 @@ const rendering =
 /** Renders with the first sentences early when the voice can, else the whole at once, which then plays first. */
 export const early = (voice: Voice["Type"], text: string, path: string): Effect.Effect<Rendering, never, Scope.Scope> =>
   voice.renderFirst?.(text, path) ?? rendering(voice.render)(text, path)
+
+/** A render started on its own, which whoever ends up with it abandons once done with it. */
+export interface Started extends Rendering {
+  /**
+   * Gives the render up if it's still under way, and removes its files, both
+   * of them. Harmless again, or once they're gone.
+   */
+  readonly abandon: Effect.Effect<void>
+}
+
+/**
+ * Starts a render like `early`, in a scope of its own, so it carries on with
+ * the rest once whoever started it has handed it on, like to the inbox to play.
+ * It lasts until abandoned, which whoever doesn't hand it on, like when yapd was
+ * turned off meanwhile, does at once, or `lifetime` ends. All in one step, so
+ * an interruption can't leave one running that nothing will abandon.
+ */
+export const startRender = (voice: Voice["Type"], text: string, path: string, lifetime: Scope.Scope): Effect.Effect<Started> =>
+  Effect.gen(function* () {
+    const scope = yield* Scope.fork(lifetime, ExecutionStrategy.sequential)
+    const rendering = yield* early(voice, text, path).pipe(Scope.extend(scope))
+    const abandon = Effect.gen(function* () {
+      yield* Scope.close(scope, Exit.void)
+      // Settled once the scope is closed: its first part's file, or a failure, when there's none to remove.
+      const first = yield* Effect.option(rendering.first)
+      yield* Effect.promise(() => Promise.all([path, ...Option.toArray(first)].map((file) => rm(file, { force: true }))))
+    }).pipe(Effect.uninterruptible)
+    return { ...rendering, abandon }
+  }).pipe(Effect.uninterruptible)
 
 /** Where Kokoro's model and voices come from. */
 export const kokoroRepo = "onnx-community/Kokoro-82M-v1.0-ONNX"
