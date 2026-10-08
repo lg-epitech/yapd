@@ -1332,12 +1332,21 @@ export const make = (options: {
         case "start":
           return start(thought, said, at.step)
         case "show":
-          return Effect.map(options.show.present(decision.how, target, thought.situation, said), ({ say, card, about }): Outcome => ({
-            say,
-            subject: say === "" ? thought.subject : { _tag: "Answer", said: say, about },
-            kind: say === "" ? "none" : "answer",
-            ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
-          }))
+          // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
+          return Effect.flatMap(options.show.present(decision.how, target, thought.situation, said), ({ say, card, about }) =>
+            onward(
+              thought,
+              {
+                say,
+                subject: say === "" ? thought.subject : { _tag: "Answer", said: say, about },
+                kind: say === "" ? "none" : "answer",
+                ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
+              },
+              about,
+              at.step + 1,
+              said,
+            ),
+          )
         case "dismiss":
           // Nothing more to say to this, and the rest, like "thanks, and tell it to open a PR", still to do.
           return onward(thought, quiet(thought.subject), Option.none(), at.step + 1, said)

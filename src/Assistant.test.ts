@@ -3552,6 +3552,39 @@ describe("Assistant", () => {
     expect(result.said).toBe("Migrate the Cosmos integration: checks pass, sir.")
   })
 
+  test("something shown with more to do in the same breath does the rest after it, about the thread shown, with its card up for the lot", async () => {
+    const url = "https://github.com/lg-epitech/yapd/pull/7"
+    const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader", "yapd", {
+      pullRequests: [{ number: 7, url, repository: "lg-epitech/yapd", snapshot: { state: "open", title: "Fix the loader", checksState: "failing" } }],
+      updatedAt: new Date(now - 30 * 60_000).toISOString(),
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, show, opened, dispatched } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("tell")
+              ? // "It" is the thread whose pull request was just shown.
+                Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Fix the checks.", how: "now" })
+              : Brain.decision({ act: "show", how: "pr", target: handle(situation, loader), rest: "tell it to fix the checks" }),
+          undefined,
+          { others: [loader] },
+        )
+        yield* show.watch
+        yield* dictate("Open the loader PR and tell it to fix the checks.")
+        return {
+          said: spoken(),
+          opened,
+          up: Option.map(yield* show.seen, ({ kind, url }) => ({ kind, url })),
+          sent: dispatched.map(({ type, threadId, text }) => [type, threadId, text]),
+        }
+      }).pipe(Effect.scoped),
+    )
+    expect(result.opened).toEqual([url])
+    expect(result.sent).toEqual([["message.dispatch", loader.id, "Fix the checks."]])
+    expect(result.said).toEqual(["It's on your screen. Fix the loader: checks are failing. On it, sir."])
+    expect(result.up).toEqual(Option.some({ kind: "pr", url }))
+  })
+
   test("a pull request opened for any thread but the one just talked about is said with whose it is", async () => {
     const url = "https://github.com/lg-epitech/yapd/pull/7"
     const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader", "yapd", {
