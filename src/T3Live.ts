@@ -337,7 +337,8 @@ export const follow = (
               const message = decodeMessage(event.value.data)
               if (Either.isLeft(message)) break
               const { _tag, requestId, values } = message.right
-              if (_tag === "Exit" && requestId === subscription) return caughtUp
+              // The subscription ended, or the connection's own calls broke, whatever the socket still answers.
+              if ((_tag === "Exit" && requestId === subscription) || _tag === "Defect") return caughtUp
               if (_tag !== "Chunk" || requestId !== subscription) break
               for (const value of values ?? []) {
                 const item = decodeItem(value)

@@ -249,6 +249,29 @@ describe("T3Live.follow", () => {
       expect(afterMarker).toBe(true)
     }))
 
+  test("connects again when T3 Code says the connection broke, even while it still answers pings", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const { sockets, dial } = fake()
+        const live = yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        yield* flush
+        sockets[0]!.emit({ _tag: "Open" })
+        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
+        yield* flush
+        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Defect", defect: "boom" }) })
+        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Pong" }) })
+        yield* flush
+        const stale = Option.isSome(yield* live.view)
+        yield* TestClock.adjust("2 seconds")
+        yield* flush
+        return { stale, closed: sockets[0]!.closed, dialed: sockets.length }
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ).then(({ stale, closed, dialed }) => {
+      expect(stale).toBe(false)
+      expect(closed).toBe(true)
+      expect(dialed).toBe(2)
+    }))
+
   test("tries again when a socket throws instead of sending", () =>
     Effect.runPromise(
       Effect.gen(function* () {
