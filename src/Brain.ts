@@ -741,6 +741,9 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
         return `he asked you: ${text}`
       case "started":
         return `you started work${where}: ${said}`
+      // What he had passed on to a thread, in the words it was sent, which yapd never said aloud.
+      case "sent":
+        return `you sent his message to the thread${where}: ${text}`
       default:
         return `you said${where}: ${said}`
     }

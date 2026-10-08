@@ -4,6 +4,7 @@ import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
+import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -172,6 +173,15 @@ describe("Brain", () => {
     for (const heard of ["Yapd.", "yapd please", "Jarvis, um."]) expect(Brain.fast(situation(heard, { open: Option.some(project) }), lines)).toBeUndefined()
     // Only what fills a pause, or asks nicely, is nothing said.
     for (const heard of ["Um.", "Uh, sir.", "Please."]) expect(Brain.fast(situation(heard, { open: Option.some(project) }), lines)?.act).toBe("resume")
+  })
+
+  test("a message passed on to a thread shows in what happened lately in the words it was sent", () => {
+    const message = "Use mainnet first, then ghostnet."
+    // As the daemon keeps it once it's sent: the message, and nothing said aloud.
+    const sent: Kept = { id: 1, at: now - 60_000, kind: "sent", machine: "Rosie", project: "integration", thread: tezos.id, directory: "/code/integration", text: message }
+    const shown = Brain.prompt(situation("What did I just tell the Tezos one?", { lately: [sent] }), Option.none())
+    const handle = desk().threads.find(({ ref }) => ref.id === tezos.id)?.handle
+    expect(shown).toContain(`LATELY, oldest first:\n- 1 min ago, you sent his message to the thread (integration, ${handle}): «${message}»\n`)
   })
 
   test("a near-silence 'Thank you.' is ignored", () => {
