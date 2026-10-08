@@ -744,7 +744,10 @@ export const make = (options: {
       // Taking back a stop is letting it carry on.
       const stopped = Option.exists(
         last,
-        (row) => row.kind === "stop" && row.state === "sent" && Option.match(to, { onNone: () => true, onSome: ({ machine, id }) => row.machine === machine && row.thread === id }),
+        (row) =>
+          row.kind === "stop" &&
+          row.state === "sent" &&
+          Option.match(to, { onNone: () => true, onSome: ({ machine, id }) => row.machine === machine && row.thread === id }),
       )
       switch (decision.act) {
         case "send":
@@ -871,6 +874,7 @@ export const make = (options: {
         yield* Effect.logInfo("Saying what's done so far, while the rest is worked out")
         yield* background(
           Fiber.join(thinking).pipe(
+            // Only what's done waits its turn, not working it out.
             Effect.flatMap((next) => turn.withPermits(1)(Effect.flatMap(then(next, quiet(first.subject), step, said, true), (after) => deliver(after, thought.utterance)))),
             Effect.annotateLogs({ utterance: thought.utterance.id }),
           ),

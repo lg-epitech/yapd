@@ -250,14 +250,14 @@ const assistant = (
                   })
                 : // Like T3 Code preparing a worktree that never gets ready, which its launcher gives up on after six minutes.
                   (given.hanging === true ? Effect.never : Effect.sleep(`${given.launching ?? 0} seconds`)).pipe(
-                Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started." }) }),
-                Effect.zipRight(
-                  Effect.sync(() => {
-                    started.push(request)
-                    return { thread: "new-thread", project: request.project.replace("/code/", ""), directory: request.project, branch: null, model: "claude-opus-5-5", worktree: false } satisfies Started
-                  }),
-                ),
-              ),
+                    Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started." }) }),
+                    Effect.zipRight(
+                      Effect.sync(() => {
+                        started.push(request)
+                        return { thread: "new-thread", project: request.project.replace("/code/", ""), directory: request.project, branch: null, model: "claude-opus-5-5", worktree: false } satisfies Started
+                      }),
+                    ),
+                  ),
           },
           researcher: Research.unavailable("Not here."),
         },
