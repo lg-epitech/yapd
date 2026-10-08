@@ -203,7 +203,33 @@ export const which = (candidates: ReadonlyArray<Threads.Listed>, lines: Lines, a
 }
 
 /** Whether it's yes or no to doing something, like "Stop the Tezos migration?", whose `about` says what, as "stop the Tezos migration". */
-const yesNo = (kind: Assistant.Open["kind"]) => kind === "confirm" || kind === "offer" || kind === "resend"
+export const yesNo = (kind: Assistant.Open["kind"]) => kind === "confirm" || kind === "offer" || kind === "resend"
+
+/** When a message goes in, as `how` says it: an empty one is at once. */
+const when = (how: string) => (how === "after" || how === "restart" ? how : "now")
+
+/**
+ * Whether a decision is what a yes or no question asked about, however it was
+ * put: the same act on the same thread, and for a message the same words and
+ * timing, or none given, which leaves them as asked. Anything else, like
+ * another thread or other words, is something else he wants instead.
+ */
+export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, decided: Decision, desk: Threads.Desk) => {
+  const asked = open.decision
+  if (decided.act !== asked.act) return false
+  if (decided.target !== "") {
+    const named = desk.threads.find(({ handle }) => handle === decided.target)
+    if (named === undefined || !open.candidates.some((ref) => Threads.same(ref, named.ref))) return false
+  }
+  switch (asked.act) {
+    case "send":
+      return (decided.text.trim() === "" || words(decided.text) === words(asked.text)) && (decided.how.trim() === "" || when(decided.how) === when(asked.how))
+    case "undo":
+      return decided.how.trim() === "" || (decided.how === "carry") === (asked.how === "carry")
+    default:
+      return true
+  }
+}
 
 /** A yes or no question about doing something: "Stop the Tezos migration, sir?", or in other words when that was asked lately, or none. */
 export const confirming = (doing: string, lines: Lines, asked: ReadonlyArray<string>) =>
@@ -718,7 +744,8 @@ const choosing = `Choosing a thread:
 - New work that refers to an existing thread, like "look at what I did for the billing export and start another thread doing the same for invoices", is "start", not "send".
 - If THREADS or LATELY shows you started the same work in the last 30 minutes, don't start it again: "answer" that it's already under way, naming it.`
 
-const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".`
+const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".
+When OPEN asks yes or no to doing something, it says what a yes does. A plain yes is that act on that thread, with "text" empty. A no is "dismiss". A no with something else instead, like "no, the Mina one" or "no, tell it to use the other table", is that something else, decided in full, with "pending" "answers": yapd does that and not what it asked.`
 
 const answering = `Answers:
 - Answer from THREADS, WAITING ON YOU, LATELY, UNHEARD and USAGE. Never make up a state: say what you don't know.
@@ -978,6 +1005,10 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
           open.candidates.length === 0
             ? ""
             : `\nIts choices, in the order you said them: ${open.candidates.map((ref) => handleOf(desk, ref.machine, ref.id) ?? "a thread that's gone").join(", ")}`
+        }${
+          yesNo(open.kind)
+            ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act === "send" ? ` with the message ${fenced(open.decision.text, 400)}` : ""}`
+            : ""
         }`,
       ],
     }),

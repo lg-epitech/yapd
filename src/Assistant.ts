@@ -845,11 +845,26 @@ export const make = (options: {
      * A yes to doing what was asked about: the same thing on the same thread,
      * as it's known now, checked as anything done is, and never asked about a
      * second time. To sending again, it's the same step under the same ids,
-     * once; a yes that doesn't stand lets it go for good.
+     * once; a yes that doesn't stand lets it go for good. A no with something
+     * else instead, like another thread or other words, is that something else,
+     * and what was asked about isn't done.
      */
     const agreeing = (open: Open, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
         const { utterance, situation } = thought
+        if (!Brain.agrees(open, thought.decision, situation.desk)) {
+          yield* forgo(open, "He asked for something else instead.")
+          // Words left out are the ones asked about, as for "no, the Mina one".
+          const answered = thought.decision
+          const instead = answered.act === open.decision.act && answered.text.trim() === "" ? { ...answered, text: open.decision.text } : answered
+          const checked = Brain.check(instead, situation, said)
+          if (checked._tag === "Ask") {
+            yield* Effect.logInfo("Leaving it, rather than ask again")
+            return reply(said.leaving, thought.subject)
+          }
+          yield* Effect.logInfo("Doing what he asked instead of what I asked about")
+          return yield* follow(checked, { ...thought, decision: instead }, said)
+        }
         const target = Option.fromNullable(open.candidates[0]).pipe(
           Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
         )
@@ -964,7 +979,9 @@ export const make = (options: {
         }
         // He didn't catch the question, so it's asked again in other words, now rather than later.
         if (decision.act === "again" && decision.pending === "answers") return yield* reask(said)
-        const answers = decision.pending === "answers" && decision.act !== "resume"
+        // Saying again just what was asked about, like the same message to the same thread, is a yes to it.
+        const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, decision, decided.situation.desk)
+        const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume"
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : answers ? "answered" : "replaced", utterance.id)
         if (!answers) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         if (decision.act === "dismiss") {

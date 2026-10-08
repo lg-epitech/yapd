@@ -903,6 +903,88 @@ describe("Assistant", () => {
     expect(result.sent.map(({ threadId }) => threadId)).toEqual([tezos.id])
   })
 
+  test("a stop only fairly sure of the focus thread is confirmed first, and yes stops it, holding its queue", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, spoken, dispatched } = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing fee tables, sir." })
+            : Brain.decision({ act: "stop", target: handle(situation, tezos), sure: "medium", others: handle(situation, mina) }),
+        )
+        yield* dictate("What's the Tezos one doing?")
+        yield* dictate("Stop it.")
+        const before = dispatched.length
+        yield* answer("Yes.")
+        return { before, spoken: spoken(), dispatched: dispatched.map(({ type, threadId, holdQueue }) => ({ type, threadId, holdQueue })) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken.slice(1, 2)).toEqual(["Stop Migrate Tezos Integration, sir?"])
+    expect(result.dispatched).toEqual([{ type: "run.interrupt", threadId: tezos.id, holdQueue: true }])
+  })
+
+  test("a no naming another thread, or other words, does what he said instead and never what was asked about", async () => {
+    const corrected = (
+      model: (situation: Brain.Situation) => Brain.Decision,
+      steps: (helpers: { dictate: (heard: string) => Effect.Effect<void>; answer: (heard: string) => Effect.Effect<boolean> }) => Effect.Effect<void>,
+    ) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, answer, spoken, dispatched } = yield* assistant(model)
+          yield* steps({ dictate, answer: (heard) => answer(heard) })
+          return { spoken: spoken(), sent: dispatched.map(({ type, threadId, text }) => ({ type, threadId, text })) }
+        }),
+      )
+    // "Stop it?" about the Tezos one, and he meant the Mina one, which has nothing to stop: nothing is stopped.
+    const stopped = await corrected(
+      (situation) =>
+        situation.utterance.heard.startsWith("What")
+          ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing fee tables, sir." })
+          : situation.utterance.heard.startsWith("No")
+            ? Brain.decision({ act: "stop", target: handle(situation, mina), sure: "high", pending: "answers" })
+            : Brain.decision({ act: "stop", target: handle(situation, tezos), sure: "medium" }),
+      ({ dictate, answer }) =>
+        Effect.gen(function* () {
+          yield* dictate("What's the Tezos one doing?")
+          yield* dictate("Stop it.")
+          yield* answer("No, the Mina one.")
+        }),
+    )
+    expect(stopped.sent).toEqual([])
+    expect(stopped.spoken.at(-1)).toBe("Open Mina SSV2 Bug Tickets isn't doing anything right now, sir.")
+    // "I sent that a minute ago. Again?", and he meant it for the Mina one: it goes there, and the Tezos one gets it once.
+    const twin = (situation: Brain.Situation) =>
+      situation.utterance.heard.startsWith("No, tell the Mina")
+        ? Brain.decision({ act: "send", target: handle(situation, mina), sure: "high", pending: "answers" })
+        : situation.utterance.heard.startsWith("No, tell it")
+          ? Brain.decision({ act: "send", target: handle(situation, tezos), sure: "high", text: "Use the other fee table.", pending: "answers" })
+          : tezosMessage("high")(situation)
+    const elsewhere = await corrected(twin, ({ dictate, answer }) =>
+      Effect.gen(function* () {
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* answer("No, tell the Mina one instead.")
+      }),
+    )
+    expect(elsewhere.spoken.at(-2)).toBe("I sent that a minute ago, sir. Again?")
+    expect(elsewhere.sent).toEqual([
+      { type: "message.dispatch", threadId: tezos.id, text: "Use the fee table from the Mina work." },
+      { type: "message.dispatch", threadId: mina.id, text: "Use the fee table from the Mina work." },
+    ])
+    // Other words for the same thread: those go, and the first ones don't go again.
+    const reworded = await corrected(twin, ({ dictate, answer }) =>
+      Effect.gen(function* () {
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* answer("No, tell it to use the other fee table instead.")
+      }),
+    )
+    expect(reworded.sent).toEqual([
+      { type: "message.dispatch", threadId: tezos.id, text: "Use the fee table from the Mina work." },
+      { type: "message.dispatch", threadId: tezos.id, text: "Use the other fee table." },
+    ])
+  })
+
   test("nothing is dispatched for a dictation heard before yapd was turned off and on", async () => {
     const sending = (toggled: boolean) =>
       run(
