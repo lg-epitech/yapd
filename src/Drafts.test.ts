@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Either, Fiber, Option, type Scope, TestClock, TestContext } from "effect"
 import * as Drafts from "./Drafts.ts"
-import { type Catalog, LaunchError, list, type Request, type Started, serve } from "./Launcher.ts"
+import { asking, type Catalog, LaunchError, list, type Request, type Started, serve } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import { ProcessError } from "./Process.ts"
 import * as Remote from "./Remote.ts"
 import * as Research from "./Research.ts"
 import type { Line } from "./Responder.ts"
@@ -72,6 +73,8 @@ const drafts = (
     readonly rigDown?: boolean
     /** Whether rig is reached as it is for real, through `yapd start` and `yapd catalog` there. */
     readonly remote?: boolean
+    /** Whether the connection to rig drops once `yapd start` there has what to start, before its answer gets here. */
+    readonly dropped?: boolean
     /** Whether what's started is written down first, in a ledger of its own, and whether writing it down takes a second. */
     readonly ledger?: boolean | "slow"
   } = {},
@@ -105,6 +108,13 @@ const drafts = (
       available: true,
       research: ({ directory }) => Effect.sync(() => void researched.push({ machine, directory })).pipe(Effect.as({})),
     })
+    /** `yapd start` on rig as SSH brings it back, with what it said on stderr ahead of SSH's own. */
+    const there = (command: ReadonlyArray<string>, stdin: string) => {
+      let said = ""
+      const answered = serve(launcher("rig", rig), stdin, Effect.sync(() => void (said += `${asking}\n`)))
+      if (options.dropped !== true) return answered
+      return Effect.flatMap(answered, () => Effect.fail(new ProcessError({ command: command.join(" "), code: 255, stderr: `${said}client_loop: send disconnect: Broken pipe` })))
+    }
     const kept = Ledger.fromStore(yield* Store.make(":memory:"))
     const ledger: Ledger.Ledger["Type"] = options.ledger === "slow" ? { ...kept, prepare: (step) => Effect.zipLeft(kept.prepare(step), Effect.sleep("1 second")) } : kept
     const made = yield* Drafts.make({
@@ -116,7 +126,7 @@ const drafts = (
           hosts: ["rig"],
           launcher:
             options.remote === true
-              ? Remote.launcher("rig", "rig", (command, stdin) => (command.at(-1)?.endsWith("start") ? serve(launcher("rig", rig), stdin) : list(launcher("rig", rig))))
+              ? Remote.launcher("rig", "rig", (command, stdin) => (command.at(-1)?.endsWith("start") ? there(command, stdin) : list(launcher("rig", rig))))
               : launcher("rig", rig),
           researcher: researcher("rig"),
         },
@@ -490,6 +500,31 @@ describe("Drafts", () => {
     )
     expect(result).toEqual({
       said: [{ spoken: "About the loader fix: T3 Code is taking too long, so I don't know if it started.", came: "Failed" }],
+      state: Option.some("unknown"),
+      open: ["yapd:u1:0"],
+    })
+  })
+
+  test("new work on another machine that the connection drops on once yapd there has it is left for a restart to look for, never taken as not started", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, said, ledger, started } = yield* drafts(() => decision({ project: "trainer", machine: "rig", model: "gpt-6-sol" }), {
+          ledger: true,
+          remote: true,
+          dropped: true,
+        })
+        yield* dictate("On rig, fix the loader in trainer.", { utterance: "u1", step: 0 })
+        return {
+          started: started.length,
+          said,
+          state: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state),
+          open: (yield* ledger.open(0)).map(({ commandId }) => commandId),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      started: 1,
+      said: [{ spoken: "About the loader fix: rig cut out partway, so I don't know if it started.", came: "Failed" }],
       state: Option.some("unknown"),
       open: ["yapd:u1:0"],
     })

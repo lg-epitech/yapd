@@ -89,7 +89,9 @@ const nowhere: Masters = () => none
  * request came in over the network, or from a model. With `master`, it goes
  * through the connection to the machine that's open already. `fail` is told
  * it was `sent` when the machine stopped answering once it had what it was
- * asked, which it may have done all the same.
+ * asked, which it may have done all the same: when it takes too long, or
+ * when it ends any other way once the command has said `heard.line` on
+ * stderr, which it says once it has it.
  */
 export const ask = <E>(
   exec: Exec,
@@ -97,10 +99,11 @@ export const ask = <E>(
   destination: string,
   command: "relay" | "start" | "catalog" | "research" | "t3",
   stdin: string,
-  // `silent` and `failed` end the sentences that start with the machine's name.
+  // `silent` and `failed` end the sentences that start with the machine's name, as `heard.cut` does.
   wording: { readonly patience: Duration.DurationInput; readonly silent: string; readonly failed: string },
   fail: (reason: string, cause?: unknown, sent?: boolean) => E,
   master: Master = none,
+  heard?: { readonly line: string; readonly cut: string },
 ) =>
   Effect.flatMap(master, (socket) =>
     // From /, since Bun would load a .env in the home directory SSH starts in, ahead of yapd's own. When the
@@ -117,17 +120,20 @@ export const ask = <E>(
   ).pipe(
     Effect.catchTag("ProcessError", (error) =>
       Effect.fail(
-        fail(
-          // 255 is SSH's own failure, 127 the remote shell not finding yapd.
-          error.code === 255
-            ? `I can't reach ${host}.`
-            : error.code === 127
-              ? `yapd isn't on ${host}'s path.`
-              : error.stderr.includes("usage: yapd")
-                ? `yapd on ${host} needs updating.`
-                : `yapd on ${host} ${wording.failed}`,
-          error,
-        ),
+        // Once it said it had it, the connection dropping, which SSH says as it does one it never made, or the command stopping partway.
+        heard !== undefined && error.stderr.split("\n").some((line) => line.trim() === heard.line)
+          ? fail(`${host} ${heard.cut}`, error, true)
+          : fail(
+              // 255 is SSH's own failure, 127 the remote shell not finding yapd.
+              error.code === 255
+                ? `I can't reach ${host}.`
+                : error.code === 127
+                  ? `yapd isn't on ${host}'s path.`
+                  : error.stderr.includes("usage: yapd")
+                    ? `yapd on ${host} needs updating.`
+                    : `yapd on ${host} ${wording.failed}`,
+              error,
+            ),
       ),
     ),
     Effect.timeoutFail({ duration: wording.patience, onTimeout: () => fail(`${host} ${wording.silent}`, undefined, true) }),
@@ -189,9 +195,14 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh, ma
           },
           failing,
           master,
+          { line: Launcher.asking, cut: "cut out partway, so I don't know if it started." },
         )
-        const { started, reason, sent } = yield* read(Launcher.Response, answer)
-        return started ?? (yield* failing(reason ?? garbled(host), undefined, sent))
+        // yapd there says nothing started in words this one reads, so an answer it can't read may be work that did, in a shape it doesn't
+        // know, or no answer at all, from yapd there stopped partway.
+        const unread = (cause?: unknown) => failing(`yapd on ${host} answered in a way I don't understand, so I don't know if it started.`, cause, true)
+        const { started, reason, sent } = yield* Schema.decodeUnknown(Schema.parseJson(Launcher.Response))(answer).pipe(Effect.mapError(unread))
+        if (started !== undefined) return started
+        return yield* reason === undefined ? unread() : failing(reason, undefined, sent)
       }),
     catalog: Effect.gen(function* () {
       const answer = yield* ask(

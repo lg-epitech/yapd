@@ -329,4 +329,14 @@ describe("Launcher", () => {
     expect(await serve(recording(requests), "{}")).toHaveProperty("reason")
     expect(requests).toEqual([request])
   })
+
+  test("says it's asking once it has what to start, before it asks, and never for what it can't start", async () => {
+    const said: Array<string> = []
+    const launcher: Launcher.Launcher = { start: () => Effect.sync(() => (said.push("started"), started)), catalog: Effect.die("unused") }
+    const asking = Effect.sync(() => void said.push("asking"))
+    for (const input of [JSON.stringify({ project: "free-sound", prompt: "Fix the loader." }), JSON.stringify({ project: "free-sound", prompt: " " }), "{}"]) {
+      await Effect.runPromise(Launcher.serve(launcher, input, asking))
+    }
+    expect(said).toEqual(["asking", "started"])
+  })
 })
