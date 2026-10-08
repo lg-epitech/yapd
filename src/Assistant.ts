@@ -145,6 +145,8 @@ const desk = { asked: 30, reply: 12, vocabulary: 15 }
 const cap = "100 millis"
 
 const day = 24 * 60 * 60_000
+/** Dictations are dropped after five minutes, so one pressed for longer ago than this has ended, whether or not anything came of it. */
+const longest = 6 * 60_000
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
 
@@ -204,8 +206,8 @@ export const make = (options: {
     let answered: { readonly subject: Subject; readonly at: number } | undefined
     /** What "it" meant when the shortcut was pressed, before the dictation stopped what was playing. */
     let pressed: Subject | undefined
-    /** For each press not yet dictated, oldest first: what lets updates be said again once its answer is queued. */
-    const presses: Array<Effect.Effect<void>> = []
+    /** For each press whose dictation hasn't ended, oldest first: when, and what lets updates be said again once its answer is queued. */
+    const presses: Array<{ readonly at: number; readonly arrived: Effect.Effect<void> }> = []
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
@@ -913,14 +915,23 @@ export const make = (options: {
         return utterance.id
       }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
 
+    /**
+     * A dictation ended, and dictations end in the order they began: the press
+     * it began with, the oldest left once any whose dictation ended without a
+     * word, like one that failed, are let go of.
+     */
+    const ended = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      while (presses.length > 1 && now - presses[0]!.at > longest) yield* presses.shift()!.arrived
+      return presses.shift()?.arrived
+    })
+
     const heard = (input: Omit<Utterance, "id">) =>
-      Effect.suspend(() => {
+      Effect.gen(function* () {
         const utterance: Utterance = { ...input, id: mint(input.at, "u") }
-        // A dictation's answer was awaited from when the shortcut was pressed, and dictations end in the order they began.
-        const press = input.via === "shortcut" ? presses.shift() : undefined
-        return Effect.flatMap(press === undefined ? options.awaiting : Effect.succeed(press), (arrived) =>
-          Effect.zipRight(hold, respond(utterance)).pipe(Effect.ensuring(arrived)),
-        )
+        // A dictation's answer was awaited from when the shortcut was pressed.
+        const arrived = (input.via === "shortcut" ? yield* ended : undefined) ?? (yield* options.awaiting)
+        return yield* Effect.zipRight(hold, respond(utterance)).pipe(Effect.ensuring(arrived))
       })
 
     return {
@@ -929,14 +940,14 @@ export const make = (options: {
       heard,
       prepare: Effect.gen(function* () {
         // What's dictated is answered before anything else is said.
-        presses.push(yield* options.awaiting)
+        presses.push({ at: yield* Clock.currentTimeMillis, arrived: yield* options.awaiting })
         yield* hold
         pressed = yield* subject
         const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
         yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
         yield* Effect.forkIn(threads.refreshUsage, scope)
       }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
-      nothing: Effect.zipRight(release, Effect.suspend(() => presses.shift() ?? Effect.void)),
+      nothing: Effect.zipRight(release, Effect.flatMap(ended, (arrived) => arrived ?? Effect.void)),
       // Not one he hasn't heard yet, which what he said can't have been about.
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),
@@ -944,7 +955,7 @@ export const make = (options: {
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
         pressed = undefined
         // No answer is on its way any more, and the dictations they were for are dropped too.
-        yield* Effect.all(presses.splice(0), { discard: true })
+        yield* Effect.forEach(presses.splice(0), ({ arrived }) => arrived, { discard: true })
         yield* Effect.forEach([...writing.values(), ...jobs], Fiber.interruptFork, { discard: true })
       }),
     } satisfies Assistant["Type"]
