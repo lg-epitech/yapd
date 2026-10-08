@@ -159,7 +159,11 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
     readonly replied: Effect.Effect<void>
     readonly open: Effect.Effect<Option.Option<Open>>
-    /** yapd was turned off: the open question is closed, and whatever was being worked out, written up or done for a request stops. */
+    /**
+     * yapd was turned off: the open question is closed, whatever was being
+     * worked out, written up or done for a request stops, and the card that's
+     * up comes down, with none still to go up ever going up.
+     */
     readonly drop: Effect.Effect<void>
     /** Messages a restart found didn't get there: each is offered to be sent again once, one at a time. */
     readonly undelivered: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
@@ -339,7 +343,8 @@ export const make = (options: {
      * own, but only its own request's when it's a later step of one, like
      * "show me everything, then hide that", which is about the card that
      * request put up and no other. Each is let go of as its line is said, and
-     * all of them once yapd is turned off, which drops what's waiting.
+     * all of them, kept down, once yapd is turned off, which drops what's
+     * waiting, though one being said just then may not have gone up yet.
      */
     const cards = new Set<{ readonly request: string; down: boolean }>()
     /**
@@ -1953,7 +1958,10 @@ export const make = (options: {
       open: Effect.map(Clock.currentTimeMillis, current),
       drop: Effect.gen(function* () {
         dropped = (yield* options.power).turns
+        // Nothing said before is on his screen once yapd is on again, where an app that connects would show it.
+        for (const pending of cards) pending.down = true
         cards.clear()
+        yield* options.show.hide
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
         // No answer is on its way any more, and the dictations they were for are dropped too.
         const kept = [...presses.values()]

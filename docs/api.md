@@ -58,7 +58,7 @@ A UI that shows yapd's [cards](#cards), like the menu bar app, follows `/state/s
 curl -X PUT -H 'Content-Type: application/json' -d '{"on": false}' http://127.0.0.1:4747/state
 ```
 
-Turning it off stops whatever yapd is saying at once, and drops whatever hasn't started yet: what was waiting to be said, a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it.
+Turning it off stops whatever yapd is saying at once, and drops whatever hasn't started yet: what was waiting to be said, a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it. The [card](#cards) yapd is showing comes down too, so `showing` is `null`.
 
 ## Hearing an update again
 

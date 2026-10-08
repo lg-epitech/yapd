@@ -3946,6 +3946,38 @@ describe("Assistant", () => {
     expect(result.up).toEqual(Option.none())
   })
 
+  test("turned off, yapd takes its card down, and one to go up with what it was about to say never does", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Showing needs no model, which can't be asked here, and each line waits its turn until the test plays it.
+        const { dictate, heard, play, notices, spoken, show, toggle } = yield* assistant(() => undefined, undefined, { waiting: true })
+        const up = Effect.map(Stream.runHead(show.showing), (up) => Option.map(Option.flatten(up), ({ kind }) => kind))
+        yield* show.watch
+        yield* dictate("Show me what's running.")
+        yield* play()
+        const before = yield* up
+        // Its turn comes just as yapd is turned off.
+        yield* dictate("Show me my usage.")
+        const usage = notices().at(-1)
+        yield* toggle(false)
+        const off = yield* up
+        yield* play(usage)
+        const played = yield* up
+        yield* toggle(true)
+        yield* heard({ heard: "Show me what you said.", via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: 3 })
+        yield* play()
+        return { before, off, played, said: spoken().at(-1), after: yield* up }
+      }).pipe(Effect.scoped),
+    )
+    expect(result).toEqual({
+      before: Option.some("threads"),
+      off: Option.none(),
+      played: Option.none(),
+      said: "I haven't said anything just now, sir.",
+      after: Option.none(),
+    })
+  })
+
   test("turned off and on, nothing he heard before, an update or a line of its own, is said again or shown, however he asks for it", async () => {
     const cycled = (before: "update" | "line", asked: string) =>
       run(
