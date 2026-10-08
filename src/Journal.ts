@@ -27,6 +27,9 @@ export type Kind =
   /** yapd answered something the user asked it. */
   | "answer"
 
+/** Every kind of entry, as the API takes them. */
+export const kinds = ["update", "reply", "sent", "dictation", "started", "action", "notice", "answer"] as const satisfies ReadonlyArray<Kind>
+
 export interface Entry {
   readonly at: number
   readonly kind: Kind
@@ -70,6 +73,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly markHeard: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<void>
     /** Entries since `at`, oldest first, the latest `most` of them when there are more. */
     readonly since: (at: number, options?: { readonly most?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
+    /** A page of entries, newest written first: `most` of them, only older than the entry `before` and of `kinds` when given. */
+    readonly page: (options: { readonly most: number; readonly before?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
     /** The latest entries about a thread, newest first. */
     readonly byThread: (machine: string, thread: string, most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Updates and notices since `at` the user hasn't heard, oldest first, the latest `most` of them. */
@@ -206,6 +211,17 @@ export const fromStore = (store: Store.Store["Type"], called: Naming = (host) =>
           .query<Row, Array<string | number>>(`select * from journal where at >= ?${filter} order by at desc, id desc limit ?`)
           .all(at, ...kinds, options.most ?? 200)
         return rows.reverse().map(kept)
+      }),
+    ),
+  page: ({ most, before = Number.MAX_SAFE_INTEGER, kinds = [] }) =>
+    reading(
+      store.transaction((database: Database) => {
+        const filter = kinds.length === 0 ? "" : ` and kind in (${kinds.map(() => "?").join(", ")})`
+        // By id, which only grows, so a page picks up where the last one left off whenever what it's about happened.
+        return database
+          .query<Row, Array<string | number>>(`select * from journal where id < ?${filter} order by id desc limit ?`)
+          .all(before, ...kinds, most)
+          .map(kept)
       }),
     ),
   byThread: (machine, thread, most) =>

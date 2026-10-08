@@ -9,6 +9,7 @@ import * as Journal from "./Journal.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
+import * as Show from "./Show.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import type * as T3CodeServer from "./T3CodeServer.ts"
@@ -244,10 +245,14 @@ const assistant = (
     )
     let power = { on: true, turns: 1 }
     let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean }>()
+    /** What the browser was asked to open. */
+    const opened: Array<string> = []
+    const show = yield* Show.make(threads.detail, (address) => Effect.sync(() => void opened.push(address)))
     const made = yield* Assistant.make({
       threads,
       journal,
       drafts,
+      show,
       // Said at once and to the end, as when nothing else is being said.
       tell: (notice) =>
         Effect.zipRight(
@@ -285,6 +290,8 @@ const assistant = (
       started,
       seen,
       journal,
+      show,
+      opened,
       spoken: () => said.map(({ spoken }) => spoken),
       questions,
       flush,
@@ -1270,5 +1277,88 @@ describe("Assistant", () => {
       "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
       "I couldn't work that out just now, sir. What you said is in my log.",
     ])
+  })
+
+  test("'it's on your screen' is said only while an app is watching", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Showing what's running and taking it down need no model, which can't be asked here.
+        const { dictate, spoken, show } = yield* assistant(() => undefined)
+        yield* dictate("Show me what's running.")
+        const unwatched = spoken().at(-1)
+        const watched = yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* show.watch
+            yield* dictate("Show me what's running.")
+            const said = spoken().at(-1)
+            const up = Option.map(yield* show.seen, ({ kind, caption }) => ({ kind, caption }))
+            const before = spoken().length
+            yield* dictate("Hide that.")
+            return { said, up, hidden: Option.isNone(yield* show.seen), quiet: spoken().length === before }
+          }),
+        )
+        // The app went away.
+        yield* dictate("Show me what's running.")
+        return { unwatched, watched, after: spoken().at(-1) }
+      }),
+    )
+    expect(result.unwatched).toBe("One running, sir.")
+    expect(result.watched).toEqual({
+      said: "It's on your screen. One running.",
+      up: Option.some({ kind: "threads", caption: "One running, sir." }),
+      hidden: true,
+      quiet: true,
+    })
+    expect(result.after).toBe("One running, sir.")
+  })
+
+  test("only an https address that came from T3 Code is opened", async () => {
+    const linked = (id: string, title: string, url: string) =>
+      thread(id, title, "yapd", {
+        pullRequests: [
+          {
+            number: 7,
+            url,
+            repository: "lg-epitech/yapd",
+            snapshot: { state: "open", title, checksState: "passing", reviewDecision: "review-required" },
+          },
+        ],
+        updatedAt: new Date(now - 30 * 60_000).toISOString(),
+      })
+    const loader = linked("f0000000-0000-4000-8000-000000000001", "Fix the loader", "https://github.com/lg-epitech/yapd/pull/7")
+    const unsafe = ["javascript:alert(1)", "file:///Applications/Calculator.app", "http://github.com/lg-epitech/yapd/pull/8", "vscode://file/etc/passwd"].map(
+      (url, index) => linked(`f0000000-0000-4000-8000-00000000001${index}`, `Tidy part ${index}`, url),
+    )
+    const result = await run(
+      Effect.gen(function* () {
+        // The model names an address of its own every time, which is never what's opened, nor said.
+        const { dictate, spoken, show, opened } = yield* assistant((situation) => {
+          const part = /part (\d)/.exec(situation.utterance.heard)
+          return Brain.decision({
+            act: "show",
+            how: "pr",
+            target: handle(situation, part === null ? loader : unsafe[Number(part[1])]!),
+            text: "https://evil.example/steal",
+            spoken: "Opening https://evil.example/steal for you.",
+          })
+        }, undefined, { others: [loader, ...unsafe] })
+        yield* dictate("Open the loader PR.")
+        const safe = { opened: [...opened], said: spoken().at(-1) }
+        const cards = yield* Effect.scoped(
+          Effect.zipRight(
+            show.watch,
+            Effect.forEach(unsafe, (_, index) =>
+              Effect.zipRight(dictate(`Show me the PR for tidy part ${index}.`), Effect.map(show.seen, Option.map(({ url, markdown }) => ({ url, link: markdown.includes("](") })))),
+            ),
+          ),
+        )
+        return { safe, cards, opened, said: spoken() }
+      }),
+    )
+    expect(result.safe).toEqual({ opened: ["https://github.com/lg-epitech/yapd/pull/7"], said: "Checks pass and it's waiting for a review, sir." })
+    // Each still shows, without an address to follow.
+    expect(result.cards).toEqual(unsafe.map(() => Option.some({ url: undefined, link: false })))
+    expect(result.opened).toEqual(["https://github.com/lg-epitech/yapd/pull/7"])
+    expect(result.said.join(" ")).not.toMatch(/evil|https?:|javascript|file:|f0000000/)
   })
 })

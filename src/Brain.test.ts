@@ -137,6 +137,23 @@ describe("Brain", () => {
     expect(stopped).toEqual({ _tag: "Say", spoken: "I can't do that yet, sir." })
   })
 
+  test("'show me that' shows what was just talked about without the model, and 'hide that' only takes a card down while one is up", () => {
+    const subject: Assistant.Subject = { _tag: "Answer", said: "The Tezos migration is comparing fee tables, sir.", about: Option.some(ref(tezos)) }
+    const shown = (heard: string, overrides: Partial<Brain.Situation> = {}) => {
+      const decided = Brain.fast(situation(heard, { subject, ...overrides }), lines)
+      return decided === undefined ? undefined : { act: decided.act, how: decided.how, target: decided.target }
+    }
+    const tezosHandle = desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
+    expect(shown("Show me that.")).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me that P.R.")).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    expect(shown("Show me what's running.")).toEqual({ act: "show", how: "threads", target: "" })
+    // Nothing "that" could be, so which thread is the model's to work out.
+    expect(shown("Show me that.", { subject: { _tag: "Nothing" } })).toBeUndefined()
+    // With nothing up, "hide that" could be about a thread.
+    expect(shown("Hide that.")).toBeUndefined()
+    expect(shown("Hide that.", { showing: "What's going on" })).toEqual({ act: "show", how: "hide", target: "" })
+  })
+
   test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {
     const rig = (decided: Brain.Decision) => Brain.check(decided, situation("What's the rig relay fix doing?"), lines)
     const here = rig(Brain.decision({ act: "look", target: "t2", machine: "rig", sure: "high" }))

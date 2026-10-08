@@ -6,6 +6,7 @@ import type { Notice } from "./Inbox.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import type { Line } from "./Responder.ts"
+import type * as Show from "./Show.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 import { ago, type Material } from "./Writer.ts"
@@ -113,6 +114,8 @@ export interface Outcome {
   readonly missed?: ReadonlyArray<number>
   /** What was decided on a second look, at a thread or at what was found, which the answer is. */
   readonly second?: Brain.Decision
+  /** A card to put on his screen as it's said. */
+  readonly card?: Show.Draft
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -198,6 +201,8 @@ export const make = (options: {
   readonly threads: Threads.Threads["Type"]
   readonly journal: Journal["Type"]
   readonly drafts: Drafts.Drafts
+  /** What's on his screen. */
+  readonly show: Show.Show["Type"]
   /** Queues something to say, unless yapd was turned off since `since`. */
   readonly tell: (notice: Notice, since?: number) => Effect.Effect<void>
   /** Whether yapd is on, and how many times it was turned on or off. */
@@ -333,6 +338,7 @@ export const make = (options: {
         // What he hasn't heard since he last said something, other than catching up, which he may never have heard the
         // answer to, or something only heard as noise, like a cough taken for "Thank you.".
         const missed = yield* journal.unheard(spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day, unheard)
+        const seen = yield* options.show.seen
         return {
           utterance,
           subject: about,
@@ -345,6 +351,7 @@ export const make = (options: {
           second: Option.none(),
           asked,
           now,
+          ...Option.match(seen, { onNone: () => ({}), onSome: ({ title }) => ({ showing: title }) }),
         } satisfies Brain.Situation
       })
 
@@ -554,7 +561,12 @@ export const make = (options: {
           if (Either.isLeft(decided)) yield* Effect.logWarning("Could not answer from what I read", decided.left)
           return reply(`I read ${target.called}, but couldn't put it into words just now${addressed(said)}.`, thought.subject)
         }
-        return yield* answer(decided.right.spoken, Option.some(target), thought, said, decided.right)
+        const answered = yield* answer(decided.right.spoken, Option.some(target), thought, said, decided.right)
+        // What it waits on can't be read out, so its card goes up with the answer.
+        return Option.match(yield* options.show.aside(target, detail.right, answered.say, said), {
+          onNone: (): Outcome => answered,
+          onSome: ({ say, card }): Outcome => ({ ...answered, say, subject: { ...answered.subject, said: say }, card }),
+        })
       })
 
     /** Searches the threads, or what yapd heard and said, and answers from what's found with a second look. */
@@ -780,10 +792,26 @@ export const make = (options: {
             const last = subject._tag === "Nothing" ? Brain.nothingSaid(said) : subject.said
             // Said again, what he missed that it told him is heard once he's heard it to the end this time.
             const missed = subject._tag === "Answer" ? subject.missed : undefined
-            return { say: decision.spoken.trim() || last, subject, kind: "answer", ...(missed === undefined ? {} : { missed }) } satisfies Outcome
+            const say = decision.spoken.trim() || last
+            // Shown too while an app watches, for what's still not caught the second time.
+            const card = subject._tag === "Nothing" ? Option.none() : yield* options.show.caption(say, thought.situation)
+            return {
+              say,
+              subject,
+              kind: "answer",
+              ...(missed === undefined ? {} : { missed }),
+              ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
+            } satisfies Outcome
           })
         case "start":
           return start(thought, said)
+        case "show":
+          return Effect.map(options.show.present(decision.how, target, thought.situation, said), ({ say, card, about }): Outcome => ({
+            say,
+            subject: say === "" ? thought.subject : { _tag: "Answer", said: say, about },
+            kind: say === "" ? "none" : "answer",
+            ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
+          }))
         case "dismiss":
         case "resume":
           return Effect.succeed(quiet(thought.subject))
@@ -916,7 +944,7 @@ export const make = (options: {
           })
         }
         yield* Effect.logInfo(`Said: ${outcome.say}`)
-        const { subject, missed } = outcome
+        const { subject, missed, card } = outcome
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -924,13 +952,13 @@ export const make = (options: {
             priority: "needs-you",
             spoken: outcome.say,
             at,
-            // "It" means this once he's heard it, not while it waits behind something else he's hearing.
+            // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
               Effect.sync(() => {
                 answered = { subject, at: now }
                 if (open !== undefined && asking?.open.id === open.id) asking.said = true
               }),
-            ),
+            ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(options.show.put(card)))),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }

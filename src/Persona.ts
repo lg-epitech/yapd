@@ -22,6 +22,8 @@ export const Lines = Schema.Struct({
   leaving: Schema.String,
   /** What the user meant could be any of several threads, and asking wouldn't help. */
   cantTell: Schema.String,
+  /** What they asked to see is on their screen, said only while an app is there to show it. */
+  onScreen: Schema.String,
   /** How the user is addressed, like "sir", or nothing. Lines made up on the spot use it too. */
   address: Schema.String,
 })
@@ -34,6 +36,7 @@ export const plain: Lines = {
   checking: "One moment.",
   leaving: "I'll leave that one.",
   cantTell: "I couldn't tell which one you meant.",
+  onScreen: "It's on your screen.",
   address: "",
 }
 
@@ -62,6 +65,7 @@ export const prompt = (style: string) =>
     `- "checking": that you're looking into something before answering, like "${plain.checking}"`,
     `- "leaving": that you'll let a question you asked go, since it wasn't answered, like "${plain.leaving}"`,
     `- "cantTell": that you couldn't tell which of their threads they meant, like "${plain.cantTell}"`,
+    `- "onScreen": that what they asked to see is on their screen now, like "${plain.onScreen}"`,
     `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")
 
