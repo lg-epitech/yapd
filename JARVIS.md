@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until it comes back with nothing to fix, then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before its first migration, to `~/.yapd/yapd.before-jarvis.sqlite`, and again before the assistant went live, to `~/.yapd/yapd.before-m1.sqlite`.
 
-Live on `dev` now: everything below except doing things to threads by voice (message, steer, stop, carry on), which is merged here and waits on its live check. Being built: showing what you ask for on screen.
+Live on `dev` now: everything below except doing things to threads by voice (message, steer, stop, carry on), which is merged here and waits on its live check, and "Needs you", which is built and waits on review and its live check. Being built: showing what you ask for on screen.
 
 ## Talk to it (the shortcut)
 
@@ -22,8 +22,8 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 
 ## Needs you (built, waiting on review and its live check)
 
-- yapd hears from T3 Code itself and says each once, even across restarts: a run that failed and why, a usage limit and when it resets, finished work from agents with no hooks, and a secret a thread waits for, which it never takes by voice. Hook updates are tied to their thread by its session id, so "it" means that thread.
-- Approvals and questions are asked and answered by voice ("The cloudmate discovery wants to install the deploy tooling. Allow it, sir?" … "Yes." … "Approved."): a risky one needs "approve" and says so, an option said aloud answers a question, and only the request you heard is answered, never one dealt with in T3 Code meanwhile. "Tell it to…" after an update goes into that thread's turn under way, and is held back, with why, if you've given it something else since.
+- Approvals and questions are asked once and answered by voice ("… Allow it, sir?" "Yes." "Approved."), a risky one only with "approve"; failures, usage limits and finished work from agents without hooks are said once. Secrets are never taken by voice.
+- Updates are tied to their T3 Code thread, so "tell it to…" after one goes into that thread.
 
 ## Faster
 
