@@ -111,7 +111,7 @@ test("a database at version 2 with settings and 42 threads moves to version 3 an
   })))
   expect(tables(path).version).toBe(2)
   const found = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-    const store = yield* Store.make(path)
+    const store = yield* Store.make(path, Store.migrations.slice(0, 3))
     return yield* store.transaction(database => ({
       settings: database.query<{ name: string; value: string }, []>("select name, value from settings order by name").all(),
       threads: database.query<{ count: number }, []>("select count(*) as count from threads").get()?.count,

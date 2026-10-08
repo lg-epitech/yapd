@@ -82,6 +82,31 @@ export const migrations: ReadonlyArray<string> = [
   create index journal_thread on journal (machine, thread, at) where thread is not null;
   create unique index journal_key on journal (key) where key is not null;
   create index journal_unheard on journal (at) where heard_at is null and kind in ('update', 'notice');`,
+  // What yapd did to threads for the user, one row for each step it committed
+  // to, written before the step goes out under the ids in it: the same ids
+  // however often the step is worked out again, so T3 Code does it once. It's
+  // a ledger, not an outbox: nothing here is ever sent again on its own, and
+  // nothing waits in it to be sent. `body` is the command as it went out, and
+  // `digest` a message's words as compared for "I sent that a minute ago".
+  `create table actions (
+    command_id text primary key,
+    message_id text,
+    utterance text not null,
+    step integer not null,
+    kind text not null check (kind in ('message','stop','undo','decide','reply','start','tidy','relay')),
+    machine text not null,
+    thread text not null,
+    body text not null,
+    digest text,
+    state text not null check (state in ('prepared','sent','refused','failed','unknown','abandoned')),
+    how text,
+    reason text,
+    at integer not null,
+    settled_at integer
+  ) strict;
+  create index actions_thread on actions (machine, thread, at);
+  create index actions_open on actions (at) where state in ('prepared', 'unknown');
+  create index actions_message on actions (message_id) where message_id is not null;`,
 ]
 
 export class Store extends Context.Tag("yapd/Store")<
