@@ -43,6 +43,8 @@ export interface Notice {
   readonly stale: Effect.Effect<boolean>
   /** Run as it starts being said, which is when the user hears of it. */
   readonly saying?: Effect.Effect<void>
+  /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
+  readonly heard?: Effect.Effect<void>
   /** For a question: what to do with the answer, and when there's none. */
   readonly question?: Pick<Question, "answer"> & { readonly unanswered: Effect.Effect<void> }
 }

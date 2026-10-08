@@ -153,11 +153,18 @@ const make = (says?: string, options: {
       )
       yield* flush
     })
-  /** Something yapd has to say for itself, which as a question, the one open, records how it went. */
+  /** Something yapd has to say for itself, which as a question, the one open, records how it went, and in `heard` when it was heard to the end. */
   const notice = (
     id: string,
     spoken: string,
-    options: { readonly question?: Array<string>; readonly stale?: boolean; readonly needsYou?: boolean; readonly answer?: boolean; readonly done?: boolean } = {},
+    options: {
+      readonly question?: Array<string>
+      readonly stale?: boolean
+      readonly needsYou?: boolean
+      readonly answer?: boolean
+      readonly done?: boolean
+      readonly heard?: Array<string>
+    } = {},
   ) =>
     tell({
       id,
@@ -167,6 +174,7 @@ const make = (says?: string, options: {
       spoken,
       at: 0,
       stale: Effect.succeed(options.stale === true),
+      ...(options.heard === undefined ? {} : { heard: Effect.sync(() => void options.heard?.push(id)) }),
       ...(options.question === undefined
         ? {}
         : {
@@ -554,6 +562,29 @@ describe("Daemon", () => {
     ])
     expect(result.meanwhile).toEqual(["question unanswered"])
     expect(result.asked).toEqual(["question unanswered"])
+  })
+
+  test("what yapd says counts as heard once it's said to the end, never when a dictation cuts it off or yapd is turned off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { wait, dictate, notice, toggle, played } = yield* daemon
+        const heard: Array<string> = []
+        yield* notice("whole", "Nothing needs you right now, sir.", { answer: true, heard })
+        yield* wait(11)
+        yield* notice("cut", "The loader fix is ready, sir.", { answer: true, heard })
+        yield* wait(2)
+        const dictation = yield* dictate
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(11)
+        yield* notice("off", "The Tezos migration is comparing request formats, sir.", { answer: true, heard })
+        yield* wait(2)
+        yield* toggle(false)
+        yield* wait(11)
+        return { played: [...played], heard }
+      }),
+    )
+    expect(result.played).toEqual(["Nothing needs you right now, sir.", "The loader fix is ready, sir.", "The Tezos migration is comparing request formats, sir."])
+    expect(result.heard).toEqual(["whole"])
   })
 
   test("a clarification cut off by a dictation is not put back", async () => {

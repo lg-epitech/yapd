@@ -103,6 +103,8 @@ export interface Outcome {
   readonly subject: Subject
   /** What kind of thing was said, which picks how long to listen after. */
   readonly kind: "answer" | "done" | "question" | "none"
+  /** What he missed that it tells him, by journal entry, which counts as heard once he's heard it to the end, and not before. */
+  readonly missed?: ReadonlyArray<number>
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -156,6 +158,14 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
+
+/** Whether a journal entry is him asking what he missed, which tells him nothing until he's heard the answer. */
+const catchUp = (kept: Kept) =>
+  Brain.catchingUp(kept.text ?? "") ||
+  (typeof kept.detail === "object" &&
+    kept.detail !== null &&
+    "decision" in kept.detail &&
+    (kept.detail.decision as Partial<Brain.Decision> | undefined)?.how === "missed")
 
 /** What yapd knows as it works something out, and what that comes to without the model, when it's enough. */
 interface Glance {
@@ -279,11 +289,12 @@ export const make = (options: {
         const [shortlist, recent, spoke, usage, asked] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           journal.since(now - lately.span, { most: lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent"] }),
-          journal.since(now - day, { most: 1, kinds: ["dictation", "reply"] }),
+          journal.since(now - day, { most: 20, kinds: ["dictation", "reply"] }),
           threads.usage,
           askedLately,
         ])
-        const missed = yield* journal.unheard(spoke.at(-1)?.at ?? now - day, unheard)
+        // What he hasn't heard since he last said something, other than asking what he missed: he may never have heard that answer.
+        const missed = yield* journal.unheard(spoke.findLast((kept) => !catchUp(kept))?.at ?? now - day, unheard)
         return {
           utterance,
           subject: about,
@@ -469,13 +480,16 @@ export const make = (options: {
 
     /** An answer, which what he said next can be about. */
     const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
-      Effect.gen(function* () {
+      Effect.sync(() => {
         const text = spoken.trim() === "" ? said.misheard : spoken.trim()
-        // What he missed has now been heard, once the model has told him.
-        if (Brain.catchingUp(thought.utterance.heard) || thought.decision.how === "missed") {
-          yield* journal.markHeard(thought.situation.unheard.map(({ id }) => id), yield* Clock.currentTimeMillis)
-        }
-        return { say: text, subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref) }, kind: "answer" } satisfies Outcome
+        // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
+        const missed = Brain.catchingUp(thought.utterance.heard) || thought.decision.how === "missed" ? thought.situation.unheard.map(({ id }) => id) : []
+        return {
+          say: text,
+          subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref) },
+          kind: "answer",
+          ...(missed.length === 0 ? {} : { missed }),
+        } satisfies Outcome
       })
 
     /** Reads what a thread is doing now, and answers from it with a second look. */
@@ -850,7 +864,7 @@ export const make = (options: {
           })
         }
         yield* Effect.logInfo(`Said: ${outcome.say}`)
-        const { subject } = outcome
+        const { subject, missed } = outcome
         yield* options.tell(
           {
             id: mint(at, "a"),
@@ -865,6 +879,7 @@ export const make = (options: {
                 if (open !== undefined && asking?.open.id === open.id) asking.said = true
               }),
             ),
+            ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {

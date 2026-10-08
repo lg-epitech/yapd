@@ -515,11 +515,14 @@ export const make = Effect.gen(function* () {
       if (question === undefined) {
         const playback = yield* audio.play(said.audio)
         yield* playback.finished
+        yield* said.notice.heard ?? Effect.void
         return yield* dealtWith
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
       const answered = yield* conversation.ask({ audio: said.audio, answer })
+      // Answered, or asked in full.
+      yield* said.notice.heard ?? Effect.void
       if (!answered) yield* Effect.uninterruptible(Effect.zipRight(dealtWith, question.unanswered))
     }).pipe(Effect.scoped)
 

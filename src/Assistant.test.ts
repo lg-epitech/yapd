@@ -235,8 +235,12 @@ const assistant = (
       threads,
       journal,
       drafts,
-      // Said at once, as when nothing else is being said.
-      tell: (notice) => Effect.zipRight(Effect.sync(() => void said.push(notice)), given.waiting === true ? Effect.void : (notice.saying ?? Effect.void)),
+      // Said at once and to the end, as when nothing else is being said.
+      tell: (notice) =>
+        Effect.zipRight(
+          Effect.sync(() => void said.push(notice)),
+          given.waiting === true ? Effect.void : Effect.zipRight(notice.saying ?? Effect.void, notice.heard ?? Effect.void),
+        ),
       power: Effect.sync(() => power),
       lastHeard: Effect.sync(() => listening),
       coming: Effect.void,
@@ -275,8 +279,10 @@ const assistant = (
             listening = Option.some({ update: update(project, spoken, at), at, playing: true })
           }),
         ),
-      /** Its turn came, after whatever was being said. */
-      play: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(flush)),
+      /** Its turn came, after whatever was being said, and it was said to the end. */
+      play: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(notice?.heard ?? Effect.void), Effect.zipRight(flush)),
+      /** Its turn came, and a dictation cut it off before the end. */
+      cut: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       /** Turned on or off from the menu bar, which drops what's under way when it's off. */
       toggle: (on: boolean) =>
@@ -851,6 +857,36 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["The loader fix is already under way, sir."])
     expect(result.started).toEqual(["/code/yapd"])
     expect(result.kept).toEqual(["new-thread"])
+  })
+
+  test("what he missed counts as heard once he's heard the catch-up to the end, so one cut off leaves it for the next", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(
+          (situation) =>
+            Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
+          undefined,
+          { waiting: true },
+        )
+        const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        // Asked while something else is being said, so the answer waits its turn...
+        yield* dictate("What did I miss?")
+        const waiting = yield* unheard
+        // ...and a dictation cuts it off as it starts.
+        yield* cut()
+        const cutOff = yield* unheard
+        yield* dictate("What did I miss?")
+        const told = seen[1]!.unheard.map(({ said }) => said)
+        yield* play()
+        return { waiting, cutOff, told, after: yield* unheard, spoken: spoken() }
+      }),
+    )
+    expect(result.waiting).toEqual(["yapd. The loader fix is ready."])
+    expect(result.cutOff).toEqual(["yapd. The loader fix is ready."])
+    expect(result.told).toEqual(["yapd. The loader fix is ready."])
+    expect(result.after).toEqual([])
+    expect(result.spoken).toEqual(["The loader fix is ready, sir.", "The loader fix is ready, sir."])
   })
 
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
