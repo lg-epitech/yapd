@@ -120,6 +120,8 @@ export interface Outcome {
   readonly second?: Brain.Decision
   /** A card to put on his screen as it's said. */
   readonly card?: Show.Draft
+  /** Whether the card holds what couldn't be read aloud, like a command, which makes it the one that goes up when another step of the request has one too. */
+  readonly unreadable?: boolean
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -684,8 +686,8 @@ export const make = (options: {
 
     /**
      * An answer, which what he said next can be about, decided at once or on a
-     * `second` look, with the `card` that goes up with it, as a step of its
-     * request: the rest of it follows.
+     * `second` look, with the `card` that goes up with it for what it couldn't
+     * read aloud, as a step of its request: the rest of it follows.
      */
     const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines, step: number, second?: Brain.Decision, card?: Show.Draft) =>
       Effect.gen(function* () {
@@ -702,7 +704,7 @@ export const make = (options: {
           kind: "answer",
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
-          ...(card === undefined ? {} : { card }),
+          ...(card === undefined ? {} : { card, unreadable: true }),
         } satisfies Outcome
         return yield* onward(thought, told, ref, step + 1, said)
       })
@@ -1184,9 +1186,11 @@ export const make = (options: {
         // What he missed that the step before told him is heard once he's heard the lot, as is what the rest told him.
         const missed = [...(first.missed ?? []), ...(after.missed ?? [])]
         const second = first.second ?? after.second
-        // A card the step before put up, like a thread's with a command he couldn't hear, goes up with the lot, unless the rest has one of its own.
-        const card = after.card ?? first.card
-        const say = joined(first.say, after.say, said)
+        // One card goes up with the lot: the rest's, the last he asked for, unless only the step before's holds what couldn't be read aloud, like a
+        // command he couldn't hear. Only the line of the step it's for says it's on his screen, so he's never told so of one that isn't.
+        const kept = after.card === undefined || (first.card !== undefined && first.unreadable === true && after.unreadable !== true) ? first : after
+        const onScreen = (step: Outcome) => (step.card === undefined || step === kept ? step.say : Show.offScreen(step.say, said))
+        const say = joined(onScreen(first), onScreen(after), said)
         // What "it" means is what the rest was about, and what's said again is the lot, as heard, with what he missed that the lot told him, but never a question asked as part of it.
         const subject: Subject =
           after.kind === "question" || after.subject._tag === "Nothing"
@@ -1200,7 +1204,8 @@ export const make = (options: {
           subject,
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
-          ...(card === undefined ? {} : { card }),
+          ...(kept.card === undefined ? {} : { card: kept.card }),
+          ...(kept.unreadable === true ? { unreadable: true } : {}),
         }
       })
 
