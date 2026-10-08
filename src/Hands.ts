@@ -874,23 +874,35 @@ export const make = (options: {
       }
       const earlier = latest !== undefined && alike(latest.body, act) ? latest : undefined
       if (earlier?.state === "sent") return settled(earlier)
-      const taken = earlier === undefined || earlier.state === "refused" || earlier.state === "abandoned" ? Option.none() : yield* ledger.resending(earlier.commandId)
-      const outcome: Went = yield* Option.match(taken, {
-        onSome: (row) =>
-          Effect.zipRight(Effect.logInfo(`Answering ${act.requestId} once more under ${row.commandId}, as you said`), Effect.uninterruptible(dispatch(row, actions, busy(thread), true))),
-        onNone: () =>
-          once(
-            step,
-            kind,
-            act.to,
-            () =>
-              act._tag === "Decide"
-                ? { _tag: "Decide", requestId: act.requestId, decision: act.decision }
-                : { _tag: "Answer", requestId: act.requestId, answers: act.answers },
-            reached.right,
-            wanted,
-          ),
-      })
+      /** The answer as a step of its own, under this request's ids. */
+      const fresh = once(
+        step,
+        kind,
+        act.to,
+        () =>
+          act._tag === "Decide"
+            ? { _tag: "Decide", requestId: act.requestId, decision: act.decision }
+            : { _tag: "Answer", requestId: act.requestId, answers: act.answers },
+        reached.right,
+        wanted,
+      )
+      /**
+       * The same answer once more, under the ids it first went under, on this
+       * yes of his, while that's still `wanted`: looked at as it's taken to
+       * send, so once yapd was turned off since he said it, however long the
+       * look at the thread took, nothing is sent and it stays as it was (I8).
+       */
+      const resend = (earlier: Ledger.Row) =>
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (!(yield* wanted)) return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, doing[kind])
+            const taken = yield* ledger.resending(earlier.commandId)
+            if (Option.isNone(taken)) return yield* fresh
+            yield* Effect.logInfo(`Answering ${act.requestId} once more under ${taken.value.commandId}, as you said`)
+            return yield* dispatch(taken.value, actions, busy(thread), true)
+          }),
+        )
+      const outcome: Went = earlier === undefined || earlier.state === "refused" || earlier.state === "abandoned" ? yield* fresh : yield* resend(earlier)
       return outcome._tag === "Refused" && outcome.reason === answeredElsewhere ? ({ _tag: "Moot" } satisfies Outcome) : outcome
     })
 

@@ -4146,4 +4146,30 @@ describe("Assistant", () => {
       expect(await read(then)).toEqual({ dispatched: ["message.dispatch"], spoken: [], reasons: [Hands.switchedOff] })
     }
   })
+
+  test("turned off while the thread is read before a yes to an approval goes once more, after the first never left yapd, nothing goes, and it stays as it was", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        let read: Effect.Effect<void> = Effect.void
+        let lost = true
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "npm install left-pad"),
+          reading: Effect.suspend(() => read),
+          answer: () => (payload, bounded) => (lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." })) : takes(payload, bounded)),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Yes.")
+        // It never left yapd, so it still waits on him; he says it again, and turns yapd off as the thread is read first.
+        yield* made.becomes(cloud)
+        lost = false
+        read = made.toggle(false)
+        yield* made.dictate("Approve the cloud deployment one.")
+        const steps = yield* made.ledger.steps(0)
+        return { dispatched: made.dispatched.length, steps: steps.map(({ commandId, state }) => `${commandId.replace(/^yapd:u\w+:/, "")} ${state}`) }
+      }),
+    )
+    expect(result).toEqual({ dispatched: 1, steps: ["0 failed"] })
+  })
 })

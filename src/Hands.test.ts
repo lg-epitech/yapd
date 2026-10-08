@@ -1650,4 +1650,25 @@ describe("Hands", () => {
       same: ["yapd:u1:0 accept", "yapd:u1:0 accept"],
     })
   })
+
+  test("an answer sent once more on his yes isn't, once yapd was turned off since he said it, and stays as it was, to go on a yes once it's on", async () => {
+    const waiting = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: waiting })
+        made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+        const act: Hands.Act = { _tag: "Decide", to: tezos, requestId: "r1", decision: "accept" }
+        // His yes never left yapd.
+        made.answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." })))
+        yield* made.run({ utterance: "u1", step: 0 }, act)
+        made.answering(takes())
+        // He says yes again, and turns yapd off while the thread is read first.
+        const off = yield* made.run({ utterance: "u2", step: 0 }, act, { wanted: Effect.succeed(false) })
+        const kept = Option.map(yield* made.ledger.get("yapd:u1:0"), ({ state }) => state)
+        const on = yield* made.run({ utterance: "u3", step: 0 }, act)
+        return { off: "reason" in off ? off.reason : off._tag, kept, on: on._tag, dispatched: made.dispatched.map(({ commandId }) => commandId) }
+      }),
+    )
+    expect(result).toEqual({ off: Hands.switchedOff, kept: Option.some("failed"), on: "Done", dispatched: ["yapd:u1:0", "yapd:u1:0"] })
+  })
 })
