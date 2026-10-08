@@ -168,8 +168,9 @@ export const make = (options: {
     if (row.messageId !== null && row.kind === "message") return actions.has(row.thread, row.messageId)
     if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)
     if (Option.isSome(sent) && sent.value._tag === "Cancel") {
+      // Only cancelled is withdrawn: one that started meanwhile is being read.
       const runId = sent.value.runId
-      return Effect.map(actions.detail(row.thread), ({ runs }) => runs.some(({ id, status }) => id === runId && status !== "queued"))
+      return Effect.map(actions.detail(row.thread), ({ runs }) => runs.some(({ id, status }) => id === runId && status === "cancelled"))
     }
     return Effect.succeed(false)
   }
@@ -359,10 +360,13 @@ export const make = (options: {
         return yield* failing({ _tag: "NotSent", reason: plainly(found.left.reason), again: Option.none() } satisfies Outcome, "take a message back")
       }
       if (Option.isNone(found.right)) {
-        // It never got there, so it's never offered again either.
+        // Not there yet, it may still get there: never offered to go again, and the same words said again are still asked about.
         if (row.state === "unknown") {
-          yield* ledger.settle(row.commandId, "abandoned", { reason: "Taken back before it got there." })
-          return { _tag: "Done", how: "now", to: ref } satisfies Outcome
+          yield* ledger.leave(row.commandId, "He took it back before it was found in the thread.")
+          return yield* failing(
+            { _tag: "Refused", reason: "It wasn't in the thread yet when I looked, so it may still get there." } satisfies Outcome,
+            "take a message back",
+          )
         }
         return yield* failing({ _tag: "Refused", reason: "I can't find it in the thread." } satisfies Outcome, "take a message back")
       }

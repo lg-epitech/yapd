@@ -432,6 +432,52 @@ describe("Hands", () => {
     expect(result.read).toBe("yapd:u3:0")
   })
 
+  test("scratch that is done only once T3 Code shows the run cancelled, and a message not there yet is said as maybe still coming", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    // The turn under way ended as the cancel went out, so the queued message started instead, and the answer was lost.
+    const started = await run(
+      Effect.gen(function* () {
+        const { send, run: act, answering, ledger, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* send("u1", "When it's done, open a PR.", "after")
+        answering((payload, bounded) =>
+          Effect.suspend(() => {
+            bounded.runs[0]!.status = "completed"
+            bounded.runs[1]!.status = "running"
+            return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+          }),
+        )
+        const withdrawn = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+        const message = yield* ledger.get("yapd:u1:0")
+        answering(takes())
+        const again = yield* send("u3", "When it's done, open a PR.", "after")
+        return { withdrawn: withdrawn._tag, message: Option.map(message, ({ state }) => state), again: again._tag, dispatched: dispatched.length }
+      }),
+    )
+    expect(started.withdrawn).toBe("Unknown")
+    expect(Hands.failed({ _tag: "Undo", to: Option.none(), carry: false }, { _tag: "Unknown", reason: "", again: Option.none() }, lines, Option.none())).toBe(
+      "I couldn't confirm it was withdrawn, sir.",
+    )
+    // It's being read, so it's still the message that went, which the same words are asked about.
+    expect(started.message).toEqual(Option.some("sent"))
+    expect(started.again).toBe("Twin")
+    expect(started.dispatched).toBe(2)
+    const unsure = await run(
+      Effect.gen(function* () {
+        const { send, run: act, answering, ledger, dispatched } = yield* hands()
+        answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        yield* send("u1", "Use the fee table.")
+        const withdrawn = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+        const told = withdrawn._tag === "Refused" ? Hands.failed({ _tag: "Undo", to: Option.none(), carry: false }, withdrawn, lines, Option.none()) : withdrawn._tag
+        const message = yield* ledger.get("yapd:u1:0")
+        return { told, message: Option.map(message, ({ state }) => state), restart: yield* ledger.open(0), dispatched: dispatched.length }
+      }),
+    )
+    expect(unsure.told).toBe("I couldn't take that back, sir: it wasn't in the thread yet when I looked, so it may still get there.")
+    expect(unsure.message).toEqual(Option.some("unknown"))
+    expect(unsure.restart).toEqual([])
+    expect(unsure.dispatched).toBe(1)
+  })
+
   test("carry on lets go of the queue the stop held, then asks it to pick up where it left off", async () => {
     const result = await run(
       Effect.gen(function* () {
