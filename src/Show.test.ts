@@ -72,6 +72,28 @@ const pulled = (url: string): Threads.Listed => ({
 const targets = (markdown: string) =>
   [...markdown.matchAll(/(?<!\\)\]\(\s*<?([^\s)>]*)|(?<!\\)<([a-z][a-z0-9+.-]*:[^\s<>]*)>/gi)].map(([, inline, angled]) => inline ?? angled ?? "")
 
+/**
+ * The lines of markdown a renderer reads as markdown, outside code blocks: by
+ * CommonMark's rules, or `loosely`, taking any run of three backticks or
+ * tildes that starts a line, however indented and whatever follows, for a fence.
+ */
+const read = (markdown: string, loosely: boolean) => {
+  const lines: Array<string> = []
+  let fence: { readonly mark: string; readonly length: number } | undefined
+  for (const line of markdown.split("\n")) {
+    const found = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line)
+    const placed = found !== null && (loosely || found[1]!.length <= 3)
+    if (fence !== undefined) {
+      if (placed && found[2]![0] === fence.mark && found[2]!.length >= fence.length && found[3]!.trim() === "") fence = undefined
+    } else if (placed && (loosely || !(found[2]![0] === "`" && found[3]!.includes("`")))) {
+      fence = { mark: found[2]![0]!, length: found[2]!.length }
+    } else {
+      lines.push(line)
+    }
+  }
+  return lines
+}
+
 /** What he said, with these threads on the desk and nothing said before. */
 const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["away"] = []): Brain.Situation => ({
   utterance: { id: "u1", heard: "Open that PR.", via: "shortcut", at: now, voiced: 2, turns: 1 },
@@ -127,7 +149,27 @@ describe("Show", () => {
       "See [the docs](<https://ok.example/docs>) (ok.example), <https://ok.example/a>, `[x](javascript:1)` and chart",
     )
     expect(tamed("[![build](https://ok.example/b.svg)](https://ok.example/run)")).toBe("[build](<https://ok.example/run>) (ok.example)")
-    expect(tamed("```js\nconst link = [x](javascript:1)\n```\nThen [y](javascript:2)")).toBe("```js\nconst link = [x](javascript:1)\n```\nThen y")
+    expect(tamed("```js\nconst link = [x](javascript:1)\n```\nThen [y](javascript:2)")).toBe("```\nconst link = [x](javascript:1)\n```\nThen y")
+  })
+
+  test("a code block in a thread's message ends where yapd sees it end, for any renderer", () => {
+    const lying = "[https://github.com/lg-epitech/integration/pull/412](https://github.com.evil.example/login)"
+    const messages = [
+      // A fence indented four spaces is a line of the code, which a looser renderer ends the block at.
+      `\`\`\`\nbuild ok\n    \`\`\`\n${lying}\n\`\`\``,
+      // An indented fence of tildes opens a block that a fence of backticks in it doesn't end, and one of tildes does.
+      `  ~~~\n\`\`\`\n~~~\n${lying}\n\`\`\``,
+      `   ~~~\n\`\`\`\n~~~\n${lying}\n\`\`\``,
+      // A code span a looser renderer takes for a fence.
+      `\`\`\` \`x\` \`\`\`\n\`\`\`\n${lying}\n\`\`\``,
+    ]
+    for (const message of messages) {
+      const { markdown } = Show.thread(listed, Option.some({ ...detail("Clean the build"), messages: [{ role: "assistant", text: message, createdAt: "x", streaming: false }] }), now)
+      for (const loosely of [false, true]) expect(read(markdown, loosely).join("\n")).not.toContain(lying)
+    }
+    // Fenced longer than the fence in it.
+    expect(Show.tamed(messages[0]!)).toBe(`\`\`\`\`\nbuild ok\n    \`\`\`\n${lying}\n\`\`\`\``)
+    expect(Show.tamed(messages[1]!)).toBe(`  \\~\\~\\~\n\`\`\`\n~~~\n${lying}\n\`\`\``)
   })
 
   test("a link in a thread's message that names one address can't hide that it opens another", () => {

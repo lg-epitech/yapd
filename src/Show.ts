@@ -252,29 +252,41 @@ const unlinked = (line: string, linking = true): string => {
  * A thread's own markdown, cut to a card's length, with nothing that could
  * open anything but an https page: no other link, no image, no definition a
  * link could point at, no address in angle brackets and no HTML. Code blocks
- * are kept as they are, which nothing in can link from.
+ * are kept as they are, which nothing in can link from, each fenced again so
+ * that no renderer can see one start or end anywhere else.
  */
 export const tamed = (markdown: string) => {
   const text = markdown.replace(/\r\n?/g, "\n")
   // At the end of a line, when there's one to cut at.
   const end = text.lastIndexOf("\n", longest)
   const cut = text.length <= longest ? text : `${text.slice(0, end > 0 ? end : longest)}\n…`
-  let fence: { readonly mark: string; readonly length: number } | undefined
-  const lines = cut.split("\n").map((line) => {
+  const lines: Array<string> = []
+  let fence: { readonly mark: string; readonly length: number; readonly code: Array<string> } | undefined
+  for (const line of cut.split("\n")) {
     if (fence !== undefined) {
       const closing = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1]
-      if (closing !== undefined && closing[0] === fence.mark && closing.length >= fence.length) fence = undefined
-      return line
+      if (closing !== undefined && closing[0] === fence.mark && closing.length >= fence.length) {
+        // Renderers differ on which lines end a block, like an indented fence, so it's fenced again with more backticks than any line in it has.
+        lines.push(verbatim(fence.code.join("\n")))
+        fence = undefined
+      } else {
+        fence.code.push(line)
+      }
+      continue
     }
     // Only a fence at the very start of a line opens a code block whatever comes before it, so only that one is kept as it is.
     const opening = /^(`{3,})[^`]*$|^(~{3,})/.exec(line)
-    if (opening === null) return unlinked(line)
-    const mark = opening[1] ?? opening[2]!
-    fence = { mark: mark[0]!, length: mark.length }
-    return line
-  })
+    if (opening !== null) {
+      const mark = opening[1] ?? opening[2]!
+      fence = { mark: mark[0]!, length: mark.length, code: [] }
+      continue
+    }
+    // Any other run of three that starts a line, indented or a code span, opens a block for some renderers, so it's only text.
+    const lead = /^(\s*)(`{3,}|~{3,})/.exec(line)
+    lines.push(lead === null ? unlinked(line) : `${lead[1]}${lead[2]!.replace(/./g, "\\$&")}${unlinked(line.slice(lead[0].length))}`)
+  }
   // A code block cut short is closed, so the rest of the card isn't taken into it.
-  return [...lines, ...(fence === undefined ? [] : [fence.mark.repeat(fence.length)])].join("\n")
+  return [...lines, ...(fence === undefined ? [] : [verbatim(fence.code.join("\n"))])].join("\n")
 }
 
 // ---------------------------------------------------------------- cards
