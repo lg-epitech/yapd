@@ -48,8 +48,9 @@ export type Outcome =
       readonly to: Threads.Ref
       /**
        * Wanted at once, it went into T3 Code's queue instead, since the turn
-       * under way is waiting: on him, or finishing off. Or, sent once more, it
-       * waits in a queue a stop has put on hold since.
+       * under way is waiting: on him, or finishing off. Or it waits in a queue
+       * on hold: one a stop held before it went, which T3 Code holds whatever
+       * goes in behind, or, sent once more, one a stop has put on hold since.
        */
       readonly waiting?: Waiting
       /** Sent once more, T3 Code had it from the first time, and the turn it started or went into has ended since: so nothing's at work on it now. */
@@ -266,6 +267,13 @@ const shown = ({ intent, run }: T3Actions.Found): Ledger.How =>
       ? "queued"
       : "now"
 
+/**
+ * Whether a message that went into the queue, as `how` has it, waits there on
+ * hold, which starts nothing till it's let carry on: T3 Code holds what goes
+ * in behind a run a stop held, however idle the thread is by then.
+ */
+const onHold = ({ run }: T3Actions.Found, how: Ledger.How) => how === "queued" && Option.exists(run, ({ held }) => held)
+
 /** How a run has ended, by its status, when it has. */
 const ends: Readonly<Partial<Record<string, Ended>>> = { completed: "finished", interrupted: "cut", failed: "cut", cancelled: "cut" }
 
@@ -422,17 +430,34 @@ export const make = (options: {
     return Effect.succeed(false)
   }
 
-  /** How a message went in, as the thread says: into the turn under way, behind it, or at once. */
+  /**
+   * How a message went in, as the thread says: into the turn under way,
+   * behind it, or at once, as `shown` has it, and, behind it, whether it
+   * waits in a queue on hold. When the thread doesn't say, as it was sent.
+   */
   const entered = (row: Ledger.Row, actions: T3Actions.Actions, wasBusy: boolean, how: T3Actions.When) =>
     Effect.gen(function* () {
-      const fallback: Ledger.How = how === "after" ? "queued" : "now"
+      const fallback = { how: how === "after" ? ("queued" as const) : ("now" as const), held: false }
       if (row.kind !== "message" || row.messageId === null || !(wasBusy || how === "after")) return fallback
-      const intent = yield* actions.inputIntent(row.thread, row.messageId).pipe(Effect.orElseSucceed(() => Option.none<T3Actions.Intent>()))
-      return Option.match(intent, {
-        onNone: () => fallback,
-        onSome: (intent): Ledger.How =>
-          steeredIn(intent) ? "steered" : intent === "queued_turn" ? "queued" : "now",
-      })
+      const found = yield* actions.message(row.thread, row.messageId).pipe(Effect.orElseSucceed(() => Option.none<T3Actions.Found>()))
+      return Option.match(
+        Option.filter(found, ({ intent }) => Option.isSome(intent)),
+        {
+          onNone: () => fallback,
+          onSome: (found): { readonly how: Ledger.How; readonly held: boolean } => {
+            const how = shown(found)
+            return { how, held: onHold(found, how) }
+          },
+        },
+      )
+    })
+
+  /** A message that went in as `entry` says, noted so, and said to wait in a queue on hold when it does. `why` is how it came to be found, for the log. */
+  const entering = (row: Ledger.Row, entry: { readonly how: Ledger.How; readonly held: boolean }, why = "") =>
+    Effect.gen(function* () {
+      yield* ledger.settle(row.commandId, "sent", { how: entry.how })
+      yield* Effect.logInfo(`Dispatched ${row.commandId} → sent (${entry.how}${entry.held ? ", held" : ""})${why === "" ? "" : `, ${why}`}`)
+      return { _tag: "Done", how: entry.how, to: refOf(row), ...(entry.held ? { waiting: "held" as const } : {}) } satisfies Outcome
     })
 
   /**
@@ -453,7 +478,7 @@ export const make = (options: {
       // Steered in, even from the queue by his hand in T3 Code's app, which cancels the run it waited in, it's in the turn under way.
       if (Option.exists(found.intent, steeredIn) || !Option.exists(found.run, ({ status }) => status === "cancelled")) {
         const how = shown(found)
-        const held = how === "queued" && Option.exists(found.run, ({ held }) => held)
+        const held = onHold(found, how)
         // Since it went in, by T3 Code's clock as the thread's turns are: not shown, it went in after it was written down.
         const ended = over(found, thread, Option.getOrElse(found.at, () => row.at))
         yield* ledger.settle(row.commandId, "sent", { how })
@@ -556,10 +581,7 @@ export const make = (options: {
       if (Either.isRight(result)) {
         const gone = earlier ? yield* kept(row, reached) : Option.none<Went>()
         if (Option.isSome(gone)) return gone.value
-        const entry = yield* entered(row, actions, wasBusy, how)
-        yield* ledger.settle(row.commandId, "sent", { how: entry })
-        yield* Effect.logInfo(`Dispatched ${row.commandId} → sent (${entry})`)
-        return { _tag: "Done", how: entry, to: refOf(row) } satisfies Outcome
+        return yield* entering(row, yield* entered(row, actions, wasBusy, how))
       }
       const error = result.left
       const reason = plainly(T3Actions.reason(error))
@@ -578,12 +600,7 @@ export const make = (options: {
         if (Either.isRight(look) && Option.isSome(look.right)) return yield* placed(row, look.right.value, reached.thread, `found after: ${reason}`)
       } else {
         const found = yield* Effect.either(landed(row, actions))
-        if (Either.isRight(found) && found.right) {
-          const entry = yield* entered(row, actions, wasBusy, how)
-          yield* ledger.settle(row.commandId, "sent", { how: entry })
-          yield* Effect.logInfo(`Dispatched ${row.commandId} → sent (${entry}), found after: ${reason}`)
-          return { _tag: "Done", how: entry, to: refOf(row) } satisfies Outcome
-        }
+        if (Either.isRight(found) && found.right) return yield* entering(row, yield* entered(row, actions, wasBusy, how), `found after: ${reason}`)
       }
       yield* ledger.settle(row.commandId, last ? "abandoned" : "unknown", { reason })
       return yield* failing({ _tag: "Unknown", reason, again } satisfies Outcome, `${what}, and couldn't tell whether it went`)
@@ -698,7 +715,8 @@ export const make = (options: {
       const waiting = act.how === "now" ? waits(reached.right.thread) : undefined
       const how = waiting === undefined ? act.how : "after"
       const sent = yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, wanted, digest)
-      return sent._tag === "Done" && waiting !== undefined ? { ...sent, waiting } : sent
+      // Waiting in a queue on hold, it waits on that first, whatever the turn does.
+      return sent._tag === "Done" && waiting !== undefined && sent.waiting === undefined ? { ...sent, waiting } : sent
     })
 
   /**

@@ -44,6 +44,7 @@ interface Bounded {
  * into the turn under way or behind it on a busy one. It steers or restarts
  * only a turn that's running, queues behind one getting going, and turns
  * down steering one that's waiting, or restarting one that isn't running.
+ * What it queues behind a run a stop held in the queue is held too.
  */
 const takes =
   (intent: "steer" | "queued_turn" = "steer"): Answer =>
@@ -60,7 +61,15 @@ const takes =
         const queued = (payload.dispatchMode as { type: string }).type === "queue_after_active" || intent === "queued_turn" || into
         bounded.messages.push({ id: messageId, role: "user", text: String(payload.text), createdAt: "now" })
         if (!going || queued) {
-          bounded.runs.push({ id: `run-${bounded.runs.length + 1}`, status: going ? "queued" : "running", ordinal: bounded.runs.length + 1, userMessageId: messageId })
+          // Behind a run a stop held in the queue, it's held too.
+          const held = going && bounded.runs.some(({ status, queueHeld }) => status === "queued" && queueHeld === true)
+          bounded.runs.push({
+            id: `run-${bounded.runs.length + 1}`,
+            status: going ? "queued" : "running",
+            ordinal: bounded.runs.length + 1,
+            userMessageId: messageId,
+            ...(held ? { queueHeld: true } : {}),
+          })
         }
         // Each in the run T3 Code names on it: the turn of its own it started, or the one it was steered into.
         if (!going || !queued) {
@@ -1519,6 +1528,48 @@ describe("Hands", () => {
     const finishing = await waiting(false)
     expect(finishing.outcome).toEqual(["queued", "finishing"])
     expect(finishing.said).toBe("Migrate Tezos Integration is finishing something off, sir, so that will go once it's done.")
+  })
+
+  test("a message that goes into a queue a stop put on hold, behind a turn begun since, is said to wait till it's let carry on, whether T3 Code answers, its answer is lost, or it goes on his yes", async () => {
+    /**
+     * A message sent `how` to a thread at work on a turn `doing`, begun since a stop held what waits in its queue, `holding` it still, which
+     * T3 Code holds what it queues behind too: as T3 Code answers, once its answer is lost and it's found, or on his yes once it never left.
+     */
+    const sent = (how: T3Actions.When, doing: "running" | "waiting", answer: "answers" | "lost" | "again", holding = true) =>
+      run(
+        Effect.gen(function* () {
+          const asked = doing === "waiting" ? { pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } } : {}
+          const { send, again, answering, ledger, dispatched } = yield* hands({
+            thread: thread(tezos.id, { latestRunId: "run-3", activeRunId: "run-3", activityRunStatus: doing, status: doing, ...asked }),
+            runs: [
+              { id: "run-1", status: "interrupted", ordinal: 1 },
+              { id: "run-2", status: "queued", ordinal: 2, userMessageId: "m-before", queueHeld: holding },
+              { id: "run-3", status: doing, ordinal: 3 },
+            ],
+          })
+          if (answer === "lost") answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          if (answer === "again") answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." })))
+          const first = yield* send("u1", "Open a PR.", how)
+          answering(takes())
+          const outcome = answer === "again" ? yield* again("yapd:u1:0") : first
+          return {
+            said: outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how }, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            noted: Option.map(yield* ledger.get("yapd:u1:0"), ({ state, how }) => [state, how]),
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    const onHold = "Its queue is on hold, sir, so that will go once it's let carry on."
+    for (const answer of ["answers", "lost", "again"] as const) {
+      const dispatched = answer === "again" ? 2 : 1
+      // Behind the turn, or for now to a turn waiting on him, which takes nothing in, so it goes behind it: on hold either way, whatever the turn does.
+      expect(await sent("after", "running", answer)).toEqual({ said: onHold, noted: Option.some(["sent", "queued"]), dispatched })
+      expect(await sent("now", "waiting", answer)).toEqual({ said: onHold, noted: Option.some(["sent", "queued"]), dispatched })
+      // Steered into the turn under way, it's being worked on, whatever waits in the queue.
+      expect(await sent("now", "running", answer)).toEqual({ said: "On it, sir.", noted: Option.some(["sent", "steered"]), dispatched })
+      // With the queue let go of, it goes once the turn is done.
+      expect(await sent("after", "running", answer, false)).toEqual({ said: "I'll get to it once the current task is done, sir.", noted: Option.some(["sent", "queued"]), dispatched })
+    }
   })
 
   test("a yes to sending again a message for now, once the thread is waiting on him, sends it behind the turn under the same ids, and he's told why", async () => {
