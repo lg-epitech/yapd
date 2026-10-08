@@ -62,7 +62,7 @@ const takes =
     })
 
 /** Hands over a ledger of its own and a T3 Code that answers as the test says, keeping what it was sent. */
-const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded["runs"] } = {}) =>
+const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded["runs"]; readonly started?: number } = {}) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
     const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
@@ -87,6 +87,7 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
         actions: (machine) => (machine === "Rosie" ? Option.some(actions) : Option.none()),
       },
       ledger,
+      ...(given.started === undefined ? {} : { started: given.started }),
     })
     const send = (utterance: string, text: string, how: T3Actions.When = "now", twice = false) =>
       made.run({ utterance, step: 0 }, { _tag: "Message", to: tezos, text, how }, { twice })
@@ -561,5 +562,60 @@ describe("Hands", () => {
       ["queue.resume", "yapd:u2:0", undefined],
       ["message.dispatch", "yapd:u2:1", Hands.carryOn],
     ])
+  })
+
+  test("guards: a restart leaves what this run did alone, an archived thread is sent nothing, a busy one isn't told to carry on, and a read message isn't cancelled", async () => {
+    const restarted = await run(
+      Effect.gen(function* () {
+        // yapd started between the two.
+        const { reconcile, ledger, dispatched } = yield* hands({ started: now + 30_000 })
+        const prepare = (utterance: string) =>
+          ledger.prepare({
+            utterance,
+            step: 0,
+            kind: "message",
+            machine: "Rosie",
+            thread: tezos.id,
+            body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+            message: true,
+          })
+        yield* prepare("u-before")
+        yield* TestClock.adjust("1 minute")
+        yield* prepare("u-since")
+        const { undelivered } = yield* reconcile
+        const since = yield* ledger.get("yapd:u-since:0")
+        return { undelivered: undelivered.map(({ commandId }) => commandId), since: Option.map(since, ({ state }) => state), dispatched: dispatched.length }
+      }),
+    )
+    expect(restarted).toEqual({ undelivered: ["yapd:u-before:0"], since: Option.some("prepared"), dispatched: 0 })
+    const archived = await run(
+      Effect.gen(function* () {
+        const { send, dispatched } = yield* hands({ thread: thread(tezos.id, { archivedAt: "2026-10-08T21:45:00.000Z" }) })
+        const outcome = yield* send("u1", "Use the fee table.")
+        return { outcome: outcome._tag === "Refused" ? outcome.reason : outcome._tag, dispatched: dispatched.length }
+      }),
+    )
+    expect(archived).toEqual({ outcome: "It's been archived.", dispatched: 0 })
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    const working = await run(
+      Effect.gen(function* () {
+        const { run: act, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })
+        // He set it going again himself before saying carry on.
+        const carried = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true })
+        return { carried: carried._tag === "Refused" ? carried.reason : carried._tag, dispatched: dispatched.map(({ type }) => type) }
+      }),
+    )
+    expect(working).toEqual({ carried: "It's already back at work.", dispatched: ["run.interrupt"] })
+    const read = await run(
+      Effect.gen(function* () {
+        // Sent to an idle thread, it started a turn of its own at once.
+        const { send, run: act, dispatched } = yield* hands()
+        yield* send("u1", "Use the fee table.")
+        const scratched = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+        return { scratched: scratched._tag, dispatched: dispatched.map(({ type }) => type) }
+      }),
+    )
+    expect(read).toEqual({ scratched: "Read", dispatched: ["message.dispatch"] })
   })
 })

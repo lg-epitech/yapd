@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Either, Option, type Scope, TestClock, TestContext } from "effect"
 import * as Drafts from "./Drafts.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
+import * as Ledger from "./Ledger.ts"
 import * as Research from "./Research.ts"
 import type { Line } from "./Responder.ts"
+import * as Store from "./Store.ts"
 import { type Decision, type Material, type Written, WriteError, Writer } from "./Writer.ts"
 
 const models: Catalog["models"] = [
@@ -65,6 +67,8 @@ const drafts = (
     readonly written?: Written
     readonly refuse?: string
     readonly rigDown?: boolean
+    /** Whether what's started is written down first, in a ledger of its own. */
+    readonly ledger?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -102,6 +106,7 @@ const drafts = (
       ],
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
       recent: Effect.succeed([]),
+      ...(options.ledger === true ? { ledger: Ledger.fromStore(yield* Store.make(":memory:")) } : {}),
     }).pipe(
       Effect.provideService(Writer, {
         decide: (material) =>
@@ -140,17 +145,18 @@ const drafts = (
             return yield* told(yield* outcome.then)
         }
       })
-    const carry = (lines: ReadonlyArray<Line>, answering?: Material) =>
+    const carry = (lines: ReadonlyArray<Line>, answering?: Material, step?: Drafts.Step) =>
       Effect.gen(function* () {
         const written = yield* made.begin(lines, answering)
         if (Either.isLeft(written)) return said.push({ spoken: written.left, came: "Failed" })
-        yield* told(yield* made.start(written.right))
+        yield* told(yield* made.start(written.right, undefined, undefined, step))
       })
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     return {
       prepare: made.prepare([]),
-      dictate: (heard: string) => carry([{ speaker: "user", text: heard }]),
+      /** As a step of a request, when `step` is given. */
+      dictate: (heard: string, step?: Drafts.Step) => carry([{ speaker: "user", text: heard }], undefined, step),
       /** Answers the question asked last, as the one open. */
       answer: (heard: string) =>
         carry(
@@ -405,6 +411,21 @@ describe("Drafts", () => {
       }),
     )
     expect(unwritten).toEqual({ spoken: ["I couldn't write that up, so nothing started. What you said is in my log."], started: [] })
+  })
+
+  test("new work asked for twice as the same step of a request is started once", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, started, said } = yield* drafts(() => decision({}), { ledger: true })
+        yield* dictate("Fix the loader in yapd.", { utterance: "u1", step: 0 })
+        yield* dictate("Fix the loader in yapd.", { utterance: "u1", step: 0 })
+        // Another request's step is new work of its own.
+        yield* dictate("Fix the loader in yapd.", { utterance: "u2", step: 0 })
+        return { started: started.map(({ request }) => request.ids?.command), said }
+      }),
+    )
+    expect(result.started).toEqual(["yapd:u1:0", "yapd:u2:0"])
+    expect(result.said[1]).toEqual({ spoken: "I've already asked for that to start.", came: "Said" })
   })
 
   test("asks every machine what it can start as the shortcut is pressed, and goes on without one that can't say", async () => {
