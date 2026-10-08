@@ -1,6 +1,6 @@
 import { Clock, Context, Effect, Either, Option, Schema } from "effect"
 import * as Ledger from "./Ledger.ts"
-import { addressed, type Lines } from "./Persona.ts"
+import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as T3Actions from "./T3Actions.ts"
 import type * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
@@ -515,7 +515,7 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
   const sir = addressed(lines)
   const name = Option.getOrUndefined(called)
   const reason = after(outcome.reason)
-  const asking = "again" in outcome && Option.isSome(outcome.again) ? ` ${lines.again}` : ""
+  const asking = "again" in outcome && Option.isSome(outcome.again) ? ` ${unaddressed(lines.again, lines)}` : ""
   switch (act._tag) {
     case "Message":
       return outcome._tag === "Refused"
@@ -545,4 +545,4 @@ export const read = (lines: Lines, called: Option.Option<string>) =>
 
 /** Offered after a restart, for a message that wasn't found where it went. */
 export const lost = (lines: Lines, called: Option.Option<string>) =>
-  `Before I restarted, I couldn't confirm your message${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} got there${addressed(lines)}. ${lines.again}`
+  `Before I restarted, I couldn't confirm your message${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} got there${addressed(lines)}. ${unaddressed(lines.again, lines)}`

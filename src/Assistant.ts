@@ -6,7 +6,7 @@ import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
-import { addressed, type Lines, Persona } from "./Persona.ts"
+import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
 import type { Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -813,7 +813,7 @@ export const make = (options: {
             const doing = `send that to ${name} again`
             yield* noting(undefined, { twin: outcome.row.commandId }, false)
             if (outcome.row.state !== "sent") {
-              const asked = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}. ${said.again}`
+              const asked = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}. ${unaddressed(said.again, said)}`
               return yield* asking({ ...base, kind: "resend", decision, asked, about: doing, resend: Option.some(outcome.row.commandId) })
             }
             return yield* asking({ ...base, kind: "confirm", decision, asked: Hands.twice(outcome.row.at, now, said, called), about: doing, resend: Option.none() })

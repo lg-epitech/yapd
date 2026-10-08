@@ -61,6 +61,17 @@ export const sayable = (lines: Lines) => [
 /** ", sir" before a line's last mark, when the user is addressed at all. */
 export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
 
+/** A line with the address taken out, for saying after a sentence that used it already, since he's addressed once a line. */
+export const unaddressed = (line: string, lines: Pick<Lines, "address">) => {
+  const address = lines.address.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  if (address === "") return line
+  const without = line
+    .replace(new RegExp(`^${address}\\s*,\\s*`, "i"), "")
+    .replace(new RegExp(`\\s*,\\s*${address}\\b`, "gi"), "")
+    .trim()
+  return `${without.charAt(0).toUpperCase()}${without.slice(1)}`
+}
+
 export class Persona extends Context.Tag("yapd/Persona")<
   Persona,
   {
@@ -81,7 +92,7 @@ export const prompt = (style: string) =>
     `- "leaving": that you'll let a question you asked go, since it wasn't answered, like "${plain.leaving}"`,
     `- "cantTell": that you couldn't tell which of their threads they meant, like "${plain.cantTell}"`,
     `- "stopped": that the work they asked you to stop has stopped, like "${plain.stopped}"`,
-    `- "again": asking whether to send something once more, after you've said it may not have got there, like "${plain.again}" A question.`,
+    `- "again": asking whether to send something once more, like "${plain.again}" A question. It comes right after a sentence that addressed them already and said it may not have got there, so it has no address of its own.`,
     `- "carrying": that the work they had stopped is going again, like "${plain.carrying}"`,
     `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")

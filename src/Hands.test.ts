@@ -286,6 +286,15 @@ describe("Hands", () => {
     expect(result.dispatched).toBe(2)
   })
 
+  test("asking to send again says sir once, however the line to ask it was written", () => {
+    const unknown: Hands.Outcome = { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }
+    for (const again of ["Shall I send it again, sir?", "Sir, shall I send it again?"]) {
+      const styled = { ...lines, again }
+      expect(Hands.failed({ _tag: "Message", to: tezos, text: "", how: "now" }, unknown, styled, Option.none())).toBe("I couldn't confirm it got there, sir. Shall I send it again?")
+      expect(Hands.lost(styled, Option.none())).toBe("Before I restarted, I couldn't confirm your message got there, sir. Shall I send it again?")
+    }
+  })
+
   test("a restart checks open rows and never dispatches", async () => {
     const result = await run(
       Effect.gen(function* () {
