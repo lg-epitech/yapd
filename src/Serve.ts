@@ -15,6 +15,7 @@ import * as Floor from "./Floor.ts"
 import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Notices from "./Notices.ts"
 import { machines } from "./Machines.ts"
 import { ProviderModel } from "./Model.ts"
 import * as Persona from "./Persona.ts"
@@ -116,14 +117,35 @@ export const serve = Effect.gen(function* () {
     skip: daemon.skip,
     upcoming: daemon.upcoming,
   })
+  // What threads need him for, what failed and what finished with no hook, each said once, ever.
+  const notices = yield* Notices.make({
+    threads,
+    journal,
+    tell: daemon.tell,
+    power: daemon.power,
+    stopped: daemon.stopped,
+    finished: daemon.finished,
+    mention: assistant.mention,
+    shortest: (yield* Config.minSeconds) * 1000,
+  })
+  yield* Effect.forkScoped(notices.follow)
+  const caughtUp = live.view.pipe(
+    Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
+    Effect.timeoutFail({ duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }),
+  )
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
   yield* Effect.forkScoped(
-    live.view.pipe(
-      Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
-      Effect.timeoutFail({ duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }),
+    caughtUp.pipe(
       Effect.zipRight(hands.reconcile),
       Effect.flatMap(({ undelivered, unconfirmed }) => Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered))),
       Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent before restarting: ${reason}`)),
+    ),
+  )
+  // And what still waits on him that was never said is said.
+  yield* Effect.forkScoped(
+    caughtUp.pipe(
+      Effect.zipRight(notices.reconcile),
+      Effect.catchAll((reason) => Effect.logInfo(`Not looking for what waits on you: ${reason}`)),
     ),
   )
   const shortcut = yield* Shortcut
@@ -138,11 +160,12 @@ export const serve = Effect.gen(function* () {
    * Off, whatever hasn't started yet is dropped, from a dictation to what was
    * waiting to be said. The keys go before the dictations, so none starts in
    * between, and all of it before the daemon waits on anything. On, what a
-   * restart found while it was off is said.
+   * restart found while it was off is said, and what waits on him that he
+   * wasn't told of.
    */
   const turn = (on: boolean) =>
     on
-      ? Effect.all([daemon.turn(true), shortcut.toggle(true), assistant.back], { discard: true })
+      ? Effect.all([daemon.turn(true), shortcut.toggle(true), assistant.back, notices.reconcile], { discard: true })
       : Effect.all([shortcut.toggle(false), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
