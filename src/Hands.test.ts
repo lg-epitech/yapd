@@ -649,6 +649,47 @@ describe("Hands", () => {
     ).toEqual({ how: "steered", said: "On it, sir.", noted: Option.some("steered") })
   })
 
+  test("a yes to sending again a message T3 Code answers for from what it kept, whose own turn has ended since, says it went in and how that turn ended, never that it's being worked on", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    /** A message for now to a thread getting a turn going, so it waits behind it, its answer lost, then sent again once its own turn has ended as `own`. */
+    const resent = (own: string) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, becomes, ledger } = yield* hands({
+            thread: thread(tezos.id, preparing),
+            runs: [{ id: "run-1", status: "preparing", ordinal: 1 }],
+          })
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // The turn ahead finished, its own started, and has ended since, with nothing going now.
+          bounded.runs[0]!.status = "completed"
+          bounded.runs[1]!.status = own
+          becomes(thread(tezos.id))
+          reads(true)
+          answering(() => Effect.succeed({ sequence: 7 }))
+          const outcome = yield* again("yapd:u1:0")
+          const said = (called: Option.Option<string>) => (outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, called, outcome) : outcome._tag)
+          return {
+            said: [said(Option.none()), said(Option.some("the Tezos migration"))],
+            noted: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state),
+          }
+        }),
+      )
+    expect(await resent("completed")).toEqual({
+      said: ["That went in, sir, and it's been dealt with.", "That went to the Tezos migration, sir, and it's been dealt with."],
+      noted: Option.some("sent"),
+    })
+    for (const own of ["interrupted", "failed"]) {
+      expect(await resent(own)).toEqual({
+        said: ["That went in, sir, but the turn it started was cut short.", "That went to the Tezos migration, sir, but the turn it started was cut short."],
+        noted: Option.some("sent"),
+      })
+    }
+    // Still at it, it's being worked on, as it says.
+    expect(await resent("running")).toEqual({ said: ["On it, sir.", "On it, sir: the Tezos migration."], noted: Option.some("sent") })
+  })
+
   test("a yes to sending again a message T3 Code answers for from what it kept, with the thread still unread, says why it can't tell it's there", async () => {
     const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
     const result = await run(
