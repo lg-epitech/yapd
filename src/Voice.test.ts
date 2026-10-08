@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
 import { ProcessError } from "./Process.ts"
-import { head, join, KokoroError, kokoro, opening, remembering, split } from "./Voice.ts"
+import { early, head, join, KokoroError, kokoro, opening, remembering, split, type Voice } from "./Voice.ts"
 
 /** Samples at `level`, with `rate` samples a second. */
 const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.round(seconds * rate)).fill(level)
@@ -98,6 +98,25 @@ describe("opening", () => {
     // Too long for Kokoro in one go, it would have to break somewhere in the middle.
     expect(open("The loader is fixed, its tests pass, and I merged it. Nothing needs you.", 30)).toBeUndefined()
   })
+})
+
+describe("early", () => {
+  test("fails a render given up on for whoever waits on it elsewhere, even one that never started", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        for (const started of [false, true]) {
+          const going = yield* Deferred.make<void>()
+          const voice: Voice["Type"] = { render: () => Deferred.succeed(going, undefined).pipe(Effect.zipRight(Effect.never)) }
+          const scope = yield* Scope.make()
+          const { first, whole } = yield* early(voice, "The tests pass. Nothing needs you.", "/nowhere.wav").pipe(Scope.extend(scope))
+          if (started) yield* Deferred.await(going)
+          yield* Scope.close(scope, Exit.void)
+          // A failure, not an interruption, so the conversation waiting to play it carries on.
+          expect(yield* Effect.flip(first).pipe(Effect.timeout("1 second"))).toBeInstanceOf(KokoroError)
+          expect(yield* Effect.flip(whole).pipe(Effect.timeout("1 second"))).toBeInstanceOf(KokoroError)
+        }
+      }),
+    ))
 })
 
 describe("remembering", () => {

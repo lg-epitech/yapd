@@ -1,5 +1,5 @@
 import type { Subprocess } from "bun"
-import { Clock, Context, Data, Deferred, Effect, Exit, Fiber, FiberId, Layer, Runtime, type Scope } from "effect"
+import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Fiber, FiberId, Layer, Runtime, type Scope } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
@@ -15,7 +15,8 @@ export class Voice extends Context.Tag("yapd/Voice")<
     /**
      * Renders like `render`, with the first sentences ready to play early, in a
      * file of their own, while the rest renders. Both files are the caller's to
-     * remove. Closing the scope before the whole is rendered gives it up.
+     * remove. Closing the scope before the whole is rendered gives it up, and
+     * fails whatever of it is still awaited with a KokoroError.
      */
     readonly renderFirst?: (text: string, path: string) => Effect.Effect<Rendering, never, Scope.Scope>
   }
@@ -48,12 +49,19 @@ const rendering =
   <E>(render: (text: string, path: string, part: (path: string) => void) => Effect.Effect<void, E>) =>
   (text: string, path: string) =>
     Effect.gen(function* () {
-      const first = yield* Deferred.make<string, E>()
-      const whole = yield* render(text, path, (part) => Deferred.unsafeDone(first, Exit.succeed(part))).pipe(
-        Effect.onExit((exit) => Deferred.done(first, Exit.as(exit, path))),
+      const first = yield* Deferred.make<string, E | KokoroError>()
+      const whole = yield* Deferred.make<void, E | KokoroError>()
+      const settle = (exit: Exit.Exit<void, E | KokoroError>) =>
+        Effect.zipRight(Deferred.done(first, Exit.as(exit, path)), Deferred.done(whole, exit))
+      // Whoever waits on it elsewhere, like the conversation playing its first part, hears it was given up as a
+      // failure rather than an interruption of their own. Even when the scope closes before the render has started.
+      const givenUp = Exit.fail(new KokoroError({ cause: "Given up" }))
+      yield* Effect.addFinalizer(() => settle(givenUp))
+      yield* render(text, path, (part) => Deferred.unsafeDone(first, Exit.succeed(part))).pipe(
+        Effect.onExit((exit) => settle(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause) ? givenUp : exit)),
         Effect.forkScoped,
       )
-      return { first: Deferred.await(first), whole: Fiber.join(whole) } satisfies Rendering<E>
+      return { first: Deferred.await(first), whole: Deferred.await(whole) } satisfies Rendering<E | KokoroError>
     })
 
 /** Renders with the first sentences early when the voice can, else the whole at once, which then plays first. */
