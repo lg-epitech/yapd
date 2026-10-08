@@ -1,5 +1,6 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
+import type * as Ledger from "./Ledger.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
@@ -140,6 +141,12 @@ export type Outcome =
 /** Notes work as it starts, in the same breath, so nothing can come between the two. */
 export type Noted = (started: Extract<Outcome, { readonly _tag: "Started" }>) => Effect.Effect<void>
 
+/** Which step of which request new work is, which its ids come from. */
+export interface Step {
+  readonly utterance: string
+  readonly step: number
+}
+
 /** What's said when the prompt couldn't be written. */
 export const unwritten = "I couldn't write that up, so nothing started. What you said is in my log."
 
@@ -152,6 +159,8 @@ export const make = (options: {
   readonly recent: Effect.Effect<ReadonlyArray<Heard>>
   /** Says which names there are, for what transcribes the dictation that's under way. */
   readonly expect?: (terms: ReadonlyArray<string>) => Effect.Effect<void>
+  /** Where what's started is written down first, under the ids it's asked for with. */
+  readonly ledger?: Ledger.Ledger["Type"]
 }) =>
   Effect.gen(function* () {
     const writer = yield* Writer
@@ -196,12 +205,43 @@ export const make = (options: {
      * it goes on by itself, and whoever asked for it waits for what comes of
      * it in its own time. It's never made uninterruptible, since then its own
      * time limits couldn't end it, and a launch that never answered would go
-     * on for good.
+     * on for good. As a step of a request, it's written down first under the
+     * ids it's asked for with, so it's asked for once.
      */
-    const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string) =>
+    const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string, step?: Step) =>
       Effect.gen(function* () {
-        const { machine, project, request } = resolved
-        if (request.prompt === "") return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
+        const { machine, project } = resolved
+        if (resolved.request.prompt === "") return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
+        const ledger = options.ledger
+        let request = resolved.request
+        let commandId: string | undefined
+        if (step !== undefined && ledger !== undefined) {
+          const thread = crypto.randomUUID()
+          const prepared = yield* ledger
+            .prepare({
+              ...step,
+              kind: "start",
+              machine: machine.name,
+              thread,
+              message: true,
+              body: ({ commandId, messageId }) => ({ ...request, ids: { thread, message: messageId ?? "", command: commandId } }),
+            })
+            .pipe(Effect.either)
+          if (Either.isLeft(prepared)) {
+            yield* Effect.logWarning("Could not write down the work before starting it", prepared.left)
+            return { _tag: "Said", spoken: "I couldn't write it down first, so I didn't start it.", failed: true } satisfies Outcome
+          }
+          // Asked for already, it's never asked for a second time.
+          if (!prepared.right.fresh) {
+            yield* Effect.logInfo(`${prepared.right.commandId} was asked for already, so it isn't again`)
+            return { _tag: "Said", spoken: "I've already asked for that to start.", failed: false } satisfies Outcome
+          }
+          const { thread: id, messageId, commandId: command } = prepared.right
+          request = { ...request, ids: { thread: id, message: messageId ?? "", command } }
+          commandId = command
+        }
+        const settle = (state: "sent" | "failed" | "unknown", reason?: string) =>
+          ledger === undefined || commandId === undefined ? Effect.void : ledger.settle(commandId, state, reason === undefined ? {} : { reason })
         yield* Effect.logInfo(
           `Decided: ${project.name} on ${machine.name}, ${[request.model ?? "its usual model", request.effort].filter(Boolean).join(" ")}, ${
             request.worktree === true ? "in a worktree" : "without a worktree"
@@ -212,9 +252,11 @@ export const make = (options: {
           const outcome = yield* Effect.either(machine.launcher.start(request))
           if (Either.isLeft(outcome)) {
             yield* Effect.logWarning("Could not start", outcome.left)
+            yield* settle(outcome.left.sent === true ? "unknown" : "failed", outcome.left.reason)
             return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
           }
           const started = outcome.right
+          yield* settle("sent")
           yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
           const begun = {
             _tag: "Started",
@@ -231,7 +273,7 @@ export const make = (options: {
       })
 
     /** Reads through the project before writing the prompt, for a request that leans on something in it. */
-    const look = (material: Material, resolved: Resolved, decision: Decision, noted: Noted): Effect.Effect<Outcome> =>
+    const look = (material: Material, resolved: Resolved, decision: Decision, noted: Noted, step?: Step): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { machine, project, request } = resolved
         const about = decision.about.trim()
@@ -250,18 +292,18 @@ export const make = (options: {
         if (Either.isRight(written)) {
           if (written.right.action === "ask") return { _tag: "Asked", question: written.right.spoken, about, material } satisfies Outcome
           const prompt = written.right.prompt
-          return yield* launch({ ...resolved, request: { ...request, prompt } }, written.right.spoken, written.right.why, about, noted)
+          return yield* launch({ ...resolved, request: { ...request, prompt } }, written.right.spoken, written.right.why, about, noted, undefined, step)
         }
         // Written from what they said after all, which leaves what was to be looked up to the agent.
         yield* Effect.logWarning(`Could not read through ${project.name}, so it's written without`, written.left)
         const plain = { ...material, research: false }
         const blind = yield* decide(plain).pipe(Effect.either)
         if (Either.isLeft(blind)) return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
-        return yield* start({ decision: blind.right, material: plain }, noted, "I couldn't read through it first.")
+        return yield* start({ decision: blind.right, material: plain }, noted, "I couldn't read through it first.", step)
       })
 
     /** Carries out what the writer decided: starts it, or says what has to be asked, or why nothing started. */
-    const start = (written: Written, noted: Noted = () => Effect.void, warning?: string): Effect.Effect<Outcome> =>
+    const start = (written: Written, noted: Noted = () => Effect.void, warning?: string, step?: Step): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { decision, material } = written
         const about = decision.about.trim()
@@ -283,9 +325,9 @@ export const make = (options: {
               yield* Effect.logInfo(`Decided on "${decision.project}", which isn't a project anywhere. ${decision.why}`)
               return asking(resolved.left)
             }
-            if (decision.action === "start") return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, warning)
+            if (decision.action === "start") return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, warning, step)
             const spoken = decision.spoken.trim() || `Looking through ${resolved.right.project.name} first.`
-            return { _tag: "Looking", spoken, about, then: look(material, resolved.right, decision, noted) } satisfies Outcome
+            return { _tag: "Looking", spoken, about, then: look(material, resolved.right, decision, noted, step) } satisfies Outcome
           }
           case "none":
           case "drop":
