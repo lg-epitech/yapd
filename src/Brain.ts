@@ -498,7 +498,7 @@ const pulling: ReadonlySet<string> = new Set([
   "show me that pull request", "show me the pull request", "open that pull request", "open the pull request",
 ])
 
-/** Taking the card off his screen, said while one is there. */
+/** Taking the card off his screen, said while one is there, and never taking back what was done, even once it's gone. */
 const hiding: ReadonlySet<string> = new Set([
   "hide that", "hide it", "hide this", "hide the card", "hide the panel", "close that", "close it", "close this", "close the card",
   "close the panel", "take that away", "take it away", "take that down", "take it down", "clear that", "clear the screen",
@@ -696,9 +696,12 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       }
       if (choice.sure === "low" && candidates.length >= 2) return ask(candidates)
       return doing({ decision: choice, target })
+    case "undo":
+      // Words for his screen, like "take that down" once its card has faded, never take back a message: at most, they take a card down.
+      if (hiding.has(gist(situation.utterance.heard))) return doing({ decision: { ...choice, act: "show", how: "hide", target: "" }, target: Option.none() })
+      return writing(choice, target, candidates, situation, lines, ask)
     case "send":
     case "stop":
-    case "undo":
       return writing(choice, target, candidates, situation, lines, ask)
     case "show":
       switch (choice.how) {

@@ -6,6 +6,7 @@ import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
 import type { Kept } from "./Journal.ts"
+import type * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -218,6 +219,39 @@ describe("Brain", () => {
     // With nothing up, "hide that" could be about a thread.
     expect(shown("Hide that.")).toBeUndefined()
     expect(shown("Hide that.", { showing: "What's going on" })).toEqual({ act: "show", how: "hide", target: "" })
+  })
+
+  test("words for his screen never take back a message, even once its card is gone, and 'scratch that' still does with one up", () => {
+    const tezosHandle = desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
+    // A message for the Tezos one a minute ago, waiting in its queue, which taking back withdraws.
+    const queued: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "message",
+      machine: "Rosie",
+      thread: tezos.id,
+      body: { _tag: "Send", text: "Use the fee table when it's done.", messageId: "yapd:u0:0:m", how: "after" },
+      digest: "use the fee table when it's done",
+      state: "sent",
+      how: "queued",
+      reason: null,
+      at: now - 60_000,
+    }
+    const acted = Option.some(queued)
+    // Its card has faded, so they're the model's, which can take them for taking back what was just done: at most, they take a card down.
+    for (const heard of ["Take that down.", "Clear that.", "Hide it, please."]) {
+      expect(Brain.fast(situation(heard, { acted }), lines)).toBeUndefined()
+      const checked = Brain.check(Brain.decision({ act: "undo", sure: "high" }), situation(heard, { acted }), lines)
+      expect(checked._tag === "Do" ? { act: checked.plan.decision.act, how: checked.plan.decision.how } : checked).toEqual({ act: "show", how: "hide" })
+    }
+    // Taking it back still does, whatever's on his screen.
+    for (const screen of [{}, { showing: "Migrate Tezos Integration" }]) {
+      expect(Brain.fast(situation("Scratch that.", { acted, ...screen }), lines)).toMatchObject({ act: "undo", target: tezosHandle, how: "" })
+      const checked = Brain.check(Brain.decision({ act: "undo", sure: "high" }), situation("Scratch that.", { acted, ...screen }), lines)
+      expect(checked._tag === "Do" ? checked.plan.decision.act : checked).toBe("undo")
+    }
   })
 
   test("showing a thread or its pull request asks between those it can't tell apart, and says why when no thread can be seen", () => {
