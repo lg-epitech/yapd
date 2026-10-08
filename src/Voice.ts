@@ -1,6 +1,8 @@
 import type { Subprocess } from "bun"
 import { Clock, Context, Data, Deferred, Effect, Exit, Fiber, FiberId, Layer, Runtime } from "effect"
-import { rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import * as Path from "node:path"
 import * as Config from "./Config.ts"
 import { type ProcessError, run } from "./Process.ts"
 import { TextSplitterStream } from "./vendor/kokoro/splitter.js"
@@ -318,28 +320,101 @@ export const kokoro = (command: ReadonlyArray<string>, voice: string, effect: st
     return { render }
   })
 
+/** Lines this short are kept once rendered: acknowledgements, questions, notices. */
+const brief = 160
+
+/**
+ * Keeps what's rendered of short lines, the ones yapd says again and again
+ * like "On it.", so saying them again is a copy rather than a render. The
+ * newest `most` are kept, in `dir`. One rendered for someone who stopped
+ * waiting is still kept, for whoever asks next.
+ */
+export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
+  Effect.gen(function* () {
+    const scope = yield* Effect.scope
+    const kept = new Map<string, Deferred.Deferred<string, ProcessError>>()
+    const forget = (text: string, entry: Deferred.Deferred<string, ProcessError>) =>
+      Effect.suspend(() => {
+        if (kept.get(text) !== entry) return Effect.void
+        kept.delete(text)
+        return Deferred.poll(entry).pipe(
+          Effect.flatMap((done) => (done._tag === "Some" ? Effect.either(done.value) : Effect.succeed(undefined))),
+          Effect.flatMap((done) => (done?._tag === "Right" ? Effect.promise(() => rm(done.right, { force: true })) : Effect.void)),
+        )
+      })
+
+    const render = (text: string, path: string) =>
+      Effect.gen(function* () {
+        if (text.length > brief) return yield* voice.render(text, path)
+        let entry = kept.get(text)
+        if (entry === undefined) {
+          const made = yield* Deferred.make<string, ProcessError>()
+          entry = made
+          const file = `${dir}/${crypto.randomUUID()}${extension}`
+          yield* voice.render(text, file).pipe(
+            Effect.as(file),
+            Effect.onError(() => forget(text, made)),
+            Effect.intoDeferred(made),
+            Effect.forkIn(scope),
+          )
+          const oldest = kept.size >= most ? kept.entries().next().value : undefined
+          if (oldest !== undefined) yield* forget(...oldest)
+        } else kept.delete(text)
+        // Last, as the most recently used.
+        kept.set(text, entry)
+        const file = yield* Deferred.await(entry)
+        yield* Effect.tryPromise(() => Bun.write(path, Bun.file(file))).pipe(
+          Effect.catchAll(() => voice.render(text, path)),
+        )
+      })
+
+    return {
+      render,
+      /** Renders lines ahead of time, so even the first time they're said is instant. */
+      warm: (lines: ReadonlyArray<string>) =>
+        Effect.forEach(
+          lines,
+          (text) => {
+            const path = `${dir}/warm-${crypto.randomUUID()}${extension}`
+            return render(text, path).pipe(Effect.ensuring(Effect.promise(() => rm(path, { force: true }))), Effect.ignore)
+          },
+          { discard: true },
+        ),
+    }
+  })
+
+/** Renders lines ahead of time, so they play at once the first time too. */
+export class Warmth extends Context.Tag("yapd/Warmth")<
+  Warmth,
+  { readonly warm: (lines: ReadonlyArray<string>) => Effect.Effect<void> }
+>() {}
+
 /**
  * Kokoro 82M, run locally, on the GPU when it can. The model downloads on first
  * start and loads in the background. If it can't load or render, updates fall
  * back to `say`. The effect needs ffmpeg; without it, updates play unprocessed.
  */
-export const KokoroVoice = Layer.scoped(
-  Voice,
+export const KokoroVoice = Layer.scopedContext(
   Effect.gen(function* () {
     const name = yield* Config.voice
+    const dir = yield* Effect.acquireRelease(
+      Effect.promise(() => mkdtemp(Path.join(tmpdir(), "yapd-voice-"))),
+      (dir) => Effect.promise(() => rm(dir, { recursive: true, force: true })),
+    )
     // Kokoro's voices don't need the model, and a name it doesn't have won't start working later.
-    if (!voices.has(name)) {
-      yield* Effect.logWarning(`Kokoro has no voice "${name}", so yapd uses say. Pick one from ${voicesPage}`)
-      return { render: say }
-    }
-    const voice = yield* kokoro([process.execPath, `${import.meta.dir}/Kokoro.ts`], name, yield* Config.effect)
-    return {
-      render: (text, path) =>
-        voice.render(text, path).pipe(
-          Effect.catchAll((error) =>
-            Effect.logWarning("Kokoro failed, using say", error).pipe(Effect.zipRight(say(text, path))),
-          ),
-        ),
-    }
+    const plain: Voice["Type"] = voices.has(name)
+      ? yield* Effect.map(kokoro([process.execPath, `${import.meta.dir}/Kokoro.ts`], name, yield* Config.effect), (voice) => ({
+          render: (text: string, path: string) =>
+            voice.render(text, path).pipe(
+              Effect.catchAll((error) =>
+                Effect.logWarning("Kokoro failed, using say", error).pipe(Effect.zipRight(say(text, path))),
+              ),
+            ),
+        }))
+      : yield* Effect.as(Effect.logWarning(`Kokoro has no voice "${name}", so yapd uses say. Pick one from ${voicesPage}`), {
+          render: say,
+        })
+    const kept = yield* remembering(plain, dir)
+    return Context.make(Voice, { render: kept.render }).pipe(Context.add(Warmth, { warm: kept.warm }))
   }),
 )

@@ -5,6 +5,7 @@ import { Audio, type Playback } from "./Audio.ts"
 import type { Turn } from "./Condenser.ts"
 import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
+import { Persona } from "./Persona.ts"
 import { type Line, type Reply, Responder } from "./Responder.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -89,7 +90,6 @@ export const cut = (text: string, fraction: number) => {
   return `${words.slice(0, Math.max(1, Math.round(words.length * fraction))).join(" ")}…`
 }
 
-const misheard: Reply = { intent: "answer", spoken: "Sorry, I didn't catch that.", message: "" }
 
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
 export interface Question {
@@ -123,6 +123,7 @@ export const make = (options: {
     const transcriber = yield* Transcriber
     const responder = yield* Responder
     const voice = yield* Voice
+    const persona = yield* Persona
 
     let ids = 0
     const fresh = () => ++ids
@@ -353,8 +354,9 @@ export const make = (options: {
         let failed = false
         const mark = {}
         sending.set(update, mark)
+        const lines = yield* persona.lines
         const fiber = yield* follow(update, reply.message).pipe(
-          Effect.map((result) => result === "queued" ? "Noted. I'll get to it once the current task is done." : reply.spoken || "On it."),
+          Effect.map((result) => (result === "queued" ? lines.queued : reply.spoken || lines.onIt)),
           Effect.catchAll((error) =>
             Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
               Effect.tap(() => {
@@ -438,7 +440,14 @@ export const make = (options: {
                   lines: [...lines, { speaker: "yapd", text: said }],
                   heard,
                 })
-                .pipe(Effect.catchAll((error) => Effect.logWarning("Could not reply", error).pipe(Effect.as(misheard)))),
+                .pipe(
+                  Effect.catchAll((error) =>
+                    Effect.logWarning("Could not reply", error).pipe(
+                      Effect.zipRight(persona.lines),
+                      Effect.map((lines): Reply => ({ intent: "answer", spoken: lines.misheard, message: "" })),
+                    ),
+                  ),
+                ),
             )
             yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
 

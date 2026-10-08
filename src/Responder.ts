@@ -2,6 +2,7 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import { aloud, inEnglish, styled, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
+import { Persona } from "./Persona.ts"
 
 export const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
 export type Intent = typeof Intent.Type
@@ -73,17 +74,87 @@ export const prompt = ({ project, turn, needsYou, lines, heard }: Interruption, 
     `What the user just said:\n${heard}`,
   ].join("\n\n")
 
+/** What's said, as it's compared: lowercase words, without the "um" and "sir" around them. */
+const gist = (heard: string) =>
+  heard
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}' ]+/gu, " ")
+    .split(/\s+/)
+    .filter((word) => word !== "" && !["uh", "um", "erm", "oh", "ah", "hmm", "sir", "jarvis", "yapd", "please"].includes(word))
+    .join(" ")
+
+/** Hearing enough, however it's put. Said to any update, it never goes to the agent. */
+const enough = new Set([
+  "stop", "quiet", "be quiet", "shut up", "silence", "mute", "skip", "skip it", "next", "enough", "that's enough", "never mind",
+])
+
+/** Taking an update in. Said to one that asked something, they could be the answer, so the model judges those. */
+const noted = new Set([
+  "thanks", "thank you", "thanks a lot", "cheers", "got it", "ok", "okay", "ok thanks", "okay thanks", "cool", "great", "good",
+  "very good", "perfect", "nice", "sounds good", "alright", "all right", "noted", "understood", "awesome", "fine", "good job",
+  "well done", "excellent", "brilliant", "lovely", "good to know", "ok cool", "okay cool", "great thanks", "perfect thanks",
+])
+
+/** Going ahead with what was asked. Only ever taken as that after a question. */
+const agreed = new Set([
+  "yes", "yeah", "yep", "yup", "sure", "go ahead", "do it", "yes do it", "yes go ahead", "go for it", "yes go for it",
+  "absolutely", "of course", "yes of course", "yeah do it", "yeah go ahead", "sure go ahead", "ok do it", "okay do it",
+  "ok go ahead", "okay go ahead", "yes yes", "yeah yeah", "sounds good do it", "sounds good go ahead", "yes that's fine",
+  "yes it's fine", "yes ship it", "ship it", "merge it", "yes merge it", "go on", "proceed", "yes proceed", "do both",
+  "yes do both", "yes both", "both",
+])
+
+const question = /\?\s*["')\]]*\s*$/
+
+/**
+ * Whether the update ended on a question, as the agent wrote it or as yapd
+ * said it in full, which is what makes "yes" an answer rather than a nod.
+ */
+const asked = ({ needsYou, turn, lines }: Interruption) => {
+  const said = lines.findLast(({ speaker }) => speaker === "yapd")?.text.trim() ?? ""
+  return needsYou && (question.test(turn.message.trim()) || (!said.endsWith("…") && question.test(said)))
+}
+
+/** What they said, as they'd have typed it. */
+const typed = (heard: string) => {
+  const trimmed = heard.trim().replace(/[\s.!,]+$/, "")
+  return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}.`
+}
+
+/**
+ * The replies that need no model to work out: hearing enough, taking an update
+ * in, and going ahead when the agent asked. They're the most common by far,
+ * and answering them at once is what makes yapd feel quick. Anything else, or
+ * anything said to an update that asked something that isn't a plain yes, is
+ * left to the model.
+ */
+export const quick = (interruption: Interruption, onIt: string): Reply | undefined => {
+  const said = gist(interruption.heard)
+  if (said === "") return undefined
+  if (enough.has(said)) return { intent: "dismiss", spoken: "", message: "" }
+  if (asked(interruption)) {
+    return agreed.has(said) ? { intent: "send", spoken: onIt, message: typed(interruption.heard) } : undefined
+  }
+  if (noted.has(said) && !interruption.needsYou) return { intent: "dismiss", spoken: "", message: "" }
+  return undefined
+}
+
 export const ProviderResponder = Layer.effect(
   Responder,
   Effect.gen(function* () {
     const model = yield* Model
     const style = yield* Config.style
+    const persona = yield* Persona
     return {
       respond: (interruption) =>
-        model.ask(Reply, prompt(interruption, style)).pipe(
-          Effect.mapError((cause) => new RespondError({ cause })),
-          Effect.flatMap((reply) => Effect.map(inEnglish(model, reply.spoken), (spoken) => ({ ...reply, spoken }))),
-        ),
+        Effect.gen(function* () {
+          const fast = quick(interruption, (yield* persona.lines).onIt)
+          if (fast !== undefined) return fast
+          return yield* model.ask(Reply, prompt(interruption, style)).pipe(
+            Effect.mapError((cause) => new RespondError({ cause })),
+            Effect.flatMap((reply) => Effect.map(inEnglish(model, reply.spoken), (spoken) => ({ ...reply, spoken }))),
+          )
+        }),
     }
   }),
 )

@@ -12,6 +12,7 @@ import { Responder } from "./Responder.ts"
 import type { Handle } from "./Server.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad, VadError } from "./Vad.ts"
+import * as Persona from "./Persona.ts"
 import { Voice } from "./Voice.ts"
 
 /**
@@ -49,6 +50,7 @@ const make = (says?: string, options: {
   let handle: Handle
   let rests = 0
   const layer = Layer.mergeAll(
+    Persona.Plain,
     Layer.succeed(Condenser, {
       condense: (_, turn) => Effect.sync(() => {
         condensed.push(turn)

@@ -12,6 +12,7 @@ import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
 import { machines } from "./Machines.ts"
 import { ProviderModel } from "./Model.ts"
+import * as Persona from "./Persona.ts"
 import * as Preferences from "./Preferences.ts"
 import * as Relay from "./Relay.ts"
 import * as Remote from "./Remote.ts"
@@ -108,7 +109,10 @@ export const serve = Effect.gen(function* () {
   Effect.scoped,
   Effect.provide(
     Layer.mergeAll(
-      Layer.mergeAll(ProviderCondenser, ProviderResponder, ProviderWriter).pipe(Layer.provide(ProviderModel)),
+      Layer.mergeAll(ProviderCondenser, ProviderResponder, ProviderWriter).pipe(
+        Layer.provideMerge(Persona.layer),
+        Layer.provide(ProviderModel),
+      ),
       WhisperDictation,
       Relays,
     ).pipe(

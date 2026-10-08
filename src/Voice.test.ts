@@ -3,7 +3,8 @@ import { Effect, Fiber, TestClock, TestContext } from "effect"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
-import { join, KokoroError, kokoro, split } from "./Voice.ts"
+import { ProcessError } from "./Process.ts"
+import { join, KokoroError, kokoro, remembering, split } from "./Voice.ts"
 
 /** Samples at `level`, with `rate` samples a second. */
 const tone = (seconds: number, level: number, rate = 100) => Array<number>(Math.round(seconds * rate)).fill(level)
@@ -66,6 +67,66 @@ describe("join", () => {
     const part = new Float32Array([...tone(0.25, 0), ...tone(1, 0.5), ...tone(0.25, 0)])
     expect(join([part], 100)).toEqual(part)
   })
+})
+
+describe("remembering", () => {
+  const run = <A>(test: (dir: string) => Effect.Effect<A, unknown, import("effect").Scope.Scope>) => {
+    const dir = mkdtempSync(Path.join(tmpdir(), "yapd-remembering-"))
+    return Effect.runPromise(Effect.scoped(test(dir))).finally(() => rmSync(dir, { recursive: true, force: true }))
+  }
+
+  test("renders a short line once, and copies it after", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const rendered: Array<string> = []
+        const voice = yield* remembering(
+          { render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid) },
+          dir,
+        )
+        yield* voice.render("On it, sir.", `${dir}/one.wav`)
+        yield* voice.render("On it, sir.", `${dir}/two.wav`)
+        expect(rendered).toEqual(["On it, sir."])
+        expect(yield* Effect.promise(() => Bun.file(`${dir}/two.wav`).text())).toBe("On it, sir.")
+        // Too long to be said again word for word.
+        const long = "The tests pass. ".repeat(20)
+        yield* voice.render(long, `${dir}/three.wav`)
+        yield* voice.render(long, `${dir}/four.wav`)
+        expect(rendered.filter((text) => text === long)).toHaveLength(2)
+      }),
+    ))
+
+  test("keeps only the newest", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const rendered: Array<string> = []
+        const voice = yield* remembering(
+          { render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid) },
+          dir,
+          2,
+        )
+        for (const text of ["one", "two", "one", "three", "one", "two"]) yield* voice.render(text, `${dir}/out.wav`)
+        expect(rendered).toEqual(["one", "two", "three", "two"])
+      }),
+    ))
+
+  test("tries again after a render that failed", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        let calls = 0
+        const voice = yield* remembering(
+          {
+            render: (text, path) =>
+              ++calls === 1
+                ? Effect.fail(new ProcessError({ command: "say", code: 1, stderr: "" }))
+                : Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid),
+          },
+          dir,
+        )
+        expect((yield* Effect.either(voice.render("Hello.", `${dir}/a.wav`)))._tag).toBe("Left")
+        yield* voice.render("Hello.", `${dir}/b.wav`)
+        expect(calls).toBe(2)
+      }),
+    ))
 })
 
 // These start real processes.

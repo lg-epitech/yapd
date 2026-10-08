@@ -11,6 +11,7 @@ import { Model, ModelError } from "./Model.ts"
 import * as Responder from "./Responder.ts"
 import { clean, Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
+import * as Persona from "./Persona.ts"
 import { Voice } from "./Voice.ts"
 
 const update: Conversation.Update = {
@@ -37,6 +38,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
     const transcripts = [...said]
     let dispatches = 0
     const layer = Layer.mergeAll(
+      Persona.Plain,
       Layer.succeed(Audio, {
         play: () =>
           Effect.succeed({
@@ -532,9 +534,40 @@ describe("Language check", () => {
     const reply = await Effect.runPromise(
       Effect.flatMap(Responder.Responder, ({ respond }) =>
         respond({ project: "yapd", turn: { prompt: Option.none(), message: "C'est prêt." }, needsYou: false, lines: [], heard: "Fusionne la branche." }),
-      ).pipe(Effect.provide(Responder.ProviderResponder.pipe(Layer.provide(layer)))),
+      ).pipe(Effect.provide(Responder.ProviderResponder.pipe(Layer.provide(Layer.merge(layer, Persona.Plain))))),
     )
     expect(reply).toEqual({ intent: "send", spoken: "Noted, sir.", message: "Fusionne la branche." })
+  })
+})
+
+describe("quick replies", () => {
+  const reply = (heard: string, message = "The PR is up. Should I merge it?", needsYou = true, said?: string) =>
+    Responder.quick(
+      { project: "yapd", turn: { prompt: Option.none(), message }, needsYou, lines: said === undefined ? [] : [{ speaker: "yapd", text: said }], heard },
+      "On it, sir.",
+    )
+
+  test("goes ahead at once when the agent asked", () => {
+    expect(reply("Yeah, go ahead.")).toEqual({ intent: "send", spoken: "On it, sir.", message: "Yeah, go ahead." })
+    expect(reply("yes please")).toEqual({ intent: "send", spoken: "On it, sir.", message: "Yes please." })
+    // As yapd said it, when the agent buried its question.
+    expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's done. Shall I merge it?")?.intent).toBe("send")
+  })
+
+  test("leaves anything more than a plain yes to the model", () => {
+    expect(reply("Yes, but rebase it first.")).toBeUndefined()
+    expect(reply("No.")).toBeUndefined()
+    expect(reply("Thanks.")).toBeUndefined()
+    // A yes to something that asked nothing, or a question cut off before it was asked.
+    expect(reply("Yes.", "The PR is up.", false)).toBeUndefined()
+    expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's…")).toBeUndefined()
+  })
+
+  test("takes a nod as enough when nothing was asked", () => {
+    expect(reply("Thank you, sir.", "The PR is up.", false)).toEqual({ intent: "dismiss", spoken: "", message: "" })
+    expect(reply("Okay, cool.", "The PR is up.", false)?.intent).toBe("dismiss")
+    expect(reply("Skip it.")?.intent).toBe("dismiss")
+    expect(reply("Merge the other one too.", "The PR is up.", false)).toBeUndefined()
   })
 })
 
