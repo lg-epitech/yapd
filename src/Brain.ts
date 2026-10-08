@@ -359,6 +359,22 @@ const usage: ReadonlySet<string> = new Set([
   "usage", "my usage", "how's my usage", "how is my usage", "limits", "my limits", "how are my limits", "what's my usage",
 ])
 
+/** Words that name a limit, in "how much X have I got left". */
+const limits: ReadonlySet<string> = new Set(["usage", "limit", "limits", "quota", "quotas", "credit", "credits", "window", "windows", "tokens"])
+
+/**
+ * Whether it's "how much X have I got left" with X a limit or whose it is,
+ * like "how much Claude is left". Anything else, like "how much is left" after
+ * an update, is about the work, so it's for the model.
+ */
+const askingUsage = (said: string, known: Option.Option<T3Actions.Usage>) => {
+  const asked = /^how much ((?:\w+ ){1,4})(?:have i got |do i have )?left$/.exec(said)
+  if (asked === null) return false
+  // Not "code" from "Claude Code", which "how much code is left" means otherwise.
+  const providers = Option.match(known, { onNone: () => [], onSome: (all) => all.flatMap(({ provider }) => words(provider).split(" ")) }).filter((word) => word.length > 2 && word !== "code")
+  return asked[1]!.trim().split(" ").some((word) => limits.has(word) || ["claude", "codex", ...providers].includes(word))
+}
+
 /** "What did I miss", for which what he hasn't heard comes first. */
 const missed: ReadonlySet<string> = new Set([
   "what did i miss", "what have i missed", "catch me up", "brief me", "fill me in", "what did i miss while i was away",
@@ -407,7 +423,7 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
     return decision({ act: "again", how: "same", spoken, pending: Option.isNone(open) ? "" : question ? "answers" : "replaces" })
   }
   if (needs.has(said)) return decision({ act: "answer", spoken: needing(desk, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
-  if (usage.has(said) || /^how much (\w+ ){0,3}(have i got |do i have )?left$/.test(said)) {
+  if (usage.has(said) || askingUsage(said, situation.usage)) {
     return decision({ act: "answer", spoken: used(situation.usage, said, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   }
   if (Option.isSome(open)) {

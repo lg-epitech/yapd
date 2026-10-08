@@ -140,6 +140,15 @@ describe("Brain", () => {
     expect(rig(Brain.decision({ act: "look", machine: "rig" }))).toEqual({ _tag: "Say", spoken: "I can't see rig's threads yet, sir." })
   })
 
+  test("only a limit or whose it is makes \"how much is left\" a usage question", () => {
+    const usage: Option.Option<T3Actions.Usage> = Option.some([{ provider: "Claude", windows: [] }, { provider: "Codex", windows: [] }])
+    const usageAsked = (heard: string) => Brain.fast(situation(heard, { usage }), lines)?.act === "answer"
+    expect(usageAsked("How much Claude have I got left?")).toBe(true)
+    expect(usageAsked("How much of my quota is left?")).toBe(true)
+    // About the work he just heard of, which only the model can answer.
+    for (const heard of ["How much is left?", "How much work is left?", "How much time is left?", "How much of it is left?"]) expect(usageAsked(heard)).toBe(false)
+  })
+
   test("a near-silence 'Thank you.' is ignored", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")
