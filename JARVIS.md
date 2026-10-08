@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until it comes back with nothing to fix, then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before its first migration, to `~/.yapd/yapd.before-jarvis.sqlite`, and again before the assistant went live, to `~/.yapd/yapd.before-m1.sqlite`.
 
-Live on `dev` now: everything below. Being built: doing things to threads by voice (message, steer, stop, carry on) and showing what you ask for on screen.
+Live on `dev` now: everything below except Show me, which is merged here and waits on its live check. Being built: doing things to threads by voice (message, steer, stop, carry on).
 
 ## Talk to it (the shortcut)
 
