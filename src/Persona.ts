@@ -63,9 +63,10 @@ export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim(
 
 /**
  * The lines that tell rather than ask: worded as a question, he'd answer one
- * yapd isn't waiting on. Not "misheard", which may well ask him to say it again.
+ * yapd isn't waiting on. Not "misheard", which may well ask him to say it
+ * again, nor "again", which asks whether to send something once more.
  */
-const telling = ["onIt", "queued", "checking", "leaving", "cantTell"] as const
+const telling = ["onIt", "queued", "checking", "leaving", "cantTell", "stopped", "carrying"] as const
 
 /** Whether none of the lines that tell asks something, nor how he's addressed, which goes into lines of every kind. */
 const tells = (lines: Lines) => !lines.address.includes("?") && telling.every((key) => !lines[key].includes("?"))

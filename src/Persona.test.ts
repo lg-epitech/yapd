@@ -71,6 +71,14 @@ describe("Persona", () => {
     expect(result.stored.cantTell).toBe("I couldn't tell which one you meant, sir.")
   })
 
+  test("saying a thread stopped or carries on never asks either, while asking to send again still does", async () => {
+    const result = await persona({ ...jarvis, stopped: "Shall I stop it, sir?" }, { ...jarvis, carrying: "Carry on, sir?", again: "Shall I send it again?" })
+    expect(result.asked).toBe(1)
+    expect(result.lines.stopped).toBe("Stopped, sir.")
+    expect(result.lines.carrying).toBe("Carrying on, sir.")
+    expect(result.lines.again).toBe("Shall I send it again?")
+  })
+
   test("how he's addressed is kept without marks, so a line said in its place doesn't ask, and isn't written again at the next start", async () => {
     const first = await persona(undefined, { ...jarvis, address: "sir?", cantTell: "Which one, sir?" })
     expect(first.lines.address).toBe("sir")
