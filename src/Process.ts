@@ -1,5 +1,5 @@
 import type { Subprocess } from "bun"
-import { Data, Effect } from "effect"
+import { Data, Effect, Exit } from "effect"
 
 export class ProcessError extends Data.TaggedError("ProcessError")<{
   readonly command: string
@@ -51,10 +51,14 @@ export const stop = (proc: Subprocess) =>
     yield* wait(1000)
   })
 
-/** Runs a command to completion and returns its stdout. Interrupting kills the process. */
+/**
+ * Runs a command to completion and returns its stdout. Interrupting kills the
+ * process. With `leave`, what it left running in its group is left alone once
+ * it succeeds, for a command that puts something in the background on purpose.
+ */
 export const run = (
   command: ReadonlyArray<string>,
-  options: { readonly stdin?: string; readonly env?: Record<string, string>; readonly cwd?: string } = {},
+  options: { readonly stdin?: string; readonly env?: Record<string, string>; readonly cwd?: string; readonly leave?: boolean } = {},
 ) =>
   Effect.acquireUseRelease(
     Effect.try({
@@ -81,5 +85,5 @@ export const run = (
         }
         return stdout
       }),
-    stop,
+    (proc, exit) => (options.leave === true && Exit.isSuccess(exit) ? Effect.void : stop(proc)),
   )

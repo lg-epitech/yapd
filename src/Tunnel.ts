@@ -74,7 +74,12 @@ export interface Tunnel {
   readonly master: Remote.Master
 }
 
-const shell: Remote.Exec = (command, stdin) => run(command, { stdin })
+/**
+ * Runs SSH here. Opening the connection leaves it running in the background,
+ * and with a ProxyCommand or ProxyJump, the proxy it reaches the machine
+ * through stays behind in the group SSH started in, so that's left running too.
+ */
+const shell: Remote.Exec = (command, stdin) => run(command, { stdin, leave: command.includes("-M") })
 
 /**
  * A port nothing listens on here right now. Something else could take it

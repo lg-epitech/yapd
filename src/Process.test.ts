@@ -41,6 +41,18 @@ describe("Process", () => {
     expect((await Effect.runPromise(run(["pwd"], { cwd: "/" }))).trim()).toBe("/")
   })
 
+  // Like the proxy an SSH connection goes through, which stays behind in the group when the connection goes into the background.
+  test("leaves what a command put in the background running once it succeeds, only when asked to", async () => {
+    const helper = ["sh", "-c", "sleep 30 >/dev/null 2>&1 </dev/null & echo $!"]
+    const pids: Array<number> = []
+    try {
+      for (const leave of [true, false]) pids.push(Number((await Effect.runPromise(run(helper, { leave }))).trim()))
+      expect(pids.map(alive)).toEqual([true, false])
+    } finally {
+      for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL")
+    }
+  })
+
   test("kills and reaps a command that ignores graceful termination", () => withProcess(
     (file) => `process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); await Bun.write(${JSON.stringify(file)}, String(process.pid));`,
     async ([pid]) => { expect(pid !== undefined && alive(pid)).toBe(false) },
