@@ -183,6 +183,8 @@ const reasons: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bno running provider turn\b/i, "It isn't at a point where it can take that yet."],
   // It stops only a run with something going in it: one that ended just before the stop got there has nothing to stop.
   [/\bis not interruptible\b/i, "It isn't doing anything right now."],
+  // It acts on a thread only while it's neither archived nor deleted.
+  [/\bthread\b.*\bis not active\b/i, "It's been archived or deleted."],
 ]
 
 /** A reason T3 Code gave, fit to say: no ids, nothing unreadable, the work never put down to an agent or a session, and a full stop. */
@@ -632,9 +634,10 @@ export const make = (options: {
     })
 
   /**
-   * Lets a thread yapd stopped carry on: lets go of its queue, then asks it to
-   * pick up where it was, while that's still `wanted`; or, told something in
-   * place of what it was stopped from that waits in that queue, only lets go.
+   * Lets a thread yapd stopped carry on: lets go of its queue, then, once
+   * that's done, asks it to pick up where it was, while that's still
+   * `wanted`; or, told something in place of what it was stopped from that
+   * waits in that queue, only lets go.
    */
   const carry = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
@@ -678,8 +681,9 @@ export const make = (options: {
         if (resumed._tag === "Done") yield* ledger.settle(stopped.value.commandId, "abandoned", { reason: carried, from: ["sent"] })
         return resumed
       }
-      // Nothing held is nothing to let go of, which doesn't stop it carrying on.
-      if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
+      // T3 Code lets go of a queue with nothing in it all the same, so one it turns down, like for a thread archived since it was looked at,
+      // isn't asked to pick up where it was: a message would go in regardless, and start work on what he's no longer there for.
+      if (resumed._tag !== "Done") return resumed
       const told = yield* once(
         { ...step, step: step.step + 1 },
         "message",

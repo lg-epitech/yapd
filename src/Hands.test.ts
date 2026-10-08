@@ -1390,6 +1390,37 @@ describe("Hands", () => {
     ])
   })
 
+  test("carry on turned down as it lets go of the queue, like for a thread archived since it was looked at, asks nothing more of it, and says why", async () => {
+    const carry = { _tag: "Undo", to: Option.none(), carry: true } as const
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { run: act, answering, becomes, bounded, dispatched, ledger } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })
+        bounded.runs[0]!.status = "interrupted"
+        becomes(thread(tezos.id, { status: "interrupted" }))
+        // Archived once yapd has looked at it, T3 Code turns down letting go of its queue, though it would still take a message.
+        answering((payload, bounded) => {
+          if (payload.type !== "queue.resume") return takes()(payload, bounded)
+          becomes(thread(tezos.id, { status: "interrupted", archivedAt: "2026-10-08T22:00:00.000Z" }))
+          return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: `Thread ${tezos.id} is not active.` }))
+        })
+        const carried = yield* act({ utterance: "u2", step: 0 }, carry)
+        return {
+          carried: carried._tag === "Refused" ? Hands.failed(carry, carried, lines, Option.none()) : carried._tag,
+          stop: Option.map(yield* ledger.get("yapd:u1:0"), ({ state, reason }) => [state, reason]),
+          dispatched: dispatched.map(({ type }) => type),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      carried: "I couldn't get it going again, sir: it's been archived or deleted.",
+      // Never let carry on, the stop stands.
+      stop: Option.some(["sent", null]),
+      dispatched: ["run.interrupt", "queue.resume"],
+    })
+  })
+
   test("guards: a restart leaves what this run did alone, an archived thread is sent nothing, a busy one isn't told to carry on, and a read message isn't cancelled", async () => {
     const restarted = await run(
       Effect.gen(function* () {
