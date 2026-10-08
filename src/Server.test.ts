@@ -252,6 +252,55 @@ describe("Server", () => {
     })
   })
 
+  test("turns away a page asking for cards, threads or the journal, or to take a card down or put one back up, as it does the rest", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { ref, api, pages, watching } = yield* stateful
+      // What each route did, so a request turned away is seen to have done nothing.
+      const done: Array<string> = []
+      const noting = <A>(what: string, effect: Effect.Effect<A>) => Effect.zipRight(Effect.sync(() => void done.push(what)), effect)
+      const server = yield* Server.serve(0, {
+        ...api,
+        card: (id) => noting("card", api.card(id)),
+        hide: noting("hide", api.hide),
+        back: (id) => noting("back", api.back(id)),
+        threads: noting("threads", api.threads),
+        journal: (page) => noting("journal", api.journal(page)),
+      })
+      const url = `http://127.0.0.1:${server.port}`
+      const routes: ReadonlyArray<readonly [string, RequestInit]> = [
+        ["/cards/c1", {}],
+        ["/cards/current", { method: "DELETE" }],
+        // As a form or a no-cors fetch posts it, which needs no preflight.
+        ["/cards/current", { method: "PUT", headers: { "content-type": "text/plain" }, body: '{"id": "c1"}' }],
+        ["/threads", {}],
+        ["/journal?limit=200", {}],
+        ["/state/stream?cards", {}],
+      ]
+      const status = (path: string, init: RequestInit, headers: Record<string, string>) =>
+        Effect.promise(async () => {
+          // A stream let through would stay open, so it's only read as far as its status.
+          const gone = new AbortController()
+          const response = await fetch(`${url}${path}`, { ...init, headers: { ...(init.headers as Record<string, string>), ...headers }, signal: gone.signal })
+          gone.abort()
+          return response.status
+        })
+      // How a browser marks a page's request: from another site, from a page served on this machine, or from a page on yapd's own address.
+      const marks = [{ origin: "https://attacker.example" }, { origin: "http://localhost:5173" }, { "sec-fetch-site": "same-origin" }, { "sec-fetch-site": "cross-site" }]
+      const fromPages = yield* Effect.forEach(marks, (headers) => Effect.forEach(routes, ([path, init]) => status(path, init, headers)))
+      const turnedAway = { done: [...done], pages: [...pages], watching: watching(), showing: (yield* SubscriptionRef.get(ref)).showing?.id }
+      // The menu bar app and scripts say neither, and get through.
+      const app = yield* Effect.forEach(routes.slice(0, -1), ([path, init]) => status(path, init, {}))
+      return { fromPages, turnedAway, app, done }
+    }))).then((result) => {
+      expect(result).toEqual({
+        fromPages: Array.from({ length: 4 }, () => [403, 403, 403, 403, 403, 403]),
+        turnedAway: { done: [], pages: [], watching: 0, showing: "c1" },
+        app: [200, 204, 204, 200, 200],
+        done: ["card", "hide", "back", "threads", "journal"],
+      })
+    })
+  })
+
   test("turns away requests addressed to another host, like a web page's DNS name pointing here", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const { api } = yield* stateful
