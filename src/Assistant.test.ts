@@ -710,6 +710,53 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["accept"])
   })
 
+  test("a dangerous approval he heard and let go is allowed by dictation only with 'approve', and read back to him otherwise", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "git push --force origin main"),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("Yes, let the cloud one go ahead.")
+        const before = made.dispatched.length
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "I'll leave that one, sir.",
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("an approval is allowed for the rest of its work only when he says so, whatever the model took his yes for", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2"].flatMap((requestId) => approval(requestId, "npm install left-pad"))
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "session", pending: "answers" }), undefined, {
+          others: [cloud],
+          items,
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Yes, go on and let it.")
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.answer("Yes, for the session.")
+        return made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`)
+      }),
+    )
+    expect(result).toEqual(["r1 accept", "r2 acceptForSession"])
+  })
+
   test("an approval dictated before he's heard it asked is read back first, and only a yes to that allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
