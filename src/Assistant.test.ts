@@ -317,7 +317,7 @@ const assistant = (
       }),
     )
     let power = { on: true, turns: 1 }
-    let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean }>()
+    let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>()
     /** What the browser was asked to open. */
     const opened: Array<string> = []
     /** What's said aloud as it's played: what a notice says in place of its own words, when it says to by then. */
@@ -390,7 +390,7 @@ const assistant = (
       reading: (project: string, spoken: string) =>
         Effect.flatMap(TestClock.currentTimeMillis, (at) =>
           Effect.sync(() => {
-            listening = Option.some({ update: update(project, spoken, at), said: spoken, at, playing: true })
+            listening = Option.some({ update: update(project, spoken, at), said: spoken, at, playing: true, turns: power.turns })
           }),
         ),
       /** yapd starts saying something back over the update being read, like an answer to what he asked over it. */
@@ -3780,6 +3780,33 @@ describe("Assistant", () => {
     expect(result.before).toEqual(Option.some("threads"))
     expect(result.said).toEqual(["It's on your screen. One running.", "I haven't said anything just now, sir."])
     expect(result.up).toEqual(Option.none())
+  })
+
+  test("turned off and on, nothing he heard before, an update or a line of its own, is said again or shown, however he asks for it", async () => {
+    const cycled = (before: "update" | "line", asked: string) =>
+      run(
+        Effect.gen(function* () {
+          // Saying again, showing and hiding need no model, which can't be asked here.
+          const { dictate, heard, reading, spoken, show, toggle } = yield* assistant(() => undefined)
+          yield* show.watch
+          if (before === "update") yield* reading("yapd", "The loader is fixed.")
+          else {
+            yield* dictate("Show me what's running.")
+            // The app faded it, and took it down too.
+            yield* show.hide
+          }
+          const told = spoken().length
+          yield* toggle(false)
+          yield* toggle(true)
+          yield* heard({ heard: asked, via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: 3 })
+          return { said: spoken().slice(told), up: Option.flatten(yield* Stream.runHead(show.showing)) }
+        }).pipe(Effect.scoped),
+      )
+    for (const before of ["update", "line"] as const) {
+      for (const asked of ["Say that again.", "Show me what you said."]) {
+        expect(await cycled(before, asked)).toEqual({ said: ["I haven't said anything just now, sir."], up: Option.none() })
+      }
+    }
   })
 
   test("a pull request taken on a low guess between two is asked about before anything opens, and the one he picks is opened", async () => {

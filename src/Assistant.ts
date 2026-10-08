@@ -286,8 +286,14 @@ export const make = (options: {
   readonly tell: (notice: Notice, since?: number) => Effect.Effect<void>
   /** Whether yapd is on, and how many times it was turned on or off. */
   readonly power: Effect.Effect<{ readonly on: boolean; readonly turns: number }>
-  /** The update being read, or the last one the user heard, what of it was said last, like an answer over it, and when. */
-  readonly lastHeard: Effect.Effect<Option.Option<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean }>>
+  /**
+   * The update being read, or the last one the user heard, what of it was
+   * said last, like an answer over it, and when, with how many times yapd had
+   * been turned on or off as it was read.
+   */
+  readonly lastHeard: Effect.Effect<
+    Option.Option<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>
+  >
   /** Something is about to be said, so the speaker can get ready while it's worked out. */
   readonly coming: Effect.Effect<void>
   /**
@@ -415,11 +421,14 @@ export const make = (options: {
     /** The open question, if it was asked by the time this was said: one asked after can't be what it's about, so it never answers, dismisses or closes it. */
     const before = (utterance: Pick<Utterance, "at">) => (asking !== undefined && asking.open.at <= utterance.at ? asking : undefined)
 
-    /** What "it" means now: what's playing, or the latest heard lately, an update or an answer. */
+    /**
+     * What "it" means now: what's playing, or the latest heard lately, an
+     * update or an answer, but nothing from before yapd was last turned off.
+     */
     const subject = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
-      const update = Option.filter(yield* options.lastHeard, ({ playing, at }) => playing || now - at < recall)
       const { turns } = yield* options.power
+      const update = Option.filter(yield* options.lastHeard, (heard) => heard.turns === turns && (heard.playing || now - heard.at < recall))
       const said = answered !== undefined && answered.turns === turns && now - answered.at < recall ? answered : undefined
       if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
         return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject

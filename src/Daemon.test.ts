@@ -1456,6 +1456,30 @@ describe("Daemon", () => {
     expect(result.warnings).toEqual([])
   })
 
+  test("an update heard before yapd was turned off and on is never said again for 'say that again' after, while one heard since is", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Saying again needs no model.
+        const { finish, wait, toggle, made, assistant, played } = yield* assisted(() => Brain.decision({ act: "answer", spoken: "Asked." }))
+        const again = Effect.gen(function* () {
+          const { turns } = yield* made.power
+          yield* assistant.heard({ heard: "Say that again.", via: "typed", at: yield* Clock.currentTimeMillis, voiced: Number.POSITIVE_INFINITY, turns })
+          yield* wait(11)
+        })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(11)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* again
+        yield* finish("b", "The tests pass.")
+        yield* wait(11)
+        yield* again
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The PR is ready.", "I haven't said anything just now.", "yapd. The tests pass.", "yapd. The tests pass."])
+  })
+
   test("anything else dictated over an update, even thanks, has it read again from the start once it's dealt with", async () => {
     const result = await run(
       Effect.gen(function* () {

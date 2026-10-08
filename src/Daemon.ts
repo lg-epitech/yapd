@@ -79,9 +79,11 @@ export const make = Effect.gen(function* () {
   const rows = new WeakMap<Conversation.Update, number>()
   /**
    * The update being read, or the last one that was, what of it was said
-   * last, like an answer over it, and when, which is what "it" means to the user.
+   * last, like an answer over it, and when, which is what "it" means to the
+   * user, with how many times yapd had been turned on or off as it was read:
+   * once it's turned off, it's no longer what "it" means.
    */
-  let latest: { readonly update: Conversation.Update; readonly said: string; at: number; playing: boolean } | undefined
+  let latest: { readonly update: Conversation.Update; readonly said: string; at: number; playing: boolean; readonly turns: number } | undefined
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   interface FollowUp {
     readonly update: Conversation.Update
@@ -301,7 +303,7 @@ export const make = Effect.gen(function* () {
     saying: (update, line) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) =>
         Effect.sync(() => {
-          if (latest?.update === update) latest = { update, said: line, at, playing: true }
+          if (latest?.update === update) latest = { ...latest, said: line, at, playing: true }
         }),
       ),
   })
@@ -651,7 +653,7 @@ export const make = Effect.gen(function* () {
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
-      latest = { update: ready.update, said: ready.update.spoken, at: yield* Clock.currentTimeMillis, playing: true }
+      latest = { update: ready.update, said: ready.update.spoken, at: yield* Clock.currentTimeMillis, playing: true, turns }
     }
     let kept = false
     let dealtWith = false
@@ -809,7 +811,7 @@ export const make = Effect.gen(function* () {
     ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
     /** Whether yapd is on, and how many times it was turned on or off, so what was heard before can tell. */
     power: switched,
-    /** The update being read, or the last one the user heard, what of it was said last, and when. */
+    /** The update being read, or the last one the user heard, what of it was said last, and when, with how many times yapd had been turned on or off then. */
     lastHeard: Effect.sync(() => Option.fromNullable(latest)),
     /** Something is about to be said, like an answer being worked out, so the speaker gets ready meanwhile. */
     coming: soon,

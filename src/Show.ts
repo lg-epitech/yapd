@@ -567,11 +567,13 @@ export const offScreen = (line: string, lines: Lines) =>
     .replace(/\s+/g, " ")
     .trim()
 
-/** What yapd said last, when there's anything to say again. */
-const lastSaid = (situation: Brain.Situation) =>
-  situation.subject._tag === "Nothing"
-    ? Option.fromNullable(situation.lately.findLast(({ kind, said }) => kind !== "dictation" && (said ?? "").trim() !== "")?.said)
-    : Option.some(situation.subject.said)
+/**
+ * What yapd said last, when there's anything to say again: what "it" means,
+ * as for "say that again", never the journal's last line, which can be from
+ * before yapd was turned off and on, or a question closed since, in the words
+ * it asked.
+ */
+const lastSaid = (situation: Brain.Situation) => (situation.subject._tag === "Nothing" ? Option.none<string>() : Option.some(situation.subject.said))
 
 /** Whether words can be said as they are: nothing a voice would spell out or skip, like a path, a flag, a link or a command's punctuation. */
 export const readable = (text: string) => {
