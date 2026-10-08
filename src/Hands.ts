@@ -191,6 +191,10 @@ const answeredElsewhere = "It was answered in T3 Code just before."
 const secretive = "It's waiting on a secret, which I never give by voice: it needs T3 Code."
 /** Why an approval or an answer isn't sent when what the thread waits on isn't what it answers. */
 const mismatched = "It isn't waiting on that kind of answer, so it needs T3 Code."
+/** Why another answer to the same request isn't sent while an earlier, different one may have got there. */
+const answeredBefore = "Your earlier answer may already have got there, so this one needs T3 Code."
+/** Why another answer to the same request isn't sent once an earlier, different one went. */
+const answeredAlready = "I sent it your earlier answer already, so this one needs T3 Code."
 /** How far back an earlier answer to the same request is looked for. */
 const answering = 24 * 60 * 60_000
 
@@ -213,6 +217,18 @@ const Body = Schema.Union(
   }),
 )
 const command = Schema.decodeUnknownOption(Body)
+
+/** Answers to a request's questions in an order that doesn't depend on how they were put together. */
+const ordered = (answers: Readonly<Record<string, string | ReadonlyArray<string>>>) =>
+  JSON.stringify(Object.keys(answers).toSorted().map((key) => [key, answers[key]]))
+
+/** Whether what's in the ledger answers a request as this does: the same decision, or the same answers. */
+const alike = (body: unknown, act: Extract<Act, { readonly _tag: "Decide" | "Reply" }>) =>
+  Option.exists(command(body), (sent) =>
+    act._tag === "Decide"
+      ? sent._tag === "Decide" && sent.decision === act.decision
+      : sent._tag === "Answer" && ordered(sent.answers) === ordered(act.answers),
+  )
 
 /** A message in the ledger as it went, or was to: its words, and when it was to go in. */
 export const went = (row: Pick<Ledger.Row, "body">) =>
@@ -772,7 +788,10 @@ export const make = (options: {
    * answered, since T3 Code takes either for both and the agent would never
    * get it, and a secret never is. Once per request: an earlier step for it
    * that went stands, and one that may not have goes once more under its
-   * own ids, on this yes of his, never under new ones (I2).
+   * own ids, on this yes of his, never under new ones (I2). That's only for
+   * the same answer: a different one goes under its own ids only once the
+   * earlier never left yapd, and is otherwise left to T3 Code, so what's
+   * sent is always what he said last, and what's said is what was sent.
    */
   const respond = (step: Step, act: Extract<Act, { readonly _tag: "Decide" | "Reply" }>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
@@ -797,9 +816,18 @@ export const make = (options: {
       )
       if (!fits) return yield* failing({ _tag: "Refused", reason: mismatched } satisfies Outcome, doing[kind])
       const now = yield* Clock.currentTimeMillis
-      const earlier = (yield* ledger.steps(now - answering, { kinds: [kind], machine: act.to.machine, thread: act.to.id })).findLast((row) =>
+      const latest = (yield* ledger.steps(now - answering, { kinds: [kind], machine: act.to.machine, thread: act.to.id })).findLast((row) =>
         Option.exists(command(row.body), (body) => (body._tag === "Decide" || body._tag === "Answer") && body.requestId === act.requestId),
       )
+      // A different answer from one that never left yapd takes its place; from one that went, or may have, it would contradict what T3 Code may have.
+      if (latest !== undefined && !alike(latest.body, act)) {
+        if (latest.state === "failed") {
+          yield* ledger.settle(latest.commandId, "abandoned", { reason: "He answered it differently since.", from: ["failed"] })
+        } else if (latest.state !== "refused" && latest.state !== "abandoned") {
+          return yield* failing({ _tag: "Refused", reason: latest.state === "sent" ? answeredAlready : answeredBefore } satisfies Outcome, doing[kind])
+        }
+      }
+      const earlier = latest !== undefined && alike(latest.body, act) ? latest : undefined
       if (earlier?.state === "sent") return settled(earlier)
       const taken = earlier === undefined || earlier.state === "refused" || earlier.state === "abandoned" ? Option.none() : yield* ledger.resending(earlier.commandId)
       const outcome: Went = yield* Option.match(taken, {

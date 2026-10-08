@@ -1499,4 +1499,67 @@ describe("Hands", () => {
     expect(result.outcomes).toEqual(["Done", "Done", "Done"])
     expect(result.dispatched).toEqual(["yapd:u1:0", "yapd:u2:0", "yapd:u3:0", "yapd:u4:0", "yapd:u5:0", "yapd:u6:0"])
   })
+
+  test("a different answer to a request goes as he said it last once the earlier never left, is left to T3 Code once it may have got there, and the same one goes once more under its ids", async () => {
+    const waiting = thread(tezos.id, {
+      activeRunId: "run-1",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" },
+    })
+    /** Allows, or turns down, r1, as the step of `utterance`. */
+    const decide = (made: { readonly run: Hands.Hands["Type"]["run"] }, utterance: string, decision: Hands.Decision) =>
+      made.run({ utterance, step: 0 }, { _tag: "Decide", to: tezos, requestId: "r1", decision })
+    const result = await run(
+      Effect.gen(function* () {
+        const never = () => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." }))
+        const lost = () => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+        const ask = (sent: Answer) =>
+          Effect.gen(function* () {
+            const made = yield* hands({ thread: waiting })
+            made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+            made.answering(sent)
+            return made
+          })
+        // A no that never left, then a yes: only the yes can go, under its own ids, and it's what's said.
+        const turned = yield* ask(never)
+        yield* decide(turned, "u1", "decline")
+        turned.answering(takes())
+        const allowed = yield* decide(turned, "u2", "accept")
+        // A yes that never left, then a no: the yes is never sent.
+        const changed = yield* ask(never)
+        yield* decide(changed, "u1", "accept")
+        changed.answering(takes())
+        const declined = yield* decide(changed, "u2", "decline")
+        // A yes that may have got there, then a no: nothing goes, and why is said.
+        const unsure = yield* ask(lost)
+        yield* decide(unsure, "u1", "accept")
+        unsure.answering(takes())
+        const left = yield* decide(unsure, "u2", "decline")
+        const said = left._tag === "Refused" ? Hands.failed({ _tag: "Decide", to: tezos, requestId: "r1", decision: "decline" }, left, lines, Option.none()) : left._tag
+        // The same yes again, after one that never left: once more, under its own ids.
+        const same = yield* ask(never)
+        yield* decide(same, "u1", "accept")
+        same.answering(takes())
+        const again = yield* decide(same, "u2", "accept")
+        const sent = (made: { readonly dispatched: ReadonlyArray<Record<string, unknown>> }) => made.dispatched.map(({ commandId, decision }) => `${commandId} ${decision}`)
+        return {
+          allowed: allowed._tag,
+          declined: declined._tag,
+          said,
+          again: again._tag,
+          dispatched: { turned: sent(turned), changed: sent(changed), unsure: sent(unsure), same: sent(same) },
+        }
+      }),
+    )
+    expect(result.allowed).toBe("Done")
+    expect(result.declined).toBe("Done")
+    expect(result.said).toBe("I couldn't get your no to it, sir: your earlier answer may already have got there, so this one needs T3 Code.")
+    expect(result.again).toBe("Done")
+    expect(result.dispatched).toEqual({
+      turned: ["yapd:u1:0 decline", "yapd:u2:0 accept"],
+      changed: ["yapd:u1:0 accept", "yapd:u2:0 decline"],
+      unsure: ["yapd:u1:0 accept"],
+      same: ["yapd:u1:0 accept", "yapd:u1:0 accept"],
+    })
+  })
 })
