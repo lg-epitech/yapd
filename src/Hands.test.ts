@@ -505,11 +505,21 @@ describe("Hands", () => {
         bounded.runs[0]!.status = "interrupted"
         becomes(thread(tezos.id, { status: "interrupted" }))
         const carried = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true })
-        return { stopped: stopped._tag, carried: carried._tag, dispatched: dispatched.map(({ type, commandId, holdQueue, text }) => [type, commandId, holdQueue ?? text]) }
+        // It worked and finished; "carry on" again, as he missed hearing it, is nothing to do.
+        yield* TestClock.adjust("3 minutes")
+        becomes(thread(tezos.id, { status: "completed" }))
+        const twice = yield* act({ utterance: "u3", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true })
+        return {
+          stopped: stopped._tag,
+          carried: carried._tag,
+          twice: twice._tag === "Refused" ? twice.reason : twice._tag,
+          dispatched: dispatched.map(({ type, commandId, holdQueue, text }) => [type, commandId, holdQueue ?? text]),
+        }
       }),
     )
     expect(result.stopped).toBe("Done")
     expect(result.carried).toBe("Done")
+    expect(result.twice).toBe("It's already carried on since I stopped it.")
     expect(result.dispatched).toEqual([
       ["run.interrupt", "yapd:u1:0", true],
       ["queue.resume", "yapd:u2:0", undefined],

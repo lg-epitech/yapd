@@ -71,6 +71,8 @@ const scratch = "2 minutes"
 const resumable = "10 minutes"
 /** How far back a restart looks at what never said what came of it. Older than that, it's left be. */
 const recent = 15 * 60_000
+/** What a stop is noted with once it's been let carry on, so it's never let carry on twice. */
+const carried = "Carried on since."
 /** What a stopped thread is told when it's let carry on. */
 export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
@@ -316,10 +318,13 @@ export const make = (options: {
     Effect.gen(function* () {
       const stopped = yield* ledger.latest(resumable, {
         kinds: ["stop"],
-        states: ["sent"],
+        states: ["sent", "abandoned"],
         ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
       })
-      if (Option.isNone(stopped)) {
+      if (Option.isSome(stopped) && stopped.value.reason === carried) {
+        return yield* failing({ _tag: "Refused", reason: "It's already carried on since I stopped it." } satisfies Outcome, "let it carry on")
+      }
+      if (Option.isNone(stopped) || stopped.value.state !== "sent") {
         return yield* failing({ _tag: "Refused", reason: "I haven't stopped anything lately." } satisfies Outcome, "let it carry on")
       }
       const ref = refOf(stopped.value)
@@ -330,7 +335,7 @@ export const make = (options: {
       const resumed = yield* once(step, "undo", ref, () => ({ _tag: "Resume" }), reached.right)
       // Nothing held is nothing to let go of, which doesn't stop it carrying on.
       if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
-      return yield* once(
+      const told = yield* once(
         { ...step, step: step.step + 1 },
         "message",
         ref,
@@ -338,6 +343,9 @@ export const make = (options: {
         reached.right,
         Ledger.digest(carryOn),
       )
+      // Let carry on, the stop is taken back, and isn't taken back twice.
+      if (told._tag === "Done") yield* ledger.settle(stopped.value.commandId, "abandoned", { reason: carried, from: ["sent"] })
+      return told
     })
 
   /**
