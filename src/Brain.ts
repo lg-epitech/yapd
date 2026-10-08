@@ -514,7 +514,7 @@ ${aloud}
 - Never a handle like t4: say what the thread is about.`
 
 const instructions = [
-  `You're yapd, a developer's assistant, the one getting their coding work done. The work happens in threads: coding agents in T3 Code on their machines. Decide what he wants from what he just said; yapd does it. Nobody second-guesses your choice of thread except to check that it exists.`,
+  `You're yapd, his assistant, the one getting his coding work done. The work happens in threads: coding agents in T3 Code on his machines. Decide what he wants from what he just said; yapd does it. Nobody second-guesses your choice of thread except to check that it exists.`,
   contract,
   hearing,
   choosing,
@@ -671,15 +671,15 @@ const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situ
 
 const how = (situation: Situation) => {
   const { utterance, subject, open } = situation
-  if (Option.isSome(open) && utterance.via === "reply") return "Answering your question"
+  if (Option.isSome(open) && utterance.via === "reply") return "answering your question"
   const maybe = Option.isSome(open) ? ", which may answer your question or be something new" : ""
   switch (utterance.via) {
     case "shortcut":
-      return `By the shortcut${maybe}`
+      return `by the shortcut${maybe}`
     case "typed":
-      return `Typed to you${maybe}`
+      return `typed to you${maybe}`
     case "reply":
-      return subject._tag === "Session" ? `Over your update about ${subject.update.project}` : "Right after what you just said"
+      return subject._tag === "Session" ? `over your update about ${subject.update.project}` : "right after what you just said"
   }
 }
 
@@ -714,7 +714,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
   return [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
-    `NOW: ${date.toLocaleString("en-US", { weekday: "long", hour: "numeric", minute: "2-digit" })}.\nMACHINES: ${machines || "none seen"}${desk.away.map(({ machine, reason }) => `; ${machine} is away: ${reason}`).join("")}`,
+    `NOW: ${date.toLocaleString("en-US", { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}.\nMACHINES: ${machines || "none seen"}${desk.away.map(({ machine, reason }) => `; ${machine} is away: ${reason}`).join("")}`,
     `USAGE:\n${usageLines(situation.usage)}`,
     `THREADS, the likeliest first:\n${desk.threads.length === 0 ? "None that you can see." : desk.threads.map((listed) => line(listed, now)).join("\n")}`,
     `WAITING ON YOU:\n${waiting.length === 0 ? "Nothing." : waiting.map((listed) => `- ${listed.handle}: ${doing(listed, now)}`).join("\n")}`,
