@@ -441,10 +441,10 @@ export const make = (options: {
    * One that went is asked about, unless the thread has answered it since, or
    * it can't be told whether it has. One that may not have got there, found,
    * is one that went; withdrawn before it was read, whether shown cancelled
-   * or, as T3 Code drops a message taken out of its queue, sent and gone from
-   * the thread, what's said now is new; otherwise it's offered again under its
-   * own ids, never sent under new ones, and once it's been sent again already,
-   * it isn't risked a third time.
+   * or, as T3 Code drops a message taken out of its queue, sent into the
+   * queue and gone from the thread, what's said now is new; otherwise it's
+   * offered again under its own ids, never sent under new ones, and once it's
+   * been sent again already, it isn't risked a third time.
    */
   const twinned = (twin: Ledger.Row, reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread }) =>
     Effect.gen(function* () {
@@ -453,7 +453,8 @@ export const make = (options: {
       // Steered in, even from the queue by his hand in T3 Code's app, which cancels the run it waited in, it's in the turn under way.
       const steered = Option.exists(found, ({ intent }) => Option.exists(intent, steeredIn))
       const own = steered ? Option.none<{ readonly status: string }>() : Option.flatMap(found, ({ run }) => run)
-      const gone = twin.state === "sent" && twin.messageId !== null && Either.isRight(look) && Option.isNone(found)
+      // Only one that went into the queue can be taken out of it: any other gone from the thread is only further back than its read reaches.
+      const gone = twin.state === "sent" && twin.how === "queued" && twin.messageId !== null && Either.isRight(look) && Option.isNone(found)
       if (gone || Option.exists(own, ({ status }) => status === "cancelled")) {
         yield* Effect.logInfo(`${twin.commandId} was withdrawn from the thread, so the same words go as new`)
         return Option.none<Outcome>()

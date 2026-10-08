@@ -682,6 +682,23 @@ describe("Hands", () => {
     expect(result).toEqual({ resent: "Done", said: "Twin", dispatched: ["yapd:u1:0", "yapd:u1:0"] })
   })
 
+  test("a message steered into the turn under way that the thread's read no longer reaches back to is still asked about, since only one in the queue can be taken out", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        const first = yield* send("u1", "Also make sure it doesn't touch the Swift helper.")
+        // The long turn it went into pushes it out of what T3 Code reads back.
+        bounded.messages.splice(0)
+        bounded.turnItems.splice(0)
+        yield* TestClock.adjust("1 minute")
+        const again = yield* send("u2", "Also make sure it doesn't touch the Swift helper.")
+        return { first: first._tag === "Done" ? first.how : first._tag, again: again._tag, dispatched: dispatched.length }
+      }),
+    )
+    expect(result).toEqual({ first: "steered", again: "Twin", dispatched: 1 })
+  })
+
   test("a message to a busy thread says whether it was steered or queued, as T3 Code did", async () => {
     const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
     const sent = (intent: "steer" | "queued_turn") =>
