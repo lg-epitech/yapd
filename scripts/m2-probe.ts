@@ -55,12 +55,14 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //       9. message.dispatch, start_immediately with deliveryIntent auto, as
 //          before: the slow message again, to have a turn under way.
 //      10. message.dispatch, start_immediately with deliveryIntent restart,
-//          as "stop that and tell it X instead" sends it, while 9 is going:
-//          "This is a test from yapd, please ignore it: stop that and reply
-//          with just OK instead." It reports whether a run started by this
-//          message's own id shows up, and how 9's run ended, which yapd's
-//          check for the same words said twice counts on. Then it waits up
-//          to two minutes for the thread to be idle.
+//          as "stop that and tell it X instead" sends it, once 9's run is
+//          running, which is the only kind T3 Code restarts, never while it's
+//          still starting: "This is a test from yapd, please ignore it: stop
+//          that and reply with just OK instead." It's sent only if 9's run
+//          gets to running within 30 seconds. It reports whether a run
+//          started by this message's own id shows up, and how 9's run ended,
+//          which yapd's check for the same words said twice counts on. Then
+//          it waits up to two minutes for the thread to be idle.
 //     Right after each message.dispatch it reads the thread once, as yapd
 //     does to say whether a message was steered or queued, and to look for one
 //     whose answer was lost. Otherwise it only reads the thread's bounded
@@ -76,6 +78,15 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //     id, yapd's check for the same words said twice needs another way to
 //     tell its answer for restart messages. The thread it started is left for
 //     Laurent to look at or archive.
+//   bun scripts/m2-probe.ts --send --thread <the id of a thread it started>
+//     Steps 9 and 10 alone, again, on a thread the probe started before, to
+//     check a restart once more without starting another thread. It reads
+//     the whole thread once first, and refuses, sending nothing, unless its
+//     first message is the probe's own opening above, so it can never touch
+//     another thread. It waits up to two minutes for that thread to be idle
+//     first, and stops if it isn't. It ends by printing the same report's
+//     restart check. Without --send, it prints those two steps and sends
+//     nothing.
 
 const option = (name: string) => {
   const at = process.argv.indexOf(`--${name}`)
@@ -88,6 +99,11 @@ const slow = "This is a test from yapd, please ignore it: run the shell command 
 const quick = "This is a test from yapd, please ignore it: reply with just OK."
 const held = "This is a test from yapd, please ignore it: reply with just OK again."
 const instead = "This is a test from yapd, please ignore it: stop that and reply with just OK instead."
+
+/** A whole thread's messages, read once to make sure it's one the probe started. */
+const Whole = Schema.Struct({
+  projection: Schema.Struct({ messages: Schema.Array(Schema.Struct({ role: Schema.String, text: Schema.String, createdAt: Schema.String })) }),
+})
 
 /** A run as the bounded view has it, with what the queue checks need. */
 const Bounded = Schema.Struct({
@@ -110,6 +126,11 @@ type Projection = (typeof Bounded.Type)["projection"]
 
 /** Runs that are still going. */
 const going = ["preparing", "starting", "running", "waiting"]
+
+/** Whether nothing's going in the thread, once it's had a turn. */
+const idle = (projection: Projection) => projection.runs.length > 0 && !projection.runs.some(({ status }) => going.includes(status))
+
+const runOf = (projection: Projection, messageId: string) => projection.runs.find(({ userMessageId }) => userMessageId === messageId)
 
 /** The commands, in order, as yapd builds them, with what isn't known until they're sent standing in. */
 const commands = (
@@ -163,58 +184,96 @@ const said = (found: Option.Option<T3Actions.Found>) =>
       }),
   })
 
+/** T3 Code, reached with yapd's own token. */
+const connected = Effect.gen(function* () {
+  const token = yield* Effect.flatMap(
+    Config.t3codeToken,
+    Option.match({ onNone: () => Effect.dieMessage("Set YAPD_T3CODE_TOKEN in ~/.yapd/.env first."), onSome: Effect.succeed }),
+  )
+  const reach = T3CodeServer.connect(token)
+  return { token, reach, ...(yield* reach), actions: T3Actions.make(reach) }
+})
+
+/** How it reads and sends to its own thread, keeping each command as sent, what came back, and the one read right after each message. */
+const session = (thread: string, connection: Effect.Effect.Success<typeof connected>) => {
+  const { api, call, actions } = connection
+  const read = Effect.map(api(`/api/orchestration/threads/${encodeURIComponent(thread)}/bounded`, Bounded), ({ projection }) => projection)
+  /** Reads the thread once a second until it shows what's wanted, for at most `most` seconds. */
+  const until = (wanted: (projection: Projection) => boolean, most = 30) =>
+    Effect.gen(function* () {
+      for (let tries = 0; tries < most; tries++) {
+        const projection = yield* read
+        if (wanted(projection)) return Option.some(projection)
+        yield* Effect.sleep("1 second")
+      }
+      return Option.none<Projection>()
+    })
+  const steps: Array<{ readonly name: string; readonly payload: unknown; readonly answer: unknown }> = []
+  const dispatch = (name: string, payload: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const answer = yield* Effect.either(call("orchestration.dispatchCommand", payload, Schema.Unknown))
+      const told = Either.match(answer, {
+        onRight: (value) => ({ ok: value }),
+        onLeft: (error) => (error._tag === "Refusal" ? { refused: error.tag, message: error.message } : { trouble: error.reason, sent: error.sent === true }),
+      })
+      steps.push({ name, payload, answer: told })
+      yield* Console.log(`${name}: ${JSON.stringify(told)}`)
+      return answer
+    })
+  /** The one read yapd makes right after a message goes, as it found it. */
+  const firsts: Record<string, string> = {}
+  const sending = (name: string, payload: Record<string, unknown>, messageId: string) =>
+    Effect.gen(function* () {
+      const answer = yield* dispatch(name, payload)
+      firsts[messageId] = said(yield* Effect.orElseSucceed(actions.message(thread, messageId), () => Option.none<T3Actions.Found>()))
+      return answer
+    })
+  return { read, until, steps, dispatch, firsts, sending }
+}
+
+/**
+ * Steps 9 and 10: a turn under way, then, once it's running, a message that
+ * restarts it, under an id of its own. What came of it, for the report.
+ */
+const restarting = (thread: string, stamp: string, connection: Effect.Effect.Success<typeof connected>, use: ReturnType<typeof session>) =>
+  Effect.gen(function* () {
+    const planned = commands(thread, stamp, unknown)
+    yield* use.sending("message.dispatch now, for a turn to restart", planned.busy, planned.messages.busy)
+    const busyId = planned.messages.busy
+    const restartId = planned.messages.restart
+    // T3 Code restarts only a turn that's running: one still preparing or starting is turned down.
+    const underWay = yield* use.until((projection) => runOf(projection, busyId)?.status === "running")
+    const restarted = Option.isNone(underWay) ? undefined : yield* use.sending("message.dispatch restart, while it runs", planned.restart, restartId)
+    const ownRun =
+      restarted === undefined ? undefined : runOf(Option.getOrUndefined(yield* use.until((projection) => runOf(projection, restartId) !== undefined)) ?? (yield* use.read), restartId)
+    const replaced = restarted === undefined ? undefined : runOf(yield* use.read, busyId)
+    yield* use.until(idle, 120)
+    const found = yield* Effect.orElseSucceed(connection.actions.message(thread, restartId), () => Option.none<T3Actions.Found>())
+    // yapd counts a restart message answered only once a run under its own id has: none here means that needs another way.
+    return {
+      answer: restarted === undefined ? "not sent: the turn to restart never got to running in 30 seconds" : Either.isRight(restarted),
+      ownRun: ownRun === undefined ? null : { id: ownRun.id, status: ownRun.status },
+      intent: said(found),
+      restartedRunStatus: replaced?.status ?? null,
+    }
+  })
+
 const probe = (project: string) =>
   Effect.gen(function* () {
-    const token = yield* Effect.flatMap(
-      Config.t3codeToken,
-      Option.match({ onNone: () => Effect.dieMessage("Set YAPD_T3CODE_TOKEN in ~/.yapd/.env first."), onSome: Effect.succeed }),
-    )
-    const reach = T3CodeServer.connect(token)
-    const { api, call } = yield* reach
-    const actions = T3Actions.make(reach)
+    const connection = yield* connected
+    const { token, reach, actions } = connection
 
     // A thread of its own, so nothing it does can touch his work.
     const begun = yield* Effect.either(T3CodeLauncher.launcher(token, reach).start({ project, prompt: opening, worktree: false }))
     if (Either.isLeft(begun)) return yield* Effect.dieMessage(`Couldn't start a thread of its own: ${begun.left.reason}`)
     const thread = begun.right.thread
     yield* Console.log(`Started a thread of its own in ${begun.right.project}: ${thread}`)
-    const read = Effect.map(api(`/api/orchestration/threads/${encodeURIComponent(thread)}/bounded`, Bounded), ({ projection }) => projection)
-    /** Reads the thread once a second until it shows what's wanted, for at most `most` seconds. */
-    const until = (wanted: (projection: Projection) => boolean, most = 30) =>
-      Effect.gen(function* () {
-        for (let tries = 0; tries < most; tries++) {
-          const projection = yield* read
-          if (wanted(projection)) return Option.some(projection)
-          yield* Effect.sleep("1 second")
-        }
-        return Option.none<Projection>()
-      })
-    const idle = yield* until((projection) => projection.runs.length > 0 && !projection.runs.some(({ status }) => going.includes(status)), 120)
-    if (Option.isNone(idle)) return yield* Effect.dieMessage(`The thread it started (${thread}) didn't finish its first turn in two minutes, so nothing more was sent.`)
+    const use = session(thread, connection)
+    const { read, until, steps, dispatch, firsts, sending } = use
+    const ready = yield* until(idle, 120)
+    if (Option.isNone(ready)) return yield* Effect.dieMessage(`The thread it started (${thread}) didn't finish its first turn in two minutes, so nothing more was sent.`)
 
     const stamp = `probe${Date.now().toString(36)}`
-    const steps: Array<{ readonly name: string; readonly payload: unknown; readonly answer: unknown }> = []
-    const dispatch = (name: string, payload: Record<string, unknown>) =>
-      Effect.gen(function* () {
-        const answer = yield* Effect.either(call("orchestration.dispatchCommand", payload, Schema.Unknown))
-        const told = Either.match(answer, {
-          onRight: (value) => ({ ok: value }),
-          onLeft: (error) => (error._tag === "Refusal" ? { refused: error.tag, message: error.message } : { trouble: error.reason, sent: error.sent === true }),
-        })
-        steps.push({ name, payload, answer: told })
-        yield* Console.log(`${name}: ${JSON.stringify(told)}`)
-        return answer
-      })
-    /** The one read yapd makes right after a message goes, as it found it. */
-    const firsts: Record<string, string> = {}
-    const sending = (name: string, payload: Record<string, unknown>, messageId: string) =>
-      Effect.gen(function* () {
-        const answer = yield* dispatch(name, payload)
-        firsts[messageId] = said(yield* Effect.orElseSucceed(actions.message(thread, messageId), () => Option.none<T3Actions.Found>()))
-        return answer
-      })
-    const runOf = (projection: Projection, messageId: string) => projection.runs.find(({ userMessageId }) => userMessageId === messageId)
-
     const planned = commands(thread, stamp, unknown)
     const first = yield* sending("message.dispatch now", planned.first, planned.messages.first)
     const again = yield* dispatch("the same message.dispatch again", planned.first)
@@ -280,23 +339,13 @@ const probe = (project: string) =>
     }
     yield* until((projection) => !projection.runs.some(({ status }) => going.includes(status)), 120)
 
-    // A turn under way, then a message that restarts it, under an id of its own.
-    yield* sending("message.dispatch now, for a turn to restart", planned.busy, planned.messages.busy)
-    const busyId = planned.messages.busy
-    const restartId = planned.messages.restart
-    const underWay = yield* until((projection) => ["running", "starting", "preparing"].includes(runOf(projection, busyId)?.status ?? ""))
-    const restarted = Option.isNone(underWay) ? undefined : yield* sending("message.dispatch restart, while it runs", planned.restart, restartId)
-    const ownRun =
-      restarted === undefined ? undefined : runOf(Option.getOrUndefined(yield* until((projection) => runOf(projection, restartId) !== undefined)) ?? (yield* read), restartId)
-    const replaced = restarted === undefined ? undefined : runOf(yield* read, busyId)
-    yield* until((projection) => !projection.runs.some(({ status }) => going.includes(status)), 120)
+    const restart = yield* restarting(thread, stamp, connection, use)
 
     const last = yield* read
     const settled = (messageId: string) => Effect.orElseSucceed(Effect.map(actions.message(thread, messageId), said), () => "unreadable")
     const sequence = (answer: Either.Either<unknown, unknown>) =>
       Either.match(answer, { onLeft: () => null, onRight: (value) => (typeof value === "object" && value !== null && "sequence" in value ? value.sequence : null) })
     const read1 = { first: firsts[firstId] ?? "not read", queued: firsts[queuedId] ?? "not read", idle: firsts[idleId] ?? "not read" }
-    const restartFound = yield* Effect.orElseSucceed(actions.message(thread, restartId), () => Option.none<T3Actions.Found>())
     const later = { first: yield* settled(firstId), queued: queuedSettled, idle: yield* settled(idleId) }
     const report = {
       thread,
@@ -322,38 +371,63 @@ const probe = (project: string) =>
           verdict: resume,
         },
         afterOnAnIdleThread: idleRun?.status ?? "not seen",
-        // yapd counts a restart message answered only once a run under its own id has: none here means that needs another way.
-        restart: {
-          answer: restarted === undefined ? "not sent: the turn to restart never got going" : Either.isRight(restarted),
-          ownRun: ownRun === undefined ? null : { id: ownRun.id, status: ownRun.status },
-          intent: said(restartFound),
-          restartedRunStatus: replaced?.status ?? null,
-        },
+        restart,
       },
     }
     yield* Console.log(JSON.stringify(report, null, 2))
     yield* Console.log(`The thread it started is left as it is: ${thread}`)
   })
 
+/** Steps 9 and 10 again, on a thread the probe started before, and on no other. */
+const again = (thread: string) =>
+  Effect.gen(function* () {
+    const connection = yield* connected
+    // Only its own: a thread whose first message is the probe's own opening, read in full, since a busy thread's bounded view may no longer reach back to it.
+    const whole = yield* connection.api(`/api/orchestration/threads/${encodeURIComponent(thread)}`, Whole)
+    const first = whole.projection.messages.filter(({ role }) => role === "user").toSorted((one, other) => one.createdAt.localeCompare(other.createdAt))[0]
+    if (first?.text.trim() !== opening) {
+      return yield* Effect.dieMessage(`${thread} isn't a thread this probe started: its first message isn't the probe's own opening, so nothing was sent.`)
+    }
+    const use = session(thread, connection)
+    const ready = yield* use.until(idle, 120)
+    if (Option.isNone(ready)) return yield* Effect.dieMessage(`${thread} wasn't idle within two minutes, so nothing was sent.`)
+    const stamp = `probe${Date.now().toString(36)}`
+    const restart = yield* restarting(thread, stamp, connection, use)
+    yield* Console.log(JSON.stringify({ thread, stamp, steps: use.steps, checks: { restart } }, null, 2))
+  })
+
+const usage = "usage: bun scripts/m2-probe.ts [--send] [--project <a T3 Code project's name or path> | --thread <the id of a thread it started>]"
+const project = option("project")
+const thread = option("thread")
+if ((project !== undefined && project.startsWith("--")) || (thread !== undefined && thread.startsWith("--")) || (project !== undefined && thread !== undefined)) {
+  console.error(usage)
+  process.exit(2)
+}
 if (!process.argv.includes("--send")) {
   // What it would send, with what it can only know once it's sending standing in.
-  const planned = commands("<the probe's own new thread>", "probe<time>", {
+  const planned = commands(thread ?? "<the probe's own new thread>", "probe<time>", {
     first: "<the first message's run>",
     queued: "<the first queued message's run>",
     held: "<the held message's run>",
     idle: "<the message sent after on the idle thread's run>",
   })
-  console.log("Nothing is sent without --send. With --send --project <name or path>, it first starts a thread of its own there, then sends it, in order:")
   const { messages: _, ...sent } = planned
-  for (const [name, payload] of Object.entries(sent)) console.log(`${name}: ${JSON.stringify(payload)}`)
-  console.log(
-    "(the first is sent twice, resume only after its own interrupt was taken and held the queue, the cancels after it only for what's still queued then, and the restart only once the turn before it is going)",
-  )
-} else {
-  const project = option("project")
-  if (project === undefined || project.startsWith("--")) {
-    console.error("usage: bun scripts/m2-probe.ts [--send --project <a T3 Code project's name or path>]")
-    process.exit(2)
+  if (thread !== undefined) {
+    console.log(`Nothing is sent without --send. With --send --thread ${thread}, once it's made sure the probe started that thread, it sends it, in order:`)
+    for (const name of ["busy", "restart"] as const) console.log(`${name}: ${JSON.stringify(sent[name])}`)
+    console.log("(the restart only once the turn before it is running)")
+  } else {
+    console.log("Nothing is sent without --send. With --send --project <name or path>, it first starts a thread of its own there, then sends it, in order:")
+    for (const [name, payload] of Object.entries(sent)) console.log(`${name}: ${JSON.stringify(payload)}`)
+    console.log(
+      "(the first is sent twice, resume only after its own interrupt was taken and held the queue, the cancels after it only for what's still queued then, and the restart only once the turn before it is running)",
+    )
   }
+} else if (thread !== undefined) {
+  await Effect.runPromise(Effect.flatMap(provider, (configured) => again(thread).pipe(Effect.withConfigProvider(configured))))
+} else if (project !== undefined) {
   await Effect.runPromise(Effect.flatMap(provider, (configured) => probe(project).pipe(Effect.withConfigProvider(configured))))
+} else {
+  console.error(usage)
+  process.exit(2)
 }
