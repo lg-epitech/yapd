@@ -341,6 +341,8 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
         return Deferred.await(entry).pipe(
           Effect.flatMap((file) => Effect.promise(() => rm(file, { force: true }))),
           Effect.ignore,
+          // Stoppable even when let go of while a line is being kept, so it never holds shutdown up.
+          Effect.interruptible,
           Effect.forkIn(scope),
           Effect.asVoid,
         )

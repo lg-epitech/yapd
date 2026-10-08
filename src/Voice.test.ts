@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { Deferred, Effect, Fiber, TestClock, TestContext } from "effect"
+import { Deferred, Effect, Exit, Fiber, Scope, TestClock, TestContext } from "effect"
 import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import * as Path from "node:path"
@@ -183,6 +183,29 @@ describe("remembering", () => {
         }
       }),
     ))
+
+  test("lets go at shutdown of a line it let go of that never finished rendering", async () => {
+    const dir = mkdtempSync(Path.join(tmpdir(), "yapd-remembering-"))
+    try {
+      const closed = await Effect.runPromise(
+        Effect.gen(function* () {
+          const scope = yield* Scope.make()
+          const voice = yield* remembering(
+            { render: (text, path) => (text === "Stuck." ? Effect.never : Effect.promise(() => Bun.write(path, text)).pipe(Effect.asVoid)) },
+            dir,
+            1,
+          ).pipe(Scope.extend(scope))
+          yield* Effect.fork(voice.render("Stuck.", `${dir}/out-a.wav`))
+          yield* Effect.promise(() => Bun.sleep(10))
+          yield* voice.render("Quick.", `${dir}/out-b.wav`)
+          return yield* Scope.close(scope, Exit.void).pipe(Effect.timeout("2 seconds"), Effect.either)
+        }),
+      )
+      expect(closed._tag).toBe("Right")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
   test("tries again after a render that failed", () =>
     run((dir) =>
