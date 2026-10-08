@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Fiber, Option, Schema, TestClock, TestContext } from "effect"
 import type * as Brain from "./Brain.ts"
 import * as Persona from "./Persona.ts"
 import * as Show from "./Show.ts"
@@ -209,6 +209,34 @@ describe("Show", () => {
     expect(result.failed).toEqual({ say: failed, caption: Option.some(failed), link: true })
     const unsafe = "The build cleanup: checks pass, sir. Its address isn't a secure web page, so I haven't opened it."
     expect(result.unsafe).toEqual({ say: unsafe, caption: Option.some(unsafe), link: false })
+  })
+
+  test("a browser or T3 Code that never answers holds up what's said with a card three seconds at most", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.never, () => Effect.never)
+        const target = pulled("https://github.com/lg-epitech/yapd/pull/412")
+        const pr = yield* Effect.fork(show.present("pr", Option.some(target), situation([target]), lines))
+        const thread = yield* Effect.fork(show.present("thread", Option.some(target), situation([target]), lines))
+        yield* TestClock.adjust("3 seconds")
+        const [opened, read] = [yield* Fiber.join(pr), yield* Fiber.join(thread)]
+        return {
+          opened: { say: opened.say, kind: Option.map(opened.card, ({ kind }) => kind) },
+          read: { say: read.say, card: Option.map(read.card, ({ kind, markdown }) => ({ kind, latest: markdown.includes("### Latest") })) },
+        }
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    )
+    expect(result.opened).toEqual({ say: "The build cleanup: checks pass, sir. I couldn't open it in your browser.", kind: Option.some("pr") })
+    // Only its messages are left off.
+    expect(result.read).toEqual({ say: "The build cleanup is running, sir.", card: Option.some({ kind: "thread", latest: false }) })
+  })
+
+  test("a thread's card links its pull request only at an https address", () => {
+    const linked = (url: string) => Show.thread(pulled(url), Option.none(), now).url
+    for (const url of ["javascript:alert(1)", "file:///Applications/Calculator.app", "http://github.com/lg-epitech/yapd/pull/412", "vscode://file/etc/passwd"]) {
+      expect(linked(url)).toBeUndefined()
+    }
+    expect(linked("https://github.com/lg-epitech/yapd/pull/412")).toBe("https://github.com/lg-epitech/yapd/pull/412")
   })
 
   test("a message made to trip a pattern up is tamed at once", () => {
