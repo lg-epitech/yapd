@@ -651,6 +651,27 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r2 accept"])
   })
 
+  test("what a thread waits on is kept under its key as it comes up to be asked, and noted heard once he's heard it, so a restart never asks it again", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        const kept = () => Effect.map(made.journal.since(0, { kinds: ["notice"] }), (all) => all.map(({ key, heardAt }) => [key, heardAt !== undefined]))
+        const before = yield* kept()
+        // Its turn comes, and it's still waiting: it's kept as it's said.
+        const stale = yield* made.questions().at(-1)!.stale
+        const said = yield* kept()
+        yield* made.play()
+        return { before, stale, said, heard: yield* kept() }
+      }),
+    )
+    expect(result.before).toEqual([])
+    expect(result.stale).toBe(false)
+    expect(result.said).toEqual([["ask:Rosie:r1", false]])
+    expect(result.heard).toEqual([["ask:Rosie:r1", true]])
+  })
+
   test("a dangerous approval needs 'approve', and the notice says so", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
