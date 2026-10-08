@@ -999,6 +999,43 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["The loader fix is ready, sir.", "The loader fix is ready, sir."])
   })
 
+  test("a catch-up said again is one too: cut off, what it told him is told again, and heard once he's heard it again to the end", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(
+          (situation) =>
+            Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
+          undefined,
+          { waiting: true },
+        )
+        const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        // The catch-up is cut off as it starts, and so is hearing it again.
+        yield* dictate("What did I miss?")
+        yield* cut()
+        yield* dictate("Say that again.")
+        yield* cut()
+        const cutOff = yield* unheard
+        yield* dictate("What did I miss?")
+        const told = seen.at(-1)!.unheard.map(({ said }) => said)
+        // Cut off too, then heard again to the end.
+        yield* cut()
+        yield* dictate("Say that again.")
+        yield* play()
+        return { cutOff, told, after: yield* unheard, spoken: spoken() }
+      }),
+    )
+    expect(result.cutOff).toEqual(["yapd. The loader fix is ready."])
+    expect(result.told).toEqual(["yapd. The loader fix is ready."])
+    expect(result.after).toEqual([])
+    expect(result.spoken).toEqual([
+      "The loader fix is ready, sir.",
+      "The loader fix is ready, sir.",
+      "The loader fix is ready, sir.",
+      "The loader fix is ready, sir.",
+    ])
+  })
+
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
     const result = await run(
       Effect.gen(function* () {

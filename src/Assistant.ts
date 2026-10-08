@@ -57,7 +57,13 @@ export type Subject =
     }
   /** An update from a session T3 Code doesn't run. */
   | { readonly _tag: "Session"; readonly update: Conversation.Update; readonly said: string }
-  | { readonly _tag: "Answer"; readonly said: string; readonly about: Option.Option<Threads.Ref> }
+  | {
+      readonly _tag: "Answer"
+      readonly said: string
+      readonly about: Option.Option<Threads.Ref>
+      /** What he missed that it told him, by journal entry, which counts as heard once he's heard it to the end, said again or not. */
+      readonly missed?: ReadonlyArray<number>
+    }
 
 /** The one question yapd has open, and what it's about. */
 export interface Open {
@@ -164,12 +170,16 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
 
-/** Whether a journal entry is him asking what he missed, at once or on a second look, which tells him nothing until he's heard the answer. */
+/**
+ * Whether a journal entry is him catching up, asking what he missed, at once
+ * or on a second look, or asking to hear something again, like a catch-up he
+ * didn't hear through: neither tells him anything until he's heard the answer.
+ */
 const catchUp = (kept: Kept) => {
   if (Brain.catchingUp(kept.text ?? "")) return true
   if (typeof kept.detail !== "object" || kept.detail === null) return false
   const { decision, second } = kept.detail as { readonly decision?: Partial<Brain.Decision>; readonly second?: Partial<Brain.Decision> }
-  return decision?.how === "missed" || second?.how === "missed"
+  return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again"
 }
 
 /** What yapd knows as it works something out, and what that comes to without the model, when it's enough. */
@@ -309,7 +319,7 @@ export const make = (options: {
           threads.usage,
           askedLately,
         ])
-        // What he hasn't heard since he last said something, other than asking what he missed: he may never have heard that answer.
+        // What he hasn't heard since he last said something, other than catching up: he may never have heard that answer.
         const missed = yield* journal.unheard(spoke.findLast((kept) => !catchUp(kept))?.at ?? now - day, unheard)
         return {
           utterance,
@@ -503,7 +513,7 @@ export const make = (options: {
         const missed = Brain.catchingUp(thought.utterance.heard) || how === "missed" ? thought.situation.unheard.map(({ id }) => id) : []
         return {
           say: text,
-          subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref) },
+          subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref), ...(missed.length === 0 ? {} : { missed }) },
           kind: "answer",
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
@@ -749,7 +759,9 @@ export const make = (options: {
               return quiet(subject)
             }
             const last = subject._tag === "Nothing" ? Brain.nothingSaid(said) : subject.said
-            return { say: decision.spoken.trim() || last, subject, kind: "answer" } satisfies Outcome
+            // Said again, what he missed that it told him is heard once he's heard it to the end this time.
+            const missed = subject._tag === "Answer" ? subject.missed : undefined
+            return { say: decision.spoken.trim() || last, subject, kind: "answer", ...(missed === undefined ? {} : { missed }) } satisfies Outcome
           })
         case "start":
           return start(thought, said)
