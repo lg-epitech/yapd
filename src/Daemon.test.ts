@@ -746,6 +746,40 @@ describe("Daemon", () => {
     expect(result.threads).toEqual(["claude:terminal", "claude:slow", "claude:elsewhere", "Rosie t-tezos"])
   })
 
+  test("a turn no hook told of is said like a hook's update, once under its key, and never once yapd was turned off since", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, wait, played, journal } = yield* make()
+        const loader = (turns: number, runId: string) =>
+          made.finished({
+            about: { machine: "Rosie", id: "t-loader" },
+            project: "yapd",
+            cwd: "/code/yapd",
+            turn: { prompt: Option.some("Fix the loader."), message: `The loader is fixed, ${runId}.` },
+            at: 0,
+            key: `done:Rosie:${runId}`,
+            turns,
+          })
+        const { turns } = yield* made.power
+        yield* loader(turns, "run-1")
+        yield* wait(11)
+        // Heard of twice, as after a reconnect, it's said the once.
+        yield* loader(turns, "run-1")
+        yield* wait(11)
+        // One heard of before yapd was turned off and on isn't said.
+        yield* made.turn(false)
+        yield* made.turn(true)
+        yield* loader(turns, "run-2")
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: updates.map(({ machine, thread, key }) => [machine, thread, key]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The loader is fixed, run-1."])
+    // Kept with its thread, and the one never said isn't kept as if it were.
+    expect(result.kept).toEqual([["Rosie", "t-loader", "done:Rosie:run-1"]])
+  })
+
   test("says what yapd has to say for itself in turn, questions first", async () => {
     const result = await run(
       Effect.gen(function* () {

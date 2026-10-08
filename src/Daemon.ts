@@ -394,7 +394,12 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
           ...(Option.isSome(about) ? { session } : {}),
         },
       }
-      // Said once ever: one already kept under its key was said, or held, before.
+      // Said once ever: one already kept under its key was said, or held, before. Never kept for one yapd won't say, as it's off.
+      const power = yield* switched
+      if (finished.key !== undefined && (!power.on || power.turns !== turns)) {
+        yield* removeFile(audio)
+        return yield* Effect.logInfo("Skipped update, since yapd is off")
+      }
       const claimed = finished.key === undefined ? undefined : yield* journal.claim({ ...entry, key: finished.key })
       if (claimed !== undefined && Option.isNone(claimed)) {
         yield* removeFile(audio)
