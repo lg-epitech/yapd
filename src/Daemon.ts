@@ -499,8 +499,13 @@ export const make = Effect.gen(function* () {
   const nextUp = Effect.gen(function* () {
     const first = yield* STM.commit(STM.orElse(STM.map(takeNext, Option.some), () => STM.as(expected, Option.none())))
     if (Option.isSome(first)) return first
+    const { turns } = yield* switched
     yield* floor.device.withPermits(1)(audio.warm)
-    return yield* STM.commit(takeNext).pipe(Effect.timeoutOption(patience))
+    // Turned off meanwhile, nothing will come, so the speaker rests at once rather than after a while.
+    return yield* STM.commit(takeNext).pipe(
+      Effect.timeoutOption(patience),
+      Effect.raceFirst(Effect.as(turnedOff(turns), Option.none())),
+    )
   })
 
   const speakNext = Effect.gen(function* () {

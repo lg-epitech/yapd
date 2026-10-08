@@ -206,18 +206,21 @@ describe("Daemon", () => {
         const whileRendering = warms()
         yield* wait(1)
         yield* wait(10)
+        // Past the pause between updates, so it's waiting again.
+        yield* wait(1)
         const playedFirst = [...played]
         yield* finish("s2", "The tests pass.")
-        // Turned off before it's ready, so nothing comes.
+        const warmedAgain = warms()
+        const restedBeforeOff = rests()
+        // Turned off before it's ready, so nothing comes, and it rests at once rather than after a while.
         yield* toggle(false)
-        const restedAfterOff = rests()
-        yield* wait(16)
-        return { whileRendering, playedFirst, restedBefore, restedAfterOff, restedLater: rests() }
+        return { whileRendering, playedFirst, restedBefore, warmedAgain, restedBeforeOff, restedAfterOff: rests() }
       }),
     )
     expect(result.whileRendering).toBe(1)
     expect(result.playedFirst).toEqual(["yapd. The PR is ready."])
-    expect(result.restedLater).toBeGreaterThan(result.restedAfterOff)
+    expect(result.warmedAgain).toBe(2)
+    expect(result.restedAfterOff).toBeGreaterThan(result.restedBeforeOff)
   })
 
   test("stops an update for a dictation, and reads it again after, before newer ones", async () => {
