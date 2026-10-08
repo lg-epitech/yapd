@@ -168,11 +168,18 @@ describe("Show", () => {
       pullRequests: [{ number: 412, url, repository: "lg-epitech/integration", snapshot: { state: "OPEN", title: "Migrate Tezos", checksState: "PASSING" } }],
     })
     const relay = Schema.decodeUnknownSync(T3Live.Thread)({ ...waiting, id: "r-1", title: "Fix the relay", pendingRuntimeRequest: null })
+    // Any agent can link its thread to a pull request at any address, which a UI that makes it a link would follow.
+    const linked = (id: string, url: string) =>
+      Schema.decodeUnknownSync(T3Live.Thread)({ ...waiting, id, title: "Tidy the docs", pendingRuntimeRequest: null, pullRequests: [{ number: 7, url, repository: "lg-epitech/yapd", snapshot: null }] })
+    const unsafe = ["javascript:alert(1)", "file:///Applications/Calculator.app", "vscode://file/etc/passwd", "http://github.com/lg-epitech/yapd/pull/7"].map((url, index) =>
+      linked(`d-${index}`, url),
+    )
     const machines = Show.listing({
       threads: [
         listed,
         { ...listed, handle: "t2", ref: { machine: "Rosie", id: tezos.id }, project: "integration", thread: tezos, state: "running", since: Date.parse("2026-10-08T21:40:00.000Z") },
         { ...listed, handle: "t3", ref: { machine: "rig", id: relay.id }, here: false, thread: relay, state: "idle", since: Date.parse("2026-10-08T20:00:00.000Z") },
+        ...unsafe.map((thread, index): Threads.Listed => ({ ...listed, handle: `t${4 + index}`, ref: { machine: "laptop", id: thread.id }, thread, state: "idle", since: Date.parse("2026-10-08T19:00:00.000Z") })),
       ],
       away: [{ machine: "Alaska", reason: "I can't reach Alaska right now." }],
     })
@@ -185,6 +192,10 @@ describe("Show", () => {
         ],
       },
       { machine: "rig", threads: [{ id: relay.id, project: "yapd", title: "Fix the relay", state: "idle", since: "2026-10-08T20:00:00.000Z" }] },
+      {
+        machine: "laptop",
+        threads: unsafe.map(({ id }) => ({ id, project: "yapd", title: "Tidy the docs", state: "idle", since: "2026-10-08T19:00:00.000Z", pr: { number: 7 } })),
+      },
       { machine: "Alaska", reason: "I can't reach Alaska right now.", threads: [] },
     ])
   })

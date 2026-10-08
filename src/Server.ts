@@ -66,7 +66,8 @@ export interface Machine {
     readonly since: string
     readonly pr?: {
       readonly number: number
-      readonly url: string
+      /** Only ever an https address from T3 Code. */
+      readonly url?: string
       readonly state?: string
       readonly checks?: string
       readonly review?: string

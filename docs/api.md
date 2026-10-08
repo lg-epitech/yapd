@@ -155,7 +155,7 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1"}' http
 
 - `reason`: why a machine's threads can't be seen right now, like T3 Code not running. Its `threads` are empty then.
 - `state`: `approval` or `question` when the thread waits on you, `running`, `finishing`, `queued`, `failed`, `limited` when it hit a usage limit, or `idle`. `since` is when it got there.
-- `pr`: its latest pull request, when it has one. `state`, `checks`, `review` and `mergeability` are there when T3 Code knows them.
+- `pr`: its latest pull request, when it has one. `url` is only ever `https`, and missing when the address T3 Code has for it isn't. `state`, `checks`, `review` and `mergeability` are there when T3 Code knows them.
 
 Archived threads and the ones a thread runs for itself aren't listed. Nothing here changes a thread: ask yapd through [`/utterances`](#asking-yapd-something), so the same rules apply as when you speak.
 

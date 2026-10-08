@@ -572,7 +572,8 @@ export const listing = (desk: Threads.Desk): ReadonlyArray<Server.Machine> => {
               return {
                 pr: {
                   number,
-                  url,
+                  // Only an https address, as on a card: any agent can link a thread to one of any kind.
+                  ...Option.match(secure(url), { onNone: () => ({}), onSome: (url) => ({ url }) }),
                   ...(known === undefined ? {} : { state: known.state }),
                   ...(known?.checks === undefined ? {} : { checks: known.checks }),
                   ...(known?.review === undefined ? {} : { review: known.review }),
