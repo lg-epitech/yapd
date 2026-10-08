@@ -467,15 +467,18 @@ export const make = (options: {
         if (owner !== undefined && !subagent(owner)) return yield* linked(owner)
         // A subagent's own conversation is its provider's to talk to, so its hooks keep to their old way.
         const here = yield* canonical(cwd)
+        // In its directory, or one it holds, since the agent may have gone into a folder of it: the nearest first, then the newest.
         const candidates = (yield* Effect.forEach(
           [...threads.values()].filter((thread) => !subagent(thread)),
           (thread) => {
             const directory = thread.worktreePath ?? projects.get(thread.projectId)?.workspaceRoot
-            return directory === undefined ? Effect.succeed([]) : Effect.map(canonical(directory), (real) => (real === here ? [thread] : []))
+            if (directory === undefined) return Effect.succeed([])
+            return Effect.map(canonical(directory), (real) => (real === here || here.startsWith(real.endsWith("/") ? real : `${real}/`) ? [{ thread, depth: real.length }] : []))
           },
         ))
           .flat()
-          .toSorted((one, other) => (time(other.updatedAt) ?? 0) - (time(one.updatedAt) ?? 0))
+          .toSorted((one, other) => other.depth - one.depth || (time(other.thread.updatedAt) ?? 0) - (time(one.thread.updatedAt) ?? 0))
+          .map(({ thread }) => thread)
           .slice(0, linkable)
         for (const thread of candidates.filter(({ id, updatedAt }) => read.get(id) !== updatedAt)) {
           const found = yield* Effect.either(sessions({ machine, id: thread.id }))
@@ -487,7 +490,7 @@ export const make = (options: {
           for (const native of found.right) owners.set(native, thread.id)
           if (found.right.includes(session)) return yield* linked(thread)
         }
-        return yield* unlinked(candidates.length === 0 ? "no thread in T3 Code works in this directory" : "no thread in this directory has this session")
+        return yield* unlinked(candidates.length === 0 ? "no thread in T3 Code works in this directory or one holding it" : "no thread in this directory, or one holding it, has this session")
       }).pipe(
         Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not link a hook to its thread", cause), Option.none<Ref>())),
         Effect.annotateLogs({ session }),

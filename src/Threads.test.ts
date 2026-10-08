@@ -189,6 +189,23 @@ describe("Threads", () => {
     expect(result.reads).toEqual(["mina", "tezos"])
   })
 
+  test("a hook from a folder of a thread's directory, where its agent went, is linked to it by its session, the nearest directory first", async () => {
+    // One thread works in the integration project, one in a worktree of it, and one in a project next to it whose name starts the same.
+    const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T21:00:00.000Z")
+    const fees = thread("fees", "Fee tables", "2026-10-08T20:00:00.000Z", { worktreePath: "/code/integration/.worktrees/fees" })
+    const loader = thread("loader", "Fix the loader", "2026-10-08T21:30:00.000Z", { worktreePath: "/code/integration-loader" })
+    const result = await Effect.gen(function* () {
+      const { threads, reads } = yield* linking(Option.some(viewing(tezos, fees, loader)), { tezos: ["s-tezos"], fees: ["s-fees"], loader: ["s-loader"] })
+      const deep = yield* threads.link("Rosie", "s-fees", "/code/integration/.worktrees/fees/src")
+      const api = yield* threads.link("Rosie", "s-tezos", "/code/integration/packages/api")
+      return { api, deep, reads }
+    }).pipe(Effect.scoped, Effect.runPromise)
+    expect(result.api).toEqual(Option.some({ machine: "Rosie", id: "tezos" }))
+    expect(result.deep).toEqual(Option.some({ machine: "Rosie", id: "fees" }))
+    // For the worktree's folder, the worktree's thread first, the nearest, though the project's is newer; never the one next to it.
+    expect(result.reads).toEqual(["fees", "tezos"])
+  })
+
   test("a hook is never linked while that machine's T3 Code isn't followed", async () => {
     const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
     const result = await Effect.gen(function* () {
