@@ -807,6 +807,29 @@ describe("Daemon", () => {
     expect(result.never).toEqual([])
   })
 
+  test("every Stop of a session is kept, oldest first, so a turn's own is never taken for the one before's, and each is forgotten an hour on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, wait, made } = yield* daemon
+        const at: Array<number> = []
+        // Two turns of one session, a few seconds apart, as a short reply of yapd's right after a turn that went well, and one of another between.
+        yield* turn("a", "The PR is ready.", 30)
+        at.push(yield* TestClock.currentTimeMillis)
+        yield* turn("b", "The loader is fixed.", 1)
+        at.push(yield* TestClock.currentTimeMillis)
+        yield* turn("a", "Done, it's merged.", 3)
+        at.push(yield* TestClock.currentTimeMillis)
+        const kept = { a: yield* made.stopped(["a"]), b: yield* made.stopped(["b"]), both: yield* made.stopped(["b", "a"]) }
+        yield* wait(60 * 60)
+        yield* turn("b", "The loader's tests pass.", 1)
+        return { at, kept, later: { a: yield* made.stopped(["a"]), b: (yield* made.stopped(["b"])).length } }
+      }),
+    )
+    const [first, other, second] = result.at as [number, number, number]
+    expect(result.kept).toEqual({ a: [first, second], b: [other], both: [first, other, second] })
+    expect(result.later).toEqual({ a: [], b: 1 })
+  })
+
   test("a hook that can't be linked is spoken and answered the old way", async () => {
     const result = await run(
       Effect.gen(function* () {
