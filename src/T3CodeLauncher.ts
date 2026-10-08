@@ -7,10 +7,10 @@ import { run } from "./Process.ts"
 import * as Server from "./T3CodeServer.ts"
 
 // Starts a thread the way T3 Code's app does when the user sends the first
-// message of a new one: a single turn start that also creates the thread and,
-// for a worktree, has the server prepare it. What the request leaves out
-// follows the app's defaults, which the app works out itself, so they are
-// worked out again here.
+// message of a new one: a single launch that creates the thread and has the
+// server prepare its workspace, a worktree or the checkout, before the first
+// turn. What the request leaves out follows the app's defaults, which the app
+// works out itself, so they are worked out again here.
 
 const Selection = Schema.Struct({
   instanceId: Schema.String,
@@ -86,9 +86,14 @@ export type Refs = typeof Refs.Type
 /** `t3.json`, which a repository can carry to say how its threads start. */
 const File = Schema.parseJson(Schema.Struct({ defaultThreadEnvMode: Schema.optional(Mode) }))
 
-const Created = Schema.Struct({
-  thread: Schema.Struct({ branch: Schema.NullOr(Schema.String), worktreePath: Schema.NullOr(Schema.String), modelSelection: Selection }),
+/** A launched thread, with the run its first message started. */
+const Launched = Schema.Struct({
+  projection: Schema.Struct({
+    thread: Schema.Struct({ branch: Schema.NullOr(Schema.String), worktreePath: Schema.NullOr(Schema.String), modelSelection: Selection }),
+    runs: Schema.Array(Schema.Struct({ status: Schema.String })),
+  }),
 })
+type Launched = typeof Launched.Type
 
 const home = (path: string) => (path === "~" || path.startsWith("~/") ? join(homedir(), path.slice(1)) : path)
 
@@ -191,9 +196,9 @@ export interface Plan {
 }
 
 /**
- * T3 Code starts in the checkout when it can't make the worktree, and calls
- * that a success. Work meant to be kept apart would land in the user's own
- * files, so what would make it do that is refused here.
+ * T3 Code only finds out it can't make the worktree once the thread exists,
+ * and then leaves it failed. What would make it fail is refused here, so
+ * nothing is left behind and the reason is one that can be read out.
  */
 export const plan = (input: {
   readonly request: Request
@@ -260,52 +265,34 @@ export const fresh = (): Fresh => ({
   now: new Date().toISOString(),
 })
 
-/** The first turn of a new thread. T3 Code picks the worktree's path, and puts its own time on it. */
-export const turnStart = (plan: Plan, fresh: Fresh) => ({
-  type: "thread.turn.start",
+/** A new thread and its first message. T3 Code picks the worktree's path, runs the project's setup there, and puts its own time on it. */
+export const launch = (plan: Plan, fresh: Fresh) => ({
   commandId: fresh.command,
+  creationSource: "web",
   threadId: fresh.thread,
-  message: { messageId: fresh.message, role: "user", text: plan.prompt, attachments: [] },
+  projectId: plan.project.id,
+  title: title(plan.prompt),
+  generateTitle: true,
   modelSelection: plan.selection,
-  titleSeed: title(plan.prompt),
   runtimeMode: plan.runtimeMode,
   interactionMode: "default",
-  bootstrap: {
-    createThread: {
-      projectId: plan.project.id,
-      title: title(plan.prompt),
-      modelSelection: plan.selection,
-      runtimeMode: plan.runtimeMode,
-      interactionMode: "default",
-      branch: plan.branch,
-      worktreePath: null,
-      createdAt: fresh.now,
-    },
-    ...(plan.worktree && plan.branch !== null
+  workspaceStrategy:
+    plan.worktree && plan.branch !== null
       ? {
-          prepareWorktree: {
-            projectCwd: plan.project.workspaceRoot,
-            baseBranch: plan.branch,
-            branch: `t3code/${fresh.branch}`,
-            ...(plan.fromOrigin ? { startFromOrigin: true } : {}),
-          },
-          runSetupScript: true,
+          type: "worktree",
+          baseRef: plan.branch,
+          branch: `t3code/${fresh.branch}`,
+          ...(plan.fromOrigin ? { startFromOrigin: true } : {}),
         }
-      : {}),
-  },
-  createdAt: fresh.now,
+      : { type: "root", ...(plan.branch === null ? {} : { branch: plan.branch }) },
+  initialMessage: { messageId: fresh.message, text: plan.prompt, attachments: [] },
 })
 
-/**
- * Stops the thread's session, for one that started where it shouldn't have:
- * the less it does in the user's own files, the better.
- */
-export const sessionStop = (fresh: Pick<Fresh, "thread" | "command" | "now">) => ({
-  type: "thread.session.stop",
-  commandId: `${fresh.command}:stop`,
-  threadId: fresh.thread,
-  createdAt: fresh.now,
-})
+/** Whether T3 Code is still getting the workspace ready, before the first turn can start. */
+const preparing = ({ projection }: Launched) => projection.runs.at(-1)?.status === "preparing"
+
+/** Whether the first turn ended before it began, like when the worktree couldn't be made. */
+const failed = ({ projection }: Launched) => ["failed", "cancelled", "interrupted"].includes(projection.runs.at(-1)?.status ?? "")
 
 /** Why T3 Code wouldn't start it, to be read out. */
 export const reason = (error: Server.Trouble | Server.Refusal) =>
@@ -406,18 +393,9 @@ const heard = <A, R>(effect: Effect.Effect<A, LaunchError | Server.Trouble | Ser
     }),
   )
 
-/** How T3 Code is reached, so tests can stand in for it. */
-export interface Transport {
-  readonly api: ReturnType<typeof Server.api>
-  readonly call: ReturnType<typeof Server.call>
-}
-
-export const connect = (token: Redacted.Redacted) =>
-  Effect.map(Server.locate, (server): Transport => ({ api: Server.api(server, token), call: Server.call(server, token) }))
-
 export const launcher = (
   token: Redacted.Redacted,
-  reach: Effect.Effect<Transport, Server.Trouble> = connect(token),
+  reach: Effect.Effect<Server.Transport, Server.Trouble> = Server.connect(token),
   ids: () => Fresh = fresh,
 ): Launcher => ({
   start: (request) =>
@@ -451,24 +429,28 @@ export const launcher = (
       const decided = yield* Either.mapLeft(plan({ request, project, settings, file: mode, latest, providers, refs, named }), refuse)
 
       const started = ids()
-      // Fetching and checking out can take minutes, and closing the socket sooner would stop them.
-      yield* call("orchestration.dispatchCommand", turnStart(decided, started), Schema.Unknown, decided.worktree ? "6 minutes" : "15 seconds").pipe(
+      const prepared = yield* Effect.gen(function* () {
+        let launched = yield* call("orchestration.launchThread", launch(decided, started), Launched, "30 seconds")
+        // T3 Code gets the workspace ready after answering. Fetching and checking out can take minutes.
+        while (preparing(launched)) {
+          yield* Effect.sleep("1 second")
+          launched = yield* api(`/api/orchestration/threads/${encodeURIComponent(started.thread)}/bounded`, Launched)
+        }
+        return launched
+      }).pipe(
+        Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new Server.Trouble({ reason: "T3 Code is taking too long." }) }),
         Effect.mapError((error) =>
           error._tag === "Trouble" && error.reason === "T3 Code is taking too long."
             ? new Server.Trouble({ reason: "T3 Code is taking too long, so I don't know if it started." })
             : error,
         ),
       )
-      const { thread } = yield* api(`/api/orchestration/threads/${encodeURIComponent(started.thread)}`, Created)
+      if (failed(prepared)) {
+        const why = decided.worktree ? "couldn't make the worktree" : `couldn't get ${project.title} ready`
+        return yield* new LaunchError({ reason: `T3 Code ${why}, so the thread it made didn't start.` })
+      }
+      const { thread } = prepared.projection
       const level = effort(thread.modelSelection)
-      // What's refused above should keep this from happening, but only T3 Code knows every reason it wouldn't make one.
-      const astray = decided.worktree && thread.worktreePath === null
-      const stopped = astray
-        ? yield* call("orchestration.dispatchCommand", sessionStop(started), Schema.Unknown).pipe(
-            Effect.as(true),
-            Effect.orElseSucceed(() => false),
-          )
-        : false
       return {
         thread: started.thread,
         project: project.title,
@@ -477,13 +459,6 @@ export const launcher = (
         model: thread.modelSelection.model,
         ...(level === undefined ? {} : { effort: level }),
         worktree: thread.worktreePath !== null,
-        ...(astray
-          ? {
-              warning: stopped
-                ? `T3 Code couldn't make the worktree and started it in ${project.title}'s own folder instead, so I stopped it at once. It may have changed something there before I did.`
-                : `It started, but not in a worktree: T3 Code couldn't make one, so it's working in ${project.title}'s own folder, and I couldn't stop it.`,
-            }
-          : {}),
       } satisfies Started
     }).pipe(heard),
 

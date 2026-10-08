@@ -2,9 +2,12 @@ import { Data, type Duration, Effect, Either, Redacted, Schema } from "effect"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-// T3 Code's local server, the one its app talks to. Reading goes over HTTP.
-// Starting a thread goes over the app's WebSocket, since only there does the
-// server prepare the worktree before the first turn.
+// T3 Code's local server, the one its app talks to. Reading goes over HTTP,
+// and everything else over the app's WebSocket, which is the only place it
+// takes commands.
+
+/** The orchestration protocol yapd speaks. T3 Code turns away clients that don't name the one it does. */
+const protocol = "2"
 
 /** Where the running server says it listens. T3CODE_HOME moves it, as it does for T3 Code. */
 const runtimeState = join(process.env.T3CODE_HOME ?? join(homedir(), ".t3"), "userdata", "server-runtime.json")
@@ -15,12 +18,7 @@ export type Server = Schema.Schema.Type<typeof Server>
 export class Trouble extends Data.TaggedError("Trouble")<{ readonly reason: string; readonly cause?: unknown }> {}
 
 /** T3 Code was asked and said no, in its own words. */
-export class Refusal extends Data.TaggedError("Refusal")<{
-  readonly tag: string
-  readonly message: string
-  /** It had created the thread by then, and took it away again. */
-  readonly deleted: boolean
-}> {}
+export class Refusal extends Data.TaggedError("Refusal")<{ readonly tag: string; readonly message: string }> {}
 
 export const locate = Effect.tryPromise(() => Bun.file(runtimeState).text()).pipe(
   Effect.flatMap(Schema.decodeUnknown(Server)),
@@ -38,7 +36,11 @@ export const api =
         try {
           response = await fetch(`${server.origin}${path}`, {
             ...init,
-            headers: { authorization: `Bearer ${Redacted.value(token)}`, "content-type": "application/json" },
+            headers: {
+              authorization: `Bearer ${Redacted.value(token)}`,
+              "content-type": "application/json",
+              "x-t3-orchestration-protocol": protocol,
+            },
             signal,
           })
         } catch (cause) {
@@ -62,11 +64,7 @@ export const api =
       Effect.timeoutFail({ duration: "5 seconds", onTimeout: () => new Trouble({ reason: "T3 Code isn't answering." }) }),
     )
 
-const Failure = Schema.Struct({
-  _tag: Schema.String,
-  message: Schema.String,
-  bootstrapThreadDisposition: Schema.optional(Schema.String),
-})
+const Failure = Schema.Struct({ _tag: Schema.String, message: Schema.String })
 
 const Exit = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("Success"), value: Schema.Unknown }),
@@ -91,8 +89,7 @@ export const outcome = (exit: unknown): Either.Either<unknown, Trouble | Refusal
   if (failure === undefined || Either.isLeft(failure)) {
     return Either.left(new Trouble({ reason: "T3 Code didn't understand me. One of us needs updating.", cause: exit }))
   }
-  const { _tag: tag, message, bootstrapThreadDisposition } = failure.right
-  return Either.left(new Refusal({ tag, message, deleted: bootstrapThreadDisposition === "deleted" }))
+  return Either.left(new Refusal({ tag: failure.right._tag, message: failure.right.message }))
 }
 
 const id = "1"
@@ -107,7 +104,7 @@ export const call =
     Effect.acquireUseRelease(
       Effect.try({
         try: () =>
-          new WebSocket(`${server.origin.replace(/^http/, "ws")}/ws`, {
+          new WebSocket(`${server.origin.replace(/^http/, "ws")}/ws?orchestrationProtocol=${protocol}`, {
             headers: { authorization: `Bearer ${Redacted.value(token)}` },
           }),
         catch: (cause) => new Trouble({ reason: "T3 Code isn't answering.", cause }),
@@ -163,3 +160,12 @@ export const call =
       Effect.timeoutFail({ duration: patience, onTimeout: () => new Trouble({ reason: "T3 Code is taking too long." }) }),
       Effect.flatMap((value) => Effect.mapError(Schema.decodeUnknown(schema)(value), misunderstood)),
     )
+
+/** How T3 Code is reached, so tests can stand in for it. */
+export interface Transport {
+  readonly api: ReturnType<typeof api>
+  readonly call: ReturnType<typeof call>
+}
+
+export const connect = (token: Redacted.Redacted) =>
+  Effect.map(locate, (server): Transport => ({ api: api(server, token), call: call(server, token) }))
