@@ -478,7 +478,8 @@ export const make = (options: { readonly link?: (session: string, cwd: string) =
     readonly turns: number
   }) =>
     Effect.gen(function* () {
-      const session = `t3:${input.about.machine}:${input.about.id}`
+      // Not what notices about the thread go under, so neither takes the other's place.
+      const session = `finished:${input.about.machine}:${input.about.id}`
       // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.
       const generation = { chain: {} }
       yield* invalidate(session)

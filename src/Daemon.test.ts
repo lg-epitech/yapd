@@ -749,7 +749,7 @@ describe("Daemon", () => {
   test("a turn no hook told of is said like a hook's update, once under its key, and never once yapd was turned off since", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { made, wait, played, journal } = yield* make()
+        const { made, wait, played, journal, finish, notice } = yield* make()
         const loader = (turns: number, runId: string) =>
           made.finished({
             about: { machine: "Rosie", id: "t-loader" },
@@ -761,7 +761,12 @@ describe("Daemon", () => {
             turns,
           })
         const { turns } = yield* made.power
+        // While something else is being said, it waits alongside a notice about the same thread, and neither takes the other's place.
+        yield* finish("a", "Something else first.")
         yield* loader(turns, "run-1")
+        yield* notice("t3:Rosie:t-loader", "The loader wants your go-ahead.")
+        yield* wait(11)
+        yield* wait(11)
         yield* wait(11)
         // Heard of twice, as after a reconnect, it's said the once.
         yield* loader(turns, "run-1")
@@ -775,9 +780,9 @@ describe("Daemon", () => {
         return { played: [...played], kept: updates.map(({ machine, thread, key }) => [machine, thread, key]) }
       }),
     )
-    expect(result.played).toEqual(["yapd. The loader is fixed, run-1."])
+    expect(result.played.toSorted()).toEqual(["The loader wants your go-ahead.", "yapd. Something else first.", "yapd. The loader is fixed, run-1."])
     // Kept with its thread, and the one never said isn't kept as if it were.
-    expect(result.kept).toEqual([["Rosie", "t-loader", "done:Rosie:run-1"]])
+    expect(result.kept.slice(1)).toEqual([["Rosie", "t-loader", "done:Rosie:run-1"]])
   })
 
   test("says what yapd has to say for itself in turn, questions first", async () => {
