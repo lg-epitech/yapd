@@ -97,9 +97,9 @@ When you ask about a thread that waits on something that can't be read aloud, li
   "id": "cmgi3k2xa4f1",
   "kind": "pr",
   "title": "Migrate the Tezos integration",
-  "markdown": "**#412** in lg-epitech/integration, open\n\n- Checks: passing\n- Review: waiting for a review\n- Mergeable: yes",
+  "markdown": "**#412** in lg-epitech/integration, open\n\n- Checks: passing\n- Review: waiting for a review\n- Mergeable: yes\n- Thread: Migrate the Tezos integration\n\n[Open the pull request](<https://github.com/lg-epitech/integration/pull/412>)",
   "url": "https://github.com/lg-epitech/integration/pull/412",
-  "caption": "Checks pass, and it's waiting for a review.",
+  "caption": "Checks pass and it's waiting for a review, sir.",
   "at": "2026-10-02T14:05:40.000Z"
 }
 ```

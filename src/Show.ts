@@ -94,8 +94,16 @@ export const verbatim = (text: string) => {
   return `${fence}\n${text.replace(/\r\n?/g, "\n").trimEnd()}\n${fence}`
 }
 
-/** Whether an address is one to follow: https, and nothing else. */
-const secure = (address: string) => /^https:\/\//i.test(address.trim())
+/** An address that's safe to follow, written out in full: https, and nothing else, like a file or another app's scheme. */
+export const secure = (address: string): Option.Option<string> => {
+  const trimmed = address.trim()
+  if (!URL.canParse(trimmed)) return Option.none()
+  const url = new URL(trimmed)
+  return url.protocol === "https:" && url.hostname !== "" ? Option.some(url.href) : Option.none()
+}
+
+/** Whether an address is safe to follow. */
+const safe = (address: string) => Option.isSome(secure(address))
 
 /** How much of a thread's own message a card shows. */
 const longest = 2500
@@ -111,9 +119,9 @@ export const tamed = (markdown: string) => {
   const cut = markdown.length <= longest ? markdown : `${markdown.slice(0, end > 0 ? end : longest)}\n…`
   const tame = cut
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)/g, (link, words: string, address: string) => (secure(address) ? link : words))
-    .replace(/<([a-z][\w+.-]*:[^>\s]*)>/gi, (link, address: string) => (secure(address) ? link : address))
-    .replace(/^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s.*)?$/gm, (definition, address: string) => (secure(address) ? definition : ""))
+    .replace(/\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)/g, (link, words: string, address: string) => (safe(address) ? link : words))
+    .replace(/<([a-z][\w+.-]*:[^>\s]*)>/gi, (link, address: string) => (safe(address) ? link : address))
+    .replace(/^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s.*)?$/gm, (definition, address: string) => (safe(address) ? definition : ""))
   // A code block cut short is closed, so the rest of the card isn't taken into it.
   const fences = tame.match(/^ {0,3}(`{3,}|~{3,})/gm) ?? []
   return fences.length % 2 === 0 ? tame : `${tame}\n${fences.at(-1)!.trim()}`
@@ -253,7 +261,7 @@ export const thread = (listed: Threads.Listed, detail: Option.Option<T3Actions.D
     ...Option.match(message, { onNone: () => [], onSome: ({ text }) => [`### Latest\n\n${tamed(text)}`] }),
     ...Option.match(Option.flatMap(detail, ({ plan }) => plan), { onNone: () => [], onSome: (plan) => [`### Plan\n\n${tamed(plan)}`] }),
   ].join("\n\n")
-  const url = Option.filter(Option.map(pr, ({ url }) => url), secure)
+  const url = Option.flatMap(pr, ({ url }) => secure(url))
   return { kind: "thread", title: listed.thread.title, markdown, ...Option.match(url, { onNone: () => ({}), onSome: (url) => ({ url }) }) }
 }
 
@@ -274,21 +282,26 @@ export const pr = (listed: Threads.Listed): Option.Option<Draft> =>
   Option.map(pullRequest(listed.thread), ({ number, url, repository, snapshot }) => {
     const known = snapshot === null ? undefined : facts(snapshot)
     const lines = [
-      ...(known?.checks === undefined ? [] : [`- Checks: ${known.checks}`]),
-      ...(known?.review === undefined ? [] : [`- Review: ${reviews[known.review] ?? known.review}`]),
-      ...(known?.mergeability === undefined || known.state !== "open" ? [] : [`- Mergeable: ${mergeable[known.mergeability] ?? known.mergeability}`]),
+      ...(known?.checks === undefined ? [] : [`- Checks: ${plainly(known.checks)}`]),
+      ...(known?.review === undefined ? [] : [`- Review: ${reviews[known.review] ?? plainly(known.review)}`]),
+      ...(known?.mergeability === undefined || known.state !== "open" ? [] : [`- Mergeable: ${mergeable[known.mergeability] ?? plainly(known.mergeability)}`]),
       `- Thread: ${plainly(listed.thread.title)}`,
     ]
-    const link = secure(url) ? [`[Open the pull request](${url})`] : []
+    const address = secure(url)
     return {
       kind: "pr",
       title: snapshot === null ? `Pull request #${number}` : snapshot.title,
-      markdown: [`**#${number}** in ${plainly(repository)}${known === undefined ? "" : `, ${known.state}`}`, lines.join("\n"), ...link].join("\n\n"),
-      ...(secure(url) ? { url } : {}),
+      markdown: [
+        `**#${number}** in ${plainly(repository)}${known === undefined ? "" : `, ${plainly(known.state)}`}`,
+        lines.join("\n"),
+        // In angle brackets, so nothing in the address can end the link early.
+        ...Option.match(address, { onNone: () => [], onSome: (address) => [`[Open the pull request](<${address}>)`] }),
+      ].join("\n\n"),
+      ...Option.match(address, { onNone: () => ({}), onSome: (url) => ({ url }) }),
     }
   })
 
-/** What a pull request comes to in a line, like "Checks pass, and it's waiting for a review." */
+/** What a pull request comes to in a line, like "Checks pass and it's waiting for a review." */
 export const verdict = (listed: Threads.Listed, address: string) =>
   Option.match(pullRequest(listed.thread), {
     onNone: () => `${Brain.capital(listed.called)} has no pull request${address}.`,
@@ -319,7 +332,7 @@ export const usage = (usage: Option.Option<T3Actions.Usage>, now: number): Draft
             windows
               .map((window) => {
                 const resets = window.resetsAt === undefined ? undefined : Brain.clock(window.resetsAt, now)
-                return `- ${Brain.capital(Brain.windowed(window).name)} window: ${Math.round(window.usedPercent)}%${resets === undefined ? "" : `, resets ${resets}`}`
+                return `- ${plainly(Brain.capital(Brain.windowed(window).name))} window: ${Math.round(window.usedPercent)}%${resets === undefined ? "" : `, resets ${resets}`}`
               })
               .join("\n"),
           ].join("\n\n"),
@@ -467,9 +480,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     const opening = (thread: T3Live.Thread) =>
       Effect.gen(function* () {
         // Only the address T3 Code has for it, and only https: never one a model wrote, a file or another app's scheme.
-        const address = Option.filter(Option.map(pullRequest(thread), ({ url }) => url.trim()), (url) => URL.canParse(url) && new URL(url).protocol === "https:")
+        const address = Option.flatMap(pullRequest(thread), ({ url }) => secure(url))
         if (Option.isNone(address)) return false
-        return yield* open(new URL(address.value).href).pipe(
+        return yield* open(address.value).pipe(
           Effect.timeout(patience),
           Effect.as(true),
           Effect.catchAll((error) => Effect.logWarning("Could not open the pull request", error).pipe(Effect.as(false))),
