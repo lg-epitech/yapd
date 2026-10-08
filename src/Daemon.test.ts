@@ -1121,6 +1121,24 @@ describe("Daemon", () => {
     expect(result.kept.slice(1)).toEqual([["Rosie", "t-loader", "done:Rosie:run-1"]])
   })
 
+  test("a turn no hook told of, dropped as it was handed on after yapd was turned off and on, is said when T3 Code tells of it again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, wait, played } = yield* make()
+        const before = (yield* made.power).turns
+        yield* made.turn(false)
+        yield* made.turn(true)
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", before))
+        yield* wait(11)
+        // As after a reconnect.
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The loader is fixed."])
+  })
+
   test("a turn no hook told of, waiting to be said, isn't once its thread started again or went", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -522,6 +522,8 @@ export const make = (
       const { fallback } = finished
       const power = yield* switched
       if (fallback !== undefined && (!power.on || power.turns !== turns)) {
+        // Never kept, it's T3 Code's to tell of again.
+        if (fallbacks.get(fallback.key) === fallback) fallbacks.delete(fallback.key)
         yield* removeFile(audio)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
       }
@@ -666,15 +668,17 @@ export const make = (
       if (!(yield* input.current)) return yield* Effect.logInfo("Not saying a turn no hook told of, since its thread started again")
       // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands.
       if (Notices.hooked(stopsOf(input.run.natives), input.run, input.run.startedAt)) return yield* Effect.logInfo("Left to its hook")
-      // Heard of twice, as after a reconnect, it's said the once.
+      // Heard of twice, as after a reconnect, it's said the once, and the one on its way isn't put aside for it.
       if (fallbacks.has(input.key)) return
+      const at = yield* Clock.currentTimeMillis
+      for (const [key, kept] of fallbacks) if (at - kept.at > forgotten) fallbacks.delete(key)
       const fallback: Fallback = {
         about: input.about,
         session,
         key: input.key,
         run: input.run,
         current: input.current,
-        at: yield* Clock.currentTimeMillis,
+        at,
         begun: false,
       }
       forsake(session)
@@ -793,7 +797,7 @@ export const make = (
           if (through !== undefined) {
             yield* release(summaryHook)
             yield* Effect.logInfo("Skipped update, said already from T3 Code's word that it finished").pipe(Effect.annotateLogs({ project }))
-            // Kept as said that way, which is what "it" was.
+            // Kept as said through T3 Code's word, so the journal still has what its hook told of.
             yield* journal.write({
               at: arrivedAt,
               kind: "action",
