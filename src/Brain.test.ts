@@ -5,6 +5,7 @@ import * as Brain from "./Brain.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
+import * as Notices from "./Notices.ts"
 import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
@@ -341,6 +342,19 @@ describe("Brain", () => {
       Hands.unoffered(lines, Option.some("Migrate Tezos Integration"), "Its thread is archived now."),
       Hands.unsure({ kind: "stop", body: { _tag: "Stop" } }, lines, Option.none()),
       Hands.unsure({ kind: "undo", body: { _tag: "Cancel", runId: "run_7f3a9c2b" } }, lines, Option.some("Migrate Tezos Integration")),
+      // What's brought up about threads, with T3 Code's own words for why a run failed, and a secret's name as the agent gave it.
+      ...[
+        `Provider session ${tezos.id} was closed before the turn finished.`,
+        "Claude API is overloaded (529). Try again shortly.",
+        'Run "run_7f3a9c2b" failed: {"type":"error","error":{"type":"api_error"}}',
+      ].map((message) =>
+        Notices.lines.failed("Migrate Tezos Integration", Notices.reason(Option.some({ class: "unknown", message }), tezos), lines),
+      ),
+      Notices.lines.failed("Migrate Tezos Integration", Notices.reason(Option.none(), { ...tezos, lastErrorClass: "transport_error" }), lines),
+      Notices.lines.limited("Migrate Tezos Integration", Notices.provider("claudeAgent"), Option.fromNullable(Brain.clock("2026-10-09T01:10:00.000Z", now)), lines),
+      Notices.lines.secret("Migrate Tezos Integration", "STRIPE_API_KEY_2", lines),
+      Notices.lines.secret("Migrate Tezos Integration", "deploy key", lines),
+      Notices.lines.waiting("Migrate Tezos Integration", "wants to push the branch", lines),
       ...Persona.sayable(Persona.plain),
       Conversation.movedOn,
       Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
