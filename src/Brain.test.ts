@@ -132,6 +132,14 @@ describe("Brain", () => {
     expect(stopped).toEqual({ _tag: "Say", spoken: "I can't do that yet, sir." })
   })
 
+  test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {
+    const rig = (decided: Brain.Decision) => Brain.check(decided, situation("What's the rig relay fix doing?"), lines)
+    const here = rig(Brain.decision({ act: "look", target: "t2", machine: "rig", sure: "high" }))
+    expect(here._tag === "Do" ? Option.map(here.plan.target, ({ thread }) => thread.title) : here).toEqual(Option.some("Migrate Tezos Integration"))
+    // With nothing here picked, it says why it can't look there.
+    expect(rig(Brain.decision({ act: "look", machine: "rig" }))).toEqual({ _tag: "Say", spoken: "I can't see rig's threads yet, sir." })
+  })
+
   test("a near-silence 'Thank you.' is ignored", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")
