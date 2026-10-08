@@ -649,12 +649,12 @@ describe("Assistant", () => {
         yield* unanswered()
         // He presses the shortcut just before it's asked again: it isn't said while he talks...
         yield* wait(58)
-        yield* prepare
+        yield* prepare(1)
         const held = yield* questions()[0]!.stale
         yield* wait(5)
         const during = spoken().length
         // ...and cancels, so it's waited on again, and asked a minute later.
-        yield* nothing
+        yield* nothing(1)
         yield* wait(60)
         const cancelled = spoken()
         // Asked afresh, then he answers an update instead, which takes its place.
@@ -838,11 +838,30 @@ describe("Assistant", () => {
         const { prepare, heard, reading, seen } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir." }))
         // He presses the shortcut over one update, then over the next, before the first dictation is transcribed.
         yield* reading("integration-connectors", "Integration-connectors. The Mina tickets are filed.")
-        yield* prepare
+        yield* prepare(1)
         yield* reading("integration", "Integration. The Tezos migration is comparing request formats.")
-        yield* prepare
-        yield* heard({ heard: "What is it doing?", via: "shortcut", at: now, voiced: 3, turns: 1 })
-        yield* heard({ heard: "Tell me more about it.", via: "shortcut", at: now, voiced: 3, turns: 1 })
+        yield* prepare(2)
+        yield* heard({ heard: "What is it doing?", via: "shortcut", at: now, voiced: 3, turns: 1 }, 1)
+        yield* heard({ heard: "Tell me more about it.", via: "shortcut", at: now, voiced: 3, turns: 1 }, 2)
+        return seen.map(({ subject }) => (subject._tag === "Nothing" ? "nothing" : subject.said))
+      }),
+    )
+    expect(result).toEqual(["Integration-connectors. The Mina tickets are filed.", "Integration. The Tezos migration is comparing request formats."])
+  })
+
+  test("\"it\" in a dictation is what was being read as its shortcut was pressed, however long it took to say and hear, with the next press waiting", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { prepare, heard, reading, wait, seen } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir." }))
+        yield* reading("integration-connectors", "Integration-connectors. The Mina tickets are filed.")
+        yield* prepare(1)
+        // He talks for nearly five minutes, then presses the shortcut again over the next update while the first is transcribed, which takes a while.
+        yield* wait(290)
+        yield* reading("integration", "Integration. The Tezos migration is comparing request formats.")
+        yield* prepare(2)
+        yield* wait(100)
+        yield* heard({ heard: "What is it doing?", via: "shortcut", at: now + 390_000, voiced: 250, turns: 1 }, 1)
+        yield* heard({ heard: "Tell me more about it.", via: "shortcut", at: now + 390_000, voiced: 3, turns: 1 }, 2)
         return seen.map(({ subject }) => (subject._tag === "Nothing" ? "nothing" : subject.said))
       }),
     )

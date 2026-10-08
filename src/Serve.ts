@@ -118,12 +118,12 @@ export const serve = Effect.gen(function* () {
   }
 
   /** What the user said to yapd, as heard now, while it's on. */
-  const heard = (text: string, via: Assistant.Utterance["via"], voiced: number) =>
+  const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, press?: number) =>
     Effect.gen(function* () {
       const power = yield* daemon.power
       if (!power.on) return Option.none<string>()
       const at = yield* Clock.currentTimeMillis
-      return Option.some(yield* assistant.heard({ heard: text, via, at, voiced, turns: power.turns }))
+      return Option.some(yield* assistant.heard({ heard: text, via, at, voiced, turns: power.turns }, press))
     })
 
   const state = Stream.zipLatestWith(daemon.state, (yield* Activity).changes, (state, activity): Server.State => ({
@@ -150,9 +150,12 @@ export const serve = Effect.gen(function* () {
     utter: (text) => heard(text, "typed", Number.POSITIVE_INFINITY),
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(shortcut.events, (event) => (event._tag === "Started" ? assistant.prepare : Effect.void)))
+  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, assistant.prepare))
+  // Each with the press it began with, which keeps what "it" meant then, however long the dictation took.
   yield* Effect.forkScoped(
-    Stream.runForEach(dictation.transcripts, ({ heard: text, voiced }) => (text === "" ? assistant.nothing : heard(text, "shortcut", voiced))),
+    Stream.runForEach(dictation.transcripts, ({ press, heard: text, voiced }) =>
+      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, press),
+    ),
   )
   // Whatever he says over an update takes the place of a question yapd asked before.
   yield* Effect.forkScoped(Stream.runForEach(daemon.replies, () => assistant.replied))

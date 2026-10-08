@@ -18,12 +18,15 @@ import { extension, Voice } from "./Voice.ts"
 export class Dictation extends Context.Tag("yapd/Dictation")<
   Dictation,
   {
+    /** Each press of the shortcut that starts a dictation, as it starts, by the number its transcript will carry. */
+    readonly presses: Stream.Stream<number>
     /**
      * What the user said, each time a dictation ends, in the order they said
-     * it, with how many seconds of it was speech: nothing when it came to
-     * nothing, like one cancelled, so whoever waited on it knows it's over.
+     * it, with how many seconds of it was speech and the press it began with:
+     * nothing when it came to nothing, like one cancelled or one that failed,
+     * so whoever waited on it knows it's over.
      */
-    readonly transcripts: Stream.Stream<{ readonly heard: string; readonly voiced: number }>
+    readonly transcripts: Stream.Stream<{ readonly press: number; readonly heard: string; readonly voiced: number }>
     /** Drops every dictation not handed on yet, without a sound, like when yapd is turned off. */
     readonly drop: Effect.Effect<void>
   }
@@ -159,6 +162,9 @@ export const wav = (samples: Float32Array, sampleRate = rate) => {
 
 type End = "Sent" | "Cancelled"
 
+/** What a dictation that came to nothing hands on. */
+const nothing = { text: "", voiced: 0 }
+
 /**
  * Records the user from the shortcut to the next press, through the helper's
  * microphone, whose echo cancellation keeps yapd's own sounds out, and
@@ -176,9 +182,12 @@ export const WhisperDictation = Layer.scoped(
     const device = Floor.use(yield* Floor.Floor, audio)
     const scope = yield* Effect.scope
     /** Each with how many times dictations were dropped before it was sent, so one handed on just before isn't taken in after. */
-    const transcripts = yield* PubSub.unbounded<{ readonly heard: string; readonly voiced: number; readonly drops: number }>()
+    const transcripts = yield* PubSub.unbounded<{ readonly press: number; readonly heard: string; readonly voiced: number; readonly drops: number }>()
+    /** Likewise each press that starts one. */
+    const presses = yield* PubSub.unbounded<{ readonly press: number; readonly drops: number }>()
     const dictations = yield* FiberSet.make()
     let drops = 0
+    let pressed = 0
 
     const dir = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-dictation-"))),
@@ -294,10 +303,13 @@ export const WhisperDictation = Layer.scoped(
         return { end, heard }
       }).pipe(Effect.scoped, device)
 
-    /** What a dictation came to, once recorded: the words, or nothing, after saying why. */
+    /**
+     * What a dictation came to, once recorded: the words, or nothing, after
+     * saying why. One that failed came to nothing too, which is passed on like
+     * the rest, so whoever waits on its press knows it's over.
+     */
     const hear = (ended: Deferred.Deferred<End>) =>
       Effect.gen(function* () {
-        const nothing = { text: "", voiced: 0 }
         const recorded = yield* record(ended, yield* Effect.scope)
         if (recorded === undefined) {
           yield* cancel(ended)
@@ -327,21 +339,27 @@ export const WhisperDictation = Layer.scoped(
         }
         if (heard.right.text === "") return yield* Effect.as(say("I didn't catch anything."), nothing)
         return heard.right
-      })
+      }).pipe(
+        Effect.catchAllCause((cause) =>
+          Cause.isInterruptedOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logError("Dictation failed", cause).pipe(Effect.zipRight(cancel(ended)), Effect.as(nothing)),
+        ),
+      )
 
     /**
      * `before` is done once the dictation before this one has been dealt with,
      * which a long one can be after a short one that followed it: what they
      * said is passed on in the order they said it, since one can build on another.
      */
-    const dictate = (ended: Deferred.Deferred<End>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
+    const dictate = (press: number, ended: Deferred.Deferred<End>, before: Deferred.Deferred<void> | undefined, done: Deferred.Deferred<void>) =>
       Effect.gen(function* () {
         // While they talk, which is plenty of time.
         yield* Effect.forkIn(transcriber.prepare, scope)
         yield* Floor.take
         const heard = yield* hear(ended)
         if (before !== undefined) yield* Deferred.await(before)
-        yield* PubSub.publish(transcripts, { heard: heard.text, voiced: heard.voiced, drops })
+        yield* PubSub.publish(transcripts, { press, heard: heard.text, voiced: heard.voiced, drops })
       }).pipe(
         Effect.ensuring(Deferred.succeed(done, undefined)),
         Effect.scoped,
@@ -358,12 +376,14 @@ export const WhisperDictation = Layer.scoped(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           if (event._tag === "Started") {
+            const press = ++pressed
             const ended = yield* Deferred.make<End>()
             const done = yield* Deferred.make<void>()
             const before = last
             ending = ended
             last = done
-            return yield* FiberSet.run(dictations, dictate(ended, before, done))
+            yield* PubSub.publish(presses, { press, drops })
+            return yield* FiberSet.run(dictations, dictate(press, ended, before, done))
           }
           if (ending !== undefined) yield* Deferred.succeed(ending, event._tag)
           ending = undefined
@@ -373,8 +393,9 @@ export const WhisperDictation = Layer.scoped(
     )
 
     return {
+      presses: Stream.fromPubSub(presses).pipe(Stream.filterMap(({ press, drops: before }) => (before === drops ? Option.some(press) : Option.none()))),
       transcripts: Stream.fromPubSub(transcripts).pipe(
-        Stream.filterMap(({ heard, voiced, drops: before }) => (before === drops ? Option.some({ heard, voiced }) : Option.none())),
+        Stream.filterMap(({ press, heard, voiced, drops: before }) => (before === drops ? Option.some({ press, heard, voiced }) : Option.none())),
       ),
       // Without waiting for them to stop, since nothing they do after can reach anyone.
       drop: Effect.suspend(() => {

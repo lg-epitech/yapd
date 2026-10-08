@@ -38,6 +38,9 @@ const dictation = (
     const said: Array<string> = []
     const heard: Array<number> = []
     const transcripts: Array<string> = []
+    /** The presses dictations started with, as they started, and those their transcripts carry, in order. */
+    const presses: Array<number> = []
+    const ended: Array<number> = []
     const remaining = [...transcribed]
     let cancelled = 0
     let detected = 0
@@ -96,8 +99,14 @@ const dictation = (
     )
     const context = yield* Layer.build(layer)
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ heard }) => Effect.sync(() => void transcripts.push(heard))),
+      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ press, heard }) =>
+        Effect.sync(() => {
+          transcripts.push(heard)
+          ended.push(press)
+        }),
+      ),
     )
+    yield* Effect.forkScoped(Stream.runForEach(Context.get(context, Dictation).presses, (press) => Effect.sync(() => void presses.push(press))))
     const floor = Context.get(context, Floor.Floor)
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -124,6 +133,8 @@ const dictation = (
       said,
       heard,
       transcripts,
+      presses,
+      ended,
       cancelled: () => cancelled,
       listening: () => open,
       flush,
@@ -221,10 +232,10 @@ describe("Dictation", () => {
     expect(result.said).toEqual([])
   })
 
-  test("doesn't cancel the next dictation when an earlier one fails late", async () => {
+  test("doesn't cancel the next dictation when an earlier one fails late, and hands the failed one on as nothing, with its own press", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { press, talk, wait, heard, transcripts, cancelled } = yield* dictation(["Second."], {
+        const { press, talk, wait, heard, transcripts, presses, ended, cancelled } = yield* dictation(["Second."], {
           transcribe: (call) => (call === 0 ? Effect.sleep("1 second").pipe(Effect.zipRight(Effect.die("Whisper crashed"))) : undefined),
         })
         yield* press("Started")
@@ -236,12 +247,14 @@ describe("Dictation", () => {
         yield* wait(1)
         yield* talk("x".repeat(20))
         yield* press("Sent")
-        return { heard, transcripts, cancelled: cancelled() }
+        return { heard, transcripts, presses, ended, cancelled: cancelled() }
       }),
     )
     expect(result.cancelled).toBe(0)
     expect(result.heard).toEqual([20 * 512, 40 * 512])
-    expect(result.transcripts).toEqual(["Second."])
+    expect(result.transcripts).toEqual(["", "Second."])
+    expect(result.presses).toEqual([1, 2])
+    expect(result.ended).toEqual([1, 2])
   })
 
   test("drops dictations being recorded or transcribed without a sound, and hands neither on", async () => {
@@ -268,10 +281,10 @@ describe("Dictation", () => {
     expect(result.listening).toBe(false)
   })
 
-  test("hands on what the user said in the order they said it", async () => {
+  test("hands on what the user said in the order they said it, each with the press it began with", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { press, talk, wait, transcripts } = yield* dictation([], {
+        const { press, talk, wait, transcripts, presses, ended } = yield* dictation([], {
           // The first is long, so it's still being transcribed when the second is done.
           transcribe: (call) => (call === 0 ? Effect.sleep("5 seconds").pipe(Effect.as("Fix the loader in yapd.")) : Effect.succeed("Then do the same in std.")),
         })
@@ -283,11 +296,13 @@ describe("Dictation", () => {
         yield* press("Sent")
         const during = [...transcripts]
         yield* wait(5)
-        return { during, transcripts }
+        return { during, transcripts, presses, ended }
       }),
     )
     expect(result.during).toEqual([])
     expect(result.transcripts).toEqual(["Fix the loader in yapd.", "Then do the same in std."])
+    expect(result.presses).toEqual([1, 2])
+    expect(result.ended).toEqual([1, 2])
   })
 
   test("turns the microphone off after saying something, while an earlier dictation is still transcribed", async () => {

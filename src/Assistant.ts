@@ -115,12 +115,12 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly think: (utterance: Utterance, subject: Subject, lines: ReadonlyArray<Line>) => Effect.Effect<Thought>
     /** Once, one request at a time; thinks once more if the open question changed meanwhile. Never fails. */
     readonly act: (thought: Thought) => Effect.Effect<Outcome>
-    /** A dictation or typed request: worked out and acted on, then what came of it said ahead of anything else. */
-    readonly heard: (utterance: Omit<Utterance, "id">) => Effect.Effect<string>
-    /** The shortcut was pressed: the open question waits for what's dictated. */
-    readonly prepare: Effect.Effect<void>
-    /** A dictation came to nothing, like one cancelled or with no words in it: the open question is waited on again. */
-    readonly nothing: Effect.Effect<void>
+    /** A dictation, begun with the shortcut `press`, or a typed request: worked out and acted on, then what came of it said ahead of anything else. */
+    readonly heard: (utterance: Omit<Utterance, "id">, press?: number) => Effect.Effect<string>
+    /** The shortcut was pressed to start a dictation: the open question waits for what's dictated. */
+    readonly prepare: (press: number) => Effect.Effect<void>
+    /** The dictation a press began came to nothing, like one cancelled, failed or with no words in it: the open question is waited on again. */
+    readonly nothing: (press: number) => Effect.Effect<void>
     /** Something was said over an update, which takes the place of whatever yapd asked before that he heard. */
     readonly replied: Effect.Effect<void>
     readonly open: Effect.Effect<Option.Option<Open>>
@@ -148,8 +148,6 @@ const desk = { asked: 30, reply: 12, named: 120, vocabulary: 15 }
 const cap = "100 millis"
 
 const day = 24 * 60 * 60_000
-/** Dictations are dropped after five minutes, so one pressed for longer ago than this has ended, whether or not anything came of it. */
-const longest = 6 * 60_000
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
 
@@ -216,11 +214,11 @@ export const make = (options: {
     /** What yapd said last of its own accord, which "it" may mean, and when it started saying it. */
     let answered: { readonly subject: Subject; readonly at: number } | undefined
     /**
-     * For each press whose dictation hasn't ended, oldest first: when, what
-     * "it" meant then, before the dictation stopped what was playing, and what
-     * lets updates be said again once its answer is queued.
+     * For each press whose dictation hasn't ended, by the press: what "it"
+     * meant then, before the dictation stopped what was playing, and what lets
+     * updates be said again once its answer is queued.
      */
-    const presses: Array<{ readonly at: number; readonly subject: Subject; readonly arrived: Effect.Effect<void> }> = []
+    const presses = new Map<number, { readonly subject: Subject; readonly arrived: Effect.Effect<void> }>()
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
@@ -970,39 +968,38 @@ export const make = (options: {
         return utterance.id
       }).pipe(Effect.ensuring(release), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
 
-    /**
-     * A dictation ended, and dictations end in the order they began: the press
-     * it began with, the oldest left once any whose dictation ended without a
-     * word, like one that failed, are let go of.
-     */
-    const ended = Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis
-      while (presses.length > 1 && now - presses[0]!.at > longest) yield* presses.shift()!.arrived
-      return presses.shift()
-    })
+    /** The dictation a press began has ended, however long it took: what was kept for it, let go of. */
+    const ended = (press: number | undefined) =>
+      Effect.sync(() => {
+        if (press === undefined) return undefined
+        const kept = presses.get(press)
+        presses.delete(press)
+        return kept
+      })
 
-    const heard = (input: Omit<Utterance, "id">) =>
+    const heard = (input: Omit<Utterance, "id">, press?: number) =>
       Effect.gen(function* () {
         const utterance: Utterance = { ...input, id: mint(input.at, "u") }
         // A dictation's answer was awaited from when the shortcut was pressed, and "it" is what he was listening to then.
-        const press = input.via === "shortcut" ? yield* ended : undefined
-        const arrived = press?.arrived ?? (yield* options.awaiting)
-        return yield* Effect.zipRight(hold, respond(utterance, press?.subject)).pipe(Effect.ensuring(arrived))
+        const kept = yield* ended(press)
+        const arrived = kept?.arrived ?? (yield* options.awaiting)
+        return yield* Effect.zipRight(hold, respond(utterance, kept?.subject)).pipe(Effect.ensuring(arrived))
       })
 
     return {
       think,
       act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought.utterance), outcome))),
       heard,
-      prepare: Effect.gen(function* () {
-        // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
-        presses.push({ at: yield* Clock.currentTimeMillis, subject: yield* subject, arrived: yield* options.awaiting })
-        yield* hold
-        const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
-        yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
-        yield* Effect.forkIn(threads.refreshUsage, scope)
-      }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
-      nothing: Effect.zipRight(release, Effect.flatMap(ended, (press) => press?.arrived ?? Effect.void)),
+      prepare: (press) =>
+        Effect.gen(function* () {
+          // What's dictated is answered before anything else is said, and kept with what "it" means now, for that dictation alone.
+          presses.set(press, { subject: yield* subject, arrived: yield* options.awaiting })
+          yield* hold
+          const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
+          yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
+          yield* Effect.forkIn(threads.refreshUsage, scope)
+        }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
+      nothing: (press) => Effect.zipRight(release, Effect.flatMap(ended(press), (kept) => kept?.arrived ?? Effect.void)),
       // Not one he hasn't heard yet, which what he said can't have been about.
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),
@@ -1010,7 +1007,9 @@ export const make = (options: {
         dropped = (yield* options.power).turns
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
         // No answer is on its way any more, and the dictations they were for are dropped too.
-        yield* Effect.forEach(presses.splice(0), ({ arrived }) => arrived, { discard: true })
+        const kept = [...presses.values()]
+        presses.clear()
+        yield* Effect.forEach(kept, ({ arrived }) => arrived, { discard: true })
         yield* Effect.forEach([...writing.values(), ...jobs], Fiber.interruptFork, { discard: true })
       }),
     } satisfies Assistant["Type"]
