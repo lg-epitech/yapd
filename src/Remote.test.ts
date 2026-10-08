@@ -180,4 +180,28 @@ describe("Remote launcher", () => {
     expect(calls[0]?.at(-2)).toBe("me@rig.example.com")
     expect(await why(launchers("box").start(request))).toBe("I don't know how to reach box. It needs adding to YAPD_REMOTES.")
   })
+
+  test("goes through the SSH connection to the machine that's open already, and connects as before when there's none", async () => {
+    const calls: Array<ReadonlyArray<string>> = []
+    let open = true
+    const launchers = Remote.launchers(
+      remotes,
+      () => "rosie",
+      own,
+      (command) =>
+        Effect.sync(() => {
+          calls.push(command)
+          return JSON.stringify({ started })
+        }),
+      undefined,
+      (host) => Effect.sync(() => (open && host === "rig" ? Option.some("/home/me/.yapd/ssh-rig.sock") : Option.none())),
+    )
+    await Effect.runPromise(launchers("Rig").start(request))
+    open = false
+    await Effect.runPromise(launchers("Rig").start(request))
+    expect(calls).toEqual([
+      ["ssh", "-S", "/home/me/.yapd/ssh-rig.sock", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd start"],
+      ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd start"],
+    ])
+  })
 })

@@ -1,4 +1,4 @@
-import { type Duration, Effect, Either, Schema } from "effect"
+import { type Duration, Effect, Either, Option, Schema } from "effect"
 import * as Launcher from "./Launcher.ts"
 import { Origin } from "./Origin.ts"
 import { Agent } from "./Payload.ts"
@@ -11,7 +11,8 @@ import * as Research from "./Research.ts"
 // Codex's queue are local to that machine. So the daemon hands them to
 // `yapd relay` there over SSH, which runs the same relays and says how it went.
 // New work goes the same way, to `yapd start`, `yapd catalog` says what that
-// machine can start, and `yapd research` reads through a project there.
+// machine can start, and `yapd research` reads through a project there. `yapd
+// t3` says where its T3 Code listens, for the tunnel to it (`Tunnel.ts`).
 
 /** Hostname, as the machine's hooks report it, to SSH destination. */
 export type Remotes = ReadonlyMap<string, string>
@@ -68,23 +69,49 @@ export type Exec = (command: ReadonlyArray<string>, stdin: string) => Effect.Eff
 const ssh: Exec = (command, stdin) => run(command, { stdin })
 
 /**
+ * The socket of an SSH connection to the machine that's open already, while
+ * there is one. Going through it saves connecting again, which is most of
+ * what a command there takes.
+ */
+export type Master = Effect.Effect<Option.Option<string>>
+
+/** The open connection to each machine, by its hostname in lowercase. */
+export type Masters = (host: string) => Master
+
+const none: Master = Effect.succeed(Option.none())
+
+const nowhere: Masters = () => none
+
+/**
  * Runs a yapd command on another machine and returns the line it answered
  * with. The command is fixed and what it's given goes over stdin: SSH joins its
  * arguments into a shell command, and what names the machine or fills the
- * request came in over the network, or from a model.
+ * request came in over the network, or from a model. With `master`, it goes
+ * through the connection to the machine that's open already.
  */
-const ask = <E>(
+export const ask = <E>(
   exec: Exec,
   host: string,
   destination: string,
-  command: "relay" | "start" | "catalog" | "research",
+  command: "relay" | "start" | "catalog" | "research" | "t3",
   stdin: string,
   // `silent` and `failed` end the sentences that start with the machine's name.
   wording: { readonly patience: Duration.DurationInput; readonly silent: string; readonly failed: string },
   fail: (reason: string, cause?: unknown) => E,
+  master: Master = none,
 ) =>
-  // From /, since Bun would load a .env in the home directory SSH starts in, ahead of yapd's own.
-  exec(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, `cd / && yapd ${command}`], stdin).pipe(
+  Effect.flatMap(master, (socket) =>
+    // From /, since Bun would load a .env in the home directory SSH starts in, ahead of yapd's own. When the
+    // connection behind the socket has just gone, SSH connects on its own, as it would without one.
+    exec(
+      [
+        "ssh",
+        ...Option.match(socket, { onNone: () => [], onSome: (path) => ["-S", path] }),
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", destination, `cd / && yapd ${command}`,
+      ],
+      stdin,
+    ),
+  ).pipe(
     Effect.catchTag("ProcessError", (error) =>
       Effect.fail(
         fail(
@@ -110,7 +137,7 @@ const unknown = (host: string) => `I don't know how to reach ${host}. It needs a
 const garbled = (host: string) => `yapd on ${host} answered in a way I don't understand.`
 
 /** Sends another machine's threads through `yapd relay` there. */
-export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh): Relay => ({
+export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh, masters: Masters = nowhere): Relay => ({
   send: (thread, text) =>
     Effect.gen(function* () {
       if (!elsewhere(self, thread)) return yield* new Unreachable()
@@ -125,6 +152,7 @@ export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh): Relay => 
         JSON.stringify(Request.make({ thread, text })),
         { patience: "30 seconds", silent: "isn't answering, so I don't know if it went through.", failed: "couldn't send it." },
         (reason, cause) => new RelayError({ reason, cause }),
+        masters(host.toLowerCase()),
       )
       const response = yield* decodeResponse(answer).pipe(Effect.mapError((cause) => new RelayError({ reason: garbled(host), cause })))
       if (response.reason !== undefined) return yield* new RelayError({ reason: response.reason })
@@ -136,7 +164,7 @@ export const relay = (remotes: Remotes, self: Self, exec: Exec = ssh): Relay => 
  * machine's own defaults. A worktree can take minutes to fetch and check out,
  * and only a request that rules one out is sure to be quick.
  */
-export const launcher = (host: string, destination: string, exec: Exec = ssh): Launcher.Launcher => {
+export const launcher = (host: string, destination: string, exec: Exec = ssh, master: Master = none): Launcher.Launcher => {
   const refuse = (reason: string, cause?: unknown) => new Launcher.LaunchError({ reason, cause })
   const read = <A, I>(schema: Schema.Schema<A, I>, answer: string) =>
     Schema.decodeUnknown(Schema.parseJson(schema))(answer).pipe(Effect.mapError((cause) => refuse(garbled(host), cause)))
@@ -155,6 +183,7 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh): L
             failed: "couldn't start it.",
           },
           refuse,
+          master,
         )
         const { started, reason } = yield* read(Launcher.Response, answer)
         return started ?? (yield* refuse(reason ?? garbled(host)))
@@ -168,6 +197,7 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh): L
         "",
         { patience: "30 seconds", silent: "isn't answering.", failed: "couldn't say what it can start." },
         refuse,
+        master,
       )
       const { catalog, reason } = yield* read(Launcher.Listing, answer)
       return catalog ?? (yield* refuse(reason ?? garbled(host)))
@@ -176,7 +206,7 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh): L
 }
 
 /** Reads through a project on another machine through `yapd research` there, with that machine's own provider. */
-export const researcher = (host: string, destination: string, exec: Exec = ssh): Research.Researcher =>
+export const researcher = (host: string, destination: string, exec: Exec = ssh, master: Master = none): Research.Researcher =>
   Research.remote(host, (stdin) =>
     ask(
       exec,
@@ -186,6 +216,7 @@ export const researcher = (host: string, destination: string, exec: Exec = ssh):
       stdin,
       { patience: Research.patience, silent: "isn't answering.", failed: "couldn't read through the project." },
       (reason, cause) => new Research.ResearchError({ reason, cause }),
+      master,
     ),
   )
 
@@ -213,11 +244,11 @@ const pick = <A>(
 
 /** The launcher for a machine. `called` is what the user calls this one. */
 export const launchers =
-  (remotes: Remotes, self: Self, own: Launcher.Launcher, exec: Exec = ssh, called?: string) =>
+  (remotes: Remotes, self: Self, own: Launcher.Launcher, exec: Exec = ssh, called?: string, masters: Masters = nowhere) =>
   (machine?: string): Launcher.Launcher =>
     pick(remotes, self, called, machine, {
       own,
-      remote: (host, destination) => launcher(host, destination, exec),
+      remote: (host, destination) => launcher(host, destination, exec, masters(host.toLowerCase())),
       unknown: (reason) => {
         const refused = Effect.fail(new Launcher.LaunchError({ reason }))
         return { start: () => refused, catalog: refused }
@@ -226,11 +257,11 @@ export const launchers =
 
 /** What reads through a machine's projects, picked like its launcher. */
 export const researchers =
-  (remotes: Remotes, self: Self, own: Research.Researcher, exec: Exec = ssh, called?: string) =>
+  (remotes: Remotes, self: Self, own: Research.Researcher, exec: Exec = ssh, called?: string, masters: Masters = nowhere) =>
   (machine?: string): Research.Researcher =>
     pick(remotes, self, called, machine, {
       own,
-      remote: (host, destination) => researcher(host, destination, exec),
+      remote: (host, destination) => researcher(host, destination, exec, masters(host.toLowerCase())),
       unknown: Research.unavailable,
     })
 
