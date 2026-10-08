@@ -270,6 +270,28 @@ describe("Brain", () => {
 
   test("spoken lines never carry a handle, an id, a path, 'the agent' or 'the session'", () => {
     const candidates = desk().threads
+    const asking = (request: Exclude<T3Actions.Request, { readonly _tag: "Secret" }>, what: string, risk: "low" | "high" = "low") =>
+      Notices.asking({ ref: ref(tezos), called: "Migrate Tezos Integration", project: "integration", request, what, risk, at: now }, lines)
+    type Asked = Exclude<T3Actions.Request, { readonly _tag: "Secret" }>
+    const question = (options: ReadonlyArray<string>, more = false): Asked => ({
+      _tag: "Question",
+      id: "q1",
+      questions: [
+        { id: "q", header: "", question: "Which network?", options: options.map((label) => ({ label, description: "" })), multiSelect: false, allowCustomAnswer: true },
+        ...(more ? [{ id: "r", header: "", question: "And which fee table?", options: [], multiSelect: false, allowCustomAnswer: true }] : []),
+      ],
+    })
+    const approve = (command: string): Asked => ({ _tag: "Approval", id: "r1", what: `Bash: ${command}`, kind: "command", decisions: [{ decision: "accept", label: "Allow" }], command })
+    const asks = [
+      asking(approve("git push origin tezos"), "wants to push the branch"),
+      asking(approve("rm -rf /tmp/build"), "wants to delete the build folder"),
+      asking(approve("ls"), "needs your go-ahead to look around", "high"),
+      asking(question(["Mainnet", "Ghostnet"]), "asks which network to start with"),
+      asking(question([]), "asks which network to start with"),
+      // One whose options can't be said, or with more than one part, is only told.
+      asking(question(["~/code/integration/mainnet.json", "Ghostnet"]), "asks which network to start with"),
+      asking(question(["Mainnet"], true), "asks which network and fee table to use"),
+    ]
     const project = { kind: "project" as const, asked: "Which project is the retry fix for?", about: "the retry fix" }
     // As T3 Code labels them.
     const usage: Option.Option<Threads.Usage> = Option.some({
@@ -355,6 +377,20 @@ describe("Brain", () => {
       Notices.lines.secret("Migrate Tezos Integration", "STRIPE_API_KEY_2", lines),
       Notices.lines.secret("Migrate Tezos Integration", "deploy key", lines),
       Notices.lines.waiting("Migrate Tezos Integration", "wants to push the branch", lines),
+      // What a thread waits on him for, asked, asked again and let go, and what's said of answering it.
+      ...asks.flatMap((worded) => (worded._tag === "Ask" ? [worded.asking.asked, ...worded.asking.rewordings, worded.asking.about] : [worded.spoken])),
+      Brain.dropped({ kind: "approval", about: "allow Migrate Tezos Integration to push the branch" }, lines),
+      Brain.dropped({ kind: "question", about: "Migrate Tezos Integration's question" }, lines),
+      Brain.dealtWith(lines),
+      Brain.secretly(lines),
+      Brain.unapproved(lines),
+      Hands.done({ _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "accept" }, "now", lines, Option.some("Migrate Tezos Integration")),
+      Hands.done({ _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "decline" }, "now", lines, Option.none()),
+      Hands.done({ _tag: "Reply", to: ref(tezos), requestId: "q1", answers: { q: "ghostnet" }, said: Option.some("Ghostnet") }, "now", lines, Option.none()),
+      Hands.failed({ _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "accept" }, { _tag: "Refused", reason: Hands.plainly("Runtime request r1 is expired.") }, lines, Option.none()),
+      Hands.failed({ _tag: "Reply", to: ref(tezos), requestId: "q1", answers: {}, said: Option.none() }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.none() }, lines, Option.some("Migrate Tezos Integration")),
+      Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Refused", reason: Hands.given }, lines, Option.some("Migrate Tezos Integration")),
+      Hands.unsure({ kind: "decide", body: { _tag: "Decide", requestId: "r1", decision: "accept" } }, lines, Option.some("Migrate Tezos Integration")),
       ...Persona.sayable(Persona.plain),
       Conversation.movedOn,
       Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
