@@ -7,7 +7,7 @@ import { join } from "node:path"
 // takes commands.
 
 /** The orchestration protocol yapd speaks. T3 Code turns away clients that don't name the one it does. */
-const protocol = "2"
+export const protocol = "2"
 
 /** Where the running server says it listens. T3CODE_HOME moves it, as it does for T3 Code. */
 const runtimeState = join(process.env.T3CODE_HOME ?? join(homedir(), ".t3"), "userdata", "server-runtime.json")
