@@ -166,8 +166,9 @@ const id = String.raw`['"‘“]?(?=[\w:.-]*\d)(?:[\w.-]*[_:][\w:.-]*|(?=(?:[a-z
 
 /** What T3 Code says in its own terms, and what's said instead. */
 const reasons: ReadonlyArray<readonly [RegExp, string]> = [
-  // It takes a message into a turn only while the turn is at it, not getting going or waiting.
+  // It takes a message into a turn only while the turn is at it, not getting going or waiting, nor busy only in the background, with no turn of the agent's going.
   [/\bcannot be steered\b/i, "It isn't at a point where it can take that yet."],
+  [/\bno running provider turn\b/i, "It isn't at a point where it can take that yet."],
 ]
 
 /** A reason T3 Code gave, fit to say: no ids, nothing unreadable, the work never put down to an agent or a session, and a full stop. */
@@ -175,7 +176,11 @@ export const plainly = (reason: string) => {
   const known = reasons.find(([pattern]) => pattern.test(reason))
   if (known !== undefined) return known[1]
   const stripped = reason
-    .replace(/\b(run|thread|command|message|request)\s+(?:['"‘“][^'"’”\s]+['"’”]|(?=[\w:.-]*[\d_:-])[\w:.-]+)/gi, (_, what: string) => `that ${what.toLowerCase()}`)
+    // Which one it is, like "the active run", in place of its id, or "that run" when nothing says.
+    .replace(
+      /\b(?:(active|queued|target|current|pending|running)\s+)?(run|thread|command|message|request)\s+(?:['"‘“][^'"’”\s]+['"’”]|(?=[\w:.-]*[\d_:-])[\w:.-]+)/gi,
+      (_, which: string | undefined, what: string) => (which === undefined ? `that ${what.toLowerCase()}` : `the ${which.toLowerCase()} ${what.toLowerCase()}`),
+    )
     .replace(/\byapd:\S+/g, "it")
     .replace(new RegExp(String.raw`(?<![\w'"])${id}(?![\w'"])`, "gi"), "")
     .replace(/['"‘“]\S*\d\S*['"’”]/g, "")

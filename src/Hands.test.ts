@@ -171,6 +171,9 @@ describe("Hands", () => {
         "Thread not found: 850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
         "Run run_7f3a9c2b is not interruptible.",
         "Target run 0193f2c4-7d1e-7a3b-9c5d-2e8f6a1b4c7d is starting and cannot be steered.",
+        // As T3 Code said it live, for a turn busy only in the background.
+        "No running provider turn found for active run run:thread:aaaf4547-528e-4031-8148-64e7a18d6540:ordinal:6",
+        "Active run run:thread:aaaf4547-528e-4031-8148-64e7a18d6540:ordinal:6 is not interruptible.",
       ].map(Hands.plainly),
     ).toEqual([
       "That command was previously rejected: that thread is archived.",
@@ -179,6 +182,8 @@ describe("Hands", () => {
       "Thread not found.",
       "That run is not interruptible.",
       "It isn't at a point where it can take that yet.",
+      "It isn't at a point where it can take that yet.",
+      "The active run is not interruptible.",
     ])
     // Names of things, like a model, are said as they are.
     expect(Hands.plainly("Model gpt-6-sol isn't available.")).toBe("Model gpt-6-sol isn't available.")
