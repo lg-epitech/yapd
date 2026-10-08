@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Option, Schema } from "effect"
+import type * as Brain from "./Brain.ts"
 import * as Persona from "./Persona.ts"
 import * as Show from "./Show.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -53,6 +54,32 @@ const detail = (what: string, request: T3Actions.Request = approval(what)): T3Ac
 })
 
 const lines: Persona.Lines = { ...Persona.plain, address: "sir" }
+
+/** The thread, running, with its pull request at `url` as T3 Code has it. */
+const pulled = (url: string): Threads.Listed => ({
+  ...listed,
+  state: "running",
+  thread: Schema.decodeUnknownSync(T3Live.Thread)({
+    ...waiting,
+    pendingRuntimeRequest: null,
+    pullRequests: [{ number: 412, url, repository: "lg-epitech/yapd", snapshot: { state: "OPEN", title: "Clean up the build", checksState: "PASSING" } }],
+  }),
+})
+
+/** What he said, with these threads on the desk and nothing said before. */
+const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["away"] = []): Brain.Situation => ({
+  utterance: { id: "u1", heard: "Open that PR.", via: "shortcut", at: now, voiced: 2, turns: 1 },
+  subject: { _tag: "Nothing" },
+  lines: [],
+  open: Option.none(),
+  desk: { threads, away },
+  lately: [],
+  unheard: [],
+  usage: Option.none(),
+  second: Option.none(),
+  asked: [],
+  now,
+})
 
 describe("Show", () => {
   test("a card never carries a pending request's raw command as anything but text", () => {
@@ -160,6 +187,28 @@ describe("Show", () => {
       { machine: "rig", threads: [{ id: relay.id, project: "yapd", title: "Fix the relay", state: "idle", since: "2026-10-08T20:00:00.000Z" }] },
       { machine: "Alaska", reason: "I can't reach Alaska right now.", threads: [] },
     ])
+  })
+
+  test("a pull request that doesn't open is said with why, after its verdict", async () => {
+    const opening = (url: string, opener: Show.Opener) =>
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.die("Nothing is read here."), opener)
+        const target = pulled(url)
+        const { say, card } = yield* show.present("pr", Option.some(target), situation([target]), lines)
+        return { say, caption: Option.flatMap(card, ({ caption }) => Option.fromNullable(caption)), link: Option.exists(card, ({ markdown }) => markdown.includes("](")) }
+      })
+    const result = await Effect.runPromise(
+      Effect.all({
+        opened: opening("https://github.com/lg-epitech/yapd/pull/412", () => Effect.void),
+        failed: opening("https://github.com/lg-epitech/yapd/pull/412", () => Effect.fail("No browser to open it in.")),
+        unsafe: opening("http://github.com/lg-epitech/yapd/pull/412", () => Effect.die("Nothing opens here.")),
+      }),
+    )
+    expect(result.opened).toEqual({ say: "The build cleanup: checks pass, sir.", caption: Option.some("The build cleanup: checks pass, sir."), link: true })
+    const failed = "The build cleanup: checks pass, sir. I couldn't open it in your browser."
+    expect(result.failed).toEqual({ say: failed, caption: Option.some(failed), link: true })
+    const unsafe = "The build cleanup: checks pass, sir. Its address isn't a secure web page, so I haven't opened it."
+    expect(result.unsafe).toEqual({ say: unsafe, caption: Option.some(unsafe), link: false })
   })
 
   test("a message made to trip a pattern up is tamed at once", () => {

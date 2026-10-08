@@ -434,7 +434,10 @@ export const pr = (listed: Threads.Listed): Option.Option<Draft> =>
         `**#${number}** in ${plainly(repository)}${known === undefined ? "" : `, ${plainly(known.state)}`}`,
         lines.join("\n"),
         // In angle brackets, so nothing in the address can end the link early.
-        ...Option.match(address, { onNone: () => [], onSome: (address) => [`[Open the pull request](<${address}>)`] }),
+        ...Option.match(address, {
+          onNone: () => ["_No link: the address T3 Code has for it isn't a secure web page._"],
+          onSome: (address) => [`[Open the pull request](<${address}>)`],
+        }),
       ].join("\n\n"),
       ...Option.match(address, { onNone: () => ({}), onSome: (url) => ({ url }) }),
     }
@@ -645,17 +648,21 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
       return Option.isSome(was)
     })
 
+    /** Opens a thread's pull request, and says whether it did, or why not: its address isn't https, or the browser didn't open it in time. */
     const opening = (thread: T3Live.Thread) =>
       Effect.gen(function* () {
         // Only the address T3 Code has for it, and only https: never one a model wrote, a file or another app's scheme.
         const address = Option.flatMap(pullRequest(thread), ({ url }) => secure(url))
-        if (Option.isNone(address)) return false
+        if (Option.isNone(address)) return "unsafe" as const
         return yield* open(address.value).pipe(
           Effect.timeout(patience),
-          Effect.as(true),
-          Effect.catchAll((error) => Effect.logWarning("Could not open the pull request", error).pipe(Effect.as(false))),
+          Effect.as("opened" as const),
+          Effect.catchAll((error) => Effect.logWarning("Could not open the pull request", error).pipe(Effect.as("failed" as const))),
         )
       })
+
+    /** What's said after a pull request's verdict when it didn't open, so he isn't left waiting on a browser. */
+    const unopened = { opened: "", unsafe: " Its address isn't a secure web page, so I haven't opened it.", failed: " I couldn't open it in your browser." }
 
     /** A line said with a card: "it's on your screen" first while an app watches, and then without addressing him again. */
     const told = (gist: (address: string) => string, lines: Lines) =>
@@ -699,10 +706,10 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
             if (how === "pr") {
               const draft = pr(listed)
               if (Option.isNone(draft)) return { say: verdict(listed, addressed(lines)), card: Option.none(), about }
-              yield* opening(listed.thread)
+              const opened = yield* opening(listed.thread)
               // Unless it's the thread just talked about, whose it is comes first, since the browser opens it whether or not he's looking.
               const named = !Option.exists(Brain.focused(situation), ({ ref }) => ref.machine === listed.ref.machine && ref.id === listed.ref.id)
-              return yield* shown((address) => verdict(listed, address, named), draft.value, lines, about)
+              return yield* shown((address) => `${verdict(listed, address, named)}${unopened[opened]}`, draft.value, lines, about)
             }
             // What it says is there either way, so a T3 Code that's slow to answer only leaves its messages off the card.
             const detail = yield* read(listed.ref, listed.thread.pendingRuntimeRequest?.id).pipe(
@@ -745,7 +752,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
             watching--
           }),
       ),
-      open: opening,
+      open: (thread) => Effect.map(opening(thread), (opened) => opened === "opened"),
       present,
       aside: (target, detail, answer, lines) =>
         Effect.gen(function* () {
