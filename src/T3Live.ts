@@ -137,7 +137,13 @@ export const compare = (before: Thread | undefined, after: Thread): ReadonlyArra
   if (before.title !== after.title) changes.push({ _tag: "Renamed", thread: after, before })
   const ran = before.activeRunId
   const runs = after.activeRunId
-  if (ran !== null && ran !== runs) changes.push({ _tag: "Finished", thread: after, before })
+  // A run seen going that has stopped, or one that came and went unseen, like a quick failure while disconnected.
+  const unseen =
+    after.latestRunId !== null &&
+    after.latestRunId !== before.latestRunId &&
+    after.latestRunId !== runs &&
+    after.latestRunCompletedAt !== null
+  if ((ran !== null && ran !== runs) || unseen) changes.push({ _tag: "Finished", thread: after, before })
   if (runs !== null && runs !== ran) changes.push({ _tag: "Started", thread: after })
   const was = before.pendingRuntimeRequest
   const is = after.pendingRuntimeRequest

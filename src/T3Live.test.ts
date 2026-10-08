@@ -62,6 +62,24 @@ describe("T3Live.apply", () => {
     expect(view.sequence).toBe(16)
   })
 
+  test("tells of a run that came and went between two looks, once", () => {
+    const failed = { latestRunId: "r2", latestRunCompletedAt: "2026-10-08T01:00:00.000Z", status: "failed", lastError: "Usage limit reached" }
+    const unseen = run([
+      snapshot(1, [thread({ latestRunId: "r1", latestRunCompletedAt: "2026-10-08T00:00:00.000Z" })]),
+      { kind: "synchronized" },
+      { kind: "thread.updated", sequence: 2, location: "active", thread: thread(failed) },
+      // Nothing new about it after, however often it's sent again.
+      { kind: "thread.updated", sequence: 3, location: "active", thread: thread(failed) },
+    ])
+    expect(unseen.changes).toEqual(["Finished"])
+    const seen = run([
+      snapshot(1, [thread({ activeRunId: "r2", latestRunId: "r2", activityRunStatus: "running" })]),
+      { kind: "synchronized" },
+      { kind: "thread.updated", sequence: 2, location: "active", thread: thread(failed) },
+    ])
+    expect(seen.changes).toEqual(["Finished"])
+  })
+
   test("goes from one run straight into the next", () => {
     const { changes } = run([
       snapshot(1, [thread({ activeRunId: "r1", activityRunStatus: "running" })]),
