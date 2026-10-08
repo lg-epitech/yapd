@@ -193,6 +193,9 @@ const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard">
   rest: decision.rest.trim() || open.decision.rest,
 })
 
+/** A desk with nothing on it, for words worked out against one that's gone, whose handles name nothing now. */
+const nowhere: Threads.Desk = { threads: [], away: [] }
+
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
 
@@ -445,7 +448,8 @@ export const make = (options: {
       Effect.gen(function* () {
         yield* close(open, "dropped: unanswered")
         const { turns } = yield* options.power
-        yield* deliver(reply(Brain.dropped(open, yield* persona.lines), { _tag: "Nothing" }), { id: open.utterance, turns })
+        const said = yield* persona.lines
+        yield* deliver(unfinished(reply(Brain.dropped(open, said), { _tag: "Nothing" }), open.decision.rest, said), { id: open.utterance, turns })
         yield* offering
       })
 
@@ -464,7 +468,7 @@ export const make = (options: {
         const asked = Brain.reworded(open, before, said)
         if (asked === undefined) {
           yield* close(open, "dropped: asked enough")
-          return reply(said.leaving, { _tag: "Nothing" })
+          return unfinished(reply(said.leaving, { _tag: "Nothing" }), open.decision.rest, said)
         }
         asking = { ...asking, open: { ...open, asked }, asks: asking.asks + 1, repeat: undefined, held: false }
         yield* Effect.logInfo(`Asked again: ${asked}`)
@@ -708,7 +712,7 @@ export const make = (options: {
         // What comes of starting it is known only later, so the rest isn't done on the strength of it, and he's told so, ahead of any question.
         const rest = thought.decision.rest.trim()
         if (rest === "") return told
-        const left = `I left the rest for now${addressed(said)}: ${rest.replace(/[.!?]+$/, "")}.`
+        const left = `I left the rest for now${addressed(said)}: ${Brain.speakable(rest, thought.situation.desk).replace(/[.!?]+$/, "")}.`
         return told.kind === "question"
           ? { ...told, say: joined(left, told.say, said) }
           : { ...told, say: joined(told.say, left, said), kind: told.kind === "none" ? "answer" : told.kind }
@@ -748,6 +752,18 @@ export const make = (options: {
     const joined = (first: string, then: string, said: Lines) => {
       const sir = addressed(said)
       return `${first} ${sir !== "" && first.includes(sir) ? then.replace(sir, "") : then}`.trim()
+    }
+
+    /**
+     * What's said of a step that didn't go, or wasn't done, with what was left
+     * of its request after it, since a failure stops the rest, and nothing he
+     * asked for goes without a word. `desk` is the one the rest was worked out
+     * against, which a handle in it is named by; none names nothing.
+     */
+    const unfinished = (outcome: Outcome, rest: string, said: Lines, desk: Threads.Desk = nowhere): Outcome => {
+      const left = Brain.speakable(rest, desk).replace(/[.!?]+$/, "")
+      if (left === "") return outcome
+      return { ...outcome, say: joined(outcome.say, `I left the rest${addressed(said)}: ${left}.`, said), kind: outcome.kind === "none" ? "answer" : outcome.kind }
     }
 
     /** What a decision to change a thread asks of the hands, if it says enough to do it. `last` is the last thing done, which taking back means. */
@@ -843,7 +859,7 @@ export const make = (options: {
             return yield* asking({
               ...base,
               kind: "offer",
-              decision: Brain.decision({ act: "send", text: Hands.ignore(text), how: "now" }),
+              decision: Brain.decision({ act: "send", text: Hands.ignore(text), how: "now", rest: decision.rest }),
               asked: Hands.read(said, called),
               about: `tell ${name} to ignore that`,
               resend: Option.none(),
@@ -856,7 +872,7 @@ export const make = (options: {
             if (Option.isSome(again) && act._tag === "Message") {
               return yield* asking({ ...base, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: again })
             }
-            return { say: line, subject: { ...subject, said: line }, kind: "done" } satisfies Outcome
+            return unfinished({ say: line, subject: { ...subject, said: line }, kind: "done" }, decision.rest, said, situation.desk)
           }
         }
       })
@@ -900,7 +916,7 @@ export const make = (options: {
     const then = (next: Thought, first: Outcome, step: number, said: Lines, quietly: boolean): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         if (next.source === "failed") return { ...first, say: joined(first.say, `I couldn't work out the rest${addressed(said)}.`, said) }
-        if (next.decision.act === "dismiss" || next.decision.act === "resume") return first
+        if ((next.decision.act === "dismiss" && next.decision.rest.trim() === "") || next.decision.act === "resume") return first
         const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, { step, twice: false, quietly })
         if (after.say === "") return first
         return { ...after, say: joined(first.say, after.say, said) }
@@ -960,7 +976,7 @@ export const make = (options: {
           const checked = Brain.check(instead, situation, said)
           if (checked._tag === "Ask") {
             yield* Effect.logInfo("Leaving it, rather than ask again")
-            return reply(said.leaving, thought.subject)
+            return unfinished(reply(said.leaving, thought.subject), instead.rest, said)
           }
           yield* Effect.logInfo("Doing what he asked instead of what I asked about")
           return yield* follow(checked, { ...thought, decision: instead }, said)
@@ -976,7 +992,7 @@ export const make = (options: {
         if (Option.isNone(resend)) yield* forgo(open, "His yes didn't stand.")
         if (checked._tag === "Ask") {
           yield* Effect.logInfo("Leaving it, rather than ask again")
-          return reply(said.leaving, thought.subject)
+          return unfinished(reply(said.leaving, thought.subject), decision.rest, said)
         }
         if (Option.isSome(resend) && Option.isSome(target)) {
           const power = yield* options.power
@@ -1021,6 +1037,8 @@ export const make = (options: {
         case "start":
           return start(thought, said, at.step)
         case "dismiss":
+          // Nothing more to say to this, and the rest, like "thanks, and tell it to open a PR", still to do.
+          return onward(thought, quiet(thought.subject), Option.none(), at.step + 1, said)
         case "resume":
           return Effect.succeed(quiet(thought.subject))
         default:
@@ -1036,7 +1054,7 @@ export const make = (options: {
     ): Effect.Effect<Outcome> => {
       switch (checked._tag) {
         case "Say":
-          return Effect.succeed(reply(checked.spoken, thought.subject))
+          return Effect.succeed(unfinished(reply(checked.spoken, thought.subject), thought.decision.rest, said, thought.situation.desk))
         case "Ask":
           return opening(checked.open, thought.utterance)
         case "Do":
@@ -1087,7 +1105,8 @@ export const make = (options: {
         if (!answers) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         if (decision.act === "dismiss") {
           yield* forgo(open, "He said not to send it again.")
-          return reply(said.leaving, decided.subject)
+          // What he asked for after what's let go is left too, and what he says to do after the no is done.
+          return yield* onward(decided, unfinished(reply(said.leaving, decided.subject), open.decision.rest, said), Option.none(), 1, said)
         }
         if (open.kind === "project") return yield* project(open, decided, said)
         if (open.kind !== "which") return yield* agreeing(open, decided, said)
@@ -1096,7 +1115,7 @@ export const make = (options: {
         // At most one question: one the answer doesn't settle is let go.
         if (checked._tag === "Ask") {
           yield* Effect.logInfo("Leaving it, since the answer didn't settle which one")
-          return reply(said.leaving, decided.subject)
+          return unfinished(reply(said.leaving, decided.subject), picked.rest, said)
         }
         return yield* follow(checked, { ...decided, decision: picked }, said)
       }).pipe(

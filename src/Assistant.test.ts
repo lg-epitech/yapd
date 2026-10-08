@@ -1483,6 +1483,38 @@ describe("Assistant", () => {
     expect(begun.dispatched).toBe(0)
   })
 
+  test("what's left of a request is said when its first step doesn't go, and done after a thanks", async () => {
+    const twoSteps = (heard: string, model: (situation: Brain.Situation) => Brain.Decision, refusing = false) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, spoken, dispatched } = yield* assistant(model, undefined, {
+            ...(refusing ? { answer: () => () => Effect.fail(new T3CodeServer.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "The provider is offline." })) } : {}),
+          })
+          yield* dictate(heard)
+          return { spoken: spoken(), sent: dispatched.map(({ type, threadId }) => [type, threadId]) }
+        }),
+      )
+    // Turned down, with the rest written by the model as the handle it knows the thread by, which is never said.
+    const refused = await twoSteps(
+      "Tell the Tesla's migration to use the fee table from the Mina work, and stop the Mina one.",
+      (situation) => ({ ...tezosMessage("high")(situation), rest: `stop ${handle(situation, mina)}` }),
+      true,
+    )
+    expect(refused.spoken).toEqual(["That didn't go to Migrate Tezos Integration, sir: the provider is offline. I left the rest: stop Open Mina SSV2 Bug Tickets."])
+    // Nothing to stop.
+    const idle = await twoSteps("Stop the Mina one and tell the Tezos one to open a PR.", (situation) =>
+      Brain.decision({ act: "stop", target: handle(situation, mina), rest: "tell the Tezos one to open a PR" }),
+    )
+    expect(idle).toEqual({ spoken: ["Open Mina SSV2 Bug Tickets isn't doing anything right now, sir. I left the rest: tell the Tezos one to open a PR."], sent: [] })
+    // Thanks, and something to do.
+    const thanks = await twoSteps("Thanks, and tell the Tezos one to open a PR.", (situation) =>
+      situation.utterance.heard.startsWith("Thanks")
+        ? Brain.decision({ act: "dismiss", rest: "tell the Tezos one to open a PR" })
+        : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Open a PR.", how: "now" }),
+    )
+    expect(thanks.sent).toEqual([["message.dispatch", tezos.id]])
+  })
+
   test("the rest of a request is done as its next step, once the first is", async () => {
     const result = await run(
       Effect.gen(function* () {
