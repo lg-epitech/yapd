@@ -174,7 +174,9 @@ export const asking = (
   },
   said: Lines,
 ): Assistant.Worded => {
-  const { ref, called, project, request, what, risk, at } = input
+  const { ref, called, project, request, risk, at } = input
+  // It follows the thread's name, so it starts as the rest of a sentence.
+  const what = input.what.replace(/^(Wants|Asks|Needs|Has) /, (word) => word.toLowerCase())
   const sir = addressed(said)
   const entry = (spoken: string) => ({
     at,
