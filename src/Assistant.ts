@@ -459,9 +459,16 @@ export const make = (options: {
         }),
       )
 
-    /** The open question, unless it's been open so long it no longer counts. */
-    const current = (now: number) =>
-      asking !== undefined && now - asking.open.at < fresh ? Option.some(asking.open) : Option.none<Open>()
+    /**
+     * The open question, unless it's been open so long it no longer counts:
+     * for an approval, with whether he's heard all of it as it was last
+     * asked, which a plain yes to it needs.
+     */
+    const current = (now: number) => {
+      if (asking === undefined || now - asking.open.at >= fresh) return Option.none<Open>()
+      const { open, whole } = asking
+      return Option.some(open.asks?._tag === "Approval" ? { ...open, asks: { ...open.asks, inFull: whole } } : open)
+    }
 
     /** The open question, if it was asked by the time this was said: one asked after can't be what it's about, so it never answers, dismisses or closes it. */
     const before = (utterance: Pick<Utterance, "at">) => (asking !== undefined && asking.open.at <= utterance.at ? asking : undefined)
@@ -1551,11 +1558,14 @@ export const make = (options: {
         const same = open.kind === "resend" ? { ...decision, how: "" } : decision
         const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, same, decided.situation.desk)
         const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume"
-        // A risky approval is allowed only by the word its asking named: a plain yes to it asks once more, naming it, then it's let go.
-        if (answers && open.asks?._tag === "Approval" && open.asks.dangerous && decision.act === "decide" && decision.how !== "decline" && !Brain.approving(utterance.heard)) {
+        // A plain yes allows an approval only once he's heard all of it as it was last asked, and a risky one only the word its asking
+        // named will: otherwise it's asked once more, in full and naming the word for a risky one, then it's let go.
+        const approval = open.asks?._tag === "Approval" ? open.asks : undefined
+        const plain = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline" && !Brain.approving(utterance.heard)
+        if (plain && (approval.dangerous || asking?.whole !== true)) {
           if ((asking?.asks ?? asks) < asks) return yield* reask(said)
-          yield* close(open, "dropped: not approved", utterance.id)
-          return reply(Brain.unapproved(said), decided.subject)
+          yield* close(open, approval.dangerous ? "dropped: not approved" : "dropped: not heard in full", utterance.id)
+          return reply(approval.dangerous ? Brain.unapproved(said) : Brain.cutShort(said), decided.subject)
         }
         yield* close(open, decision.act === "resume" ? "dropped: unclear" : answers ? "answered" : "replaced", utterance.id)
         if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)
@@ -1686,9 +1696,8 @@ export const make = (options: {
             ...(open === undefined || request === undefined
               ? {}
               : {
-                  // Heard, it's his to answer by dictation too, and its entry is noted as heard.
+                  // Heard, or answered, its entry is noted as heard.
                   heard: Effect.gen(function* () {
-                    if (open.asks !== undefined && open.asks._tag !== "Agent") known.set(open.asks.requestId, open.asks)
                     const row = claim?.kept === undefined ? Option.none() : Option.flatten(claim.kept)
                     if (Option.isSome(row)) yield* journal.markHeard([row.value], yield* Clock.currentTimeMillis)
                   }),
@@ -1713,9 +1722,11 @@ export const make = (options: {
                     return true
                   }),
                   question: {
-                    // Heard to the end, a plain yes can only be to it.
+                    // Heard to the end, a plain yes can only be to it, and what a thread waits on is his to answer by dictation too.
                     through: Effect.sync(() => {
-                      if (asking?.open.id === open.id) asking.whole = true
+                      if (asking?.open.id !== open.id) return
+                      asking.whole = true
+                      if (open.asks !== undefined && open.asks._tag !== "Agent") known.set(open.asks.requestId, open.asks)
                     }),
                     answer: listen(open),
                     unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),

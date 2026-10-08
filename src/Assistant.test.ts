@@ -583,6 +583,43 @@ describe("Assistant", () => {
     expect(result.steps).toEqual(["decide sent"])
   })
 
+  test("a plain yes over an approval he hasn't heard to the end asks it again in full, and allows it only once he has", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2"].flatMap((requestId) => approval(requestId, "npm install left-pad"))
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items, waiting: true })
+        yield* asked(made, cloud)
+        // Said over it, before the end.
+        yield* made.cut()
+        yield* made.answer("Yes.")
+        const before = made.dispatched.length
+        // Asked again, and heard to the end this time.
+        yield* made.play()
+        yield* made.answer("Yes.")
+        // Another, cut off both times it's asked: it's left waiting, never allowed.
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.cut()
+        yield* made.answer("Yeah.")
+        yield* made.cut()
+        yield* made.answer("Yes.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir?",
+      "Approved, sir.",
+      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir?",
+      "You stopped me before the end, so I've left it waiting for you in T3 Code, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
   test("a dangerous approval needs 'approve', and the notice says so", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

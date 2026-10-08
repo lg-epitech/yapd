@@ -290,6 +290,9 @@ export const secretly = (lines: Lines) => `That one needs T3 Code; I never take 
 /** What's said of a risky approval once a plain yes to it was asked about again, and wasn't "approve" either time. */
 export const unapproved = (lines: Lines) => `It needs an 'approve', so I've left it waiting for you in T3 Code${addressed(lines)}.`
 
+/** What's said of an approval he said a plain yes over once it was asked again, before he'd heard all of it. */
+export const cutShort = (lines: Lines) => `You stopped me before the end, so I've left it waiting for you in T3 Code${addressed(lines)}.`
+
 /**
  * What makes what a thread wants to do risky enough to need "approve", in
  * its prompt or the command, change or tool it's for, whatever the model
@@ -544,11 +547,11 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
 }
 
 /**
- * What answers what a thread waits on him for without the model: "approve"
- * or a no to an approval, and a plain yes to one he heard all of, or to a
- * risky one, which asks once more for the word it needs; an option of a
- * question, by position or a name only it has. Anything else is the model's
- * to judge, which a yes to what he didn't hear all of may not be.
+ * What answers what a thread waits on him for without the model: "approve",
+ * a plain yes or a no to an approval, of which a plain yes only allows one
+ * he's heard all of that isn't risky, as the assistant sees to, asking once
+ * more otherwise; an option of a question, by position or a name only it
+ * has. Anything else is the model's to judge.
  */
 const settling = (asks: Assistant.Asks | undefined, said: string, target: string): Decision | undefined => {
   switch (asks?._tag) {
@@ -558,7 +561,7 @@ const settling = (asks: Assistant.Asks | undefined, said: string, target: string
       const how = sessionly.test(said) ? "session" : "accept"
       if (allows.has(bare)) return decide(how)
       if (declines.has(bare)) return decide("decline")
-      if (agreed.has(bare) && (asks.inFull || asks.dangerous)) return decide(how)
+      if (agreed.has(bare)) return decide(how)
       return undefined
     }
     case "Question": {
@@ -653,8 +656,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
       }
     }
     if (agreed.has(said) && question.kind === "which" && candidates.length === 1) return pick(candidates[0])
-    // Yes to doing it: what was asked about, on the thread it was about as it's known now.
-    if (agreed.has(said) && yesNo(question.kind)) {
+    // Yes to doing it: what was asked about, on the thread it was about as it's known now. Never to what a thread waits on, which only what settles it answers.
+    if (agreed.has(said) && yesNo(question.kind) && question.asks === undefined) {
       return decision({ ...question.decision, target: candidates[0]?.handle ?? "", sure: "high", others: "", pending: "answers" })
     }
     return undefined
