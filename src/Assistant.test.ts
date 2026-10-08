@@ -1670,13 +1670,14 @@ describe("Assistant", () => {
   })
 
   test("new work T3 Code never answered for, found still getting its worktree ready, is waited for as a launch is: said as started only once it's begun, and never once it failed or isn't ready in time", async () => {
-    const launched = (then: "begun" | "failed" | "still preparing") =>
+    const launched = (then: "begun" | "failed" | "still preparing" | "never given") =>
       run(
         Effect.gen(function* () {
           const { dictate, wait, launched, spoken, journal, ledger, started } = yield* assistant(
             (situation) => Brain.decision({ act: "start", text: situation.utterance.heard }),
             () => written({ worktree: true, spoken: "Started in yapd, on Opus, in a worktree." }),
-            { unanswered: "started", made: preparing },
+            // Never given the work, it has no run, which T3 Code shows as idle.
+            { unanswered: "started", made: then === "never given" ? {} : preparing },
           )
           const kept = Effect.map(journal.since(0, { kinds: ["started"] }), (kept) => kept.length)
           yield* dictate("Start a thread in yapd to fix the loader in a worktree.")
@@ -1712,6 +1713,9 @@ describe("Assistant", () => {
       state: Option.some("unknown"),
       asked: 1,
     })
+    // T3 Code puts the work in as soon as it's made the thread, so one still without it a moment later never had it put in: that's said then, not once a launch would give up.
+    const never = ["About the loader fix: T3 Code never put the work in the thread it made, so it didn't start."]
+    expect(await launched("never given")).toEqual({ meanwhile: { spoken: never, started: 0 }, spoken: never, started: 0, state: Option.some("failed"), asked: 1 })
   })
 
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {

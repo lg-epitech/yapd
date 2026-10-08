@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Deferred, Effect, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Deferred, type Duration, Effect, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
 import * as Hands from "./Hands.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
@@ -661,7 +661,7 @@ describe("Hands", () => {
     const preparing = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "preparing", status: "preparing" }
     const begun = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "running", status: "running", latestRunStartedAt: "2026-10-08T22:02:00.000Z" }
     const unbegun = { latestRunId: "run-1", status: "failed", lastError: "Workspace preparation failed.", latestRunCompletedAt: "2026-10-08T22:02:00.000Z" }
-    const restarted = (first: Record<string, unknown>, then?: Record<string, unknown>) =>
+    const restarted = (first: Record<string, unknown>, then?: Record<string, unknown>, after: Duration.DurationInput = "2 minutes") =>
       run(
         Effect.gen(function* () {
           const { ledger, becomes, restarted, dispatched } = yield* hands({ thread: thread(tezos.id, first) })
@@ -678,7 +678,7 @@ describe("Hands", () => {
           // yapd restarted a minute after asking for it, and T3 Code has made its thread.
           yield* TestClock.adjust("1 minute")
           const looking = yield* Effect.fork(restarted(now + 30_000).reconcile)
-          yield* TestClock.adjust("2 minutes")
+          yield* TestClock.adjust(after)
           if (then !== undefined) becomes(thread(tezos.id, then))
           yield* TestClock.adjust("4 minutes")
           const { unconfirmed } = yield* Fiber.join(looking)
@@ -702,6 +702,13 @@ describe("Hands", () => {
     expect(await restarted(preparing)).toEqual({
       state: "abandoned",
       said: ["Before I restarted, I couldn't confirm the new work you asked for started, sir. T3 Code is still getting it ready."],
+      dispatched: 0,
+    })
+    // With no run, the work isn't in it yet, which T3 Code puts in as soon as it's made the thread: a moment later, it's there, and then it never will be.
+    expect(await restarted({ status: "idle" }, begun, "5 seconds")).toEqual({ state: "sent", said: [], dispatched: 0 })
+    expect(await restarted({ status: "idle" })).toEqual({
+      state: "failed",
+      said: ["Before I restarted, I asked for new work, sir, but T3 Code never put the work in the thread it made, so it didn't start."],
       dispatched: 0,
     })
   })

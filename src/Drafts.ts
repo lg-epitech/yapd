@@ -4,7 +4,7 @@ import type * as Ledger from "./Ledger.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
-import { preparation, progress, readied, unready } from "./T3CodeLauncher.ts"
+import { preparation, progress, readied, unstarted } from "./T3CodeLauncher.ts"
 import type * as T3Live from "./T3Live.ts"
 import { type Decision, type Destination, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
@@ -287,13 +287,12 @@ export const make = (options: {
             Either.isLeft(outcome) && outcome.left.sent === true && request.ids !== undefined && options.find !== undefined
               ? yield* Effect.zipRight(Effect.sleep(settling), readied(options.find(machine.name, request.ids.thread), asked + Duration.toMillis(preparation)))
               : Option.none<T3Live.Thread>()
-          const now = Option.map(found, progress)
-          if (Either.isLeft(outcome) && !Option.contains(now, "begun")) {
-            // Ended before it began, it didn't start; still being got ready by the time a launch would have given up, it can't be told yet.
-            const ended = Option.contains(now, "unstarted")
-            const why = ended ? unready(request.worktree === true, project.name) : Option.isSome(now) ? readying : outcome.left.reason
+          if (Either.isLeft(outcome) && !Option.exists(found, (thread) => progress(thread) === "begun")) {
+            // Ended before it began, or never given the work, it didn't start; still being got ready by the time a launch would have given up, it can't be told yet.
+            const ended = Option.flatMap(found, (thread) => unstarted(thread, request.worktree === true, project.name))
+            const why = Option.getOrElse(ended, () => (Option.isSome(found) ? readying : outcome.left.reason))
             yield* Effect.logWarning(`Could not start: ${why}`, outcome.left)
-            yield* settle(outcome.left.sent === true && !ended ? "unknown" : "failed", why)
+            yield* settle(outcome.left.sent === true && Option.isNone(ended) ? "unknown" : "failed", why)
             return { _tag: "Said", spoken: about === "" ? why : `About ${about}: ${why}`, failed: true } satisfies Outcome
           }
           const started = Either.isRight(outcome) ? outcome.right : seen(Option.getOrThrow(found), resolved)

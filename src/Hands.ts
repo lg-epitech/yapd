@@ -876,16 +876,16 @@ export const make = (options: {
         // as a launch would be: a thread made for it doesn't say it started.
         if (row.kind === "start") {
           const thread = yield* T3CodeLauncher.readied(threads.find(refOf(row)), row.at + Duration.toMillis(T3CodeLauncher.preparation))
-          const now = Option.map(thread, T3CodeLauncher.progress)
-          if (Option.contains(now, "begun")) {
+          const ended = Option.flatMap(thread, (thread) => T3CodeLauncher.unstarted(thread, Option.exists(request(row.body), ({ worktree }) => worktree === true)))
+          if (Option.exists(thread, (thread) => T3CodeLauncher.progress(thread) === "begun")) {
             yield* ledger.settle(row.commandId, "sent", { from })
             yield* Effect.logInfo(`Found ${row.commandId} started after restarting`)
-          } else if (Option.contains(now, "unstarted")) {
-            const reason = T3CodeLauncher.unready(Option.exists(request(row.body), ({ worktree }) => worktree === true))
+          } else if (Option.isSome(ended)) {
+            const reason = ended.value
             yield* ledger.settle(row.commandId, "failed", { reason, from })
             yield* Effect.logWarning(`${row.commandId} didn't start before restarting: ${reason}`)
             unconfirmed.push({ ...row, state: "failed", reason })
-          } else yield* unverified(Option.isSome(now) ? gettingReady : unconfirmable)
+          } else yield* unverified(Option.isSome(thread) ? gettingReady : unconfirmable)
           continue
         }
         const found = yield* Effect.either(landed(row, actions.value))
