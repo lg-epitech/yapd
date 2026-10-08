@@ -814,6 +814,24 @@ describe("Assistant", () => {
     expect(result.started).toEqual(["/code/yapd"])
   })
 
+  test("turned off as soon as he's told it reads through the project first, before the reading has begun, nothing starts", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { heard, toggle, wait, spoken, started } = yield* assistant(
+          (situation) => Brain.decision({ act: "start", text: situation.utterance.heard }),
+          () => written({ action: "research", spoken: "Looking through yapd first." }),
+          { researching: 5 },
+        )
+        yield* heard({ heard: "Fix the loader in yapd.", via: "typed", at: now, voiced: 3, turns: 1 })
+        yield* toggle(false)
+        yield* wait(10)
+        return { spoken: spoken(), started: started.map(({ project }) => project) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Looking through yapd first."])
+    expect(result.started).toEqual([])
+  })
+
   test("\"it\" in each dictation is what was being read as its own shortcut was pressed, though the next was pressed before it was heard", async () => {
     const result = await run(
       Effect.gen(function* () {

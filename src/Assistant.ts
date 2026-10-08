@@ -1,4 +1,4 @@
-import { Cause, Clock, Context, type Duration, Effect, Either, Fiber, Option } from "effect"
+import { Cause, Clock, Context, type Duration, Effect, Either, Fiber, FiberSet, Option } from "effect"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
@@ -224,7 +224,9 @@ export const make = (options: {
     /** Prompts being written for what was said before it's known whether it's new work, by utterance. */
     const writing = new Map<string, Fiber.RuntimeFiber<Either.Either<Drafts.Written, string>>>()
     /** What's under way in the background for a request, stopped when yapd is turned off. */
-    const jobs = new Set<Fiber.RuntimeFiber<unknown, unknown>>()
+    const jobs = yield* FiberSet.make()
+    /** How many times yapd had been turned on or off when it was last turned off, so what's begun after for a request heard by then is stopped too. */
+    let dropped = Number.NEGATIVE_INFINITY
     /**
      * Work being started, by the request it's for, which the journal only has
      * once T3 Code has it ready: from when yapd starts reading through its
@@ -235,17 +237,23 @@ export const make = (options: {
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
-    /** In the background, and stoppable even when begun from what can't be stopped, like an answer being taken in. */
-    const background = <A, E>(effect: Effect.Effect<A, E>) =>
-      Effect.withFiberRuntime<A | void, E>((fiber) => {
-        jobs.add(fiber)
-        return Effect.ensuring(effect, Effect.sync(() => jobs.delete(fiber)))
-      }).pipe(
-        Effect.catchAllCause((cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Something went wrong", cause))),
-        Effect.interruptible,
-        Effect.forkIn(scope),
-        Effect.asVoid,
-      )
+    /**
+     * In the background for a request heard when yapd had been turned on or
+     * off `turns` times, and stoppable even when begun from what can't be
+     * stopped, like an answer being taken in. It's among the jobs from when
+     * it's begun, not from when it starts running, so turning yapd off just
+     * after can't miss it; and begun as yapd is being turned off, it's
+     * stopped like the rest.
+     */
+    const background = <A, E>(effect: Effect.Effect<A, E>, turns: number) =>
+      Effect.gen(function* () {
+        const job = yield* effect.pipe(
+          Effect.catchAllCause((cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError("Something went wrong", cause))),
+          Effect.interruptible,
+          FiberSet.run(jobs),
+        )
+        if (turns <= dropped) yield* Fiber.interruptFork(job)
+      })
 
     /** The open question, unless it's been open so long it no longer counts. */
     const current = (now: number) =>
@@ -639,6 +647,7 @@ export const make = (options: {
                 Effect.ensuring(arrived),
                 Effect.annotateLogs({ utterance: utterance.id }),
               ),
+              utterance.turns,
             )
             return quiet({ _tag: "Nothing" })
           }
@@ -656,6 +665,7 @@ export const make = (options: {
                 Effect.ensuring(settled),
                 Effect.annotateLogs({ utterance: utterance.id }),
               ),
+              utterance.turns,
             )
             return reply(outcome.spoken, { _tag: "Nothing" })
           }
@@ -837,6 +847,7 @@ export const make = (options: {
                   yield* deliver(outcome, utterance)
                 }),
               ).pipe(Effect.ensuring(arrived), Effect.annotateLogs({ utterance: utterance.id })),
+              turns,
             ),
           ),
         )
@@ -888,7 +899,7 @@ export const make = (options: {
                   stale: Effect.sync(() => asking?.open.id !== open.id || asking.held),
                   question: {
                     answer: listen(open),
-                    unanswered: background(turn.withPermits(1)(unanswered(open.id))),
+                    unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),
                   },
                 }),
           },
@@ -996,6 +1007,7 @@ export const make = (options: {
       replied: Effect.suspend(() => (asking === undefined || !asking.said ? Effect.void : close(asking.open, "replaced"))),
       open: Effect.map(Clock.currentTimeMillis, current),
       drop: Effect.gen(function* () {
+        dropped = (yield* options.power).turns
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
         // No answer is on its way any more, and the dictations they were for are dropped too.
         yield* Effect.forEach(presses.splice(0), ({ arrived }) => arrived, { discard: true })
