@@ -48,6 +48,16 @@ const decodeUtterance = Schema.decodeUnknown(Schema.Struct({ text: Schema.String
 /** Names for this machine, so a web page can't reach the API through a DNS name of its own that points here. */
 const local = new Set(["127.0.0.1", "localhost", "[::1]"])
 
+/**
+ * Whether a web page sent it, which browsers always say, while yapd's hooks,
+ * its app and scripts never do: a page could otherwise have yapd act on its
+ * behalf, by posting what to do without ever reading the answer.
+ */
+const fromPage = (request: Request) => {
+  const site = request.headers.get("sec-fetch-site")
+  return request.headers.has("origin") || (site !== null && site !== "none")
+}
+
 const failed = (what: string) => (error: unknown) =>
   Effect.logWarning(`Could not ${what}`, error).pipe(Effect.as(new Response(null, { status: 500 })))
 
@@ -63,6 +73,7 @@ export const serve = (port: number, api: Api) =>
       Effect.gen(function* () {
         const url = new URL(request.url)
         if (!local.has(url.hostname)) return new Response(null, { status: 403 })
+        if (fromPage(request)) return new Response(null, { status: 403 })
         const route = `${request.method} ${url.pathname}`
         if (route === "GET /health") return new Response("ok")
         if (route === "POST /events") return yield* event(request, url, server)
