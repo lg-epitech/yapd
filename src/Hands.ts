@@ -282,7 +282,12 @@ export const make = (options: {
       return yield* failing({ _tag: "Unknown", reason, again } satisfies Outcome, `${what}, and couldn't tell whether it went`)
     })
 
-  /** Writes the step in the ledger and sends it, unless it's there already, when what came of it stands. */
+  /**
+   * Writes the step in the ledger and sends it, unless it's there already,
+   * when what came of it stands. Once written, it's seen through: stopped
+   * between the two, it would be left as if it may have gone when it didn't,
+   * and stopped while it's sent, as if it never went when it may have.
+   */
   const once = (
     step: Step,
     kind: Ledger.Kind,
@@ -291,19 +296,21 @@ export const make = (options: {
     reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread },
     digest?: string,
   ) =>
-    Effect.gen(function* () {
-      const prepared = yield* ledger
-        .prepare({ ...step, kind, machine: to.machine, thread: to.id, body, message: kind === "message", ...(digest === undefined ? {} : { digest }) })
-        .pipe(Effect.either)
-      if (Either.isLeft(prepared)) {
-        return yield* failing(
-          { _tag: "NotSent", reason: "I couldn't write it down first, so I didn't send it.", again: Option.none() } satisfies Outcome,
-          doing[kind],
-        )
-      }
-      if (!prepared.right.fresh) return settled(prepared.right)
-      return yield* dispatch(prepared.right, reached.actions, busy(reached.thread))
-    })
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const prepared = yield* ledger
+          .prepare({ ...step, kind, machine: to.machine, thread: to.id, body, message: kind === "message", ...(digest === undefined ? {} : { digest }) })
+          .pipe(Effect.either)
+        if (Either.isLeft(prepared)) {
+          return yield* failing(
+            { _tag: "NotSent", reason: "I couldn't write it down first, so I didn't send it.", again: Option.none() } satisfies Outcome,
+            doing[kind],
+          )
+        }
+        if (!prepared.right.fresh) return settled(prepared.right)
+        return yield* dispatch(prepared.right, reached.actions, busy(reached.thread))
+      }),
+    )
 
   /**
    * What's made of the same words going to a thread they went to lately,
@@ -452,26 +459,29 @@ export const make = (options: {
           return act.carry ? carry(step, act.to) : withdraw(step, act.to)
       }
     },
+    // Taken to send again, it's seen through, as a step is once written.
     again: (commandId) =>
-      Effect.gen(function* () {
-        const taken = yield* ledger.resending(commandId)
-        if (Option.isNone(taken)) {
-          // Sent again already, or it's come to something since: that stands.
-          const row = yield* ledger.get(commandId)
-          return Option.match(row, {
-            onNone: (): Outcome => ({ _tag: "Refused", reason: "I've no record of that any more." }),
-            onSome: (row): Outcome => (row.state === "abandoned" ? { _tag: "NotSent", reason: "I've sent that once more already.", again: Option.none() } : settled(row)),
-          })
-        }
-        const row = taken.value
-        const reached = yield* reach(refOf(row))
-        if (Either.isLeft(reached)) {
-          yield* unsent(row, reached.left)
-          return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing[row.kind])
-        }
-        yield* Effect.logInfo(`Sending ${row.commandId} once more, as you said`)
-        return yield* dispatch(row, reached.right.actions, busy(reached.right.thread), true)
-      }),
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const taken = yield* ledger.resending(commandId)
+          if (Option.isNone(taken)) {
+            // Sent again already, or it's come to something since: that stands.
+            const row = yield* ledger.get(commandId)
+            return Option.match(row, {
+              onNone: (): Outcome => ({ _tag: "Refused", reason: "I've no record of that any more." }),
+              onSome: (row): Outcome => (row.state === "abandoned" ? { _tag: "NotSent", reason: "I've sent that once more already.", again: Option.none() } : settled(row)),
+            })
+          }
+          const row = taken.value
+          const reached = yield* reach(refOf(row))
+          if (Either.isLeft(reached)) {
+            yield* unsent(row, reached.left)
+            return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing[row.kind])
+          }
+          yield* Effect.logInfo(`Sending ${row.commandId} once more, as you said`)
+          return yield* dispatch(row, reached.right.actions, busy(reached.right.thread), true)
+        }),
+      ),
     leave: (commandId, reason) =>
       Effect.zipRight(ledger.leave(commandId, reason), Effect.logInfo(`Not offering ${commandId} again: ${reason}`)),
     still: (commandId) =>

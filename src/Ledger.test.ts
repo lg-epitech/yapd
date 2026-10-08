@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import * as Ledger from "./Ledger.ts"
 
 describe("Ledger", () => {
@@ -29,5 +29,30 @@ describe("Ledger", () => {
     expect(result.again).toMatchObject({ commandId: "yapd:u1:0", messageId: "yapd:u1:0:m", fresh: false })
     expect(result.again.body).toEqual({ _tag: "Send", text: "Use the fee table from the Mina work.", messageId: "yapd:u1:0:m", how: "now" })
     expect(result.open.map(({ commandId }) => commandId)).toEqual(["yapd:u1:0"])
+  })
+
+  test("a step taken to send again, or let be, is nothing a restart offers, even when yapd stops before it's settled", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const ledger = yield* Ledger.Ledger
+        const step = (utterance: string) =>
+          ledger.prepare({
+            utterance,
+            step: 0,
+            kind: "message",
+            machine: "Rosie",
+            thread: "t-tezos",
+            body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+            message: true,
+          })
+        yield* step("u1")
+        yield* step("u2")
+        // His yes to the first, and yapd stopping as it's sent; his no to the second, which never said what came of it.
+        const taken = yield* ledger.resending("yapd:u1:0")
+        yield* ledger.leave("yapd:u2:0", "He said no.")
+        return { taken: Option.isSome(taken), open: yield* ledger.open(0), again: Option.isSome(yield* ledger.resending("yapd:u1:0")) }
+      }).pipe(Effect.provide(Ledger.memory)),
+    )
+    expect(result).toEqual({ taken: true, open: [], again: false })
   })
 })

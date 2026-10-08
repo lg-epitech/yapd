@@ -1139,6 +1139,33 @@ describe("Assistant", () => {
     expect(await sending(true)).toEqual({ dispatched: 0, spoken: 0 })
   })
 
+  test("turning yapd off while a message is being sent still notes what came of it, so scratch that knows it went", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, answer, heard, toggle, wait, spoken, dispatched, ledger, journal } = yield* assistant(tezosMessage("medium"), undefined, {
+          // T3 Code takes it, and is slow to say so.
+          answer: () => (payload, bounded) => Effect.zipLeft(takes(payload, bounded), Effect.sleep("10 seconds")),
+        })
+        yield* dictate("Tell the migration one to use the fee table from the Mina work.")
+        yield* answer("The first.")
+        yield* toggle(false)
+        yield* wait(10)
+        const row = yield* ledger.latest("1 hour", { kinds: ["message"] })
+        const kept = yield* journal.since(0, { kinds: ["sent"] })
+        const before = spoken().length
+        yield* toggle(true)
+        yield* heard({ heard: "Scratch that.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 1, turns: 3 })
+        return { state: Option.map(row, ({ state }) => state), kept: kept.length, before, after: spoken().slice(before), dispatched: dispatched.length }
+      }),
+    )
+    expect(result.state).toEqual(Option.some("sent"))
+    expect(result.kept).toBe(1)
+    // Nothing was said of it once yapd was off.
+    expect(result.before).toBe(1)
+    expect(result.after).toEqual(["Migrate Tezos Integration has already read it, sir. Shall I tell it to ignore that?"])
+    expect(result.dispatched).toBe(1)
+  })
+
   test("a message that didn't go is said with why, logged and journaled with it", async () => {
     const warned: Array<string> = []
     const logger = Logger.make(({ logLevel, message }) => {

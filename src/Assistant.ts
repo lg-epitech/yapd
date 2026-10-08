@@ -796,6 +796,8 @@ export const make = (options: {
      * didn't go: as a question when there's one to ask, like whether to send
      * again what may not have got there, under the same ids. Once a step is
      * done, the rest of the request is worked out and done as the next step.
+     * `free` is how what follows the note is let be stopped, when the change
+     * and its note can't be.
      */
     const told = (
       act: Hands.Act,
@@ -803,6 +805,7 @@ export const make = (options: {
       thought: Thought,
       said: Lines,
       at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean },
+      free: <A>(effect: Effect.Effect<A>) => Effect.Effect<A> = (effect) => effect,
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { utterance, situation } = thought
@@ -832,7 +835,7 @@ export const make = (options: {
             utterance: utterance.id,
             detail: { commandId: at.commandId, act: act._tag, outcome: outcome._tag, ...detail },
           })
-        const asking = (open: Omit<Open, "id" | "version" | "at">) => opening(open, utterance)
+        const asking = (open: Omit<Open, "id" | "version" | "at">) => free(opening(open, utterance))
         const base = { utterance: utterance.id, heard: utterance.heard, material: Option.none(), candidates: ref === undefined ? [] : [ref] }
         switch (outcome._tag) {
           case "Done": {
@@ -841,7 +844,7 @@ export const make = (options: {
             yield* noting(line === "" ? undefined : line, { how: outcome.how })
             const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
             // Taking a stop back is two steps: letting go of the queue, then the message to carry on.
-            return yield* onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" ? 2 : 1), said)
+            return yield* free(onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" ? 2 : 1), said))
           }
           case "Twin": {
             // One that may not have got there is offered again under its own ids; one that did, to a thread that hasn't answered since, is asked about.
@@ -933,12 +936,19 @@ export const make = (options: {
         }
         const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted)
         if (act === undefined) return reply(said.cantTell, thought.subject)
-        const outcome = yield* hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice })
-        return yield* told(act, outcome, thought, said, {
-          step: at.step,
-          commandId: Ledger.ids(utterance.id, at.step, false).commandId,
-          ...(at.quietly === true ? { quietly: true } : {}),
-        })
+        // Once it's begun, it's seen through and noted: turning yapd off meanwhile only stops what's said of it.
+        return yield* Effect.uninterruptibleMask((free) =>
+          Effect.flatMap(hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice }), (outcome) =>
+            told(
+              act,
+              outcome,
+              thought,
+              said,
+              { step: at.step, commandId: Ledger.ids(utterance.id, at.step, false).commandId, ...(at.quietly === true ? { quietly: true } : {}) },
+              free,
+            ),
+          ),
+        )
       })
 
     /**
@@ -999,9 +1009,11 @@ export const make = (options: {
           if (!power.on || power.turns !== utterance.turns) return quiet(thought.subject)
           // Under the same ids it goes exactly as it went before, whenever he now says.
           if (decision.how !== open.decision.how) yield* Effect.logInfo("Sending it again as it was first asked, since it goes under the same ids")
-          const outcome = yield* hands.again(resend.value)
           const act: Hands.Act = { _tag: "Message", to: target.value.ref, text: decision.text, how: "now" }
-          return yield* told(act, outcome, { ...thought, decision }, said, { step: 0, commandId: resend.value })
+          const commandId = resend.value
+          return yield* Effect.uninterruptibleMask((free) =>
+            Effect.flatMap(hands.again(commandId), (outcome) => told(act, outcome, { ...thought, decision }, said, { step: 0, commandId }, free)),
+          )
         }
         return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: true })
       })

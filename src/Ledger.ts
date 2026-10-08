@@ -96,9 +96,10 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
       details?: { readonly reason?: string; readonly how?: How; readonly from?: ReadonlyArray<State> },
     ) => Effect.Effect<void>
     /**
-     * Leaves a step that didn't get through, or may not have, as it is, but
-     * never to be offered again on its own, noting why: the same words said
-     * again still find it, and it may still go once more on his yes.
+     * Leaves a step that didn't get through, may not have, or never said what
+     * came of it, as it is, but never to be offered again on its own, noting
+     * why: the same words said again still find it, and it may still go once
+     * more on his yes.
      */
     readonly leave: (commandId: string, why: string) => Effect.Effect<void>
     /**
@@ -206,7 +207,7 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
       store.transaction((database: Database) => {
         database
-          .query("update actions set reason = ?, settled_at = ? where command_id = ? and state in ('failed', 'unknown')")
+          .query("update actions set reason = ?, settled_at = ? where command_id = ? and state in ('prepared', 'failed', 'unknown')")
           .run(`${unoffered}: ${why.charAt(0).toLowerCase()}${why.slice(1)}`, at, commandId)
       }),
     ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note that ${commandId} is left be`, error))),
