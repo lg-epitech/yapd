@@ -315,7 +315,7 @@ export const needing = (desk: Threads.Desk, lines: Lines, now: number) => {
  * with the day further off, like "Monday at 9:00 AM", since a weekly window
  * can be days from resetting.
  */
-const clock = (iso: string, now: number) => {
+export const clock = (iso: string, now: number) => {
   const at = Date.parse(iso)
   if (Number.isNaN(at)) return undefined
   if (at - now < 20 * 60 * 60_000) return `at ${time(at)}`
@@ -852,7 +852,8 @@ const lasted = (ms: number) => {
   return `${Math.round(minutes / (24 * 60))} days`
 }
 
-const failures: Readonly<Record<string, string>> = {
+/** What each kind of failure T3 Code tells of comes to, in words. */
+export const failures: Readonly<Record<string, string>> = {
   provider_error: "the model provider had an error",
   transport_error: "it lost its connection",
   permission_error: "it wasn't allowed to do something",

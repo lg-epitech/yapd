@@ -34,6 +34,8 @@ export interface Listed {
   readonly called: string
   /** Its project's name, as it's said. */
   readonly project: string
+  /** Where it works: its worktree, or its project's folder. */
+  readonly directory: Option.Option<string>
   readonly thread: T3Live.Thread
   readonly state: State
   /** When it got to that state, in ms. */
@@ -227,14 +229,15 @@ export const shortlist = (input: {
     .slice(0, input.more ?? 0)
   return [...ranked.slice(0, most), ...named]
     .map(({ thread, doing }, index): Listed => {
-      const project = view.projects.get(thread.projectId)?.title ?? ""
+      const project = view.projects.get(thread.projectId)
       const own = started.get(thread.id)
       return {
         handle: `t${index + 1}`,
         ref: { machine, id: thread.id },
         here: true,
-        called: called(thread.title, own?.description, project, time(thread.createdAt) ?? now, now),
-        project: spoken(project),
+        called: called(thread.title, own?.description, project?.title ?? "", time(thread.createdAt) ?? now, now),
+        project: spoken(project?.title ?? ""),
+        directory: Option.fromNullable(thread.worktreePath ?? project?.workspaceRoot),
         thread,
         state: doing,
         since: since(thread, doing),
