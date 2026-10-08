@@ -154,6 +154,26 @@ describe("Brain", () => {
     for (const heard of ["How much is left?", "How much work is left?", "How much time is left?", "How much of it is left?"]) expect(usageAsked(heard)).toBe(false)
   })
 
+  test("a name said on its own is an answer, never silence, and \"Jarvis.\" picks the thread called that", () => {
+    const jarvis = thread("6f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f", "Jarvis companion assistant", "p-std")
+    const latency = thread("7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d", "Latency audit", "p-std")
+    const named: T3Live.View = { ...view, threads: new Map([jarvis, latency].map((thread) => [thread.id, thread])) }
+    const candidates = [ref(jarvis), ref(latency)]
+    const listed = Threads.shortlist({ machine: "Rosie", view: named, focus: Option.none(), pending: candidates, most: 30, started: new Map(), said: new Map(), now })
+    const asking = { ...which(candidates), asked: "Jarvis companion assistant or Latency audit, sir?" }
+    const picked = Brain.fast(situation("Jarvis.", { open: Option.some(asking), desk: { threads: listed, away: [] } }), lines)
+    expect({ act: picked?.act, pending: picked?.pending, thread: listed.find(({ handle }) => handle === picked?.target)?.thread.title }).toEqual({
+      act: "look",
+      pending: "answers",
+      thread: "Jarvis companion assistant",
+    })
+    // Which project, with "Yapd." for an answer, is for the model, which hears it out.
+    const project: Assistant.Open = { ...which([]), kind: "project", asked: "For the loader fix, is that yapd or std?", about: "the loader fix" }
+    for (const heard of ["Yapd.", "yapd please", "Jarvis, um."]) expect(Brain.fast(situation(heard, { open: Option.some(project) }), lines)).toBeUndefined()
+    // Only what fills a pause, or asks nicely, is nothing said.
+    for (const heard of ["Um.", "Uh, sir.", "Please."]) expect(Brain.fast(situation(heard, { open: Option.some(project) }), lines)?.act).toBe("resume")
+  })
+
   test("a near-silence 'Thank you.' is ignored", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")

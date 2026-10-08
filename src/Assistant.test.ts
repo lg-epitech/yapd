@@ -889,6 +889,36 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.none())
   })
 
+  test("a name on its own, like \"Yapd.\", answers the project question rather than being taken for silence", async () => {
+    const answered = (reply: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, answer, spoken, open, started } = yield* assistant(
+            (situation) => Brain.decision({ act: "start", text: situation.utterance.heard, pending: Option.isNone(situation.open) ? "" : "answers" }),
+            // It starts the work in whichever project his answer names, and asks until one does.
+            ({ lines }) => {
+              const said = lines.at(-1)!.text
+              const named = lines.length === 1 ? undefined : ["yapd", "std"].find((name) => said.toLowerCase().includes(name))
+              return named === undefined
+                ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" })
+                : written({ project: named, evidence: said.replace(/\W+$/, ""), spoken: `Started in ${named}, on Opus, without a worktree.` })
+            },
+          )
+          yield* dictate("Fix the loader.")
+          const taken = yield* answer(reply)
+          return { taken, spoken: spoken(), open: yield* open, started: started.map(({ project }) => project) }
+        }),
+      )
+    for (const reply of ["Yapd.", "yapd", "Yapd, please."]) {
+      expect(await answered(reply)).toEqual({
+        taken: true,
+        spoken: ["For the loader fix, is that yapd or std?", "Started in yapd, on Opus, without a worktree."],
+        open: Option.none(),
+        started: ["/code/yapd"],
+      })
+    }
+  })
+
   test("a request with fewer than two candidates says it couldn't tell, without asking", async () => {
     const result = await run(
       Effect.gen(function* () {
