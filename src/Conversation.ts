@@ -8,6 +8,7 @@ import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
 import { type Line, type Reply, Responder } from "./Responder.ts"
+import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
@@ -24,6 +25,8 @@ export interface Update {
   readonly thread: Thread
   /** When its turn stopped. */
   readonly at: number
+  /** The T3 Code thread it came from, when its hook could be tied to one, or T3 Code told of it. */
+  readonly about?: Threads.Ref
 }
 
 type Signal =
@@ -538,7 +541,8 @@ export const make = (options: {
                 kind: "reply",
                 host: update.thread.origin.host,
                 project: update.project,
-                thread: update.session,
+                // With the thread T3 Code knows it by, when it's tied to one, like the update itself.
+                ...(update.about === undefined ? { thread: update.session } : { machine: update.about.machine, thread: update.about.id }),
                 directory: update.thread.cwd,
                 said: reply.spoken,
                 text: heard,

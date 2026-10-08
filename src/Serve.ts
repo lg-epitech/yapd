@@ -70,7 +70,6 @@ const catchingUp = "15 minutes"
 
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
-  const daemon = yield* Daemon.make
   const preferences = yield* Preferences.path
   const everywhere = yield* machines
   const journal = yield* Journal.Journal
@@ -80,15 +79,18 @@ export const serve = Effect.gen(function* () {
   )
   const token = yield* Config.t3codeToken
   const live = yield* T3Live.T3Live
+  // As the machine is called when yapd starts, which is what its threads are known by while it runs.
+  const machine = everywhere.find(({ here }) => here)?.name ?? hostname()
   const threads = yield* Threads.make({
-    // As the machine is called when yapd starts, which is what its threads are known by while it runs.
-    machine: everywhere.find(({ here }) => here)?.name ?? hostname(),
+    machine,
     live,
     actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
     others: everywhere.filter(({ here }) => !here).map(({ name }) => name),
     journal,
     store: yield* Store.Store,
   })
+  // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it.
+  const daemon = yield* Daemon.make({ link: (session, cwd) => threads.link(machine, session, cwd) })
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),

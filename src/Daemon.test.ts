@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, Scope, STM, Stream, TestClock, TestContext, TRef } from "effect"
+import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Audio, AudioError } from "./Audio.ts"
 import * as Brain from "./Brain.ts"
@@ -48,6 +49,8 @@ const make = (says?: string, options: {
   /** Lines that can't be played at all, as when the audio helper is down. */
   readonly unplayable?: ReadonlyArray<string>
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
+  /** Finds the T3 Code thread a hook on this machine came from. */
+  readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -156,7 +159,7 @@ const make = (says?: string, options: {
     })),
   )
   const context = yield* Layer.build(layer)
-  const made = yield* Daemon.make.pipe(Effect.provide(context))
+  const made = yield* Daemon.make(options.link === undefined ? {} : { link: options.link }).pipe(Effect.provide(context))
   handle = made.handle
   const { speak: read, tell } = made
   yield* Effect.forkScoped(read)
@@ -685,16 +688,62 @@ describe("Daemon", () => {
   test("skips a turn the user was likely watching, but never one that needs them or that yapd started", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { turn, wait, played } = yield* daemon
+        const { turn, wait, played, made } = yield* daemon
         yield* turn("a", "Quick and watched.", 5)
         yield* turn("b", "Quick, with nobody watching.", 5, { launched: true })
         yield* wait(11)
         yield* turn("c", "It was refused when it tried to push.", 5, { needsYou: true })
         yield* wait(11)
-        return [...played]
+        // The skipped one's Stop is still known, so T3 Code's word that it finished isn't said in its place.
+        return { played: [...played], stopped: yield* made.stopped(["a"]), never: yield* made.stopped(["d"]) }
       }),
     )
-    expect(result).toEqual(["yapd. Quick, with nobody watching.", "yapd. It was refused when it tried to push."])
+    expect(result.played).toEqual(["yapd. Quick, with nobody watching.", "yapd. It was refused when it tried to push."])
+    expect(Option.isSome(result.stopped)).toBe(true)
+    expect(result.never).toEqual(Option.none())
+  })
+
+  test("a hook that can't be linked is spoken and answered the old way", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const asked: Array<string> = []
+        const { handle, speak, wait, nextEvent, nextPlayback, followUps, journal } = yield* make("Use the fee table.", {
+          send: () => Effect.void,
+          // No thread has the first session, and T3 Code never says for the second. The last is the Tezos thread's.
+          link: (session) =>
+            Effect.zipRight(
+              Effect.sync(() => void asked.push(session)),
+              session === "terminal" ? Effect.succeedNone : session === "tezos" ? Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }) : Effect.never,
+            ),
+        })
+        const stop = (session: string, message: string, host: string) =>
+          handle("claude", { hook_event_name: "Stop", session_id: session, cwd: "/tmp", last_assistant_message: message }, { project: "yapd", host }, false)
+        yield* stop("terminal", "The fee table is in.", hostname())
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        yield* stop("slow", "The loader is fixed.", hostname())
+        // Three seconds on, T3 Code still hasn't said which thread it is, so it's said all the same.
+        yield* wait(3)
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        // Rig's T3 Code isn't followed, so nothing is asked for its hooks.
+        yield* stop("elsewhere", "Rig's tests pass.", "rig.local")
+        yield* nextPlayback
+        // One that is linked is kept with its thread, as T3 Code knows it.
+        yield* stop("tezos", "The Tezos migration is in.", hostname())
+        yield* nextEvent("Ready: yapd. The Tezos")
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { asked, followUps: [...followUps], threads: updates.map(({ machine, thread }) => (machine === "Rosie" ? `Rosie ${thread}` : thread)) }
+      }),
+    )
+    expect(result.asked).toEqual(["terminal", "slow", "tezos"])
+    expect(result.followUps).toEqual(["terminal sent: Use the fee table.", "slow sent: Use the fee table."])
+    expect(result.threads).toEqual(["claude:terminal", "claude:slow", "claude:elsewhere", "Rosie t-tezos"])
   })
 
   test("says what yapd has to say for itself in turn, questions first", async () => {

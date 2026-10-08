@@ -1,6 +1,6 @@
 import { Cause, Clock, Effect, FiberMap, Option, PubSub, STM, Stream, SubscriptionRef, TRef } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import { Audio } from "./Audio.ts"
 import { type Ticket, Waiting, wake } from "./ClaudeCode.ts"
@@ -9,13 +9,15 @@ import * as Config from "./Config.ts"
 import * as Conversation from "./Conversation.ts"
 import * as Floor from "./Floor.ts"
 import * as Inbox from "./Inbox.ts"
-import { Journal } from "./Journal.ts"
+import { type Entry, Journal } from "./Journal.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
+import * as T3Code from "./T3Code.ts"
+import type * as Threads from "./Threads.ts"
 import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
@@ -46,11 +48,19 @@ const patience = "15 seconds"
 /** How long an answer on its way holds everything else back at most, in case it never comes. */
 const holding = "20 seconds"
 
+/** How long after a session's last Stop it's forgotten: T3 Code says its thread finished well within it. */
+const forgotten = 60 * 60_000
+
+/** How long finding the T3 Code thread a hook came from can take, after which its update goes the old way. */
+const lookup = "3 seconds"
+
 /**
  * Updates are condensed and rendered in parallel, then spoken one at a time,
- * along with what yapd has to say for itself.
+ * along with what yapd has to say for itself. `link` finds the T3 Code thread
+ * a hook on this machine came from, if any, so what's said of it is kept
+ * with the thread.
  */
-export const make = Effect.gen(function* () {
+export const make = (options: { readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>> } = {}) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
   const condenser = yield* Condenser
   const voice = yield* Voice
@@ -94,6 +104,8 @@ export const make = Effect.gen(function* () {
     hook?: Ticket
   }
   const followed = new Map<string, Replies>()
+  /** When each session's last Stop came, by the agent's own id for it, whether or not it was said, for an hour. */
+  const stops = new Map<string, number>()
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
   /**
@@ -311,21 +323,35 @@ export const make = Effect.gen(function* () {
     spoken: `${speakable(project) ? project : "One of your threads"} finished a turn, but I couldn't summarize it.`,
   })
 
-  const prepare = (
-    session: string,
-    project: string,
-    turn: Turn,
-    thread: Thread,
-    arrivedAt: number,
-    generation: { readonly chain: object },
-    hook: Ticket | undefined,
-    needsYou: boolean,
-    turns: number,
-  ) =>
-    Effect.gen(function* () {
-      const summary = yield* condenser.condense(project, turn).pipe(
-        Effect.retry({ times: 1 }),
-        Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),
+  /** A turn that finished, to sum up and queue, and what it's for. */
+  interface Finished {
+    readonly session: string
+    readonly project: string
+    readonly turn: Turn
+    readonly thread: Thread
+    readonly arrivedAt: number
+    readonly generation: { readonly chain: object }
+    readonly hook: Ticket | undefined
+    readonly needsYou: boolean
+    readonly turns: number
+    /** The T3 Code thread it's from, worked out alongside the summary, when there's one. */
+    readonly about: Effect.Effect<Option.Option<Threads.Ref>>
+    /** What it's said under only once, ever, for an update no hook told of. */
+    readonly key?: string
+  }
+
+  const prepare = (finished: Finished) => {
+    const { session, project, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
+    return Effect.gen(function* () {
+      const [summary, about] = yield* Effect.all(
+        [
+          condenser.condense(project, turn).pipe(
+            Effect.retry({ times: 1 }),
+            Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(fallback(project)))),
+          ),
+          finished.about,
+        ],
+        { concurrency: 2 },
       )
       // Whoever sent it knows it needs the user, whatever the summary makes of it.
       const priority = needsYou ? "needs-you" : summary.priority
@@ -340,24 +366,46 @@ export const make = Effect.gen(function* () {
       // Rendering takes about as long as the speaker takes to get ready.
       yield* soon
       yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
-      const update = { session, project, turn, needsYou: priority === "needs-you", spoken, audio, thread, at: arrivedAt }
+      const update: Conversation.Update = {
+        session,
+        project,
+        turn,
+        needsYou: priority === "needs-you",
+        spoken,
+        audio,
+        thread,
+        at: arrivedAt,
+        ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
+      }
       generations.set(update, generation)
+      // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread.
+      const entry: Entry = {
+        at: arrivedAt,
+        kind: "update",
+        host: thread.origin.host,
+        project,
+        ...Option.match(about, { onNone: () => ({ thread: session }), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
+        directory: thread.cwd,
+        said: spoken,
+        text: turn.message,
+        detail: {
+          priority,
+          ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }),
+          ...(Option.isSome(about) ? { session } : {}),
+        },
+      }
+      // Said once ever: one already kept under its key was said, or held, before.
+      const claimed = finished.key === undefined ? undefined : yield* journal.claim({ ...entry, key: finished.key })
+      if (claimed !== undefined && Option.isNone(claimed)) {
+        yield* removeFile(audio)
+        return yield* Effect.logInfo(`Skipped update, said already: ${spoken}`)
+      }
       if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns))) {
         yield* removeFile(audio)
         yield* release(hook)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
       }
-      const row = yield* journal.write({
-        at: arrivedAt,
-        kind: "update",
-        host: thread.origin.host,
-        project,
-        thread: session,
-        directory: thread.cwd,
-        said: spoken,
-        text: turn.message,
-        detail: { priority, ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }) },
-      })
+      const row = claimed === undefined ? yield* journal.write(entry) : Option.flatten(claimed)
       if (Option.isSome(row)) rows.set(update, row.value)
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
@@ -372,6 +420,7 @@ export const make = Effect.gen(function* () {
       ),
       Effect.annotateLogs({ project }),
     )
+  }
 
   /** Lets a waiting Stop hook go without a reply. */
   const release = (hook: Ticket | undefined) => (hook === undefined ? Effect.void : waiting.close(hook))
@@ -387,6 +436,74 @@ export const make = Effect.gen(function* () {
       // Its hook, if one waits, won't be getting a reply.
       yield* waiting.drop(session)
     })
+
+  /**
+   * The T3 Code thread a hook came from, when it ran on this machine and the
+   * thread is found in time. Anything else keeps its update on the old path.
+   */
+  const linking = (session: string, cwd: string, origin: Origin): Effect.Effect<Option.Option<Threads.Ref>> => {
+    const { link } = options
+    if (link === undefined) return Effect.succeedNone
+    // Read each time, since a Mac's hostname changes with the network.
+    if (origin.host === undefined || origin.host.toLowerCase() !== hostname().toLowerCase()) {
+      return Effect.as(Effect.logInfo(`Not linked: it came from ${origin.host ?? "a machine that didn't say"}`), Option.none())
+    }
+    return link(session, cwd).pipe(
+      Effect.timeout(lookup),
+      Effect.catchTag("TimeoutException", () =>
+        Effect.as(Effect.logInfo("Not linked: T3 Code took too long to say which thread it is"), Option.none<Threads.Ref>()),
+      ),
+    )
+  }
+
+  /**
+   * A turn T3 Code says one of its threads finished, which no hook told of,
+   * like one run by an agent yapd has no hooks for: summed up and said like a
+   * hook's update, once ever under its `key`. It's the thread's own session
+   * to yapd, and a reply to it can only go through T3 Code.
+   */
+  const finished = (input: {
+    readonly about: Threads.Ref
+    readonly project: string
+    readonly cwd: string
+    readonly turn: Turn
+    readonly at: number
+    readonly key: string
+    /** How many times yapd had been turned on or off when T3 Code said so, so it isn't said if yapd was turned off since. */
+    readonly turns: number
+  }) =>
+    Effect.gen(function* () {
+      const session = `t3:${input.about.machine}:${input.about.id}`
+      // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.
+      const generation = { chain: {} }
+      yield* invalidate(session)
+      activity.set(session, generation)
+      yield* discard(session)
+      const thread: Thread = {
+        agent: "claude",
+        session: input.about.id,
+        cwd: input.cwd,
+        message: input.turn.message,
+        origin: { host: hostname(), app: T3Code.bundle },
+      }
+      yield* FiberMap.run(
+        preparing,
+        session,
+        prepare({
+          session,
+          project: input.project,
+          turn: input.turn,
+          thread,
+          arrivedAt: input.at,
+          generation,
+          hook: undefined,
+          needsYou: false,
+          turns: input.turns,
+          about: Effect.succeedSome(input.about),
+          key: input.key,
+        }),
+      )
+    }).pipe(events.withPermits(1))
 
   /** Returns the ticket of the session's Stop hook when it waits for a reply. */
   const receive = (agent: Agent, payload: Payload, origin: Origin, wait: boolean) =>
@@ -408,6 +525,9 @@ export const make = Effect.gen(function* () {
           return undefined
         }
         case "Stop": {
+          // Every one, even one that's never said, so T3 Code's word that its thread finished leaves it to the hook.
+          stops.set(payload.session_id, arrivedAt)
+          for (const [other, at] of stops) if (arrivedAt - at > forgotten) stops.delete(other)
           // Not kept for later, so a waiting hook is let go of at once.
           const { on, turns } = yield* switched
           if (!on) {
@@ -444,7 +564,22 @@ export const make = Effect.gen(function* () {
           const queued = channel !== undefined && channel.queued.length > 0
           if (queued && hook !== undefined) channel.hook = hook
           const summaryHook = queued ? undefined : hook
-          yield* FiberMap.run(preparing, session, prepare(session, project, turn, thread, arrivedAt, currentGeneration, summaryHook, needsYou, turns))
+          yield* FiberMap.run(
+            preparing,
+            session,
+            prepare({
+              session,
+              project,
+              turn,
+              thread,
+              arrivedAt,
+              generation: currentGeneration,
+              hook: summaryHook,
+              needsYou,
+              turns,
+              about: linking(payload.session_id, payload.cwd, origin),
+            }),
+          )
           return hook
         }
       }
@@ -816,5 +951,12 @@ export const make = Effect.gen(function* () {
     ),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
+    /** When the latest Stop hook of any of these sessions came, by the agent's own ids for them, whether its update was said or not. */
+    stopped: (sessions: ReadonlyArray<string>) =>
+      Effect.sync(() => {
+        const at = sessions.flatMap((session) => Option.toArray(Option.fromNullable(stops.get(session))))
+        return at.length === 0 ? Option.none<number>() : Option.some(Math.max(...at))
+      }),
+    finished,
   }
 })
