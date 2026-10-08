@@ -151,8 +151,9 @@ export const serve = Effect.gen(function* () {
   }
 
   /** What the user said to yapd, as heard now, with how many times yapd had been turned on or off as it was said. */
-  const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number) =>
-    Effect.flatMap(Clock.currentTimeMillis, (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
+  /** Said at `at`, or now: a dictation was said when he stopped talking, however long it then took to hear and hand on. */
+  const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number, at?: number) =>
+    Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
   const state = Stream.zipLatestWith(daemon.state, (yield* Activity).changes, (state, activity): Server.State => ({
     on: state.on,
@@ -178,11 +179,11 @@ export const serve = Effect.gen(function* () {
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
-  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns }) => assistant.prepare(press, turns)))
+  yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))
   // Each with the press it began with, which keeps what "it" meant then, however long the dictation took.
   yield* Effect.forkScoped(
-    Stream.runForEach(dictation.transcripts, ({ press, turns, heard: text, voiced }) =>
-      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, turns, press),
+    Stream.runForEach(dictation.transcripts, ({ press, turns, heard: text, voiced, at }) =>
+      text === "" ? assistant.nothing(press) : heard(text, "shortcut", voiced, turns, press, at),
     ),
   )
   // Whatever he says over an update takes the place of a question yapd asked before.

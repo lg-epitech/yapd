@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { type Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
@@ -756,6 +756,32 @@ describe("Assistant", () => {
     expect(result.off).toEqual({ taken: Option.some(Option.none()), arrived: 1 })
     expect(result.answered).toBe(true)
     expect(result.spoken).toEqual(["The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."])
+  })
+
+  test("a request stopped just as it's handed to a fiber of its own stops with it, rather than running on where nothing can stop it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        // The model never answers, so only being stopped ends the request.
+        const { heard, toggle, flush } = yield* assistant(minaStatus, undefined, { deciding: Effect.never })
+        let request: Fiber.RuntimeFiber<unknown, unknown> | undefined
+        // Stops whatever waits for the request the moment the request's own fiber starts, before anything else can happen.
+        const stopping = new (class extends Supervisor.AbstractSupervisor<void> {
+          value = Effect.void
+          override onStart<A, E, R>(_context: Context.Context<R>, _effect: Effect.Effect<A, E, R>, parent: Option.Option<Fiber.RuntimeFiber<any, any>>, fiber: Fiber.RuntimeFiber<A, E>) {
+            if (request !== undefined || Option.isNone(parent)) return
+            request = fiber
+            parent.value.unsafeInterruptAsFork(parent.value.id())
+          }
+        })()
+        const waiting = yield* Effect.fork(heard({ heard: "How are the Mina tickets doing?", via: "typed", at: now, voiced: 3, turns: 1 }).pipe(Effect.supervised(stopping)))
+        yield* Fiber.await(waiting)
+        yield* flush
+        const runningOn = Option.isNone(yield* Fiber.poll(request!))
+        yield* toggle(false)
+        return { runningOn, runningAfterOff: Option.isNone(yield* Fiber.poll(request!)) }
+      }),
+    )
+    expect(result).toEqual({ runningOn: false, runningAfterOff: false })
   })
 
   test("starting new work that mentions an existing thread starts new work", async () => {

@@ -28,6 +28,8 @@ const dictation = (
     readonly detect?: (call: number) => Effect.Effect<number> | undefined
     /** How long whoever takes the transcripts in takes over the one a press began. */
     readonly consume?: (press: number) => Effect.Effect<void>
+    /** What voice detection waits for before it's loaded, like its model on the first dictation. */
+    readonly loading?: Effect.Effect<void>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -43,6 +45,10 @@ const dictation = (
     /** The presses dictations started with, as they started, and those their transcripts carry, in order. */
     const presses: Array<number> = []
     const ended: Array<number> = []
+    /** When each transcript says it was said, in the order they were handed on. */
+    const spoken: Array<number> = []
+    /** When each press says the shortcut was pressed, as they started. */
+    const began: Array<number> = []
     /** The same, each with how many times yapd had been turned on or off as it was pressed, as they carry it. */
     const turned = { pressed: [] as Array<readonly [number, number]>, ended: [] as Array<readonly [number, number]> }
     let turns = 1
@@ -87,7 +93,10 @@ const dictation = (
           }),
           // Each frame holds the probability that it's speech.
           Layer.succeed(Vad, {
-            make: Effect.succeed((frame: Float32Array) => Effect.suspend(() => options.detect?.(detected++) ?? Effect.succeed(frame[0]!))),
+            make: Effect.zipRight(
+              options.loading ?? Effect.void,
+              Effect.succeed((frame: Float32Array) => Effect.suspend(() => options.detect?.(detected++) ?? Effect.succeed(frame[0]!))),
+            ),
           }),
           Layer.succeed(DictationTranscriber, {
             transcribe: (audio) =>
@@ -105,18 +114,20 @@ const dictation = (
     )
     const context = yield* Layer.build(layer)
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ press, turns, heard }) =>
+      Stream.runForEach(Context.get(context, Dictation).transcripts, ({ press, turns, heard, at }) =>
         Effect.sync(() => {
           transcripts.push(heard)
+          spoken.push(at)
           ended.push(press)
           turned.ended.push([press, turns])
         }).pipe(Effect.zipRight(options.consume?.(press) ?? Effect.void)),
       ),
     )
     yield* Effect.forkScoped(
-      Stream.runForEach(Context.get(context, Dictation).presses, ({ press, turns }) =>
+      Stream.runForEach(Context.get(context, Dictation).presses, ({ press, turns, began: at }) =>
         Effect.sync(() => {
           presses.push(press)
+          began.push(at)
           turned.pressed.push([press, turns])
         }),
       ),
@@ -149,6 +160,8 @@ const dictation = (
       transcripts,
       presses,
       ended,
+      spoken,
+      began,
       turned,
       cancelled: () => cancelled,
       listening: () => open,
@@ -357,6 +370,65 @@ describe("Dictation", () => {
     expect(result.transcripts).toEqual(["Fix the loader in yapd.", "Then do the same in std."])
     expect(result.presses).toEqual([1, 2])
     expect(result.ended).toEqual([1, 2])
+  })
+
+  test("hands on each dictation as said when they stopped talking, however long the one before it took to hear", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, wait, spoken } = yield* dictation([], {
+          // The first takes five seconds to hear, so the second, sent a second in, is handed on only after it.
+          transcribe: (call) => (call === 0 ? Effect.sleep("5 seconds").pipe(Effect.as("Which migration is running?")) : Effect.succeed("The second one.")),
+        })
+        const start = yield* TestClock.currentTimeMillis
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* press("Sent")
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* wait(1)
+        yield* press("Sent")
+        yield* wait(5)
+        return spoken.map((at) => at - start)
+      }),
+    )
+    expect(result).toEqual([0, 1000])
+  })
+
+  test("each press says when the shortcut was pressed, whenever it's got ready for", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { press, talk, wait, began } = yield* dictation(["First.", "Second."])
+        const start = yield* TestClock.currentTimeMillis
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* press("Sent")
+        yield* wait(3)
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* press("Sent")
+        return began.map((at) => at - start)
+      }),
+    )
+    expect(result).toEqual([0, 3000])
+  })
+
+  test("hands on a dictation as said when it was sent, though voice detection was still loading then", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const loaded = yield* Deferred.make<void>()
+        const { press, talk, wait, flush, spoken } = yield* dictation(["The second one."], { loading: Deferred.await(loaded) })
+        const start = yield* TestClock.currentTimeMillis
+        yield* press("Started")
+        yield* talk("x".repeat(20))
+        yield* wait(1)
+        yield* press("Sent")
+        yield* wait(4)
+        yield* Deferred.succeed(loaded, undefined)
+        yield* flush
+        return spoken.map((at) => at - start)
+      }),
+    )
+    expect(result).toEqual([1000])
   })
 
   test("turns the microphone off after saying something, while an earlier dictation is still transcribed", async () => {
