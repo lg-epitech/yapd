@@ -10,6 +10,9 @@ Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6
 - It picks the thread you mean by how it sounds and what it's about, so misheard names like "MiNAS SV2" or "my Tesla's migration" land first time. Nothing in yapd overrules its pick by matching words, which is what sank the reverted attempt.
 - At most one question at a time, always naming what it's choosing between, never in the same words twice. Whatever you say next answers it or replaces it. Left unanswered, it's asked once more a minute later in other words, then let go with a word (your rule).
 - "It" means what you were just listening to. Work it started in the last half hour isn't started twice.
+- Tell a thread something ("tell the Tezos one to use the Mina fee table"): a busy one gets it in the turn under way, or in T3 Code's own queue when you say "when it's done", and yapd says which. It names the thread when it isn't the one you were just hearing about, and asks first only when it isn't sure which.
+- "Stop the Tezos one" or "stop working", then "carry on" if you change your mind; "scratch that" withdraws a message still in the queue. A bare "stop" still only stops yapd talking.
+- Nothing is ever sent twice behind your back: the same words to a thread that hasn't answered since get "I sent that a minute ago, sir. Again?", and a message yapd can't confirm got there, even across a restart, gets "Send it again?".
 - Answers come before any update waiting to be read.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
 
@@ -24,6 +27,8 @@ Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6
 ## Under the hood
 
 - A versioned SQLite store in `~/.yapd/yapd.sqlite`, with a journal of everything heard, said and done. It survives restarts and feeds "what did I miss".
-- A live link to T3 Code's threads that reconnects and catches up on its own, and actions on threads (message, steer, stop, approve, answer, archive, rename, snooze, search, usage). The brain reads through them now; acting on threads by voice is the next milestone.
+- A live link to T3 Code's threads that reconnects and catches up on its own, and actions on threads (message, steer, stop, approve, answer, archive, rename, snooze, search, usage). Messages, stops and starts by voice go through them now.
+- Every message, stop and start is written down before it goes out, under ids that make T3 Code do it once however often it's sent. A restart only looks; it never sends.
+- `scripts/m2-probe.ts` checks those T3 Code receipts once on a scratch thread; it sends nothing without `--send`.
 - Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.

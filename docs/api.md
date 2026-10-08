@@ -75,7 +75,7 @@ curl -X POST -H 'Content-Type: application/json' -d '{"text": "what is going on?
 | `400` | There's no text. |
 | `409` | yapd is off. |
 
-It can tell you what your threads are doing, who needs you, how much of your usage is left, what you missed, and say again what it just said, and it can start new work. Anything that would change a thread, like sending it a message or stopping it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant, is answered by speaking over it or right after, or by asking again here.
+It can tell you what your threads are doing, who needs you, how much of your usage is left, what you missed, and say again what it just said, and it can start new work, send a thread a message, now or once its current task is done, stop a thread, let it carry on, and take back a message still waiting in the queue. The same words to a thread that hasn't answered since are asked about rather than sent again. Anything else that would change a thread, like approving what it asks or archiving it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant or whether to send something again, is answered by speaking over it or right after, or by asking again here.
 
 ## Errors
 
