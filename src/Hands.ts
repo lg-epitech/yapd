@@ -351,11 +351,13 @@ export const make = (options: {
    * never saw its ids; otherwise it's left, never offered again on its own,
    * and why is what comes of it, since T3 Code may hold it as it first went.
    */
-  const retime = (commandId: string, how: T3Actions.When | undefined) =>
+  const retime = (commandId: string, wanted: T3Actions.When | undefined) =>
     Effect.gen(function* () {
       const row = yield* ledger.get(commandId)
       const first = Option.flatMap(row, (row) => Option.flatMap(command(row.body), (sent) => (sent._tag === "Send" ? Option.some(sent) : Option.none())))
-      if (how === undefined || Option.isNone(row) || Option.isNone(first) || first.value.how === how) return Option.none<Outcome>()
+      // In place of the turn under way, a message goes at once, once yapd has stopped the turn, which is how it's sent, so that's the same time.
+      const how = wanted === "restart" ? "now" : wanted
+      if (how === undefined || Option.isNone(row) || Option.isNone(first) || (first.value.how === "restart" ? "now" : first.value.how) === how) return Option.none<Outcome>()
       if (yield* ledger.amend(commandId, { ...first.value, how })) {
         yield* Effect.logInfo(`Sending ${commandId} ${how} rather than ${first.value.how}, since it never left`)
         return Option.none<Outcome>()

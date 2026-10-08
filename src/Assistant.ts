@@ -1059,7 +1059,9 @@ export const make = (options: {
             if (outcome.row.state !== "sent") {
               const news = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}.`
               const asked = `${news} ${unaddressed(said.again, said)}`
-              return yield* asking({ ...base, kind: "resend", decision: twin, asked, about: doing, resend: Option.some(outcome.row.commandId), news })
+              // Sent again under its own ids, it goes at the time it first went, whatever time these words say, like at once for one told to a turn once it was stopped.
+              const again = Option.match(Hands.went(outcome.row), { onNone: () => twin, onSome: ({ how }) => ({ ...twin, how }) })
+              return yield* asking({ ...base, kind: "resend", decision: again, asked, about: doing, resend: Option.some(outcome.row.commandId), news })
             }
             return yield* asking({
               ...base,

@@ -2754,6 +2754,77 @@ describe("Assistant", () => {
     }
   })
 
+  test("the same words to stop a turn and do something else instead, said again once the message after the stop may not have got there, are offered again as it went, and yes sends it under its own ids", async () => {
+    let lost = true
+    const result = await run(
+      Effect.gen(function* () {
+        const others = [tezos]
+        const { dictate, answer, spoken, dispatched } = yield* assistant(
+          (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
+          undefined,
+          {
+            others,
+            answer: () => (payload, bounded) => {
+              // Stopped, the live view shows it idle; the message after it goes, but T3 Code doesn't say so.
+              if (payload.type === "run.interrupt") others[0] = thread(tezos.id, tezos.title, "integration")
+              return payload.type === "message.dispatch" && lost
+                ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+                : takes(payload, bounded)
+            },
+          },
+        )
+        yield* dictate("Stop the Tezos one and tell it to fix the loader instead.")
+        yield* answer("No.")
+        lost = false
+        yield* dictate("Stop the Tezos one and tell it to fix the loader instead.")
+        yield* answer("Yes.")
+        return { spoken: spoken(), sent: dispatched.map(({ type, commandId }) => [type, String(commandId).replace(/^yapd:u\w+:/, "")]), ids: dispatched.map(({ commandId }) => commandId) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "I stopped Migrate Tezos Integration, sir, but couldn't confirm the message got there. Send it again?",
+      "I'll leave that one, sir.",
+      "I couldn't confirm that got to Migrate Tezos Integration before, sir. Send it again?",
+      "On it, sir.",
+    ])
+    expect(result.sent).toEqual([
+      ["run.interrupt", "0"],
+      ["message.dispatch", "1"],
+      ["message.dispatch", "1"],
+    ])
+    expect(result.ids[2]).toBe(result.ids[1])
+  })
+
+  test("the same words said again once a message that went behind a turn waiting on him may not have got there are offered again as it went, and yes sends it behind the turn under its own ids", async () => {
+    let lost = true
+    const result = await run(
+      Effect.gen(function* () {
+        const waiting = thread(tezos.id, tezos.title, "integration", {
+          activeRunId: null,
+          activityRunStatus: "waiting",
+          status: "waiting",
+          pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-01T02:15:00.000Z" },
+        })
+        const { dictate, answer, spoken, dispatched } = yield* assistant(tezosMessage("high"), undefined, {
+          others: [waiting],
+          answer: () => (payload, bounded) =>
+            lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) : takes(payload, bounded),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* answer("No.")
+        lost = false
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* answer("Yes.")
+        return { spoken: spoken(), sent: dispatched.map(({ commandId, dispatchMode }) => [commandId, (dispatchMode as { type: string }).type]) }
+      }),
+    )
+    expect(result.spoken.slice(2)).toEqual(["I couldn't confirm that got to Migrate Tezos Integration before, sir. Send it again?", "On it, sir."])
+    expect(result.sent).toEqual([
+      [result.sent[0]![0], "queue_after_active"],
+      [result.sent[0]![0], "queue_after_active"],
+    ])
+  })
+
   test("a request said before a question asked since never asks in its place: the same words again aren't sent, nor is a message read already told to ignore it, and he's told what didn't happen and why", async () => {
     const before = (then: string) =>
       run(

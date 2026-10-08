@@ -846,6 +846,20 @@ describe("Hands", () => {
     }
   })
 
+  test("a yes to sending again in place of the turn under way a message told to a turn once it was stopped goes as it first went, at once, which is how that's sent", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, answering, dispatched } = yield* hands()
+        answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        yield* send("u1", "Fix the loader instead.")
+        answering(takes())
+        const outcome = yield* again("yapd:u1:0", { how: "restart" })
+        return { outcome: outcome._tag, dispatched: dispatched.map(({ commandId, deliveryIntent }) => [commandId, deliveryIntent]) }
+      }),
+    )
+    expect(result).toEqual({ outcome: "Done", dispatched: [["yapd:u1:0", "auto"], ["yapd:u1:0", "auto"]] })
+  })
+
   test("a message in place of the turn under way stops it, holding its queue, then tells it at once once the live view shows it stopped, whatever the turn was doing, and never asks T3 Code to restart it", async () => {
     const at = (status: string, overrides: Record<string, unknown> = {}) =>
       thread(tezos.id, { activeRunId: status === "waiting" ? null : "run-1", activityRunStatus: status, status, ...overrides })
