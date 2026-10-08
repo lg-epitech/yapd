@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Option, Schema, Stream, TestClock, TestContext } from "effect"
+import { Effect, Fiber, Logger, LogLevel, Option, Schema, Stream, TestClock, TestContext } from "effect"
 import type * as Brain from "./Brain.ts"
 import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
@@ -270,7 +270,7 @@ describe("Show", () => {
           const url = `http://127.0.0.1:${server.port}`
           const json = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init).then((response) => response.json()))
           const before = yield* json("/state")
-          const card = yield* show.put({ ...Show.said("Two running.", Option.none()), caption: "Two running, sir." }, "Two running, sir.")
+          const card = yield* show.put({ ...Show.said("Two running.", Option.none()), caption: "Two running, sir." }, { said: "Two running, sir.", turns: 1 })
           const state = (yield* json("/state")) as Server.State
           const served = yield* json(`/cards/${card.id}`)
           const threads = yield* json("/threads")
@@ -325,6 +325,22 @@ describe("Show", () => {
     expect(result).toEqual({ before: Option.none(), after: Option.some(true) })
   })
 
+  test("a card that went up with a line before yapd was turned off isn't put back up when the line is said again after", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+        yield* show.put({ kind: "threads", title: "What's going on", markdown: "### Running\n\n- **Clean up the build**" }, { said: "One running.", turns: 1 })
+        const again = (turns: number) => {
+          const asked = situation([])
+          return Effect.map(show.caption("One running.", { ...asked, utterance: { ...asked.utterance, turns } }), Option.map(({ kind }) => kind))
+        }
+        // Said again before yapd is turned off, then after it's turned off and on.
+        return yield* Effect.scoped(Effect.zipRight(show.watch, Effect.all([again(1), again(3)])))
+      }),
+    )
+    expect(result).toEqual([Option.some("threads"), Option.some("said")])
+  })
+
   test("keeps the last twenty cards to fetch again, and puts one back up as it was, on his screen while an app watches", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -340,6 +356,18 @@ describe("Show", () => {
       }),
     )
     expect(result).toEqual({ first: Option.none(), latest: Option.some(true), gone: false, back: Option.some(true) })
+  })
+
+  test("gives every card an id of its own, however many go up in the same millisecond", async () => {
+    const ids = await Effect.runPromise(
+      Effect.gen(function* () {
+        const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+        // The test's clock stands still, so they all go up at once.
+        const cards = yield* Effect.forEach(Array.from({ length: 2000 }, (_, index) => index), (index) => show.put(Show.said(`Line ${index}.`, Option.none())))
+        return cards.map(({ id }) => id)
+      }).pipe(Effect.provide(TestContext.TestContext), Logger.withMinimumLogLevel(LogLevel.None)),
+    )
+    expect(new Set(ids).size).toBe(2000)
   })
 
   test("lists the threads on each machine, with their pull requests, and the machines it can't see, as /threads documents", () => {

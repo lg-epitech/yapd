@@ -36,11 +36,27 @@ export interface Card {
 /** A card before it's put up. */
 export type Draft = Omit<Card, "id" | "at">
 
+/**
+ * The line a card goes up with, and how many times yapd had been turned on or
+ * off as it was said: saying it again puts the card back up, but never once
+ * yapd has been turned off since.
+ */
+export interface Line {
+  readonly said: string
+  readonly turns: number
+  /** The request it was said for, whose later steps take down no card but one it put up. */
+  readonly request?: string
+}
+
 /** What showing something comes to: what's said, the card put up as it's said, and the thread it's about. */
 export interface Shown {
   readonly say: string
   readonly card: Option.Option<Draft>
   readonly about: Option.Option<Threads.Ref>
+  /** Whether it took his card down, so none that was to go up before it does. */
+  readonly hides?: boolean
+  /** What's said in place of `say` if no app is there to show its card by the time it's said: the line as it's said with none watching. */
+  readonly unseen?: string
 }
 
 /** Opens an address in the browser. */
@@ -54,7 +70,7 @@ export class Show extends Context.Tag("yapd/Show")<
   Show,
   {
     /** Puts a card up in place of the one there, as it's talked about: saying `line` again puts it back up. */
-    readonly put: (draft: Draft, line?: string) => Effect.Effect<Card>
+    readonly put: (draft: Draft, line?: Line) => Effect.Effect<Card>
     /** Takes the card down, and says whether one was up. */
     readonly hide: Effect.Effect<boolean>
     /** Puts one of the cards put up lately back up as it was, with nothing said of it, and says whether there was one. */
@@ -71,19 +87,29 @@ export class Show extends Context.Tag("yapd/Show")<
     readonly watch: Effect.Effect<void, never, Scope.Scope>
     /** Opens a thread's pull request in the browser, only ever at its https address from T3 Code. Says whether it did. */
     readonly open: (thread: T3Live.Thread) => Effect.Effect<boolean>
-    /** What showing what he asked for comes to: `how` is the decision's. */
-    readonly present: (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines) => Effect.Effect<Shown>
+    /**
+     * What showing what he asked for comes to: `how` is the decision's. As a
+     * later step of the request `mine`, "hide that" takes down only a card
+     * that request put up, never one asked for after it.
+     */
+    readonly present: (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines, mine?: string) => Effect.Effect<Shown>
     /**
      * A thread's card to go with an answer about it, when what it waits on
      * can't be read aloud, and the answer with "it's on your screen" while an
-     * app watches. None when it can all be said.
+     * app watches, with the answer alone to say in its place if none is by
+     * the time it's said. None when it can all be said.
      */
-    readonly aside: (target: Threads.Listed, detail: T3Actions.Detail, answer: string, lines: Lines) => Effect.Effect<Option.Option<{ readonly say: string; readonly card: Draft }>>
+    readonly aside: (
+      target: Threads.Listed,
+      detail: T3Actions.Detail,
+      answer: string,
+      lines: Lines,
+    ) => Effect.Effect<Option.Option<{ readonly say: string; readonly card: Draft; readonly unseen?: string }>>
     /**
      * A card to put up as `line` is said again, while an app watches to show
      * it: the one that went up with it, if one did, so it's on his screen as
-     * long as it's talked about, and otherwise what was said last and heard
-     * last.
+     * long as it's talked about, unless yapd was turned off since, and
+     * otherwise what was said last and heard last.
      */
     readonly caption: (line: string, situation: Brain.Situation) => Effect.Effect<Option.Option<Draft>>
   }
@@ -555,11 +581,13 @@ export const offScreen = (line: string, lines: Lines) =>
     .replace(/\s+/g, " ")
     .trim()
 
-/** What yapd said last, when there's anything to say again. */
-const lastSaid = (situation: Brain.Situation) =>
-  situation.subject._tag === "Nothing"
-    ? Option.fromNullable(situation.lately.findLast(({ kind, said }) => kind !== "dictation" && (said ?? "").trim() !== "")?.said)
-    : Option.some(situation.subject.said)
+/**
+ * What yapd said last, when there's anything to say again: what "it" means,
+ * as for "say that again", never the journal's last line, which can be from
+ * before yapd was turned off and on, or a question closed since, in the words
+ * it asked.
+ */
+const lastSaid = (situation: Brain.Situation) => (situation.subject._tag === "Nothing" ? Option.none<string>() : Option.some(situation.subject.said))
 
 /** Whether words can be said as they are: nothing a voice would spell out or skip, like a path, a flag, a link or a command's punctuation. */
 export const readable = (text: string) => {
@@ -666,18 +694,26 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
   Effect.gen(function* () {
     const up = yield* SubscriptionRef.make(Option.none<Card>())
     const recent = new Map<string, Card>()
+    /** The request each of those cards was put up for, when it went up with what was said for one. */
+    const requests = new Map<string, string>()
+    /** How many cards were put up since yapd started, which makes each id one of its own, however many go up in the same millisecond. */
+    let made = 0
     let watching = 0
     // Whether the card that's up went up while an app was there to show it: one put up before isn't on his screen, even once an app is.
     let shownTo = false
     // The last card that went up as something was said, and what was: said again, it goes up again, whether it's still up or not.
-    let withLine: { readonly line: string; readonly draft: Draft } | undefined
+    let withLine: { readonly line: Line; readonly draft: Draft } | undefined
 
-    const put = (draft: Draft, line?: string) =>
+    const put = (draft: Draft, line?: Line) =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
-        const card: Card = { ...draft, id: `c${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`, at }
+        const card: Card = { ...draft, id: `c${at.toString(36)}${(made++).toString(36)}`, at }
         recent.set(card.id, card)
-        for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) recent.delete(id)
+        if (line?.request !== undefined) requests.set(card.id, line.request)
+        for (const id of [...recent.keys()].slice(0, Math.max(0, recent.size - cards))) {
+          recent.delete(id)
+          requests.delete(id)
+        }
         shownTo = watching > 0
         if (line !== undefined) withLine = { line, draft }
         yield* SubscriptionRef.set(up, Option.some(card))
@@ -689,11 +725,17 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
 
     const seen = Effect.flatMap(watched, (watching) => (watching && shownTo ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>())))
 
-    const hide = Effect.gen(function* () {
-      const was = yield* SubscriptionRef.getAndSet(up, Option.none())
-      if (Option.isSome(was)) yield* Effect.logInfo(`Took down ${was.value.kind}: ${was.value.title}`)
-      return Option.isSome(was)
-    })
+    /** Takes the card down, or only one put up for the request `mine`, and says whether it did. */
+    const takeDown = (mine?: string) =>
+      Effect.gen(function* () {
+        const was = yield* SubscriptionRef.modify(up, (card) =>
+          mine === undefined || Option.exists(card, ({ id }) => requests.get(id) === mine) ? [card, Option.none<Card>()] : [Option.none<Card>(), card],
+        )
+        if (Option.isSome(was)) yield* Effect.logInfo(`Took down ${was.value.kind}: ${was.value.title}`)
+        return Option.isSome(was)
+      })
+
+    const hide = takeDown()
 
     /** Opens a thread's pull request, and says whether it did, or why not: its address isn't https, or the browser didn't open it in time. */
     const opening = (thread: T3Live.Thread) =>
@@ -711,20 +753,26 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     /** What's said after a pull request's verdict when it didn't open, so he isn't left waiting on a browser. */
     const unopened = { opened: "", unsafe: " Its address isn't a secure web page, so I haven't opened it.", failed: " I couldn't open it in your browser." }
 
-    /** A line said with a card: "it's on your screen" first while an app watches, and then without addressing him again. */
-    const told = (gist: (address: string) => string, lines: Lines) =>
-      Effect.map(watched, (watching) => (watching ? `${lines.onScreen} ${gist("")}` : gist(addressed(lines))))
-
+    /**
+     * A line said with a card: "it's on your screen" first while an app
+     * watches, and then without addressing him again, with the line as it's
+     * said with none watching to say in its place if none is by the time it's
+     * said.
+     */
     const shown = (gist: (address: string) => string, draft: Draft, lines: Lines, about: Option.Option<Threads.Ref> = Option.none()) =>
-      Effect.map(told(gist, lines), (say): Shown => ({ say, card: Option.some({ ...draft, caption: gist(addressed(lines)) }), about }))
+      Effect.map(watched, (watching): Shown => {
+        const plain = gist(addressed(lines))
+        const card = Option.some({ ...draft, caption: plain })
+        return watching ? { say: `${lines.onScreen} ${gist("")}`, card, about, unseen: plain } : { say: plain, card, about }
+      })
 
-    const present = (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines): Effect.Effect<Shown> =>
+    const present = (how: string, target: Option.Option<Threads.Listed>, situation: Brain.Situation, lines: Lines, mine?: string): Effect.Effect<Shown> =>
       Effect.gen(function* () {
         const { now } = situation
         switch (how) {
           case "hide":
-            yield* hide
-            return { say: "", card: Option.none(), about: Option.none() }
+            yield* takeDown(mine)
+            return { say: "", card: Option.none(), about: Option.none(), hides: true }
           case "threads":
             return yield* shown((address) => tally(situation.desk, address, now), overview(situation.desk, now), lines)
           case "usage": {
@@ -742,7 +790,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           case "said": {
             const line = Option.filter(Option.map(lastSaid(situation), (line) => offScreen(line, lines)), (line) => line !== "")
             if (Option.isNone(line)) return { say: Brain.nothingSaid(lines), card: Option.none(), about: Option.none() }
-            const draft = said(line.value, lastHeard(situation))
+            // A question closed since is shown in the words it was asked in, but said as what it asked, so it's never asked again.
+            const asked = situation.subject._tag === "Answer" ? situation.subject.asked : undefined
+            const draft = said(asked === undefined ? line.value : offScreen(asked, lines), lastHeard(situation))
             return yield* shown(() => line.value, draft, lines)
           }
           case "thread":
@@ -813,9 +863,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
                 : request.questions.flatMap(({ question, options }) => [question, ...options.map(({ label }) => label)])
           if (words.every(readable)) return Option.none()
           const now = yield* Clock.currentTimeMillis
+          const card = { ...thread(target, Option.some(detail), now), caption: answer }
           // The answer addressed him already.
-          const say = (yield* watched) ? `${answer} ${unaddressed(lines.onScreen, lines)}` : answer
-          return Option.some({ say, card: { ...thread(target, Option.some(detail), now), caption: answer } })
+          return Option.some((yield* watched) ? { say: `${answer} ${unaddressed(lines.onScreen, lines)}`, card, unseen: answer } : { say: answer, card })
         }),
       caption: (line, situation) =>
         Effect.gen(function* () {
@@ -823,8 +873,10 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           // Like a thread's card with a command he couldn't hear, which is what he'd want to see while it's said again. Put up
           // anew, it fades only once this is said, not a while after it was first. Said again before, it went up with the line
           // as it was said then, without "it's on your screen".
+          // Never one from before yapd was turned off, which isn't what's talked about now, whatever's said.
           const repeated = situation.subject._tag === "Nothing" ? undefined : situation.subject.said
-          if (withLine !== undefined && (withLine.line === repeated || withLine.line === line)) return Option.some(withLine.draft)
+          const kept = withLine?.line.turns === situation.utterance.turns ? withLine : undefined
+          if (kept !== undefined && (kept.line.said === repeated || kept.line.said === line)) return Option.some(kept.draft)
           return Option.some(said(line, lastHeard(situation)))
         }),
     } satisfies Show["Type"]

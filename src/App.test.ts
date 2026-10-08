@@ -1,0 +1,73 @@
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+// The menu bar app has no test target, so its checks in app/checks are built
+// with swiftc, together with the files of the app they check, and run. They
+// need a Mac's Foundation, as the app does, so they're skipped only where
+// there's no Mac swiftc to build them with.
+
+const app = join(import.meta.dir, "..", "app")
+
+/** A Mac's swiftc, unless it's missing, or only a stand-in that asks to install the developer tools. */
+const swiftc = (() => {
+  const found = process.platform === "darwin" ? Bun.which("swiftc") : null
+  return found !== null && Bun.spawnSync([found, "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0 ? found : undefined
+})()
+
+/** The app's files the checks check, which need neither AppKit nor SwiftUI. */
+const checked = ["Cards.swift", "State.swift"]
+
+/** Where the checks are built, once, and removed after. */
+const dir = mkdtemp(join(tmpdir(), "yapd-app-"))
+
+/** The checks, built the first time they're run: their path, or what swiftc said when they didn't build. */
+let built: Promise<{ readonly path?: string; readonly error?: string }> | undefined
+
+const build = async () => {
+  const path = join(await dir, "checks")
+  const sources = [...checked.map((file) => join(app, "yapd", file)), ...new Bun.Glob("*.swift").scanSync({ cwd: join(app, "checks"), absolute: true })]
+  const swift = Bun.spawn([swiftc!, "-swift-version", "6", "-o", path, ...sources], { stdout: "pipe", stderr: "pipe" })
+  return (await swift.exited) === 0 ? { path } : { error: await new Response(swift.stderr).text() }
+}
+
+/** Runs the checks of one name, and gives back what they printed and how they ended. */
+const run = async (checks: string) => {
+  built ??= build()
+  const { path, error } = await built
+  if (path === undefined) return { code: -1, out: error }
+  const ran = Bun.spawn([path, checks], { stdout: "pipe", stderr: "pipe" })
+  const out = await new Response(ran.stdout).text()
+  return { code: await ran.exited, out }
+}
+
+afterAll(async () => {
+  await rm(await dir, { recursive: true, force: true })
+})
+
+describe.skipIf(swiftc === undefined)("App", () => {
+  test(
+    "the panel opens only https links from a card, never a file, a script or another app's, and shows code blocks as text that links nowhere",
+    async () => {
+      expect(await run("cards")).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      // What the checks cover is what the panel uses: every link it's asked to open goes through the same gate, and every block shows as checked.
+      const panel = await Bun.file(join(app, "yapd", "Panel.swift")).text()
+      expect(panel.match(/OpenURLAction\s*\{[^}]*\}/g)).toEqual(["OpenURLAction { url in opens(url) ? .systemAction : .discarded }"])
+      expect(panel).not.toMatch(/AttributedString\(|Text\(verbatim|\.systemAction(?! : \.discarded)/)
+    },
+    120_000,
+  )
+
+  test(
+    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, and checks what it shows against it whenever it connects",
+    async () => {
+      expect(await run("following")).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      // What the checks cover is what the app uses: the card it shows is the one it follows.
+      const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
+      expect(yapd).toMatch(/following\.follow\(status\.showing, connecting: connecting\)/)
+      expect(yapd).not.toMatch(/panel\.show\(card, talking: (true|false)\)/)
+    },
+    120_000,
+  )
+})

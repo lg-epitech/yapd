@@ -5,7 +5,7 @@ import * as Config from "./Config.ts"
 import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
 import { Model } from "./Model.ts"
-import { addressed, type Lines } from "./Persona.ts"
+import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import { agreed, enough, gist, type Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -195,7 +195,7 @@ const named = (listed: Threads.Listed, among: ReadonlyArray<Threads.Listed>) => 
 const words = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
 
 /** Whether a question was asked before in the same words. */
-const repeated = (question: string, before: ReadonlyArray<string>) => before.some((asked) => words(asked) === words(question))
+export const repeated = (question: string, before: ReadonlyArray<string>) => before.some((asked) => words(asked) === words(question))
 
 /** The threads a question chooses between, as they're named in it: "A or B". */
 export const choices = (candidates: ReadonlyArray<Threads.Listed>) => either(candidates.slice(0, 3).map((listed) => named(listed, candidates)))
@@ -276,6 +276,21 @@ export const left = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines)
     : yesNo(open.kind)
       ? `I didn't ask whether to ${open.about}, since you'd moved on${addressed(lines)}.`
       : `I left ${open.about || "what you dictated"}, since you'd moved on${addressed(lines)}.`
+
+/**
+ * A question that's closed, said or shown again: what it asked, told rather
+ * than asked, after any news it followed, whatever came of it, so a closed
+ * question is never asked again (I4).
+ */
+export const recalled = (open: Pick<Assistant.Open, "kind" | "about" | "news">, lines: Lines) => {
+  const asked =
+    open.kind === "which"
+      ? `I asked whether you meant ${open.about}${addressed(lines)}.`
+      : yesNo(open.kind)
+        ? `I asked whether to ${open.about}${addressed(lines)}.`
+        : `I asked which project ${open.about || "that"} should go in${addressed(lines)}.`
+  return open.news === undefined ? asked : `${open.news} ${unaddressed(asked, lines)}`
+}
 
 /** An act the brain understood, but yapd can't do yet. */
 export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.`
@@ -548,10 +563,10 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
     return decision({ act: "resume" })
   }
   // Right after the question, it's the question he didn't catch, which is asked again in other words; after anything else, like an update, that's said again instead.
+  const askedLast = Option.isSome(open) && subject._tag === "Answer" && subject.said === open.value.asked
   if (again.has(said)) {
     const spoken = subject._tag === "Nothing" ? nothingSaid(lines) : subject.said
-    const question = Option.isSome(open) && subject._tag === "Answer" && subject.said === open.value.asked
-    return decision({ act: "again", how: "same", spoken, pending: Option.isNone(open) ? "" : question ? "answers" : "replaces" })
+    return decision({ act: "again", how: "same", spoken, pending: Option.isNone(open) ? "" : askedLast ? "answers" : "replaces" })
   }
   if (needs.has(said)) return decision({ act: "answer", spoken: needing(desk, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   if (usage.has(said) || askingUsage(said, situation.usage)) {
@@ -571,7 +586,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   }
   if (hiding.has(said) && situation.showing !== undefined) return decision({ act: "show", how: "hide", pending: replacing })
   const shown = shows.get(said)
-  if (shown !== undefined) return decision({ act: "show", how: shown, pending: replacing })
+  // Asking to see the question, like asking to hear it again, is about it.
+  if (shown !== undefined) return decision({ act: "show", how: shown, pending: shown === "said" && askedLast ? "answers" : replacing })
   // "P.R." comes out of the gist as two letters.
   const pr = said.replace(/\bp r\b/g, "pr")
   if (showing.has(said) || threading.has(said) || pulling.has(pr)) {

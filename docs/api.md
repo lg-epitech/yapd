@@ -58,7 +58,7 @@ A UI that shows yapd's [cards](#cards), like the menu bar app, follows `/state/s
 curl -X PUT -H 'Content-Type: application/json' -d '{"on": false}' http://127.0.0.1:4747/state
 ```
 
-Turning it off stops whatever yapd is saying at once, and drops whatever hasn't started yet: what was waiting to be said, a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it.
+Turning it off stops whatever yapd is saying at once, and drops whatever hasn't started yet: what was waiting to be said, a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it. The [card](#cards) yapd is showing comes down too, so `showing` is `null`.
 
 ## Hearing an update again
 
@@ -84,13 +84,13 @@ curl -X POST -H 'Content-Type: application/json' -d '{"text": "what is going on?
 | `400` | There's no text. |
 | `409` | yapd is off. |
 
-It can tell you what your threads are doing, who needs you, how much of your usage is left, what you missed, and say again what it just said, it can [show you things](#cards), and it can start new work, send a thread a message, now or once its current task is done, stop a thread, let it carry on, and take back a message still waiting in the queue. The same words to a thread that hasn't answered since are asked about rather than sent again. Anything else that would change a thread, like approving what it asks or archiving it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant or whether to send something again, is answered by speaking over it or right after, or by asking again here.
+It can tell you what your threads are doing, who needs you, how much of your usage is left, what you missed, and say again what it just said, it can [show you things](#cards), and it can start new work, send a thread a message, now or once its current task is done, stop a thread, let it carry on, and take back a message still waiting in the queue. The same words to a thread that hasn't answered since are asked about rather than sent again. Anything else that would change a thread, like approving what it asks or archiving it, it answers with "I can't do that yet" for now. A question it asks you, like which of two threads you meant or whether to send something again, is answered by speaking over it or right after, or by asking again here. Once it's closed, however that was, asking to hear or see it again gets what it asked told rather than asked, like "I asked whether you meant the Tezos migration or the Mina tickets".
 
 ## Cards
 
-Ask yapd to show you something, like "show me that PR", "show me what's running", "show me my usage" or "show me what I missed", and it puts a card up and says what's on it in a line, adding "it's on your screen" only while a UI that shows cards follows [`/state/stream?cards`](#following-changes), like the menu bar app. "Hide that" takes the card down. "Show me that PR" also opens the pull request in your browser. yapd only ever opens an `https` address that came from T3 Code, never one a model wrote.
+Ask yapd to show you something, like "show me that PR", "show me what's running", "show me my usage" or "show me what I missed", and it puts a card up and says what's on it in a line, adding "it's on your screen" only if a UI that shows cards, like the menu bar app, follows [`/state/stream?cards`](#following-changes) when the line is said. "Hide that" takes the card down, or keeps down one still to go up with what yapd hasn't said yet, but as a later step of a request, like "show me everything, then hide that", only a card that request put up. "Show me that PR" also opens the pull request in your browser. yapd only ever opens an `https` address that came from T3 Code, never one a model wrote.
 
-When you ask about a thread that waits on something that can't be read aloud, like a command it wants to run, yapd puts that thread's card up with its answer. "Say that again" also puts a card up while a UI that shows cards follows the state: the one that went up with what it says again, anew, so it stays up while that's said, or else what it said and what it heard you say last.
+When you ask about a thread that waits on something that can't be read aloud, like a command it wants to run, yapd puts that thread's card up with its answer. "Say that again" also puts a card up while a UI that shows cards follows the state: the one that went up with what it says again, anew, so it stays up while that's said, or else what it said and what it heard you say last. "Show me what you said" shows what "say that again" would say. Once yapd has been turned off and on, neither says again nor shows anything you heard before, an update or a line of yapd's own, nor puts its card back up.
 
 `GET /cards/{id}` returns one of the last twenty cards, by the `id` in `showing`:
 

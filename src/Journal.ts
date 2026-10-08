@@ -71,6 +71,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<boolean>
     /** Notes that the user heard these through, answered them or was briefed on them, unless they had already. */
     readonly markHeard: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<void>
+    /** Notes that what was said for an entry was these words in the end, like a line played without "it's on your screen". */
+    readonly reword: (id: number, said: string) => Effect.Effect<void>
     /** Entries since `at`, oldest first, the latest `most` of them when there are more. */
     readonly since: (at: number, options?: { readonly most?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
     /** A page of entries, newest written first: `most` of them, only older than the entry `before` and of `kinds` when given. */
@@ -202,6 +204,12 @@ export const fromStore = (store: Store.Store["Type"], called: Naming = (host) =>
               .run(at, ...ids)
           })
           .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what you heard in my journal", error))),
+  reword: (id, said) =>
+    store
+      .transaction((database: Database) => {
+        database.query<never, [string, number]>("update journal set said = ? where id = ?").run(said, id)
+      })
+      .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what I said in my journal", error))),
   since: (at, options = {}) =>
     reading(
       store.transaction((database: Database) => {
