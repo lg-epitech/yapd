@@ -296,17 +296,23 @@ describe("Brain", () => {
     expect(said[1]).toBe("Which one, sir: Fix the transcription upload, Migrate Tezos Integration or Open Mina SSV2 Bug Tickets?")
   })
 
-  test("hyphenated pairs like \"on-chain/off-chain\" are said as written, with the word before them, and only branches become \"a branch\"", () => {
+  test("hyphenated pairs like \"on-chain/off-chain\" or \"unit/end-to-end\" are said as written, with the word before them, and only branches become \"a branch\"", () => {
     for (const line of [
       "The on-chain/off-chain reconciliation is done.",
       "The client/server-side split is in.",
       "It added read/write-heavy tests.",
       "The arm64/x86-64 builds pass, and UTF-8/UTF-16 decoding too.",
+      "The unit/end-to-end tests pass.",
+      "The client/peer-to-peer link works, and the in-band/out-of-band checks too.",
+      "The stale/up-to-date flags and the copy/copy-on-write split are in.",
+      "The Claude/Codex-style prompts are shorter.",
+      "The BTC/USD-1000 contract settled.",
     ]) {
       expect(Brain.speakable(line, desk())).toBe(line)
     }
     expect(Brain.speakable("It pushed the t3code/reactor-menu-bar-icon to origin.", desk())).toBe("It pushed a branch to origin.")
     expect(Brain.speakable("It pushed t3code/fix-loader.", desk())).toBe("It pushed a branch.")
+    expect(Brain.speakable("It's on laurent/fix-loader now.", desk())).toBe("It's on a branch now.")
     expect(Brain.speakable("It's on laurent/issue-412 now.", desk())).toBe("It's on a branch now.")
     expect(Brain.speakable("It's on laurent/jarvis-companion-assistant now.", desk())).toBe("It's on a branch now.")
   })

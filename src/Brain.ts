@@ -562,14 +562,25 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
 
 // ---------------------------------------------------------------- speaking
 
+/** Words that join the parts of an everyday compound, like "end-to-end" or "state-of-the-art", and never a generated name's. */
+const joining = "(?:a|an|and|as|at|by|for|in|of|on|or|the|to)"
+
+/**
+ * How a branch is named after its slash: words joined by two dashes or more
+ * with no joining word among them, like "fix-loader-retry", a name started
+ * with what a branch is for, like "fix-loader", or a number or a hash after a
+ * dash, like "issue-412".
+ */
+const generated = `(?:(?![\\w.-]*\\b${joining}-)(?:[\\w.]*-){2}|(?:feat|fix|bugfix|hotfix|chore|bump|revert|wip)-|[\\w.]*-(?:\\d{3,}|(?=[\\da-f]{6,}\\b)[a-f]*\\d[\\da-f]*)\\b)`
+
 /**
  * Something only meant to be read, a link, a path, a branch, an id, an
  * address or a hash, and what's said for it, so the sentence still holds. A
- * branch is told from pairs like "and/or", "SSv1/SSv2", "x86/arm64" or
- * "on-chain/off-chain" by being called one, by a prefix branches have, or by
- * how a generated one is named after its slash: words joined by two dashes or
- * more, or ending in a number or a hash, like "fix-loader-retry" or
- * "issue-412", never a compound like "server-side" or "write-heavy".
+ * branch is told from pairs like "and/or", "SSv1/SSv2", "Claude/Codex" or
+ * "on-chain/off-chain" by being called one, by a prefix branches have, always
+ * written in lower case, or by how a generated one is named after a slash
+ * with only lower case before it, never a compound like "server-side",
+ * "write-heavy" or "end-to-end", nor a pair like "BTC/USD-1000".
  */
 const unreadable: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bhttps?:\/\/\S*[^\s.,;:!?)]/gi, "a link"],
@@ -577,8 +588,8 @@ const unreadable: ReadonlyArray<readonly [RegExp, string]> = [
   [/(?<![\w.])(?:~|\.{1,2})?(?:\/[\w.@-]+){2,}\/?/g, "a file"],
   [/\b[\w.-]+(?:\/[\w.@-]+)+\.[a-z]\w*\b/gi, "a file"],
   [/\b(?:the\s+)?[\w.-]+\/[\w./-]*\w\s+branch\b/gi, "a branch"],
-  [/\b(?:the\s+)?(?:t3|t3code|feat|feature|fix|bugfix|hotfix|release|origin|upstream|chore|claude|codex|cursor|dependabot|renovate)\/[\w./-]*\w/gi, "a branch"],
-  [/\b(?:the\s+)?(?<![\w./-])[a-z][\w.]{2,}\/(?=(?:[\w.]*-){2}|[\w.]*-(?:\d{3,}|(?=[\da-f]{6,}\b)[a-f]*\d[\da-f]*)\b)[\w./-]*\w/gi, "a branch"],
+  [/\b(?:[Tt]he\s+)?(?:t3|t3code|feat|feature|fix|bugfix|hotfix|release|origin|upstream|chore|claude|codex|cursor|dependabot|renovate)\/[\w./-]*\w/g, "a branch"],
+  [new RegExp(`\\b(?:[Tt]he\\s+)?(?<![\\w./-])[a-z][a-z\\d_.]{2,}\\/(?=${generated})[\\w./-]*\\w`, "g"), "a branch"],
   [/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi, ""],
   [/\b(?:the\s+)?(?:wallet\s+|address\s+)?0x[\da-f]{6,}\b/gi, "an address"],
   [/\b(?:the\s+)?(?:commit\s+)?(?=[\da-f]*\d)(?=[\da-f]*[a-f])[\da-f]{7,}\b/gi, "a commit"],
