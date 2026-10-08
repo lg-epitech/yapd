@@ -15,3 +15,5 @@ A running list of what this branch changed and what yapd can do now, for review.
 ## Under the hood
 
 - The settings table now holds anything yapd works out once and keeps, not just whether it's on.
+- A versioned SQLite store (`~/.yapd/yapd.sqlite`) again, with the migration runner from the reverted threads work. Its two shipped steps are kept as they were, so a database already at version 2 carries on, and step 3 adds the journal, memories and reminders. Checked against a copy of a real version 2 database: settings and the 42 thread rows survived.
+- A journal of everything heard, said and done: each update with the agent's message and the prompt, each reply and what it meant, each message sent to an agent, and each piece of work started. What the prompt writer reads as "what you read out lately" now comes from it, so it survives a restart.
