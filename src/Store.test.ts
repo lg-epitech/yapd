@@ -127,3 +127,20 @@ test("a database at version 2 with settings and 42 threads moves to version 3 an
   })
   expect(tables(path).version).toBe(3)
 }))
+
+test("a database at version 3 with its journal moves to version 4 and keeps it", () => within(async path => {
+  // As Rosie's is once the assistant has shipped: a journal, and nothing yet done to threads.
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const store = yield* Store.make(path, Store.migrations.slice(0, 3))
+    yield* store.transaction(database => database.run("insert into journal (at, kind, said) values (1, 'answer', 'Four on the go, sir.')"))
+  })))
+  const found = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const store = yield* Store.make(path)
+    return yield* store.transaction(database => ({
+      said: database.query<{ said: string }, []>("select said from journal").all(),
+      actions: database.query<{ count: number }, []>("select count(*) as count from actions").get()?.count,
+    }))
+  })))
+  expect(found).toEqual({ said: [{ said: "Four on the go, sir." }], actions: 0 })
+  expect(tables(path).version).toBe(4)
+}))
