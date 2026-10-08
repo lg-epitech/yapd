@@ -964,6 +964,63 @@ describe("Assistant", () => {
     expect(result.ids[1]).toEqual(result.ids[0])
   })
 
+  test("an offer to send again left unanswered is asked once more in other words, then let go, and never sent", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, unanswered, wait, spoken, dispatched, ledger } = yield* assistant(tezosMessage("high"), undefined, {
+          answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })),
+        })
+        yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+        yield* unanswered()
+        yield* wait(60)
+        yield* unanswered()
+        yield* wait(600)
+        const row = yield* ledger.latest("1 hour", { kinds: ["message"] })
+        return { spoken: spoken(), dispatched: dispatched.length, state: Option.map(row, ({ state }) => state) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "I couldn't confirm it got to Migrate Tezos Integration, sir. Send it again?",
+      "Shall I still send that to Migrate Tezos Integration again, sir?",
+      "I didn't hear back about whether to send that to Migrate Tezos Integration again, so I left it, sir.",
+    ])
+    expect(result.dispatched).toBe(1)
+    expect(result.state).toEqual(Option.some("abandoned"))
+  })
+
+  test("after a restart, each message that didn't get there is offered once, one at a time, and yes sends it under its own ids", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { undelivered, answer, spoken, questions, dispatched, ledger } = yield* assistant(() => undefined)
+        const lost = (utterance: string, text: string) =>
+          Effect.zipLeft(
+            ledger.prepare({
+              utterance,
+              step: 0,
+              kind: "message",
+              machine: "Rosie",
+              thread: tezos.id,
+              body: ({ messageId }) => ({ _tag: "Send", text, messageId, how: "now" }),
+              message: true,
+            }),
+            ledger.settle(`yapd:${utterance}:0`, "unknown"),
+          )
+        const rows = [yield* lost("u-old1", "Use the fee table."), yield* lost("u-old2", "Also add a test.")]
+        yield* undelivered(rows)
+        const first = questions().length
+        yield* answer("No.")
+        yield* answer("Yes.")
+        const states = yield* Effect.forEach(rows, ({ commandId }) => Effect.map(ledger.get(commandId), Option.map(({ state }) => state)))
+        return { first, spoken: spoken(), sent: dispatched.map(({ commandId, text }) => [commandId, text]), states: states.map(Option.getOrNull) }
+      }),
+    )
+    const offered = "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir. Send it again?"
+    expect(result.first).toBe(1)
+    expect(result.spoken).toEqual([offered, "I'll leave that one, sir.", offered, "On it, sir: Migrate Tezos Integration."])
+    expect(result.sent).toEqual([["yapd:u-old2:0", "Also add a test."]])
+    expect(result.states).toEqual(["abandoned", "sent"])
+  })
+
   test("the rest of a request is done as its next step, once the first is", async () => {
     const result = await run(
       Effect.gen(function* () {
