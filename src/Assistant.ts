@@ -105,6 +105,8 @@ export interface Outcome {
   readonly kind: "answer" | "done" | "question" | "none"
   /** What he missed that it tells him, by journal entry, which counts as heard once he's heard it to the end, and not before. */
   readonly missed?: ReadonlyArray<number>
+  /** What was decided on a second look, at a thread or at what was found, which the answer is. */
+  readonly second?: Brain.Decision
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -157,13 +159,13 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
 
-/** Whether a journal entry is him asking what he missed, which tells him nothing until he's heard the answer. */
-const catchUp = (kept: Kept) =>
-  Brain.catchingUp(kept.text ?? "") ||
-  (typeof kept.detail === "object" &&
-    kept.detail !== null &&
-    "decision" in kept.detail &&
-    (kept.detail.decision as Partial<Brain.Decision> | undefined)?.how === "missed")
+/** Whether a journal entry is him asking what he missed, at once or on a second look, which tells him nothing until he's heard the answer. */
+const catchUp = (kept: Kept) => {
+  if (Brain.catchingUp(kept.text ?? "")) return true
+  if (typeof kept.detail !== "object" || kept.detail === null) return false
+  const { decision, second } = kept.detail as { readonly decision?: Partial<Brain.Decision>; readonly second?: Partial<Brain.Decision> }
+  return decision?.how === "missed" || second?.how === "missed"
+}
 
 /** What yapd knows as it works something out, and what that comes to without the model, when it's enough. */
 interface Glance {
@@ -484,17 +486,19 @@ export const make = (options: {
         ),
       )
 
-    /** An answer, which what he said next can be about. */
-    const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
+    /** An answer, which what he said next can be about, decided at once or on a `second` look. */
+    const answer = (spoken: string, about: Option.Option<Threads.Listed>, thought: Thought, said: Lines, second?: Brain.Decision) =>
       Effect.sync(() => {
         const text = spoken.trim() === "" ? said.misheard : spoken.trim()
         // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
-        const missed = Brain.catchingUp(thought.utterance.heard) || thought.decision.how === "missed" ? thought.situation.unheard.map(({ id }) => id) : []
+        const { how } = second ?? thought.decision
+        const missed = Brain.catchingUp(thought.utterance.heard) || how === "missed" ? thought.situation.unheard.map(({ id }) => id) : []
         return {
           say: text,
           subject: { _tag: "Answer", said: text, about: Option.map(about, ({ ref }) => ref) },
           kind: "answer",
           ...(missed.length === 0 ? {} : { missed }),
+          ...(second === undefined ? {} : { second }),
         } satisfies Outcome
       })
 
@@ -513,7 +517,7 @@ export const make = (options: {
           if (Either.isLeft(decided)) yield* Effect.logWarning("Could not answer from what I read", decided.left)
           return reply(`I read ${target.called}, but couldn't put it into words just now${addressed(said)}.`, thought.subject)
         }
-        return yield* answer(decided.right.spoken, Option.some(target), thought, said)
+        return yield* answer(decided.right.spoken, Option.some(target), thought, said, decided.right)
       })
 
     /** Searches the threads, or what yapd heard and said, and answers from what's found with a second look. */
@@ -549,7 +553,7 @@ export const make = (options: {
           return reply(`I found something, but couldn't put it into words just now${addressed(said)}.`, thought.subject)
         }
         const about = Option.fromNullable(called(situation, decided.right.target))
-        return yield* answer(decided.right.spoken, about, thought, said)
+        return yield* answer(decided.right.spoken, about, thought, said, decided.right)
       })
 
     /** Notes work as it starts, as part of starting it, so turning yapd off can't come between the two. */
@@ -905,10 +909,11 @@ export const make = (options: {
         )
       })
 
-    /** Notes what he said and what was made of it. */
+    /** Notes what he said and what was made of it, at once and on a second look. */
     const note = (thought: Thought, outcome: Outcome, began: number) =>
       Effect.gen(function* () {
         const { utterance, decision } = thought
+        const { second } = outcome
         const ms = (yield* Clock.currentTimeMillis) - began
         // What was said back has an entry of its own.
         yield* journal.write({
@@ -916,7 +921,7 @@ export const make = (options: {
           kind: utterance.via === "reply" ? "reply" : "dictation",
           text: utterance.heard,
           utterance: utterance.id,
-          detail: { via: utterance.via, source: thought.source, decision, ms, outcome: outcome.kind },
+          detail: { via: utterance.via, source: thought.source, decision, ...(second === undefined ? {} : { second }), ms, outcome: outcome.kind },
         })
         yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
       })

@@ -926,6 +926,35 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["The loader fix is ready, sir.", "The loader fix is ready, sir."])
   })
 
+  test("a catch-up told on a second look is one too: cut off, what it told him is told again, and heard once it's heard to the end", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.second)
+              ? Brain.decision({ act: "find", how: "journal", text: "loader" })
+              : Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
+          undefined,
+          { waiting: true },
+        )
+        const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        // Put the way the model has to look up, so it's told on a second look, and cut off as it starts.
+        yield* dictate("Anything happen to the loader while I was out?")
+        yield* cut()
+        const cutOff = yield* unheard
+        yield* dictate("Anything happen to the loader while I was out?")
+        const told = seen[2]!.unheard.map(({ said }) => said)
+        yield* play()
+        return { cutOff, told, after: yield* unheard, spoken: spoken() }
+      }),
+    )
+    expect(result.cutOff).toEqual(["yapd. The loader fix is ready."])
+    expect(result.told).toEqual(["yapd. The loader fix is ready."])
+    expect(result.after).toEqual([])
+    expect(result.spoken).toEqual(["The loader fix is ready, sir.", "The loader fix is ready, sir."])
+  })
+
   test("when the model can't be asked, what he missed stays unheard and the question he heard is closed", async () => {
     const result = await run(
       Effect.gen(function* () {
