@@ -620,6 +620,37 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
+  test("approving another thread by name while one approval is open never answers the open one", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const fees = thread(mina.id, mina.title, "connectors", {
+      activeRunId: "run-4",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:17:30.000Z" },
+      updatedAt: "2026-10-01T02:17:30.000Z",
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, fees), how: "accept", pending: "answers" }), undefined, {
+          others: [cloud, fees],
+          items: [...approval("r1", "npm install left-pad"), ...approval("r2", "git push origin fee-tables")],
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Approve the Mina one instead.")
+        const before = made.dispatched.length
+        // What the Mina one waits on, read back since he hasn't heard it asked, and allowed.
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+      "Open Mina SSV2 Bug Tickets wants to run git push origin fee-tables. Allow it, sir?",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r2 accept"])
+  })
+
   test("a dangerous approval needs 'approve', and the notice says so", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

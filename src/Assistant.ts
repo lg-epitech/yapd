@@ -1557,7 +1557,11 @@ export const make = (options: {
         // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.
         const same = open.kind === "resend" ? { ...decision, how: "" } : decision
         const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, same, decided.situation.desk)
-        const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume"
+        // What a thread waits on him for is only answered for that thread: naming another, like "approve the Mina one instead", is
+        // something new, which the model's pick of thread stands for, and leaves the one asked about waiting.
+        const named = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
+        const elsewhere = requestOf(open) !== undefined && named !== undefined && !open.candidates.some((ref) => Threads.same(ref, named.ref))
+        const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume" && !elsewhere
         // A plain yes allows an approval only once he's heard all of it as it was last asked, and a risky one only the word its asking
         // named will: otherwise it's asked once more, in full and naming the word for a risky one, then it's let go.
         const approval = open.asks?._tag === "Approval" ? open.asks : undefined
