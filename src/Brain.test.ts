@@ -172,6 +172,8 @@ describe("Brain", () => {
       Conversation.movedOn,
       Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
       Brain.speakable("I updated src/Brain.ts and the config in ~/.yapd/config.json, commit a1b2c3d4e5. The Codex agent is idle.", desk()),
+      Brain.speakable("The Claude Code session finished the fix in the commit 9f3e2a1c, and a Claude Code agent pushed it. It's on the t3/jarvis-m1 branch.", desk()),
+      Brain.speakable("It flagged wallet 0x5a0b54d5dc17e0aadc383d2db43b0a0d3e029c4c as unmatched, and/or skipped it.", desk()),
       Brain.speakable(
         "t2 is still at it: it rewrote /Users/me/code/integration/src/fees.ts at 5c529e6b, and the agent says the session ends soon, see https://github.com/x/y/pull/412.",
         desk(),
@@ -184,11 +186,14 @@ describe("Brain", () => {
       expect(line).not.toMatch(/\b(?=[\da-f]*\d)(?=[\da-f]*[a-f])[\da-f]{7,}\b/)
       expect(line).not.toMatch(/(^|\s)~?\/[\w.-]+\//)
       expect(line).not.toMatch(/https?:/)
-      expect(line).not.toMatch(/\bthe (\w+ )?(agent|session)\b/i)
+      expect(line).not.toMatch(/\bthe (\w+ ){0,2}(agent|session)\b/i)
+      expect(line).not.toMatch(/0x[\da-f]{6,}/i)
       expect(line).not.toMatch(/\w\.(ts|js|json|md)\b/)
     }
     expect(said.at(-1)).toBe("Migrate Tezos Integration is still at it: it rewrote a file at a commit, and the work says the work ends soon, see a link.")
-    expect(said.at(-2)).toBe("I updated a file and the config in a file, a commit. The work is idle.")
+    expect(said.at(-2)).toBe("It flagged an address as unmatched, and/or skipped it.")
+    expect(said.at(-3)).toBe("The work finished the fix in a commit, and a thread pushed it. It's on a branch.")
+    expect(said.at(-4)).toBe("I updated a file and the config in a file, a commit. The work is idle.")
     // A weekly window resets days away, so the day is said, and "sir" only once however many lines.
     const everything = Brain.used(usage, "usage", lines, now)
     expect(everything).toContain("resetting Monday at")
