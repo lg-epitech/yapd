@@ -145,6 +145,22 @@ describe("Brain", () => {
     })
   })
 
+  test("a write only fairly sure of its thread is confirmed on the focus thread when it's a stop, and asked about or left elsewhere", () => {
+    const listed = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!
+    const on: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
+    const checked = (decided: Brain.Decision, subject: Assistant.Subject = { _tag: "Nothing" }) => Brain.check(decided, situation("Stop the migration.", { subject }), lines)
+    const stop = checked(Brain.decision({ act: "stop", target: listed(tezos).handle, sure: "medium" }), on)
+    expect(stop._tag === "Ask" ? { kind: stop.open.kind, asked: stop.open.asked } : stop).toEqual({ kind: "confirm", asked: "Stop Migrate Tezos Integration, sir?" })
+    // Sure of it, a stop goes ahead.
+    expect(checked(Brain.decision({ act: "stop", target: listed(tezos).handle, sure: "high" }), on)._tag).toBe("Do")
+    // A message to the focus thread goes ahead; to one that isn't, with nothing else it could be, it isn't guessed at.
+    const message = (sure: Brain.Sure, others = "") => Brain.decision({ act: "send", target: listed(tezos).handle, sure, others, text: "Use the fee table." })
+    expect(checked(message("medium"), on)._tag).toBe("Do")
+    expect(checked(message("medium"))).toEqual({ _tag: "Say", spoken: "I couldn't tell which one you meant, sir." })
+    const between = checked(message("medium", listed(mina).handle))
+    expect(between._tag === "Ask" ? between.open.kind : between).toBe("which")
+  })
+
   test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {
     const rig = (decided: Brain.Decision) => Brain.check(decided, situation("What's the rig relay fix doing?"), lines)
     const here = rig(Brain.decision({ act: "look", target: "t2", machine: "rig", sure: "high" }))

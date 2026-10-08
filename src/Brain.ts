@@ -594,25 +594,12 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
   }
 }
 
-/** What a write is said as when it's asked about: "stop the Tezos migration". */
-const asking = (choice: Decision, listed: Threads.Listed, among: ReadonlyArray<Threads.Listed>) => {
-  const name = named(listed, among)
-  switch (choice.act) {
-    case "stop":
-      return `stop ${name}`
-    case "undo":
-      return choice.how === "carry" ? `let ${name} carry on` : `take back what I sent ${name}`
-    default:
-      return `send that to ${name}`
-  }
-}
-
 /**
  * Whether a write goes ahead: on a thread he plainly meant, or fairly surely
  * the one he's on about, which the confirmation names when it isn't. A stop
  * that's only fairly sure is confirmed first, since it can't be taken back
- * mid-thought. Otherwise he's asked which, naming them, or, with nothing to
- * choose between, whether it's that one.
+ * mid-thought. Otherwise he's asked which, naming them, or told it couldn't
+ * be told with nothing to choose between, as the confidence policy says.
  */
 const writing = (
   choice: Decision,
@@ -632,7 +619,7 @@ const writing = (
   if (choice.act === "stop" && !stoppable(listed)) return { _tag: "Say", spoken: `${capital(listed.called)} isn't doing anything right now${addressed(lines)}.` }
   const on = Option.exists(focused(situation), (focus) => focus.handle === listed.handle)
   const confirm = (): Checked => {
-    const doing = asking(choice, listed, desk.threads)
+    const doing = `stop ${named(listed, desk.threads)}`
     const asked = confirming(doing, lines, situation.asked)
     if (asked === undefined) return { _tag: "Say", spoken: lines.cantTell }
     return {
@@ -652,8 +639,7 @@ const writing = (
   }
   if (choice.sure === "high") return { _tag: "Do", plan: { decision: choice, target } }
   if (choice.sure === "medium" && on) return choice.act === "stop" ? confirm() : { _tag: "Do", plan: { decision: choice, target } }
-  if (candidates.length >= 2) return ask(candidates)
-  return choice.sure === "medium" ? confirm() : { _tag: "Say", spoken: lines.cantTell }
+  return ask(candidates)
 }
 
 // ---------------------------------------------------------------- speaking
