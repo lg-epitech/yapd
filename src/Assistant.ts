@@ -404,8 +404,8 @@ export const make = (options: {
     const asked: Array<Queued> = []
     /** Questions about what a thread waited on him for that was dealt with in T3 Code, which a late answer does nothing to. */
     const gone = new Set<string>()
-    /** What threads wait on him for that he's heard asked, by request: answered by dictation, it's done as he says. */
-    const known = new Map<string, Exclude<Asks, { readonly _tag: "Agent" }>>()
+    /** What threads wait on him for that he's heard asked, by request, oldest first: answered by dictation, it's done as he says. */
+    const known = new Map<string, { readonly ref: Threads.Ref; readonly asks: Exclude<Asks, { readonly _tag: "Agent" }> }>()
 
     /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
     const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
@@ -1403,21 +1403,38 @@ export const make = (options: {
       })
 
     /**
+     * What a thread waits on him for that he heard asked and that this
+     * answers, an approval or a question: what it shows it waits on, or else
+     * the latest still waiting behind something it asked since, which T3
+     * Code's summary of the thread shows in its place.
+     */
+    const meant = (ref: Threads.Ref, shown: string, kind: "Approval" | "Question") =>
+      Effect.gen(function* () {
+        const answers = (heard: { readonly ref: Threads.Ref; readonly asks: Exclude<Asks, { readonly _tag: "Agent" }> }) => Threads.same(heard.ref, ref) && heard.asks._tag === kind
+        const showing = known.get(shown)
+        if (showing !== undefined && answers(showing)) return Option.some(showing.asks)
+        for (const heard of [...known.values()].toReversed()) {
+          if (heard.asks.requestId !== shown && answers(heard) && (yield* still(ref, heard.asks.requestId))) return Option.some(heard.asks)
+        }
+        return Option.none<Exclude<Asks, { readonly _tag: "Agent" }>>()
+      })
+
+    /**
      * Allowing, turning down or answering what a thread waits on him for,
      * said with no question about it open: done as he says only for a
-     * request he's heard asked, and a risky one only with "approve".
-     * Otherwise what it waits on is read back to him as its question, so his
-     * answer is to what he heard.
+     * request he's heard asked, even one now behind something it asked
+     * since, and a risky one only with "approve". Otherwise what it waits on
+     * is read back to him as its question, so his answer is to what he heard.
      */
     const unprompted = (plan: Brain.Plan, target: Threads.Listed, thought: Thought, said: Lines, at: Stepping) =>
       Effect.gen(function* () {
         const { decision } = plan
         const pending = target.thread.pendingRuntimeRequest
         if (pending === null) return reply(Brain.dealtWith(said), thought.subject)
-        const heard = known.get(pending.id)
+        const heard = Option.getOrUndefined(yield* meant(target.ref, pending.id, decision.act === "decide" ? "Approval" : "Question"))
         const risky = heard?._tag === "Approval" && heard.dangerous && decision.how !== "decline" && !Brain.approving(thought.utterance.heard)
         if (heard !== undefined && !risky) return yield* write(plan, thought, said, at, heard)
-        const worded = yield* options.compose(target.ref, pending.id)
+        const worded = yield* options.compose(target.ref, heard?.requestId ?? pending.id)
         if (Option.isNone(worded)) return reply(`I couldn't read what ${target.called} is waiting on just now${addressed(said)}.`, thought.subject)
         const about = { _tag: "Answer", said: "", about: Option.some(target.ref) } satisfies Subject
         // Said now, so it's never brought up again as news.
@@ -1729,7 +1746,8 @@ export const make = (options: {
                     through: Effect.sync(() => {
                       if (asking?.open.id !== open.id) return
                       asking.whole = true
-                      if (open.asks !== undefined && open.asks._tag !== "Agent") known.set(open.asks.requestId, open.asks)
+                      const [ref] = open.candidates
+                      if (open.asks !== undefined && open.asks._tag !== "Agent" && ref !== undefined) known.set(open.asks.requestId, { ref, asks: open.asks })
                     }),
                     answer: listen(open),
                     unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),

@@ -818,12 +818,11 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       return writing(choice, target, candidates, situation, lines, ask)
     case "decide":
     case "reply": {
-      // Only what the thread still waits on, of the kind it is, and never a secret, which only T3 Code takes.
+      // Only a thread still waiting on him, and never on a secret, which only T3 Code takes. Which request it answers, maybe one asked
+      // before what the thread shows it waits on now, is read as it's done.
       const request = Option.getOrUndefined(target)?.thread.pendingRuntimeRequest
       if (request !== undefined && request !== null && T3Actions.secret(request.id)) return { _tag: "Say", spoken: secretly(lines) }
-      if (Option.isSome(target) && (request === null || (request?.kind === "user_input") !== (choice.act === "reply"))) {
-        return { _tag: "Say", spoken: dealtWith(lines) }
-      }
+      if (Option.isSome(target) && request === null) return { _tag: "Say", spoken: dealtWith(lines) }
       return writing(choice, target, candidates, situation, lines, ask)
     }
     default:

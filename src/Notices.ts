@@ -260,7 +260,7 @@ export const asking = (
  * Reads what a thread waits on him for and words it, to be asked, or only
  * told, like a secret, which is never answered by voice, or one the model
  * couldn't word, which isn't asked blind. None while the thread doesn't wait
- * on it, or isn't on the desk.
+ * on it, even behind something it asked since, or isn't on the desk.
  */
 export const composer = (threads: Threads.Threads["Type"]) =>
   Effect.gen(function* () {
@@ -270,9 +270,10 @@ export const composer = (threads: Threads.Threads["Type"]) =>
       Effect.gen(function* () {
         const thread = yield* threads.find(ref)
         const shown = Option.fromNullable((yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref)))
-        if (Option.isNone(thread) || Option.isNone(shown) || thread.value.pendingRuntimeRequest?.id !== requestId) return Option.none<Assistant.Worded>()
+        if (Option.isNone(thread) || Option.isNone(shown) || !(yield* threads.waiting(ref, requestId))) return Option.none<Assistant.Worded>()
         const { called, project } = shown.value
-        const kind = thread.value.pendingRuntimeRequest?.kind ?? ""
+        // What kind it is, when it's the one the thread shows, for when it can't be read.
+        const kind = thread.value.pendingRuntimeRequest?.id === requestId ? thread.value.pendingRuntimeRequest.kind : ""
         const said = yield* persona.lines
         const when = at ?? (yield* Clock.currentTimeMillis)
         const request = yield* threads.detail(ref, requestId).pipe(

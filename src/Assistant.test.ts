@@ -846,6 +846,38 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
+  test("an approval he heard, now behind a question it asked since, is allowed by dictating it, and a risky one read back to him first", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const question = { type: "user_input_request", status: "waiting", requestId: "q2", questions: [{ id: "net", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }] }
+    // It asks something else alongside, which T3 Code's summary shows in its place, while the approval still waits.
+    const both = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:17:30.000Z" } }
+    const allow = (command: string, dictated: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+            others: [cloud],
+            items: [...approval("r1", command), question],
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Never mind.")
+          yield* made.becomes(both)
+          for (const words of dictated) {
+            if (Option.isSome(yield* made.open)) yield* made.answer(words)
+            else yield* made.dictate(words)
+          }
+          return { spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    expect(await allow("npm install left-pad", ["Approve the cloud deployment one."])).toEqual({ spoken: ["Approved, sir: Cloud deployment discovery."], dispatched: ["r1 accept"] })
+    expect(await allow("git push --force origin main", ["Yes, let the cloud one go ahead.", "Approve."])).toEqual({
+      spoken: [
+        "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+        "Approved, sir.",
+      ],
+      dispatched: ["r1 accept"],
+    })
+  })
+
   test("an option said aloud answers the thread's question", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [
