@@ -51,6 +51,8 @@ export interface Shown {
   readonly say: string
   readonly card: Option.Option<Draft>
   readonly about: Option.Option<Threads.Ref>
+  /** Whether it took his card down, so none that was to go up before it does. */
+  readonly hides?: boolean
 }
 
 /** Opens an address in the browser. */
@@ -734,7 +736,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         switch (how) {
           case "hide":
             yield* hide
-            return { say: "", card: Option.none(), about: Option.none() }
+            return { say: "", card: Option.none(), about: Option.none(), hides: true }
           case "threads":
             return yield* shown((address) => tally(situation.desk, address, now), overview(situation.desk, now), lines)
           case "usage": {

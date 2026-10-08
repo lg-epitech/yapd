@@ -122,6 +122,8 @@ export interface Outcome {
   readonly card?: Show.Draft
   /** Whether the card holds what couldn't be read aloud, like a command, which makes it the one that goes up when another step of the request has one too. */
   readonly unreadable?: boolean
+  /** Whether it took his card down, after which only its own card goes up, never one a step before it had. */
+  readonly hides?: boolean
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -319,6 +321,8 @@ export const make = (options: {
     let asking: { open: Open; asks: number; repeat: Fiber.RuntimeFiber<void> | undefined; held: Set<string>; said: boolean } | undefined
     /** Changes whenever the open question does, so what was worked out against another can tell. */
     let version = 0
+    /** How many times he's had his card taken down, so one that was to go up with what's still waiting to be said never does. */
+    let hidden = 0
     /**
      * What yapd said last of its own accord, which "it" may mean, when it
      * started saying it, and how many times yapd had been turned on or off
@@ -1197,21 +1201,35 @@ export const make = (options: {
         return first
       })
 
+    /**
+     * A step whose card a step after it took down: it never goes up, nor is
+     * it said to be on his screen, and what it comes to took it down too, so
+     * no card from before it goes up either.
+     */
+    const unshown = (step: Outcome, said: Lines): Outcome => {
+      const { card, unreadable: _, ...rest } = step
+      const say = card === undefined ? step.say : Show.offScreen(step.say, said)
+      const subject: Subject = step.subject._tag !== "Nothing" && step.subject.said === step.say ? { ...step.subject, said: say } : step.subject
+      return { ...rest, say, subject, hides: true }
+    }
+
     /** What comes of the rest of a request, worked out, said with what was said of the step before. `quietly` when that was said already. */
     const then = (next: Thought, first: Outcome, step: number, said: Lines, quietly: boolean): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         if (next.source === "failed") return { ...first, say: joined(first.say, `I couldn't work out the rest${addressed(said)}.`, said) }
         if ((next.decision.act === "dismiss" && next.decision.rest.trim() === "") || next.decision.act === "resume") return first
         const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, { step, twice: false, quietly })
-        if (after.say === "") return first
+        // Taken down by the rest, like "and hide that", the card of the step before never goes up once it's said.
+        const before = after.hides === true ? unshown(first, said) : first
+        if (after.say === "") return before
         // What he missed that the step before told him is heard once he's heard the lot, as is what the rest told him.
-        const missed = [...(first.missed ?? []), ...(after.missed ?? [])]
-        const second = first.second ?? after.second
+        const missed = [...(before.missed ?? []), ...(after.missed ?? [])]
+        const second = before.second ?? after.second
         // One card goes up with the lot: the rest's, the last he asked for, unless only the step before's holds what couldn't be read aloud, like a
         // command he couldn't hear. Only the line of the step it's for says it's on his screen, so he's never told so of one that isn't.
-        const kept = after.card === undefined || (first.card !== undefined && first.unreadable === true && after.unreadable !== true) ? first : after
+        const kept = after.card === undefined || (before.card !== undefined && before.unreadable === true && after.unreadable !== true) ? before : after
         const onScreen = (step: Outcome) => (step.card === undefined || step === kept ? step.say : Show.offScreen(step.say, said))
-        const say = joined(onScreen(first), onScreen(after), said)
+        const say = joined(onScreen(before), onScreen(after), said)
         // What "it" means is what the rest was about, and what's said again is the lot, as heard, with what he missed that the lot told him, but never a question asked as part of it.
         const subject: Subject =
           after.kind === "question" || after.subject._tag === "Nothing"
@@ -1227,6 +1245,7 @@ export const make = (options: {
           ...(second === undefined ? {} : { second }),
           ...(kept.card === undefined ? {} : { card: kept.card }),
           ...(kept.unreadable === true ? { unreadable: true } : {}),
+          ...(before.hides === true ? { hides: true } : {}),
         }
       })
 
@@ -1368,20 +1387,22 @@ export const make = (options: {
           return start(thought, said, at.step)
         case "show":
           // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
-          return Effect.flatMap(options.show.present(decision.how, target, thought.situation, said), ({ say, card, about }) =>
-            onward(
+          return Effect.flatMap(options.show.present(decision.how, target, thought.situation, said), ({ say, card, about, hides }) => {
+            if (hides === true) hidden++
+            return onward(
               thought,
               {
                 say,
                 subject: say === "" ? thought.subject : { _tag: "Answer", said: say, about },
                 kind: say === "" ? "none" : "answer",
                 ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
+                ...(hides === true ? { hides } : {}),
               },
               about,
               at.step + 1,
               said,
-            ),
-          )
+            )
+          })
         case "dismiss":
           // Nothing more to say to this, and the rest, like "thanks, and tell it to open a PR", still to do.
           return onward(thought, quiet(thought.subject), Option.none(), at.step + 1, said)
@@ -1554,15 +1575,19 @@ export const make = (options: {
         let unsaid: Effect.Effect<void> = Effect.void
         // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
         const line = subject._tag === "Nothing" ? outcome.say : subject.said
-        // Told while an app was there to show its card, it's said without "it's on your screen" if none is by the time it's played.
+        // Taken down by voice before it's said, like by the rest of its request said on its own, its card never goes up.
+        const shown = hidden
+        const up = () => hidden === shown
+        // Told while an app was there to show its card, it's said without "it's on your screen" if none is by the time it's played, or the card won't go up.
         const unseen = card === undefined ? outcome.say : Show.offScreen(outcome.say, yield* persona.lines)
+        const off = Effect.map(options.show.watched, (watched) => !watched || !up())
         yield* options.tell(
           {
             id: mint(at, "a"),
             kind: open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer",
             priority: "needs-you",
             spoken: outcome.say,
-            ...(unseen === outcome.say || unseen === "" ? {} : { instead: { spoken: unseen, when: Effect.map(options.show.watched, (watched) => !watched) } }),
+            ...(unseen === outcome.say || unseen === "" ? {} : { instead: { spoken: unseen, when: off } }),
             at,
             // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
@@ -1578,7 +1603,7 @@ export const make = (options: {
                   if (open !== undefined && asking?.open.id === open.id) asking.said = heard
                 })
               }),
-            ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns })))),
+            ).pipe(Effect.zipRight(card === undefined ? Effect.void : Effect.asVoid(Effect.when(options.show.put(card, { said: line, turns: utterance.turns }), up)))),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }

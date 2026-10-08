@@ -88,7 +88,7 @@ It can tell you what your threads are doing, who needs you, how much of your usa
 
 ## Cards
 
-Ask yapd to show you something, like "show me that PR", "show me what's running", "show me my usage" or "show me what I missed", and it puts a card up and says what's on it in a line, adding "it's on your screen" only if a UI that shows cards, like the menu bar app, follows [`/state/stream?cards`](#following-changes) when the line is said. "Hide that" takes the card down. "Show me that PR" also opens the pull request in your browser. yapd only ever opens an `https` address that came from T3 Code, never one a model wrote.
+Ask yapd to show you something, like "show me that PR", "show me what's running", "show me my usage" or "show me what I missed", and it puts a card up and says what's on it in a line, adding "it's on your screen" only if a UI that shows cards, like the menu bar app, follows [`/state/stream?cards`](#following-changes) when the line is said. "Hide that" takes the card down, or keeps down one still to go up with what yapd hasn't said yet. "Show me that PR" also opens the pull request in your browser. yapd only ever opens an `https` address that came from T3 Code, never one a model wrote.
 
 When you ask about a thread that waits on something that can't be read aloud, like a command it wants to run, yapd puts that thread's card up with its answer. "Say that again" also puts a card up while a UI that shows cards follows the state: the one that went up with what it says again, anew, so it stays up while that's said, or else what it said and what it heard you say last. Once yapd has been turned off and on, it doesn't say again what it said before, nor put its card back up.
 
