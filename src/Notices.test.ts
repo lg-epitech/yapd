@@ -397,4 +397,39 @@ describe("Notices", () => {
     expect(result).toHaveLength(1)
     expect(result[0]).toMatch(/^(Migrate Tezos Integration|Open Mina SSV2 Bug Tickets) hit Claude's limit, sir; it resets at \d/)
   })
+
+  test("a usage limit is said once until it resets, though T3 Code only knew when by the time the next thread hit it", async () => {
+    // Codex's reset is only known once its usage shows full, which can be after the first thread failed on it.
+    const codex = { instanceId: "codex", model: "gpt-6" }
+    const limited = (id: string, title: string, runId: string, resetAt?: string) =>
+      thread(id, title, { status: "failed", latestRunId: runId, lastErrorClass: "usage_limit", modelSelection: codex, usageLimitResetAt: resetAt ?? null })
+    const tezos = limited("tezos", "Migrate Tezos Integration", "run-1")
+    const mina = limited("mina", "Open Mina SSV2 Bug Tickets", "run-2", "2026-10-09T03:00:00.000Z")
+    const loader = limited("loader", "Fix the loader", "run-3", "2026-10-09T08:00:00.000Z")
+    const limit = (runId: string, resetAt?: string) => ({
+      runs: [{ id: runId, status: "failed", ordinal: 1, startedAt: minutes(3) }],
+      turnItems: [failure(runId, "usage_limit", "You've hit your usage limit.", resetAt)],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, told } = yield* notices({
+          view: [tezos, mina, loader],
+          bounded: { tezos: limit("run-1"), mina: limit("run-2", "2026-10-09T03:00:00.000Z"), loader: limit("run-3", "2026-10-09T08:00:00.000Z") },
+        })
+        yield* hear(ended(tezos, "run-1"))
+        yield* wait(10)
+        yield* hear(ended(mina, "run-2"))
+        yield* wait(10)
+        const once = [...told]
+        // It reset, and the loader hit it again.
+        yield* wait(5 * 60 * 60)
+        yield* hear(ended(loader, "run-3"))
+        yield* wait(10)
+        return { once, told }
+      }),
+    )
+    expect(result.once).toEqual(["Migrate Tezos Integration hit Codex's limit, sir."])
+    expect(result.told).toHaveLength(2)
+    expect(result.told[1]).toMatch(/^Fix the loader hit Codex's limit, sir; it resets at \d/)
+  })
 })

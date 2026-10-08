@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, FiberSet, Option, Stream } from "effect"
+import { Cause, Clock, Effect, FiberSet, Option, Schema, Stream } from "effect"
 import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import { Condenser, english } from "./Condenser.ts"
@@ -70,6 +70,14 @@ const pending = 12 * 60 * 60_000
 const leeway = 1000
 /** How long after a run ended its Stop hook may still come, getting going and naming its project first. */
 const late = 5000
+/** How long a limit whose reset nobody said is taken to hold: the shortest window a provider has. */
+const lasting = 5 * 60 * 60_000
+/** How far back a limit said before is looked for: the longest a provider's holds. */
+const longest = 7 * 24 * 60 * 60_000
+
+/** When a limit said before resets, as it's kept with it, when that was known. */
+const Limit = Schema.Struct({ resets: Schema.String })
+const decodeLimit = Schema.decodeUnknownOption(Limit)
 
 /** A provider as it's said, from T3 Code's name for it, like "claudeAgent". */
 export const provider = (instance: string) => {
@@ -447,6 +455,28 @@ export const make = (options: {
         })
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
 
+    /**
+     * Whether a limit of this provider other than the one under `limit` was
+     * said and still holds: until it resets, or, when nobody said when, for
+     * as long as the shortest does. T3 Code may only know when it resets by
+     * the time another thread hits it, which keys it apart.
+     */
+    const holding = (who: string, limit: string) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const said = yield* journal.since(now - longest, { kinds: ["notice"], most: 1000 })
+        return said.some(
+          (entry) =>
+            entry.key !== undefined &&
+            entry.key !== limit &&
+            entry.key.startsWith(key.limited(who, "")) &&
+            Option.match(
+              Option.filter(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)), (reset) => !Number.isNaN(reset)),
+              { onNone: () => now - entry.at < lasting, onSome: (reset) => now < reset },
+            ),
+        )
+      })
+
     /** Says a run failed, with why, or that it hit its provider's limit, once for every thread that does until it resets. */
     const failed = (ref: Threads.Ref, run: T3Actions.Ran, thread: T3Live.Thread, called: string, project: string, turns: number, at: number) =>
       Effect.gen(function* () {
@@ -463,7 +493,10 @@ export const make = (options: {
           const who = provider(thread.modelSelection.instanceId)
           const limit = key.limited(who, window(resets, at))
           const spoken = lines.limited(called, who, Option.flatMap(resets, (resets) => Option.fromNullable(Brain.clock(resets, at))), said)
-          return yield* notify(ref, spoken, { ...base, said: spoken, key: limit }, still, at, turns, limit)
+          // Said for another thread, it isn't again till it resets, whether or not it was known when then.
+          const unsaid = Effect.zipWith(still, holding(who, limit), (still, held) => still && !held)
+          const entry = { ...base, said: spoken, key: limit, detail: { failure: kind, ...Option.match(resets, { onNone: () => ({}), onSome: (resets) => ({ resets }) }) } }
+          return yield* notify(ref, spoken, entry, unsaid, at, turns, limit)
         }
         const spoken = lines.failed(called, reason(run.failure, thread), said)
         yield* notify(ref, spoken, { ...base, said: spoken, key: key.failed(ref.machine, run.id) }, still, at, turns)
