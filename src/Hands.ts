@@ -556,7 +556,7 @@ export const make = (options: {
       /** The message, as a step of its own, at once. To a thread busy just before, how it went in is looked up rather than taken for granted. */
       const send = (at: Step) => once(at, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how: "now" }), reached, digest)
       /** Not told after all, with why, noted with a stop that went, so the same step worked out again says the same. */
-      const unsaid = (reason: string, stopped: true | "ended") =>
+      const notTold = (reason: string, stopped: true | "ended") =>
         Effect.gen(function* () {
           if (stopped === true) yield* ledger.settle(Ledger.ids(step.utterance, step.step, false).commandId, "sent", { reason, from: ["sent"] })
           return yield* failing({ _tag: "NotSent", reason, again: Option.none(), stopped } satisfies Outcome, "tell it what to do instead")
@@ -566,14 +566,14 @@ export const make = (options: {
       const stopped = yield* once(step, "stop", to, () => ({ _tag: "Stop" }), reached)
       const next = { ...step, step: step.step + 1 }
       if (stopped._tag === "Refused" && idle(stopped.reason)) {
-        if (!(yield* wanted)) return yield* unsaid(switchedOff, "ended")
+        if (!(yield* wanted)) return yield* notTold(switchedOff, "ended")
         yield* Effect.logInfo("Its turn ended just before it was stopped, so telling it at once")
         return { ...(yield* send(next)), stopped: "ended" } satisfies Outcome
       }
       if (stopped._tag !== "Done") return { ...stopped, stopped: false } satisfies Outcome
       const after = yield* watch(to, reached.thread, busy, stopping, wanted)
-      if (!(yield* wanted)) return yield* unsaid(switchedOff, true)
-      if (busy(after)) return yield* unsaid(windingDown, true)
+      if (!(yield* wanted)) return yield* notTold(switchedOff, true)
+      if (busy(after)) return yield* notTold(windingDown, true)
       return { ...(yield* send(next)), stopped: true } satisfies Outcome
     })
 
