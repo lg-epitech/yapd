@@ -314,6 +314,35 @@ describe("Show", () => {
     )
   })
 
+  test("an app's request to take down a card it put away leaves up one put up before the request came", async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const server = yield* Server.serve(0, {
+            handle: () => Effect.succeed(undefined),
+            state: Show.stated(Stream.succeed({ on: true, activity: "idle" as const, updates: [] }), show),
+            turn: () => Effect.void,
+            replay: () => Effect.succeed("unknown" as const),
+            utter: () => Effect.succeed(Option.none()),
+            ...Show.served(show, Effect.succeed({ threads: [], away: [] }), () => Effect.succeed([])),
+          })
+          const url = `http://127.0.0.1:${server.port}`
+          const takeDown = (id: string) => Effect.promise(() => fetch(`${url}/cards/current?id=${id}`, { method: "DELETE" }).then((response) => response.status))
+          const showing = Effect.map(Stream.runHead(show.showing), (card) => Option.map(Option.flatten(card), ({ id }) => id))
+          // The app put the first away, and the second went up before its request came.
+          const first = yield* show.put(Show.said("One running.", Option.none()))
+          const second = yield* show.put(Show.said("Two running.", Option.none()))
+          const late = yield* takeDown(first.id)
+          const kept = Option.contains(yield* showing, second.id)
+          const own = yield* takeDown(second.id)
+          return { late, kept, own, after: yield* showing }
+        }),
+      ),
+    )
+    expect(result).toEqual({ late: 204, kept: true, own: 204, after: Option.none() })
+  })
+
   test("a card put up while no app watched isn't taken to be on his screen once one does", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {

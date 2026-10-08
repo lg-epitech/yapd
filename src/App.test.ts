@@ -60,13 +60,14 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, and checks what it shows against it whenever it connects",
+    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, checks what it shows against it whenever it connects, and has yapd take down only the card it means",
     async () => {
       expect(await run("following")).toEqual({ code: 0, out: "The app's checks pass.\n" })
-      // What the checks cover is what the app uses: the card it shows is the one it follows.
+      // What the checks cover is what the app uses: the card it shows is the one it follows, and the one it has yapd take down is the one it names.
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
       expect(yapd).toMatch(/following\.follow\(status\.showing, connecting: connecting\)/)
       expect(yapd).not.toMatch(/panel\.show\(card, talking: (true|false)\)/)
+      expect(yapd.match(/send\("DELETE"[^\n]*/g)).toEqual(['send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },'])
     },
     120_000,
   )

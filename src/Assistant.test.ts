@@ -3958,7 +3958,7 @@ describe("Assistant", () => {
         // Each time it's said again, and once it faded and the app took it down too, so the app shows it for as long as it's talked about.
         const again: Array<{ readonly said: string | undefined; readonly up: Option.Option<{ readonly id: string; readonly kind: string; readonly markdown: string }> }> = []
         for (const hidden of [false, false, true]) {
-          if (hidden) yield* show.hide
+          if (hidden) yield* show.hide()
           yield* dictate("Say that again.")
           again.push({ said: spoken().at(-1), up: yield* up })
         }
@@ -3991,7 +3991,7 @@ describe("Assistant", () => {
         yield* dictate("Show me what's running.")
         const before = Option.map(yield* show.seen, ({ kind }) => kind)
         // The app faded it, and took it down too.
-        yield* show.hide
+        yield* show.hide()
         yield* toggle(false)
         yield* toggle(true)
         yield* heard({ heard: "Say that again.", via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: 3 })
@@ -4046,7 +4046,7 @@ describe("Assistant", () => {
           else {
             yield* dictate("Show me what's running.")
             // The app faded it, and took it down too.
-            yield* show.hide
+            yield* show.hide()
           }
           const told = spoken().length
           yield* toggle(false)

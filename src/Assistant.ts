@@ -1984,7 +1984,7 @@ export const make = (options: {
         // Nothing said before is on his screen once yapd is on again, where an app that connects would show it.
         for (const pending of cards) pending.down = true
         cards.clear()
-        yield* options.show.hide
+        yield* options.show.hide()
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
         // No answer is on its way any more, and the dictations they were for are dropped too.
         const kept = [...presses.values()]
