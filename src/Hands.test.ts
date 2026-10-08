@@ -928,7 +928,7 @@ describe("Hands", () => {
         bounded.runs.push({ id: "run-2", status: "queued", ordinal: 2, userMessageId: String(payload.messageId) })
         return { sequence: 8 }
       })
-    expect((await restarting(at("running"), true, queues)).said).toBe("Stopped it, sir, but that's waiting in its queue.")
+    expect((await restarting(at("running"), true, queues)).said).toBe("Stopped it, sir, but that's held in its queue till you say carry on.")
   })
 
   test("a message in place of the turn under way worked out again is the stop and the message it was, whatever came of them, and nothing goes twice", async () => {
@@ -1204,6 +1204,42 @@ describe("Hands", () => {
       ["queue.resume", "yapd:u2:0", undefined],
       ["message.dispatch", "yapd:u2:1", Hands.carryOn],
     ])
+  })
+
+  test("carry on, once what a stopped turn was told in its place waits in the queue the stop held, lets go of the queue, and never asks it to pick up what it was told to drop", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { send, run: act, answering, becomes, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        // Stopped, with a message queued behind it that the stop held, so T3 Code puts what it's told in its place in the queue too.
+        answering((payload, bounded) =>
+          Effect.sync(() => {
+            if (payload.type === "run.interrupt") {
+              bounded.runs[0]!.status = "interrupted"
+              becomes(thread(tezos.id, { status: "interrupted" }))
+            } else if (payload.type === "message.dispatch") bounded.runs.push({ id: "run-2", status: "queued", ordinal: 2, userMessageId: String(payload.messageId) })
+            return { sequence: 7 }
+          }),
+        )
+        const instead = yield* send("u1", "Drop that and fix the loader instead.", "restart")
+        const carried = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: true })
+        const said = (outcome: Hands.Outcome, act: Hands.Act) => (outcome._tag === "Done" ? Hands.done(act, outcome.how, lines, Option.none(), outcome) : outcome._tag)
+        return {
+          instead: said(instead, { _tag: "Message", to: tezos, text: "", how: "restart" }),
+          carried: said(carried, { _tag: "Undo", to: Option.none(), carry: true }),
+          dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      instead: "Stopped it, sir, but that's held in its queue till you say carry on.",
+      carried: "Carrying on.",
+      dispatched: [
+        ["run.interrupt", "yapd:u1:0"],
+        ["message.dispatch", "yapd:u1:1"],
+        ["queue.resume", "yapd:u2:0"],
+      ],
+    })
   })
 
   test("carry on said again once the word to carry on may not have got there sends nothing under new ids, and offers it again under its own", async () => {

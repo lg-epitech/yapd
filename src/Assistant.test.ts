@@ -2563,6 +2563,50 @@ describe("Assistant", () => {
     expect(refused.spoken).toEqual(["Stopped, sir: Migrate Tezos Integration.", "That didn't go to Open Mina SSV2 Bug Tickets, sir: the provider is offline."])
   })
 
+  test("what a turn stopped as a later step was told in its place, held in the queue the stop held, is said, though the step before was said on its own", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const others = [tezos]
+        const { heard, wait, flush, spoken, dispatched } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Tell")
+              ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now", rest: "stop the Tezos one and tell it to fix the loader instead" })
+              : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Fix the loader instead.", how: "restart" }),
+          undefined,
+          {
+            others,
+            thinking: 3,
+            answer: () => (payload, bounded) => {
+              // Stopped, the live view shows it idle, and what it's told in its place goes into the queue the stop held.
+              if (payload.type === "run.interrupt") others[0] = thread(tezos.id, tezos.title, "integration")
+              if (payload.type !== "message.dispatch" || payload.threadId !== tezos.id) return takes(payload, bounded)
+              return Effect.sync(() => {
+                bounded.runs.push({ id: "run-4", status: "queued", ordinal: 4, userMessageId: String(payload.messageId) })
+                return { sequence: 2 }
+              })
+            },
+          },
+        )
+        const dictated = yield* Effect.fork(
+          heard({ heard: "Tell the Mina one to use its fee table, then stop the Tezos one and tell it to fix the loader instead.", via: "shortcut", at: now, voiced: 3, turns: 1 }),
+        )
+        yield* flush
+        yield* wait(3)
+        yield* wait(1)
+        yield* Fiber.join(dictated)
+        yield* wait(2)
+        yield* wait(1)
+        return { spoken: spoken(), dispatched: dispatched.map(({ type, threadId }) => [type, threadId]) }
+      }),
+    )
+    expect(result.dispatched).toEqual([
+      ["message.dispatch", mina.id],
+      ["run.interrupt", tezos.id],
+      ["message.dispatch", tezos.id],
+    ])
+    expect(result.spoken).toEqual(["On it, sir: Open Mina SSV2 Bug Tickets.", "Stopped Migrate Tezos Integration, sir, but that's held in its queue till you say carry on."])
+  })
+
   test("nothing is dispatched for the rest of a request when yapd was turned off and on while it was worked out", async () => {
     const sending = (toggled: boolean) =>
       run(

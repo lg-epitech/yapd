@@ -591,7 +591,11 @@ export const make = (options: {
       return yield* once(step, "stop", to, () => ({ _tag: "Stop" }), reached.right)
     })
 
-  /** Lets a thread yapd stopped carry on: lets go of its queue, then asks it to pick up where it was, while that's still `wanted`. */
+  /**
+   * Lets a thread yapd stopped carry on: lets go of its queue, then asks it to
+   * pick up where it was, while that's still `wanted`; or, told something in
+   * place of what it was stopped from that waits in that queue, only lets go.
+   */
   const carry = (step: Step, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
       const stopped = yield* ledger.latest(resumable, {
@@ -626,7 +630,14 @@ export const make = (options: {
         yield* Effect.logInfo(`It was told to carry on as ${told.commandId}, which isn't confirmed, so asking first`)
         return { _tag: "Twin", row: told } satisfies Outcome
       }
+      // Told something in its place that waits in the queue the stop held, carrying on is letting that go, never asking it to pick up what it was told to drop.
+      const then = yield* ledger.get(Ledger.ids(stopped.value.utterance, stopped.value.step + 1, true).commandId)
+      const instead = Option.exists(then, (row) => row.kind === "message" && row.machine === ref.machine && row.thread === ref.id && row.state === "sent" && row.how === "queued")
       const resumed = yield* once(step, "undo", ref, () => ({ _tag: "Resume" }), reached.right)
+      if (instead) {
+        if (resumed._tag === "Done") yield* ledger.settle(stopped.value.commandId, "abandoned", { reason: carried, from: ["sent"] })
+        return resumed
+      }
       // Nothing held is nothing to let go of, which doesn't stop it carrying on.
       if (resumed._tag !== "Done" && resumed._tag !== "Refused") return resumed
       if (!(yield* wanted)) return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, "ask it to carry on")
@@ -808,13 +819,19 @@ export const naming = (line: string, called: Option.Option<string>) =>
   Option.match(called, { onNone: () => line, onSome: (name) => `${line.trim().replace(/[.!]+$/, "")}: ${name}.` })
 
 /**
+ * Whether a message told to a turn yapd stopped for it waits in the queue the
+ * stop held, which nothing lets go of but his word to carry on.
+ */
+export const held = (outcome: { readonly how: Ledger.How; readonly stopped?: boolean | "ended" }) => outcome.stopped === true && outcome.how === "queued"
+
+/**
  * What's said once it's done, naming the thread when it isn't the one he's on
  * about, and why a message he wanted in at once waits in the queue, when it does.
  */
 export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Option<string>, as: { readonly waiting?: Waiting; readonly stopped?: boolean | "ended" } = {}) => {
   const { waiting } = as
-  // In place of the turn under way, done as a stop and then the message, which T3 Code may still have put in the queue the stop held.
-  if (as.stopped === true && how === "queued") return `Stopped ${Option.getOrElse(called, () => "it")}${addressed(lines)}, but that's waiting in its queue.`
+  // In place of the turn under way, done as a stop and then the message, which T3 Code may still have put in the queue the stop held, where it stays till he says.
+  if (held({ how, ...as })) return `Stopped ${Option.getOrElse(called, () => "it")}${addressed(lines)}, but that's held in its queue till you say carry on.`
   if (as.stopped === true) return naming(`Stopped it${addressed(lines)}, and told it.`, called)
   if (waiting !== undefined) {
     const it = Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} is` })

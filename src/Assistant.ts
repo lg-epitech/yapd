@@ -1048,8 +1048,8 @@ export const make = (options: {
         const base = { utterance: utterance.id, heard: utterance.heard, material: Option.none(), candidates: ref === undefined ? [] : [ref] }
         switch (outcome._tag) {
           case "Done": {
-            // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, he's told why.
-            const line = at.quietly === true && outcome.waiting === undefined ? "" : Hands.done(act, outcome.how, said, called, outcome)
+            // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, or in the queue a stop held till he says, he's told why.
+            const line = at.quietly === true && outcome.waiting === undefined && !Hands.held(outcome) ? "" : Hands.done(act, outcome.how, said, called, outcome)
             yield* noting(line === "" ? undefined : line, {
               how: outcome.how,
               ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }),
