@@ -82,6 +82,14 @@ describe("T3Actions", () => {
     expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(
       Option.some({ _tag: "Secret", id: "turn-item:secret-request:t1:deploy", label: "Deploy key" }),
     )
+    // A question that asks him to type in a secret, as Codex marks one and T3 Code passes on as any other, is a secret too; one with options isn't.
+    const typed = (header: string, asked: string, options: ReadonlyArray<{ readonly label: string; readonly description: string }> = []) =>
+      Option.map(T3Actions.request([{ ...question, questions: [{ id: "k", header, question: asked, options }] }], "r2"), (found) => (found._tag === "Secret" ? found.label : found._tag))
+    expect(typed("Question", "Paste your OpenAI API key.")).toEqual(Option.some("API key"))
+    expect(typed("Login", "What's the database password?")).toEqual(Option.some("password"))
+    expect(typed("GitHub token", "So I can open the PR.")).toEqual(Option.some("GitHub token"))
+    expect(typed("Question", "Which token should the indexer track first?")).toEqual(Option.some("Question"))
+    expect(typed("Keys", "Keep the API keys in the vault?", [{ label: "Yes", description: "Yes" }, { label: "No", description: "No" }])).toEqual(Option.some("Question"))
   })
 
   test("gives back a thread's last messages, its plan and what it waits on", async () => {

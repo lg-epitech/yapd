@@ -179,10 +179,24 @@ const wouldRun = (items: ReadonlyArray<typeof Item.Type>, approval: typeof Item.
   return text === undefined || text.trim() === "" ? undefined : text.trim().slice(0, commandLength)
 }
 
+/** What names something only he should type in, like a password, a key or a token to sign in with. */
+const credentials =
+  /\b(?:pass(?:word|phrase|code)s?|(?:api|access|secret|private|ssh|signing|deploy|license)[ _-]?keys?|(?:api|access|auth|bearer|refresh|personal access|github|npm)[ _-]?tokens?|secrets?|credentials?|seed phrase|mnemonic|one[ -]time (?:code|password)|2fa code)\b/i
+
+/**
+ * What a question asks him to type in that's a secret, if one does: one with
+ * nothing to pick from that names a credential, like a Codex question marked
+ * secret, which T3 Code passes on as any other. None for a question with
+ * options, whose answer is one of them.
+ */
+const credential = (questions: ReadonlyArray<typeof Question.Type>) =>
+  questions.flatMap(({ header, question, options }) => (options.length > 0 ? [] : Option.toArray(Option.fromNullable(credentials.exec(`${header} ${question}`)?.[0])))).at(0)
+
 /**
  * Reads what a thread waits on out of its turn items, by the request's id. A
  * secret it asks for goes by its item's own id, which is the one the thread
- * says it waits on.
+ * says it waits on; a question that asks him to type in a secret is one too,
+ * under the question's id.
  */
 export const request = (items: ReadonlyArray<unknown>, id: string): Option.Option<Request> => {
   const decoded = items.flatMap((item) => Option.toArray(decodeItem(item)))
@@ -190,7 +204,8 @@ export const request = (items: ReadonlyArray<unknown>, id: string): Option.Optio
     if (found.type === "secret_request" && found.id === id) return Option.some({ _tag: "Secret", id, label: found.label ?? "" })
     if (found.requestId !== id) continue
     if (found.type === "user_input_request" && found.questions !== undefined) {
-      return Option.some({ _tag: "Question", id, questions: found.questions })
+      const named = credential(found.questions)
+      return Option.some(named === undefined ? { _tag: "Question", id, questions: found.questions } : { _tag: "Secret", id, label: named })
     }
     if (found.type === "approval_request") {
       const runs = wouldRun(decoded, found)

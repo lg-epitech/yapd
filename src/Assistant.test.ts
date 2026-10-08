@@ -798,6 +798,25 @@ describe("Assistant", () => {
     expect(result.dispatched).toBe(0)
   })
 
+  test("a question that asks him to type in a secret, as Codex marks one, is only told, and nothing he dictates for it is sent", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question: "Paste your OpenAI API key." }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "sk proj one two three" }), undefined, {
+          others: [cloud],
+          items,
+        })
+        const worded = Option.getOrThrow(yield* made.compose(cloud))
+        yield* made.dictate("Tell the cloud one the key is sk proj one two three.")
+        return { worded: worded._tag, spoken: made.spoken(), dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.worded).toBe("Tell")
+    expect(result.spoken).toEqual(["Cloud deployment discovery needs the API key from you, sir, which I never take by voice: it's waiting for you in T3 Code."])
+    expect(result.dispatched).toBe(0)
+  })
+
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {
     const result = await run(
       Effect.gen(function* () {
