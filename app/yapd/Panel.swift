@@ -202,9 +202,11 @@ private struct Blocks: View {
             Text(inline(text)).fixedSize(horizontal: false, vertical: true)
           }
         case .code(let text):
-          // As it is: what a thread waits on is only ever text, never a link.
+          // As it is: what a thread waits on is only ever text, never a link. In no language, so a long word, like
+          // base64 in a command, wraps where it must without a hyphen that isn't in it.
           Text(verbatim: text)
             .font(.system(.callout, design: .monospaced))
+            .typesettingLanguage(.explicit(Locale.Language(identifier: "zxx")))
             .textSelection(.enabled)
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
