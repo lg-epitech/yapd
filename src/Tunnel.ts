@@ -1,4 +1,4 @@
-import { Deferred, Duration, Effect, Either, Exit, Option, Redacted, Schema } from "effect"
+import { Deferred, Duration, Effect, Either, Option, Redacted, Schema } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import * as Home from "./Home.ts"
@@ -107,7 +107,7 @@ const pidOf = (said: string) => {
 
 /**
  * A port nothing listens on here right now. Something else could take it
- * before SSH does, and then forwarding fails and is tried again.
+ * before SSH does, and then forwarding fails and the next try connects afresh.
  */
 const unused = Effect.try({
   try: () => {
@@ -125,7 +125,7 @@ const again = (failures: number) => Duration.seconds(Math.min(30, 2 ** Math.max(
 /** How often the connection is checked on. SSH gives up on one that's gone quiet after 45 seconds. */
 const every = "5 seconds"
 
-/** A port here forwarded to one on the machine, through the connection. */
+/** A port here forwarded to one on the machine, through the connection: the one it has. */
 interface Forward {
   readonly local: number
   readonly remote: number
@@ -177,8 +177,6 @@ export const forward = (
     /** Its process here, as SSH last said, to kill it by should it not exit when asked. */
     let pid: number | undefined
     let forwarded: Forward | undefined
-    /** Forwards the connection may still have that lead nowhere, to cancel before opening another. */
-    const stale: Array<Forward> = []
     let located: Located | undefined
     /** Unset until the first try is over, so starting up isn't taken for an outage. */
     let status: Status | undefined
@@ -194,7 +192,7 @@ export const forward = (
      * Whether the connection is open or gone, failing when SSH couldn't say,
      * like when it took too long or couldn't start. Only nothing listening on
      * the socket means it's gone. Taking one that's just slow for gone would
-     * open a second connection and leave the first running, with its forwards,
+     * open a second connection and leave the first running, with its forward,
      * where nothing can reach it or close it. When it's open, SSH says its
      * process, which is kept.
      */
@@ -206,16 +204,15 @@ export const forward = (
       Effect.catchIf(missing, () => Effect.succeed("gone" as const)),
     )
 
-    /** Forgets the connection that's gone, and the forwards that went with it. */
+    /** Forgets the connection that's gone, and the forward that went with it. */
     const forget = () => {
       open = false
       pid = undefined
       forwarded = undefined
-      stale.length = 0
     }
 
     /**
-     * Closes the connection, and its forwards with it. One that doesn't exit
+     * Closes the connection, and its forward with it. One that doesn't exit
      * when asked, before long, like one that hangs, is killed by its process
      * instead, and the socket it leaves then removed, so it can neither hold up
      * yapd stopping nor leave a forward listening. Fails when it may still be
@@ -223,6 +220,8 @@ export const forward = (
      * by again.
      */
     const close = Effect.gen(function* () {
+      // Whatever comes of it, it isn't used again: what it forwards is in doubt.
+      open = false
       const exited = yield* Effect.either(control("-O", "exit"))
       if (Either.isLeft(exited) && !missing(exited.left)) {
         if (pid === undefined) return yield* exited.left
@@ -232,9 +231,13 @@ export const forward = (
       yield* Effect.ignore(Effect.tryPromise(() => rm(socket, { force: true })))
     })
 
-    /** Fails, with the reason to say, once SSH says the connection is gone. When it can't say, it's asked again next time. */
+    /**
+     * Fails, with the reason to say, once SSH says the connection is gone, or
+     * when it's no longer to be used, like after closing it was cut short.
+     * When SSH can't say, it's asked again next time.
+     */
     const still = Effect.gen(function* () {
-      if ((yield* Effect.orElseSucceed(check, () => "open" as const)) === "open") return
+      if (open && (yield* Effect.orElseSucceed(check, () => "open" as const)) === "open") return
       forget()
       return yield* trouble(unreachable)
     })
@@ -270,31 +273,17 @@ export const forward = (
     })
 
     /**
-     * Forwards a free port here to `remote` there, in place of the forward
-     * there was. Each forward is kept track of from the moment SSH is asked to
-     * open it until cancelling it has been tried, so whatever asked being
-     * interrupted can't leave one listening that nothing will cancel, or have
-     * the next try open another beside it. Those to cancel go before another
-     * is opened: one that may never have opened has a port the new one could
-     * get, and cancelling it after would close the new one.
+     * Forwards a free port here to `remote` there: the connection's one
+     * forward, never changed or cancelled. When asking fails or is cut short,
+     * SSH may have opened it all the same, so rather than keep track of a
+     * forward that may be listening, the connection is closed with it, and the
+     * next try opens a fresh one: one forward never listens beside another.
      */
-    const reforward = (remote: number) =>
+    const listen = (remote: number) =>
       Effect.gen(function* () {
-        // T3 Code there moved to another port: the forward there was leads nowhere.
-        if (forwarded !== undefined) stale.push(forwarded)
-        forwarded = undefined
-        for (let old = stale[0]; old !== undefined; old = stale[0]) {
-          yield* Effect.ignore(control("-O", "cancel", "-L", spec(old)))
-          stale.shift()
-        }
         const fresh = { local: yield* free, remote }
-        // When asking fails or is cut short, SSH may have opened it all the same.
-        yield* Effect.onExit(control("-O", "forward", "-L", spec(fresh)), (exit) =>
-          Effect.sync(() => {
-            if (Exit.isSuccess(exit)) forwarded = fresh
-            else stale.push(fresh)
-          }),
-        )
+        yield* Effect.onError(control("-O", "forward", "-L", spec(fresh)), () => Effect.ignore(close))
+        forwarded = fresh
         return fresh
       })
 
@@ -321,7 +310,9 @@ export const forward = (
       }
       const remote = origin === undefined ? undefined : port(origin)
       if (remote === undefined || token === undefined || token === "") return yield* garbled
-      const { local } = forwarded?.remote === remote ? forwarded : yield* reforward(remote)
+      // T3 Code there moved to another port. A fresh connection forwards there, and the one there was goes with its forward.
+      if (forwarded !== undefined && forwarded.remote !== remote) yield* connect
+      const { local } = forwarded ?? (yield* listen(remote))
       located = { server: { origin: `http://127.0.0.1:${local}` }, token: Redacted.make(token) }
       return located
     })
@@ -359,8 +350,9 @@ export const forward = (
       let failures = 0
       while (true) {
         // Whatever goes wrong with one try, the next is made. The connection yapd opened is kept while it's there.
-        const kept = Effect.suspend(() => (open ? Effect.orElse(still, () => connect) : connect))
-        const once = Effect.zipRight(kept, look).pipe(Effect.catchAllDefect((defect) => Effect.fail(trouble(unreachable, defect))))
+        const once = Effect.zipRight(Effect.orElse(still, () => connect), look).pipe(
+          Effect.catchAllDefect((defect) => Effect.fail(trouble(unreachable, defect))),
+        )
         const tried = yield* Effect.either(settle(once))
         if (Either.isRight(tried)) {
           failures = 0
