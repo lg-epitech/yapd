@@ -209,6 +209,20 @@ const answeredBefore = "Your earlier answer may already have got there, so this 
 const answeredAlready = "I sent it your earlier answer already, so this one needs T3 Code."
 /** How far back an earlier answer to the same request is looked for. */
 const answering = 24 * 60 * 60_000
+/** Why an answer that never left yapd was put aside: he answered differently since, which goes in its place. */
+const replaced = "He answered it differently since."
+/** Why a step never went: what it was to send couldn't be read back. */
+const unreadable = "I couldn't read back what to send."
+/** Why the same answer isn't sent again once an earlier one was given up on without knowing whether it got there. */
+const unconfirmedAnswer = "I couldn't confirm your earlier answer got there, so I won't risk sending it again: it needs T3 Code."
+
+/**
+ * Whether an answer that was given up on may still have got there: sent
+ * once more already and still not found, or left unconfirmed by a restart.
+ * Only one that never left yapd, put aside for a different one or never
+ * readable to send, was given up on safely.
+ */
+const unsettled = (row: Pick<Ledger.Row, "state" | "reason">) => row.state === "abandoned" && ![replaced, unreadable].includes(row.reason ?? "")
 
 /**
  * The commands kept in the ledger, read back to send again. A stop to tell a
@@ -488,8 +502,8 @@ export const make = (options: {
       const what = doing[row.kind]
       const read = command(row.body)
       if (Option.isNone(read)) {
-        yield* ledger.settle(row.commandId, "abandoned", { reason: "I couldn't read back what to send." })
-        return yield* failing({ _tag: "NotSent", reason: "I couldn't read back what to send.", again: Option.none() }, what)
+        yield* ledger.settle(row.commandId, "abandoned", { reason: unreadable })
+        return yield* failing({ _tag: "NotSent", reason: unreadable, again: Option.none() }, what)
       }
       const sent = read.value._tag === "Send" && at !== undefined ? { ...read.value, how: at } : read.value
       const how = sent._tag === "Send" ? sent.how : "now"
@@ -829,10 +843,12 @@ export const make = (options: {
    * answered, since T3 Code takes either for both and the agent would never
    * get it, and a secret never is. Once per request: an earlier step for it
    * that went stands, and one that may not have goes once more under its
-   * own ids, on this yes of his, never under new ones (I2). That's only for
-   * the same answer: a different one goes under its own ids only once the
-   * earlier never left yapd, and is otherwise left to T3 Code, so what's
-   * sent is always what he said last, and what's said is what was sent.
+   * own ids, on this yes of his, never under new ones (I2); once that's been
+   * given up on still unconfirmed, or a restart couldn't confirm it, it's
+   * never sent again, and he's told so. That's only for the same answer: a
+   * different one goes under its own ids only once the earlier never left
+   * yapd, and is otherwise left to T3 Code, so what's sent is always what he
+   * said last, and what's said is what was sent.
    */
   const respond = (step: Step, act: Extract<Act, { readonly _tag: "Decide" | "Reply" }>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
@@ -864,16 +880,20 @@ export const make = (options: {
       const latest = (yield* ledger.steps(now - answering, { kinds: [kind], machine: act.to.machine, thread: act.to.id })).findLast((row) =>
         Option.exists(command(row.body), (body) => (body._tag === "Decide" || body._tag === "Answer") && body.requestId === act.requestId),
       )
-      // A different answer from one that never left yapd takes its place; from one that went, or may have, it would contradict what T3 Code may have.
+      // A different answer from one that never left yapd takes its place; from one that went, or may have, even given up on since, it would
+      // contradict what T3 Code may have.
       if (latest !== undefined && !alike(latest.body, act)) {
         if (latest.state === "failed") {
-          yield* ledger.settle(latest.commandId, "abandoned", { reason: "He answered it differently since.", from: ["failed"] })
-        } else if (latest.state !== "refused" && latest.state !== "abandoned") {
+          yield* ledger.settle(latest.commandId, "abandoned", { reason: replaced, from: ["failed"] })
+        } else if (latest.state !== "refused" && (latest.state !== "abandoned" || unsettled(latest))) {
           return yield* failing({ _tag: "Refused", reason: latest.state === "sent" ? answeredAlready : answeredBefore } satisfies Outcome, doing[kind])
         }
       }
       const earlier = latest !== undefined && alike(latest.body, act) ? latest : undefined
       if (earlier?.state === "sent") return settled(earlier)
+      /** The same answer, given up on without knowing whether it got there: it's never sent again, under its own ids or new ones. */
+      const unconfirmed = failing({ _tag: "Unknown", reason: unconfirmedAnswer, again: Option.none() } satisfies Outcome, doing[kind])
+      if (earlier !== undefined && unsettled(earlier)) return yield* unconfirmed
       /** The answer as a step of its own, under this request's ids. */
       const fresh = once(
         step,
@@ -897,7 +917,12 @@ export const make = (options: {
           Effect.gen(function* () {
             if (!(yield* wanted)) return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, doing[kind])
             const taken = yield* ledger.resending(earlier.commandId)
-            if (Option.isNone(taken)) return yield* fresh
+            // Taken just before, as by another yes, or come to something since: what it came to stands, and it never goes under new ids.
+            if (Option.isNone(taken)) {
+              const now = yield* ledger.get(earlier.commandId)
+              if (Option.isSome(now) && ["sent", "refused", "failed"].includes(now.value.state)) return settled(now.value)
+              return yield* unconfirmed
+            }
             yield* Effect.logInfo(`Answering ${act.requestId} once more under ${taken.value.commandId}, as you said`)
             return yield* dispatch(taken.value, actions, busy(thread), true)
           }),
@@ -1177,6 +1202,8 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
     case "Decide":
     case "Reply": {
       const answer = act._tag === "Reply" ? "your answer" : act.decision === "decline" ? "your no" : "your go-ahead"
+      // Not known to have got there, and not risked again, it's T3 Code's to show, which he's told plainly.
+      if (outcome.reason === unconfirmedAnswer) return `I couldn't confirm ${name ?? "it"} got ${answer} before${sir}, so I won't risk sending it again: it needs T3 Code.`
       return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} got ${answer}${sir}.` : `I couldn't get ${answer} to ${name ?? "it"}${sir}: ${reason}`
     }
   }

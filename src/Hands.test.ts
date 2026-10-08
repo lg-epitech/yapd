@@ -1671,4 +1671,45 @@ describe("Hands", () => {
     )
     expect(result).toEqual({ off: Hands.switchedOff, kept: Option.some("failed"), on: "Done", dispatched: ["yapd:u1:0", "yapd:u1:0"] })
   })
+
+  test("an answer that may have got there, sent once more and still unconfirmed, or left unconfirmed by a restart, is never sent again under any ids, nor a different one, and he's told why", async () => {
+    const waiting = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const decide = (decision: Hands.Decision): Hands.Act => ({ _tag: "Decide", to: tezos, requestId: "r1", decision })
+    const lost = () => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+    const said = (outcome: Hands.Outcome, decision: Hands.Decision) => ("reason" in outcome ? Hands.failed(decide(decision), outcome, lines, Option.none()) : outcome._tag)
+    const sent = (made: { readonly dispatched: ReadonlyArray<Record<string, unknown>> }) => made.dispatched.map(({ commandId, decision }) => `${commandId} ${decision}`)
+    const twice = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: waiting })
+        made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+        made.answering(lost)
+        yield* made.run({ utterance: "u1", step: 0 }, decide("accept"))
+        // His yes again sends it once more under its ids, which may not have got there either.
+        yield* made.run({ utterance: "u2", step: 0 }, decide("accept"))
+        made.answering(takes())
+        const third = yield* made.run({ utterance: "u3", step: 0 }, decide("accept"))
+        const declined = yield* made.run({ utterance: "u4", step: 0 }, decide("decline"))
+        return { said: [said(third, "accept"), said(declined, "decline")], dispatched: sent(made) }
+      }),
+    )
+    expect(twice.dispatched).toEqual(["yapd:u1:0 accept", "yapd:u1:0 accept"])
+    expect(twice.said).toEqual([
+      "I couldn't confirm it got your go-ahead before, sir, so I won't risk sending it again: it needs T3 Code.",
+      "I couldn't get your no to it, sir: your earlier answer may already have got there, so this one needs T3 Code.",
+    ])
+    const restarted = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: waiting })
+        made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+        made.answering(lost)
+        yield* made.run({ utterance: "u1", step: 0 }, decide("accept"))
+        const after = made.restarted(now + 60_000)
+        yield* after.reconcile
+        made.answering(takes())
+        const again = yield* after.run({ utterance: "u2", step: 0 }, decide("accept"))
+        return { said: said(again, "accept"), dispatched: sent(made) }
+      }),
+    )
+    expect(restarted).toEqual({ said: "I couldn't confirm it got your go-ahead before, sir, so I won't risk sending it again: it needs T3 Code.", dispatched: ["yapd:u1:0 accept"] })
+  })
 })
