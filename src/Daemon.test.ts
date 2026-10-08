@@ -304,12 +304,15 @@ const handing = Effect.gen(function* () {
   let current = tezos()
   /** Whether what it's sent is lost on the way, after it may have got there, and never shows in the thread. */
   let losing = false
+  /** Whether T3 Code is down, so nothing it's sent ever leaves yapd. */
+  let down = false
   const reach: Effect.Effect<T3CodeServer.Transport, T3CodeServer.Trouble> = Effect.succeed({
     api: (<A, I>(_: string, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)) as T3CodeServer.Transport["api"],
     call: (<A, I>(method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
       method === "orchestration.dispatchCommand"
         ? Effect.gen(function* () {
             dispatched.push(payload)
+            if (down) return yield* new T3CodeServer.Trouble({ reason: "T3 Code isn't running.", sent: false })
             if (losing) return yield* new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })
             if (payload.type === "message.dispatch") {
               const at = new Date(yield* Clock.currentTimeMillis).toISOString()
@@ -336,6 +339,8 @@ const handing = Effect.gen(function* () {
     hands,
     /** The messages T3 Code was sent, by thread. */
     sent: () => dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => `${threadId}: ${text}`),
+    /** How many commands were sent to T3 Code, whether they got there or not. */
+    dispatched: () => dispatched.length,
     /** How each went in, as the thread says. */
     intents: () => bounded.turnItems.map(({ inputIntent }) => inputIntent),
     /** The thread as T3 Code has it from now on, like once he's typed something into it. */
@@ -347,6 +352,11 @@ const handing = Effect.gen(function* () {
     loses: (lost: boolean) =>
       Effect.sync(() => {
         losing = lost
+      }),
+    /** T3 Code is down from now on, or up again. */
+    downs: (isDown: boolean) =>
+      Effect.sync(() => {
+        down = isDown
       }),
   }
 })
@@ -975,6 +985,36 @@ describe("Daemon", () => {
     expect(result.told).toEqual(["I couldn't confirm it got there.", "I couldn't confirm that got there before, so I haven't sent it again."])
     expect(result.sent).toEqual(["t-tezos: Use the fee table."])
     expect(result.states).toEqual(["Unknown", "unknown"])
+  })
+
+  test("the same reply over a linked update, after one that never left yapd, is told it never got there, and isn't sent under new ids", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const t3 = yield* handing
+        const { handle, speak, wait, nextEvent, nextPlayback, journal } = yield* make("Use the fee table.", {
+          hands: t3.hands,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          transcripts: ["Use the fee table.", "Use the fee table."],
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        // T3 Code isn't running, so it never leaves yapd.
+        yield* t3.downs(true)
+        yield* speak
+        const first = yield* nextPlayback
+        // It's back, and he says the same again.
+        yield* t3.downs(false)
+        yield* wait(1)
+        yield* speak
+        const second = yield* nextPlayback
+        const noted = yield* journal.since(0, { kinds: ["action"] })
+        return { told: [first, second], dispatched: t3.dispatched(), states: noted.map(({ detail }) => (detail as { state?: string }).state ?? (detail as { outcome?: string }).outcome) }
+      }),
+    )
+    expect(result.told).toEqual(["That didn't get there: T3 Code isn't running.", "That didn't get there before, so I haven't sent it: say it to me with the shortcut to send it again."])
+    expect(result.dispatched).toBe(1)
+    expect(result.states).toEqual(["NotSent", "failed"])
   })
 
   test("a turn no hook told of is said like a hook's update, once under its key, and never once yapd was turned off since", async () => {

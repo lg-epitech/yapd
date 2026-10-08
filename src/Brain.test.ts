@@ -453,6 +453,7 @@ describe("Brain", () => {
       ].map((reason) => Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Refused", reason: Hands.plainly(reason) }, lines, Option.none())),
       Hands.twice(now - 54_000, now, lines, Option.none()),
       Hands.unconfirmedBefore(lines),
+      Hands.unsentBefore(lines),
       Hands.read(lines, Option.some("Migrate Tezos Integration")),
       Hands.lost(lines, Option.none()),
       Hands.unoffered(lines, Option.some("Migrate Tezos Integration"), "Its thread is archived now."),

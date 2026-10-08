@@ -331,12 +331,12 @@ export const make = (
         return outcome.how === "queued" ? ("queued" as const) : ("sent" as const)
       }
       yield* unregister(pending)
-      // The same words went to it lately, or may have: said, never asked about, until replies go through the brain.
+      // The same words went to it lately, may have, or never left yapd: said, never asked about, until replies go through the brain.
+      const twin = (row: Ledger.Row) =>
+        row.state === "sent" ? Hands.sentBefore(row.at, at, lines, Option.none()) : row.state === "failed" ? Hands.unsentBefore(lines) : Hands.unconfirmedBefore(lines)
       const reason =
         outcome._tag === "Twin"
-          ? outcome.row.state === "sent"
-            ? Hands.sentBefore(outcome.row.at, at, lines, Option.none())
-            : Hands.unconfirmedBefore(lines)
+          ? twin(outcome.row)
           : "reason" in outcome
             ? Hands.failed(act, "again" in outcome ? { ...outcome, again: Option.none<string>() } : outcome, lines, Option.none())
             : `That didn't go through${lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`}.`

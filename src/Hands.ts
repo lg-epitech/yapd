@@ -1160,6 +1160,9 @@ export const sentBefore = (sent: number, now: number, lines: Lines, called: Opti
 /** That the same words may not have got to the same thread when they went lately, said instead of offering to send them again. */
 export const unconfirmedBefore = (lines: Lines) => `I couldn't confirm that got there before${addressed(lines)}, so I haven't sent it again.`
 
+/** That the same words never left yapd when they went to the same thread lately, said instead of offering to send them again, which dictating them does. */
+export const unsentBefore = (lines: Lines) => `That didn't get there before${addressed(lines)}, so I haven't sent it: say it to me with the shortcut to send it again.`
+
 /** Asked when the same words went to the same thread lately, and it hasn't said anything since. */
 export const twice = (sent: number, now: number, lines: Lines, called: Option.Option<string>) => `${sentBefore(sent, now, lines, called)} Again?`
 
