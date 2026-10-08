@@ -1447,12 +1447,15 @@ export const make = (options: {
         const worded = yield* options.compose(target.ref, heard?.requestId ?? pending.id)
         if (Option.isNone(worded)) return reply(`I couldn't read what ${target.called} is waiting on just now${addressed(said)}.`, thought.subject)
         const about = { _tag: "Answer", said: "", about: Option.some(target.ref) } satisfies Subject
-        // Said now, so it's never brought up again as news.
-        yield* journal.claim(worded.value._tag === "Tell" ? worded.value.entry : worded.value.asking.entry)
-        if (worded.value._tag === "Tell") return { say: worded.value.spoken, subject: { ...about, said: worded.value.spoken }, kind: "answer" } satisfies Outcome
+        // Said now, so it's never brought up again as news, and noted as heard once he's heard it, so it's nothing he missed.
+        const kept = yield* journal.claim(worded.value._tag === "Tell" ? worded.value.entry : worded.value.asking.entry)
+        if (worded.value._tag === "Tell") {
+          const missed = Option.toArray(Option.flatten(kept))
+          return { say: worded.value.spoken, subject: { ...about, said: worded.value.spoken }, kind: "answer", ...(missed.length === 0 ? {} : { missed }) } satisfies Outcome
+        }
         const { asking: waiting } = worded.value
         yield* Effect.logInfo("Reading back what it waits on, since he hasn't heard it asked")
-        return yield* opening(
+        const read = yield* opening(
           {
             kind: waiting.asks._tag === "Approval" ? "approval" : "question",
             utterance: thought.utterance.id,
@@ -1468,6 +1471,9 @@ export const make = (options: {
           },
           thought.utterance,
         )
+        // Asked as a notice would be, under the entry it was just kept under.
+        if (asking?.open.utterance === thought.utterance.id && asking.open.asks === waiting.asks) asking.from = { asking: waiting, again: false, kept }
+        return read
       })
 
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
@@ -1685,7 +1691,8 @@ export const make = (options: {
         const open = outcome.kind === "question" && asking !== undefined ? asking.open : undefined
         const about = outcome.subject._tag === "Answer" ? outcome.subject.about : Option.none<Threads.Ref>()
         // What a thread waits on him for is kept under its key as it's first said, even asked again after something cut it off, which is its entry, so it's said once, ever.
-        const claim = open !== undefined && asking?.from !== undefined && asking.from.kept === undefined ? asking.from : undefined
+        const from = open === undefined ? undefined : asking?.from
+        const claim = from !== undefined && from.kept === undefined ? from : undefined
         const request = open === undefined ? undefined : requestOf(open)
         // Work that started has its own entry.
         if (outcome.kind !== "done" && claim === undefined) {
@@ -1728,9 +1735,9 @@ export const make = (options: {
             ...(open === undefined || request === undefined
               ? {}
               : {
-                  // Heard, or answered, its entry is noted as heard.
+                  // Heard, or answered, its entry is noted as heard, however many times it took to ask it.
                   heard: Effect.gen(function* () {
-                    const row = claim?.kept === undefined ? Option.none() : Option.flatten(claim.kept)
+                    const row = from?.kept === undefined ? Option.none() : Option.flatten(from.kept)
                     if (Option.isSome(row)) yield* journal.markHeard([row.value], yield* Clock.currentTimeMillis)
                   }),
                 }),

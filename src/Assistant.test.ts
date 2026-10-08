@@ -751,6 +751,61 @@ describe("Assistant", () => {
     expect(result.heard).toEqual([["ask:Rosie:r1", true]])
   })
 
+  test("an approval asked again after something cut it off, or read back on his dictating it, is noted heard once he's heard it, so it's nothing he missed", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const unheard = (made: { readonly journal: Journal.Journal["Type"] }) =>
+      Effect.map(made.journal.unheard(0, 20), (entries) => entries.flatMap(({ key }) => (key === undefined ? [] : [key])))
+    const cut = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        yield* made.questions().at(-1)!.stale
+        yield* made.cut()
+        yield* made.dictate("What's the status on Mina?")
+        const again = made.questions().at(-1)!
+        yield* again.stale
+        yield* made.play(again)
+        yield* made.answer("Yes.", again)
+        return { spoken: made.spoken().at(-1), unheard: yield* unheard(made) }
+      }),
+    )
+    expect(cut).toEqual({ spoken: "Approved, sir.", unheard: [] })
+    const dictated = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "npm install left-pad"),
+          waiting: true,
+        })
+        yield* made.dictate("Approve the cloud deployment one.")
+        const read = made.questions().at(-1)!
+        yield* read.stale
+        yield* made.play(read)
+        yield* made.answer("Yes.", read)
+        return { spoken: made.spoken().at(-1), unheard: yield* unheard(made) }
+      }),
+    )
+    expect(dictated).toEqual({ spoken: "Approved, sir.", unheard: [] })
+    // One only told, as a question with too many options to take in is, once he's heard it told.
+    const question = waitingOn({ id: "q1", kind: "user_input" })
+    const told = await run(
+      Effect.gen(function* () {
+        const options = ["Mainnet", "Ghostnet", "Shadownet", "Weeklynet", "Localnet"].map((label) => ({ label }))
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, question), text: "Ghostnet" }), undefined, {
+          others: [question],
+          items: [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "net", question: "Which network first?", options }] }],
+        })
+        yield* made.dictate("Tell the cloud one Ghostnet.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.length, unheard: yield* unheard(made) }
+      }),
+    )
+    expect(told).toEqual({
+      spoken: ["Cloud deployment discovery asks which network to start with, sir: it's waiting for you in T3 Code."],
+      dispatched: 0,
+      unheard: [],
+    })
+  })
+
   test("a dangerous approval needs 'approve', and the notice says so", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
