@@ -115,12 +115,18 @@ export const serve = Effect.gen(function* () {
     upcoming: daemon.upcoming,
   })
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
+  // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it.
   yield* Effect.forkScoped(
     live.view.pipe(
       Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
       Effect.timeoutFail({ duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }),
       Effect.zipRight(hands.reconcile),
-      Effect.flatMap(({ undelivered, unconfirmed }) => Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered))),
+      Effect.flatMap(({ undelivered, unconfirmed, readying }) =>
+        Effect.all([Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered)), Effect.flatMap(readying, assistant.unconfirmed)], {
+          concurrency: "unbounded",
+          discard: true,
+        }),
+      ),
       Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent before restarting: ${reason}`)),
     ),
   )

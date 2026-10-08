@@ -78,6 +78,13 @@ export interface Reconciled {
    * again.
    */
   readonly unconfirmed: ReadonlyArray<Ledger.Row>
+  /**
+   * New work T3 Code was still getting ready, waited for on its own, as long
+   * after it was asked for as a launch would be, so nothing above waits
+   * behind it: then what of it didn't start or still can't be confirmed, as
+   * in `unconfirmed`, to be said once.
+   */
+  readonly readying: Effect.Effect<ReadonlyArray<Ledger.Row>>
 }
 
 /** Which step of which request something is. */
@@ -115,7 +122,8 @@ export class Hands extends Context.Tag("yapd/Hands")<
     /**
      * At startup: looks at what never said what came of it, and never sends
      * anything (I6). Gives back the messages found not to have got there
-     * lately, to offer, and whatever else it couldn't confirm, to say so.
+     * lately, to offer, and whatever else it couldn't confirm, to say so,
+     * with new work T3 Code is still getting ready to wait for on its own.
      */
     readonly reconcile: Effect.Effect<Reconciled>
     /** A message a restart found didn't get there, while it's still to be offered: nothing came of it since, and it's recent enough to. */
@@ -135,6 +143,8 @@ const recent = 15 * 60_000
 export const unconfirmable = "I couldn't tell whether it went through before I restarted."
 /** Why new work a restart looked for can't be confirmed, when T3 Code is still getting it ready as long after it was asked for as a launch waits. */
 export const gettingReady = "T3 Code is still getting it ready."
+/** How new work is getting on while T3 Code is still getting it ready: its thread made, with the work not in it yet, or its workspace being prepared. */
+const readies: ReadonlyArray<ReturnType<typeof T3CodeLauncher.progress>> = ["empty", "preparing"]
 /** Why a message that may not have got there isn't offered to go again. */
 export const tooLong = "It's too long ago to send it again now."
 /** What a stop is noted with once it's been let carry on, so it's never let carry on twice. */
@@ -796,6 +806,45 @@ export const make = (options: {
       return { _tag: "Read", row } satisfies Outcome
     })
 
+  /**
+   * Not confirmed after a restart, it's said once, with why, and never done
+   * again. A message stays as it may be, never offered again on its own, so
+   * the same words said again find it, and are offered under its own ids.
+   * Only from where it was, in case something came of it since it was read.
+   */
+  const unverified = (row: Ledger.Row, reason: string) =>
+    Effect.gen(function* () {
+      const from = [row.state]
+      if (row.kind === "message") {
+        yield* ledger.settle(row.commandId, "unknown", { reason, from })
+        yield* ledger.leave(row.commandId, reason)
+      } else yield* ledger.settle(row.commandId, "abandoned", { reason, from })
+      yield* Effect.logWarning(`Couldn't confirm ${row.commandId} went through before restarting: ${reason}`)
+      return { ...row, reason }
+    })
+
+  /**
+   * What came of new work asked for before a restart, by the checks a launch
+   * waits on, and waited for while T3 Code is still getting it ready, as long
+   * after it was asked for as a launch would be, since a thread made for it
+   * doesn't say it started: unless it began, it's given back with why, to say.
+   */
+  const launched = (row: Ledger.Row) =>
+    Effect.gen(function* () {
+      const from = [row.state]
+      const thread = yield* T3CodeLauncher.readied(threads.find(refOf(row)), row.at + Duration.toMillis(T3CodeLauncher.preparation))
+      const ended = Option.flatMap(thread, (thread) => T3CodeLauncher.unstarted(thread, Option.exists(request(row.body), ({ worktree }) => worktree === true)))
+      if (Option.exists(thread, (thread) => T3CodeLauncher.progress(thread) === "begun")) {
+        yield* ledger.settle(row.commandId, "sent", { from })
+        yield* Effect.logInfo(`Found ${row.commandId} started after restarting`)
+        return Option.none<Ledger.Row>()
+      }
+      if (Option.isNone(ended)) return Option.some(yield* unverified(row, Option.isSome(thread) ? gettingReady : unconfirmable))
+      yield* ledger.settle(row.commandId, "failed", { reason: ended.value, from })
+      yield* Effect.logWarning(`${row.commandId} didn't start before restarting: ${ended.value}`)
+      return Option.some<Ledger.Row>({ ...row, state: "failed", reason: ended.value })
+    })
+
   return {
     run: (step, act, options = {}) => {
       const wanted = options.wanted ?? Effect.succeed(true)
@@ -849,56 +898,33 @@ export const make = (options: {
       const open = yield* ledger.open(0)
       const undelivered: Array<Ledger.Row> = []
       const unconfirmed: Array<Ledger.Row> = []
+      const readying: Array<Ledger.Row> = []
       // What this run did is settled, or offered again, as it happens.
       for (const row of open.filter(({ at }) => at < started)) {
         // Only from where it was, in case something came of it since it was read.
         const from = [row.state]
-        /**
-         * Not confirmed, it's said once, with why, and never done again. A
-         * message stays as it may be, never offered again on its own, so the
-         * same words said again find it, and are offered under its own ids.
-         */
-        const unverified = (reason: string) =>
-          Effect.gen(function* () {
-            if (row.kind === "message") {
-              yield* ledger.settle(row.commandId, "unknown", { reason, from })
-              yield* ledger.leave(row.commandId, reason)
-            } else yield* ledger.settle(row.commandId, "abandoned", { reason, from })
-            yield* Effect.logWarning(`Couldn't confirm ${row.commandId} went through before restarting: ${reason}`)
-            unconfirmed.push({ ...row, reason })
-          })
         const actions = threads.actions(row.machine)
         if (Option.isNone(actions)) {
-          yield* unverified(`I can't reach the threads on ${row.machine} right now.`)
+          unconfirmed.push(yield* unverified(row, `I can't reach the threads on ${row.machine} right now.`))
           continue
         }
-        // New work, by the checks a launch waits on, and waited for while T3 Code is still getting it ready, as long after it was asked for
-        // as a launch would be: a thread made for it doesn't say it started.
+        // New work T3 Code is still getting ready is waited for on its own, so nothing else waits behind it, and what isn't is told now.
         if (row.kind === "start") {
-          const thread = yield* T3CodeLauncher.readied(threads.find(refOf(row)), row.at + Duration.toMillis(T3CodeLauncher.preparation))
-          const ended = Option.flatMap(thread, (thread) => T3CodeLauncher.unstarted(thread, Option.exists(request(row.body), ({ worktree }) => worktree === true)))
-          if (Option.exists(thread, (thread) => T3CodeLauncher.progress(thread) === "begun")) {
-            yield* ledger.settle(row.commandId, "sent", { from })
-            yield* Effect.logInfo(`Found ${row.commandId} started after restarting`)
-          } else if (Option.isSome(ended)) {
-            const reason = ended.value
-            yield* ledger.settle(row.commandId, "failed", { reason, from })
-            yield* Effect.logWarning(`${row.commandId} didn't start before restarting: ${reason}`)
-            unconfirmed.push({ ...row, state: "failed", reason })
-          } else yield* unverified(Option.isSome(thread) ? gettingReady : unconfirmable)
+          if (Option.exists(yield* threads.find(refOf(row)), (thread) => readies.includes(T3CodeLauncher.progress(thread)))) readying.push(row)
+          else unconfirmed.push(...Option.toArray(yield* launched(row)))
           continue
         }
         const found = yield* Effect.either(landed(row, actions.value))
         if (Either.isLeft(found)) {
-          yield* unverified(`I couldn't look for it just now: ${after(plainly(found.left.reason))}`)
+          unconfirmed.push(yield* unverified(row, `I couldn't look for it just now: ${after(plainly(found.left.reason))}`))
           continue
         }
         if (found.right) {
           yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }), from })
           yield* Effect.logInfo(`Found ${row.commandId} after restarting: it got there`)
-        } else if (row.kind !== "message") yield* unverified(unconfirmable)
+        } else if (row.kind !== "message") unconfirmed.push(yield* unverified(row, unconfirmable))
         // Too long ago to send again, it's only said.
-        else if (now - row.at > recent) yield* unverified(tooLong)
+        else if (now - row.at > recent) unconfirmed.push(yield* unverified(row, tooLong))
         else {
           yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", from })
           yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
@@ -915,7 +941,11 @@ export const make = (options: {
         yield* Effect.logWarning(`${row.commandId} went, but I restarted before I could do what came next: ${next.value}`)
         unconfirmed.push({ ...row, reason: unfollowed })
       }
-      return { undelivered, unconfirmed } satisfies Reconciled
+      return {
+        undelivered,
+        unconfirmed,
+        readying: Effect.map(Effect.forEach(readying, launched, { concurrency: "unbounded" }), (rows) => rows.flatMap(Option.toArray)),
+      } satisfies Reconciled
     }),
   }
 }
