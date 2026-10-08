@@ -388,7 +388,8 @@ const Providers = Schema.Struct({ providers: Schema.Array(Provider) })
 const heard = <A, R>(effect: Effect.Effect<A, LaunchError | Server.Trouble | Server.Refusal, R>) =>
   effect.pipe(
     Effect.catchTags({
-      Trouble: (error) => Effect.fail(new LaunchError({ reason: reason(error), cause: error.cause })),
+      Trouble: (error) =>
+        Effect.fail(new LaunchError({ reason: reason(error), cause: error.cause, ...(error.sent === true ? { sent: true } : {}) })),
       Refusal: (error) => Effect.fail(new LaunchError({ reason: reason(error), cause: error })),
     }),
   )
@@ -428,9 +429,13 @@ export const launcher = (
       const latest = newest(shell, project)[0]?.modelSelection
       const decided = yield* Either.mapLeft(plan({ request, project, settings, file: mode, latest, providers, refs, named }), refuse)
 
-      const started = ids()
+      // Under the ids yapd wrote down before asking, when it did, so asking again starts it once.
+      const started = request.ids === undefined ? ids() : { ...ids(), ...request.ids }
+      /** Whether T3 Code took the launch, after which whatever goes wrong may have left it started. */
+      let asked = false
       const prepared = yield* Effect.gen(function* () {
         let launched = yield* call("orchestration.launchThread", launch(decided, started), Launched, "30 seconds")
+        asked = true
         // T3 Code gets the workspace ready after answering. Fetching and checking out can take minutes.
         while (preparing(launched)) {
           yield* Effect.sleep("1 second")
@@ -440,9 +445,13 @@ export const launcher = (
       }).pipe(
         Effect.timeoutFail({ duration: "6 minutes", onTimeout: () => new Server.Trouble({ reason: "T3 Code is taking too long." }) }),
         Effect.mapError((error) =>
-          error._tag === "Trouble" && error.reason === "T3 Code is taking too long."
-            ? new Server.Trouble({ reason: "T3 Code is taking too long, so I don't know if it started." })
-            : error,
+          error._tag !== "Trouble"
+            ? error
+            : error.reason === "T3 Code is taking too long."
+              ? new Server.Trouble({ reason: "T3 Code is taking too long, so I don't know if it started.", sent: true })
+              : asked
+                ? new Server.Trouble({ ...error, sent: true })
+                : error,
         ),
       )
       if (failed(prepared)) {
