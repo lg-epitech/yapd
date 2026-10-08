@@ -30,7 +30,7 @@ describe("Research", () => {
     )
     expect(await Effect.runPromise(researcher.research(request))).toEqual({ prompt: "Fix it." })
     expect(calls[0]?.command).toEqual([
-      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", "me@rig.example.com", "cd / && yapd research",
+      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes", "--", "me@rig.example.com", "cd / && yapd research",
     ])
     expect(JSON.parse(calls[0]?.stdin ?? "")).toEqual(request)
   })
