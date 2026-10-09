@@ -617,18 +617,18 @@ const leaving: ReadonlySet<string> = new Set([
   ...enough, "never mind", "nevermind", "forget it", "forget about it", "leave it", "cancel", "stop asking", "drop it",
 ])
 
+/** A question that asks which, how or what, rather than whether, like "Which colour?" or "What now?": never "What about the cache?". */
+const asksWhich = /^(?:which|what(?! about)|what's|how(?! about)|where|when|who|whom|whose|why)\b/i
+
 /**
- * Whether a plain yes or no answers the part's question itself, like
- * "Should I keep the cache?", by its last sentence: never one that asks
+ * Whether a plain yes or no answers the part's question itself, by its last
+ * sentence, however it's put: "Should I keep the cache?", "Is caching still
+ * needed?", "Ready to merge?" or "Keep the old config?". Never one that asks
  * which, nor one that names two things, like "Red or Blue".
  */
 const whether = (part: Said) => {
-  const last = part.question.split(/(?<=[.!?:])\s+/).at(-1) ?? ""
-  return (
-    /^(?:should|shall|can|could|may|must|do|does|did|is|are|was|will|would|have|has)\s+(?:i|we|you|it|they|this|that|these|those|there|the|my|our|your)\b/i.test(last) &&
-    last.endsWith("?") &&
-    !/\bor\b/i.test(last)
-  )
+  const last = (part.question.split(/(?<=[.!?:])\s+/).at(-1) ?? "").replace(/^(?:so|and|then|now|also)\b,?\s*/i, "")
+  return last.endsWith("?") && !/\bor\b/i.test(last) && !asksWhich.test(last)
 }
 
 /** Whether it answers how it's asked rather than which option, which then only an option's name in full picks. */

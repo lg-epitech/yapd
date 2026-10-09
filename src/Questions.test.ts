@@ -286,12 +286,28 @@ describe("Questions", () => {
     const cache = part("Should I keep the cache?", ["Drop it (Recommended)", "Keep it"])
     expect(["Yes.", "Sure.", "No.", "Nope."].map((heard) => pick(cache, heard))).toEqual([undefined, undefined, undefined, undefined])
     expect(pick(part("The cache is stale. Can we keep it for now?", ["Drop it (Recommended)", "Keep it"]), "Yes.")).toBeUndefined()
+    // However the question that asks whether is put: with any subject, or none, or starting with what it would do.
+    for (const asked of [
+      "Should migrations run first?",
+      "Should tests be added for the loader?",
+      "Is caching still needed?",
+      "Can CI run without the fixtures?",
+      "OK to drop the cache?",
+      "Ready to merge?",
+      "Proceed with the migration?",
+      "Keep the old config?",
+      "So, should I do it now?",
+    ]) {
+      expect([asked, pick(part(asked, ["Do it", "Skip it for now (Recommended)"]), "Yes.")]).toEqual([asked, undefined])
+    }
+    expect(pick(part("Want me to add tests?", ["Add unit tests", "Skip tests (Recommended)"]), "Yes.")).toBeUndefined()
     // What only agrees with yapd's pick still takes it.
     expect(["Sounds good.", "Your pick."].map((heard) => pick(cache, heard))).toEqual([picked(0), picked(0)])
     // A question that asks which, or names its options, takes a yes as yapd's pick, and a no as which one then, as before.
     const colour = part("Which colour should the test use?", ["Red", "Blue (Recommended)"])
     expect([pick(colour, "Yes."), pick(colour, "No.")]).toEqual([picked(1), { _tag: "Instead" }])
     expect(pick(part("Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
+    expect(pick(part("The test needs a colour. So, which one should it use?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
     // An option that is a yes or a no is still what a yes or no picks.
     const invoices = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
     expect([pick(invoices, "Yes."), pick(invoices, "No.")]).toEqual([picked(0), picked(1)])
