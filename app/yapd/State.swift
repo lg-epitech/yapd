@@ -47,7 +47,7 @@ struct Status: Decodable {
 /// The card the panel shows, following the one yapd points at: put up once it's fetched, which is tried again a few times, a
 /// while apart, as long as yapd still points at it, and taken away when yapd takes it down. What yapd points at is only what
 /// it asks for, so on connecting, even to the same card, it's checked against what the panel actually shows, which may have
-/// faded while yapd was away.
+/// faded while yapd was away. A card shown again from the menu is fetched too, and shown only if nothing newer came meanwhile.
 @MainActor
 final class Following {
   /// What it does with the panel, and asks of yapd.
@@ -61,6 +61,8 @@ final class Following {
     /// Has yapd take this card down too, as `DELETE /cards/current?id=`, which it does only while it's still the one up, so a
     /// request that gets there late never takes down a card put up since.
     let takeDown: @MainActor (String) -> Void
+    /// Has yapd put this card back up, as `PUT /cards/current`, so it points at it again and "hide that" takes it down.
+    let putBack: @MainActor (String) -> Void
     /// Waits before trying again.
     let wait: @MainActor (Duration) async -> Void
   }
@@ -79,6 +81,11 @@ final class Following {
   private var untold: String?
   /// Fetching the card yapd points at to put it up, which stops when it points at another.
   private var putting: Task<Void, Never>?
+  /// Fetching the card asked last to be shown again, which stops when anything newer comes first.
+  private var replaying: Task<Void, Never>?
+  /// How many times the panel was told something newer than a card being fetched to show again, so one whose fetch comes back
+  /// after that, even had it missed being stopped, is left unshown.
+  private var newer = 0
 
   init(_ doing: Doing) {
     self.doing = doing
@@ -90,6 +97,8 @@ final class Following {
     let untold = self.untold
     self.untold = nil
     guard connecting || showing?.id != wanted else { return }
+    // What yapd says is up now comes after a card asked to be shown again before, so that one isn't.
+    supersede()
     wanted = showing?.id
     putting?.cancel()
     putting = nil
@@ -115,23 +124,43 @@ final class Following {
 
   /// The panel put a card away, by its close button or by fading: yapd takes it down too, unless it points at another since.
   func closed(_ id: String) {
+    // Put away since it was asked for, the panel isn't to be put back up by a card shown again late.
+    supersede()
     if shown == id { shown = nil }
     guard wanted == id else { return }
     if connected { doing.takeDown(id) } else { untold = id }
   }
 
-  /// Shows a card fetched again, with nothing said of it, which yapd is asked to point at too.
-  func showAgain(_ card: Card) {
-    putting?.cancel()
-    putting = nil
-    wanted = card.id
-    shown = card.id
-    doing.show(card, false)
+  /// Fetches one of the cards yapd showed lately and shows it again, with nothing said of it, and has yapd put it back up too,
+  /// unless yapd points at another, hides it or connects, or a card is put away, before it's fetched: what came last wins, so a
+  /// fetch that comes back late never replaces a card put up since or undoes a hide. `gone` when yapd no longer has it.
+  func showAgain(_ id: String, gone: @escaping @MainActor () -> Void) {
+    supersede()
+    let asked = newer
+    replaying = Task {
+      let card = await doing.fetch(id)
+      // Stopped, a fetch that failed only for that says nothing of whether yapd still has it.
+      guard !Task.isCancelled, asked == newer else { return }
+      guard let card else { return gone() }
+      putting?.cancel()
+      putting = nil
+      wanted = card.id
+      shown = card.id
+      doing.show(card, false)
+      doing.putBack(card.id)
+    }
   }
 
-  /// Once the card being fetched is put up, or given up on.
+  /// Once the card being fetched is put up, or given up on, and the one fetched last to show again has come back, shown or not.
   func settled() async {
     await putting?.value
+    await replaying?.value
+  }
+
+  /// Stops showing again a card still being fetched for it, as the panel was told something newer.
+  private func supersede() {
+    newer += 1
+    replaying?.cancel()
   }
 
   /// Fetches the card and puts it up, trying again a few times, a while apart, as long as yapd points at it.

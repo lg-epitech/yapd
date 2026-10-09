@@ -27,6 +27,7 @@ final class Yapd {
         show: { card, talking in panel.show(card, talking: talking) },
         hide: { panel.hide() },
         takeDown: { id in Yapd.send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },
+        putBack: { id in Yapd.send("PUT", "cards/current", body: try? JSONEncoder().encode(["id": id]), to: api) },
         wait: { delay in try? await Task.sleep(for: delay) }
       )
     )
@@ -98,17 +99,13 @@ final class Yapd {
     send("POST", "updates/\(update.id)/replay")
   }
 
-  /// Shows the last card again, for a while, with nothing said of it, and has yapd put it back up too, so "hide that" takes it down.
+  /// Shows the last card again, for a while, with nothing said of it, and has yapd put it back up too, so "hide that" takes it
+  /// down, unless yapd shows or hides a card, or one is put away, before it's fetched.
   func showLast() {
     guard let last else { return }
-    Task {
-      guard let card = await Yapd.fetch(last, from: api) else {
-        // Gone, with a yapd that restarted since or after twenty more, so there's nothing to show again.
-        if self.last == last { self.last = nil }
-        return
-      }
-      following.showAgain(card)
-      send("PUT", "cards/current", body: try? JSONEncoder().encode(["id": card.id]))
+    following.showAgain(last) {
+      // Gone, with a yapd that restarted since or after twenty more, so there's nothing to show again.
+      if self.last == last { self.last = nil }
     }
   }
 

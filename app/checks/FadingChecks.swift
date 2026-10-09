@@ -46,6 +46,7 @@ private final class Faded {
       show: { _, talking in fading.shown(talking: talking) },
       hide: { fading.hidden() },
       takeDown: { _ in },
+      putBack: { _ in },
       wait: { _ in }
     ))
     following.follow(pointing("c1", fresh: true), connecting: false)
