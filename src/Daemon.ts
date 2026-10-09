@@ -123,8 +123,8 @@ export const make = (
    * A turn T3 Code said finished that no hook had told of, said in its hook's
    * place, under the session `finished:<machine>:<thread>`: what tells a Stop
    * of its own from another's, which is what decides the turn is its, and
-   * whether it's begun being said, after which a Stop of its own coming late,
-   * while nothing started since, isn't said too; until then, one gives way to it.
+   * whether he's hearing it or heard it, after which a Stop of its own coming
+   * late isn't said too; until then, one gives way to it.
    */
   interface Fallback {
     readonly about: Threads.Ref
@@ -134,7 +134,12 @@ export const make = (
     /** Whether it's still the thread's run, which ends once the thread starts again or goes. */
     readonly current: Effect.Effect<boolean>
     readonly at: number
-    begun: boolean
+    /**
+     * Whether it's being said, or he heard it to the end, answered it or told
+     * it to stop. Broken off before then, like by turning yapd off, or put
+     * back by a dictation to be read again, it isn't, until it's said again.
+     */
+    heard: boolean
     /** Its entry in the journal, once it's kept, to note as dealt with if a Stop of its own takes its place. */
     row?: number
   }
@@ -608,21 +613,22 @@ export const make = (
   /** The Stops of these sessions in the last hour, oldest first, by the agent's own ids for them. */
   const stopsOf = (sessions: ReadonlyArray<string>) => sessions.flatMap((session) => stops.get(session) ?? []).toSorted((a, b) => a.at - b.at)
 
-  /** Turns said in a hook's place under this session that haven't begun being said, which are dropped with what's waiting under it. */
+  /** Turns said in a hook's place under this session that he isn't hearing and didn't hear, which are dropped with what's waiting under it. */
   const forsake = (session: string) => {
-    for (const [key, fallback] of fallbacks) if (fallback.session === session && !fallback.begun) fallbacks.delete(key)
+    for (const [key, fallback] of fallbacks) if (fallback.session === session && !fallback.heard) fallbacks.delete(key)
   }
 
   /**
    * A Stop came for a turn T3 Code's word may have been said of in its hook's
    * place, by the session its run had, `prompted` last through the hooks. One
-   * still to be said gives way to a Stop of its own, or to one whose words
-   * can't be told, which is then dealt with, as the Stop's own update is said
-   * in its stead. One begun being said was the turn's, so such a Stop is
-   * given back for its update not to be, as long as nothing started since:
-   * the thread is still on that run, and no prompt came through the hooks
-   * since it was taken on. After that, the Stop is a newer turn's, however
-   * alike their words, and it's said. Called with the event lock held.
+   * he hasn't heard, still to be said or broken off, gives way to a Stop of
+   * its own, or to one whose words can't be told, which is then dealt with,
+   * as the Stop's own update is said in its stead. One he's hearing or heard
+   * was the turn's, so such a Stop is given back for its update not to be,
+   * as long as nothing started since: the thread is still on that run, and
+   * no prompt came through the hooks since it was taken on. After that, the
+   * Stop is a newer turn's, however alike their words, and it's said. Called
+   * with the event lock held.
    */
   const giveWay = (session: string, stop: Notices.Stop, prompted: number | undefined) =>
     Effect.gen(function* () {
@@ -630,7 +636,7 @@ export const make = (
       for (const fallback of [...fallbacks.values()].filter((fallback) => fallback.run.natives.includes(session))) {
         const whose = Notices.whose(stop, fallback.run)
         if (whose === "another") continue
-        if (fallback.begun) {
+        if (fallback.heard) {
           // A newer turn started since, which a Stop now is: this one stands for nothing more.
           if (!(yield* fallback.current) || (prompted !== undefined && prompted > fallback.at)) {
             fallbacks.delete(fallback.key)
@@ -648,10 +654,10 @@ export const make = (
     })
 
   /**
-   * A turn said in its hook's place, as its turn to be said comes: begun, it's
-   * the turn's, so a Stop of its own coming later isn't said too; unless it
-   * gave way to one already, or its thread is on another run by now. Taken
-   * with the event lock held, so it's one or the other.
+   * A turn said in its hook's place, as its turn to be said comes: being
+   * heard, it's the turn's, so a Stop of its own coming later isn't said too;
+   * unless it gave way to one already, or its thread is on another run by
+   * now. Taken with the event lock held, so it's one or the other.
    */
   const begin = (fallback: Fallback) =>
     Effect.gen(function* () {
@@ -660,8 +666,20 @@ export const make = (
         fallbacks.delete(fallback.key)
         return false
       }
-      fallback.begun = true
+      fallback.heard = true
       return true
+    }).pipe(events.withPermits(1))
+
+  /**
+   * A turn said in its hook's place that he didn't hear after all, like one
+   * broken off by turning yapd off, or put back by a dictation to be read
+   * again: it isn't the turn's until it's said again, so a Stop of its own
+   * coming before then is said in its stead. Taken with the event lock held,
+   * like `begin`, so a Stop coming as it ends finds it one or the other.
+   */
+  const unheard = (fallback: Fallback) =>
+    Effect.sync(() => {
+      fallback.heard = false
     }).pipe(events.withPermits(1))
 
   /**
@@ -691,7 +709,7 @@ export const make = (
         run: input.run,
         current: input.current,
         at,
-        begun: false,
+        heard: false,
       }
       forsake(session)
       fallbacks.set(input.key, fallback)
@@ -991,6 +1009,9 @@ export const make = (
       }
       const row = rows.get(update)
       if (row !== undefined) yield* journal.markHeard([row], yield* Clock.currentTimeMillis)
+      // Said in its hook's place, it's the turn's, so a Stop of its own coming later isn't said either.
+      const fallback = standing.get(update)
+      if (fallback !== undefined) fallback.heard = true
     })
 
   /**
@@ -1025,7 +1046,7 @@ export const make = (
     // What was about to be ready never came, so the speaker rests again, the next time round.
     if (Option.isNone(next)) return
     const { ready, turns } = next.value
-    // A turn said in its hook's place is the turn's once it's begun, unless it gave way to a Stop of its own, or its thread was on another run, by now.
+    // A turn said in its hook's place is the turn's as he hears it, unless it gave way to a Stop of its own, or its thread was on another run, by now.
     const fallback = "update" in ready ? standing.get(ready.update) : undefined
     if (fallback !== undefined && !(yield* begin(fallback))) {
       yield* removeFile(Inbox.audio(ready))
@@ -1092,6 +1113,8 @@ export const make = (
         ),
       ),
       Effect.ensuring(STM.commit(TRef.set(floor.reading, false))),
+      // Broken off before he heard it, or put back to be read again, it isn't the turn's until he does.
+      Effect.ensuring(Effect.suspend(() => (fallback === undefined || through ? Effect.void : unheard(fallback)))),
       Effect.ensuring(
         Effect.gen(function* () {
           if (!("update" in ready)) return

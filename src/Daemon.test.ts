@@ -1257,6 +1257,82 @@ describe("Daemon", () => {
     ).toEqual({ played: ["yapd. The loader is fixed.", "yapd. The tests pass now."], through: [] })
   })
 
+  test("a turn no hook told of that he didn't hear after all, broken off or put back to be read again, gives way to a Stop of its own, unless he told it to stop", async () => {
+    const linked = { link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }) }
+    /** The loader's turn, said in its hook's place in more words than its Stop's update has, ending the same. */
+    const loader = (turns: number) => ({ ...unhooked("The loader is fixed.", "run-1", turns), turn: { prompt: Option.some("Fix the loader."), message: "Looked into it. The loader is fixed." } })
+    const fallback = "yapd. Looked into it. The loader is fixed."
+    const stop = (handle: Handle) =>
+      handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: "The loader is fixed." }, { project: "yapd", host: hostname() }, false)
+    /** What was played, what was kept as said through T3 Code's word, and what he missed, once the Stop's had time to be said. */
+    const after = (played: ReadonlyArray<string>, journal: Journal.Journal["Type"], wait: (seconds: number) => Effect.Effect<void>) =>
+      Effect.gen(function* () {
+        yield* wait(11)
+        yield* wait(11)
+        const kept = yield* journal.since(0, { kinds: ["action"] })
+        return { played: [...played], through: kept.map(({ detail }) => (detail as { through?: string }).through), missed: (yield* journal.unheard(0, 60)).map(({ said }) => said) }
+      })
+    const said = { played: [fallback, "yapd. The loader is fixed."], through: [], missed: [] }
+    // Its playback broke off, as when the audio helper quits.
+    expect(
+      await run(
+        Effect.gen(function* () {
+          const { made, wait, played, handle, journal, nextEvent } = yield* make(undefined, { ...linked, breaks: { [fallback]: 3 } })
+          yield* made.finished(loader((yield* made.power).turns))
+          yield* nextEvent("Ready:")
+          yield* wait(11)
+          yield* stop(handle)
+          return yield* after(played, journal, wait)
+        }),
+      ),
+    ).toEqual(said)
+    // yapd was turned off and on as it was said.
+    expect(
+      await run(
+        Effect.gen(function* () {
+          const { made, wait, played, handle, journal, nextEvent, nextPlayback, toggle } = yield* make(undefined, linked)
+          yield* made.finished(loader((yield* made.power).turns))
+          yield* nextEvent("Ready:")
+          yield* nextPlayback
+          yield* toggle(false)
+          yield* toggle(true)
+          yield* stop(handle)
+          return yield* after(played, journal, wait)
+        }),
+      ),
+    ).toEqual(said)
+    // A dictation cut it off and put it back, and its Stop came meanwhile: that's said, rather than it again.
+    expect(
+      await run(
+        Effect.gen(function* () {
+          const { made, wait, played, handle, journal, nextEvent, nextPlayback, dictate } = yield* make(undefined, linked)
+          yield* made.finished(loader((yield* made.power).turns))
+          yield* nextEvent("Ready:")
+          yield* nextPlayback
+          const dictation = yield* dictate
+          yield* stop(handle)
+          yield* Scope.close(dictation, Exit.void)
+          yield* wait(0)
+          return yield* after(played, journal, wait)
+        }),
+      ),
+    ).toEqual(said)
+    // He told it to stop: he's heard enough of that turn, so its Stop isn't said either.
+    expect(
+      await run(
+        Effect.gen(function* () {
+          const { made, wait, played, handle, journal, nextEvent, dictating } = yield* assisted(() => Brain.decision({ act: "answer", spoken: "Asked." }), linked)
+          yield* made.finished(loader((yield* made.power).turns))
+          yield* nextEvent("Ready:")
+          yield* wait(2)
+          yield* dictating("Stop.")
+          yield* stop(handle)
+          return yield* after(played, journal, wait)
+        }),
+      ),
+    ).toEqual({ played: [fallback], through: ["done:Rosie:run-1"], missed: [] })
+  })
+
   test("a turn no hook told of isn't said once its thread is no longer on that run, whether it's found as it's queued or as its turn to be said comes", async () => {
     const result = await run(
       Effect.gen(function* () {
