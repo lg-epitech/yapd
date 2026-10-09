@@ -1765,7 +1765,9 @@ describe("Assistant", () => {
       expect(result.spoken).toEqual(["Alpha and Gamma it is, sir."])
       expect(result.answers).toEqual([{ [extras.id]: ["Alpha", "Gamma"] }])
     }
-    expect((await answering("All but Beta.")).asked).toBe(0)
+    // A list of whole names needs no model; all but some is the model's, since it takes what he may not have heard.
+    expect((await answering("Alpha and Gamma.")).asked).toBe(0)
+    expect((await answering("All but Beta.")).asked).toBe(1)
   })
 
   test("a number alone to options named with numbers is the model's to tell, which sends the option with that number, never the one in that place, and its whole name needs no model", async () => {
@@ -2532,7 +2534,7 @@ describe("Assistant", () => {
         yield* made.wait(60)
         yield* made.unanswered()
         yield* made.dictate("What's the question?")
-        yield* made.answer("All of them.")
+        yield* made.answer("Alpha, Beta and Gamma.")
         return { spoken: made.spoken().slice(2), answers: answered(made.dispatched), asked: made.seen.length }
       }),
     )
@@ -2696,7 +2698,7 @@ describe("Assistant", () => {
         // The second part's turn never comes: he asks for the question before it's said.
         yield* made.dictate("What's the question?")
         yield* made.play()
-        yield* made.answer("All of them.")
+        yield* made.answer("Alpha, Beta and Gamma.")
         return { spoken: made.spoken().slice(2), answers: answered(made.dispatched) }
       }),
     )

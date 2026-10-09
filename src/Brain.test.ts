@@ -254,7 +254,9 @@ describe("Brain", () => {
     expect(decided("Later.", 0)).toEqual({ act: "dismiss", how: "later", text: "", pending: "answers" })
     expect(decided("Skip that one.", 0)).toEqual({ act: "reply", how: "skip", text: "", pending: "answers" })
     expect(decided("Red, please.", 0)).toEqual({ act: "reply", how: "", text: "Red", pending: "answers" })
-    expect(decided("All but Beta.", 1)).toEqual({ act: "reply", how: "", text: "Alpha\nGamma (Recommended)", pending: "answers" })
+    expect(decided("Alpha and Gamma.", 1)).toEqual({ act: "reply", how: "", text: "Alpha\nGamma (Recommended)", pending: "answers" })
+    // All but some is the model's, since it takes what he may not have heard.
+    expect(decided("All but Beta.", 1)).toBeUndefined()
     // With nothing open, about the thread he's on about while it asks him something: read to him again.
     const asking = thread("9b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e", "Cloud deployment discovery", "p-std", {
       pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "2026-10-08T21:58:00.000Z" },

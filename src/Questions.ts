@@ -55,7 +55,7 @@ export interface Said {
   /**
    * The options he was offered last, by their place in the part, when that
    * isn't all of them: the others, once he's turned down yapd's pick. A
-   * place or "all" counts among these, as he heard them.
+   * place counts among these, as he heard them.
    */
   readonly among?: ReadonlyArray<number> | undefined
 }
@@ -731,23 +731,11 @@ const listed = (part: Said, heard: string): ReadonlyArray<number> | undefined =>
   return found.every((index) => index !== undefined) ? [...new Set(found)].toSorted((a, b) => a - b) : undefined
 }
 
-/** All of them, both of two, or all but some: "all", "everything", "both", "all but Beta", of what he was offered last. */
-const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => {
-  const every = offeredLast(part)
-  if (["all", "all of them", "everything", "every one", "all of those"].includes(said)) return every
-  if (["both", "both of them"].includes(said) && every.length === 2) return every
-  const but = /^(?:all|everything)(?: of them)? (?:but|except|except for|apart from|other than|bar) (.+)$/.exec(said)
-  const left = but === null ? undefined : listed(part, but[1] ?? "")
-  const kept = left === undefined ? [] : every.filter((index) => !left.includes(index))
-  return kept.length > 0 ? kept : undefined
-}
-
 /**
  * What he said to a part comes to, without the model, only when that's
  * plain: an option's whole name, as `wholly` has it; its place, when he
  * heard them in order and no name has a word a place is said with; for a
- * part that takes several, every option, all but some, or a list of whole
- * names; a plain yes or no to the option named Yes or No, or "Yes, …" or
+ * part that takes several, a list of whole names; a plain yes or no to the option named Yes or No, or "Yes, …" or
  * "No, …"; yapd's pick, on a plain yes once he's heard it in full, unless
  * the question asks whether or an option starts with a yes or a no, or on
  * "your pick"; his own words for "you decide" or "none of those"; or what
@@ -776,7 +764,8 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (!steers(said)) {
     const placed = byPlace(part, said, asked.inFull)
     if (placed !== undefined) return picked([placed])
-    const several = part.several ? (wholes(part, said) ?? listed(part, heard)) : undefined
+    // Of several, only a list of whole names: "all", "both" or "all but Beta" are the model's, since they take what he may not have heard.
+    const several = part.several ? listed(part, heard) : undefined
     return several === undefined ? undefined : picked(several)
   }
   const recommended = Option.getOrUndefined(part.recommended)

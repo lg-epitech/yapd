@@ -416,10 +416,10 @@ describe("Questions", () => {
       false,
     ])
     expect(["Wait for CI, I think.", "Wait, I think.", "CI, I think.", "Don't wait for CI."].map((heard) => Questions.mentions(waiting, 1, heard))).toEqual([true, false, false, false])
-    // Of several, each piece is held to the same, and so is what's left of all but some: only whole names.
+    // Of several, each piece is held to the same: only whole names.
     const checks = part("Which checks should run?", ["Lint", "Tests", "Skip docs"], { multiSelect: true })
     const several = (heard: string) => Questions.pick(checks, heard, { inFull: true, parts: 1 })
-    expect(["Lint and docs.", "All but docs.", "Lint and skip docs.", "All but skip docs."].map(several)).toEqual([undefined, undefined, picked(0, 2), picked(0, 1)])
+    expect(["Lint and docs.", "All but docs.", "Lint and skip docs.", "All but skip docs."].map(several)).toEqual([undefined, undefined, picked(0, 2), undefined])
     expect(Questions.resolve(checks, "Lint\nDocs")).toEqual({ _tag: "Words", text: "Lint\nDocs" })
     expect(Questions.pick(part("Which checks should run?", ["No", "Docs", "Tests"], { multiSelect: true }), "No docs.", { inFull: true, parts: 1 })).toBeUndefined()
   })
@@ -739,7 +739,7 @@ describe("Questions", () => {
     expect(Questions.mentions(colour, 1, "The first one, I think.")).toBe(true)
     expect(Questions.mentions(colour, 0, "The first one, I think.")).toBe(false)
     const extras = { ...part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)"], { multiSelect: true }), recommended: Option.none<number>(), among: [0, 1] }
-    expect(["All of them.", "Both.", "Alpha and Beta.", "The first and the second."].map((heard) => pick(extras, heard))).toEqual([picked(0, 1), picked(0, 1), picked(0, 1), undefined])
+    expect(["All of them.", "Both.", "Alpha and Beta.", "The first and the second."].map((heard) => pick(extras, heard))).toEqual([undefined, undefined, picked(0, 1), undefined])
   })
 
   test("when the question names its options so they aren't read, a place is the model's to tell, since he heard them in the question's order, not the agent's", () => {
@@ -776,7 +776,7 @@ describe("Questions", () => {
     expect(["C", "C++"].map((text) => Questions.resolve(plain, text))).toEqual([picked(0), picked(1)])
   })
 
-  test("a multi-select answer takes lists of whole names, 'all', 'both', 'all but X' and 'none'", () => {
+  test("a multi-select answer takes only lists of whole names and 'none' without the model: 'all', 'both' and 'all but X' are the model's, since they take what he may not have heard", () => {
     const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
     const pick = (heard: string) => Questions.pick(extras, heard, { inFull: true, parts: 2 })
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
@@ -788,15 +788,15 @@ describe("Questions", () => {
     expect(pick("Alpha Gamma.")).toBeUndefined()
     expect(pick("And Beta.")).toBeUndefined()
     expect(pick("Just Beta.")).toBeUndefined()
-    expect(pick("All of them.")).toEqual(picked(0, 1, 2, 3))
-    expect(pick("Everything.")).toEqual(picked(0, 1, 2, 3))
-    expect(pick("All but Beta.")).toEqual(picked(0, 2, 3))
-    expect(pick("Everything except Beta and full history.")).toEqual(picked(0, 2))
+    for (const heard of ["All.", "All of them.", "Everything.", "All but Beta.", "Everything except Beta and full history."]) {
+      expect([heard, pick(heard)]).toEqual([heard, undefined])
+    }
+    // Least of all before he's heard every option, like one that drops a database.
+    const steps = part("What should I run?", ["Run tests", "Lint", "Drop the staging database"], { multiSelect: true })
+    expect(["All.", "All but lint."].map((heard) => Questions.pick(steps, heard, { inFull: false, parts: 1 }))).toEqual([undefined, undefined])
     expect(pick("Yes.")).toEqual(picked(2))
     expect(pick("None of them.")).toEqual({ _tag: "Words", text: "None of those." })
-    expect(Questions.pick(part("Which checks?", ["Lint", "Types"], { multiSelect: true }), "Both.", { inFull: true, parts: 1 })).toEqual(picked(0, 1))
-    // "Both" of more than two is the model's to make sense of.
-    expect(Questions.pick(part("Which checks?", ["Lint", "Types", "Tests"], { multiSelect: true }), "Both.", { inFull: true, parts: 1 })).toBeUndefined()
+    expect(Questions.pick(part("Which checks?", ["Lint", "Types"], { multiSelect: true }), "Both.", { inFull: true, parts: 1 })).toBeUndefined()
     expect(pick("Alpha and something else.")).toBeUndefined()
     // Sent as a list straight to the agent, and as one string when T3 Code takes the answer as a message.
     const asked = question(extras.id, ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
