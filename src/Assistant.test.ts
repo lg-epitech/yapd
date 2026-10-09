@@ -991,6 +991,7 @@ describe("Assistant", () => {
       approval("r1", "git push origin main \\\n  --follow-tags"),
       tool("mcp__fs__list_directory", { path: "src", recursive: true }),
       tool("mcp__search__search", { query: "how to remove a recursive function", recursive: true }),
+      tool("mcp__search__grep", { pattern: "delete_user", path: "src", recursive: true }),
     ]) {
       expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
     }

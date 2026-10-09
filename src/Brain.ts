@@ -339,8 +339,10 @@ const risky = new RegExp(
     String.raw`\bflush(?:all|db)\b`,
     String.raw`\bpulumi\s+destroy\b`,
     String.raw`\bsudo\s+rm\b`,
-    // A tool that deletes, by its name, like mcp__github__delete_repository.
-    String.raw`__(?:delete|destroy|drop|remove|purge|wipe)|\b(?:delete|destroy|drop|remove|purge|wipe)_\w+`,
+    // A tool that deletes, by its name, like mcp__github__delete_repository, wherever it's named; named like delete_repository, only as the tool, below.
+    String.raw`__(?:delete|destroy|drop|remove|purge|wipe)`,
+    // Deleting every row, as Rails' `User.delete_all` does.
+    String.raw`\.(?:delete|destroy)_all\b`,
     String.raw`\bprod(?:uction)?\b`,
     String.raw`\bdeploy\w*`,
     String.raw`chmod\s+-R\s+777`,
@@ -576,19 +578,22 @@ const recursing = setTo("recursive|recursively|recurse")
 /** A word that names deleting, like the "rm" of `mcp__fs__rm` or the "delete" of `{"action": "delete"}`. */
 const deletes = /(?:\b|_)(?:rm|rmdir|unlink|delete|remove|erase|trash|destroy|purge|wipe)(?:\b|_)/i
 
-/** A tool's name, as a line of its own or before the JSON it's given, like `mcp__fs__rm {"path": "x"}`. */
-const toolName = /^[\w.:-]+(?=[ \t]*(?:\{|$))/gm
-
-/** What a tool is told to do, under a name like "action" or "command", as its JSON writes it or a line each. */
-const toldTo = /(?:^|")(?:action|operation|op|method|command|mode|type)"?(?:\s*:\s*"|[ \t]*\r?\n)([^"\n]*)/gim
+/** A name that says it deletes for good, by itself, like delete_repository or mcp__github__delete_repository. */
+const deletesForGood = /__(?:delete|destroy|drop|remove|purge|wipe)|\b(?:delete|destroy|drop|remove|purge|wipe)_\w/i
 
 /**
- * Whether a tool deletes, by its name or by what it's told to do, never by
- * any other words it's given, like what a search looks for, which can be
- * "how to remove a recursive function".
+ * A tool's name, where T3Actions writes it: first, on a line of its own or
+ * before the JSON it's given, like `mcp__fs__rm {"path": "x"}`. Any other
+ * line is a name or a value among what it's given, like "remove_duplicates"
+ * or a search for "delete_user", which only looks like one.
  */
-const deleting = (text: string) =>
-  [...text.matchAll(toolName)].some(([name]) => deletes.test(name)) || [...text.matchAll(toldTo)].some(([, what]) => deletes.test(what ?? ""))
+const toolName = /^[\w.:-]+(?=[ \t]*(?:\{|\r?\n|$))/
+
+/** What a tool is told to do, under a name like "action" or "command", or the tool it's told to call, as its JSON writes it or a line each. */
+const toldTo = /(?:^|")(?:action|operation|op|method|command|mode|type|tool|tool[_-]?name)"?(?:\s*:\s*"|[ \t]*\r?\n)([^"\n]*)/gim
+
+/** What a tool does, by its name and what it's told to do, never by any other words it's given, like what a search looks for. */
+const whatItDoes = (text: string) => [...(toolName.exec(text) ?? []), ...[...text.matchAll(toldTo)].map(([, what]) => what ?? "")]
 
 /** Whether what a command, or a few, would run is risky, by what it says or by a flag after its name, of those that count for what runs. */
 const riskyToRun = (run: string) => risky.test(run) || commands(run).some((command) => flaggable.test(command) && counting(command).some((risks) => risks(command)))
@@ -596,18 +601,16 @@ const riskyToRun = (run: string) => risky.test(run) || commands(run).some((comma
 /**
  * Whether what a thread wants to do is risky, by what it says it would run
  * or change, as the shell would run it, or by what a tool is told to do in
- * so many words.
+ * so many words: a tool that deletes for good, by its name or what it's told
+ * to do, or one that deletes told to take all that's under what it's given,
+ * which a search for "how to remove a recursive function" never is.
  */
 export const dangerous = (text: string) => {
   const command = continued(text)
   const quoteless = unquoted(command)
-  return (
-    riskyToRun(command) ||
-    (quoteless !== command && riskyToRun(quoteless)) ||
-    forcing.test(text) ||
-    overwriting.test(text) ||
-    (recursing.test(text) && deleting(text))
-  )
+  if (riskyToRun(command) || (quoteless !== command && riskyToRun(quoteless)) || forcing.test(text) || overwriting.test(text)) return true
+  const does = whatItDoes(text)
+  return does.some((what) => deletesForGood.test(what)) || (recursing.test(text) && does.some((what) => deletes.test(what)))
 }
 
 /**

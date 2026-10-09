@@ -368,6 +368,9 @@ describe("Brain", () => {
       "git --no-pager branch -D old",
       "git -c core.pager='rm -rf ~/work' log",
       "echo rm -rf ~/work | xargs -0 sh -c",
+      'mcp__proxy__call {"tool":"remove_directory","path":"build"}',
+      "mcp__fs__delete_file\npath\nbuild",
+      "bin/rails runner 'User.delete_all'",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -422,6 +425,12 @@ describe("Brain", () => {
       'git commit -m "push --force"',
       "git -C ~/work log --grep branch -D",
       "bash -c 'grep rm -r src'",
+      'mcp__search__search {"query":"remove","recursive":true}',
+      "mcp__search__search\nquery\nremove\nrecursive\ntrue",
+      'mcp__search__grep {"pattern":"delete_user","path":"src","recursive":true}',
+      "mcp__search__grep\npattern\ndelete_user\npath\nsrc\nrecursive\ntrue",
+      "mcp__search__grep\npattern\nrm\nrecursive\ntrue",
+      "mcp__fs__list\npath\nsrc\nremove_duplicates\nfalse\nrecursive\ntrue",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])

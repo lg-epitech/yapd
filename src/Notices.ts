@@ -265,8 +265,8 @@ export const asking = (
     return { _tag: "Tell", spoken, entry: entry(spoken) }
   }
   if (request._tag === "Approval") {
-    // By all of what it would run, never what's cut short to be said, which can leave out the risky part.
-    const risky = risk === "high" || Brain.dangerous(`${request.what}\n${request.whole ?? ""}`)
+    // By all of what it would run, never what's cut short to be said, which can leave out the risky part, and that first, as a tool's name is.
+    const risky = risk === "high" || Brain.dangerous(request.whole === undefined ? request.what : `${request.whole}\n${request.what}`)
     // Not shown in full, what it would run could be anything, so it's taken for risky too.
     const unread = request.whole === undefined
     const dangerous = risky || unread
