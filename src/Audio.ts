@@ -310,7 +310,7 @@ export const native = (
     const shortcut = Option.isSome(keys) ? yield* Shortcut.make(keys.value, send, false) : undefined
 
     const now = () => runSync(Clock.currentTimeMillis)
-    /** The helper went quiet, so the echo cancellation heard yapd until now. */
+    /** The helper went quiet, so the echo cancellation heard yapd until now, and the last of it is still on its way in. */
     const quiet = () => {
       if (playingSince !== undefined) {
         heard += now() - playingSince
