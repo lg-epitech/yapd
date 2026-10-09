@@ -257,6 +257,8 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly ask: (asking: Asking) => Effect.Effect<void>
     /** What a thread waited on him for was dealt with, in T3 Code or anywhere: it's not asked, and if it's being asked, it's let go without a word. */
     readonly settled: (requestId: string) => Effect.Effect<void>
+    /** A machine's threads can be seen again, like rig's once it can be reached: what waits on him there, put by meanwhile, is asked. */
+    readonly returned: (machine: string) => Effect.Effect<void>
   }
 >() {}
 
@@ -597,6 +599,17 @@ export const make = (options: {
     /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
     const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
 
+    /**
+     * What's waiting to be asked that can be now: the first that's due, on a
+     * machine whose threads can be seen. One on a machine whose can't, like
+     * rig's while it can't be reached, waits for them to be back, without
+     * holding up the rest.
+     */
+    const askable = (now: number) =>
+      Effect.findFirst(asked, ({ asking: waiting, notBefore }) =>
+        (notBefore ?? now) > now ? Effect.succeed(false) : Effect.map(threads.unseen(waiting.ref.machine), Option.isNone),
+      )
+
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
     /** Whether yapd is off, or was turned off since it had been turned on or off `turns` times, so nothing is done now for what was said by then. */
@@ -835,10 +848,12 @@ export const make = (options: {
         if (from !== undefined && open.kind === "question") {
           // A thread's question still waits for him in T3 Code, so whatever took its place, even what made no sense, it's asked again
           // first thing after, from the part he'd got to, or when it was due to be anyway; the third time it's let go with a word.
-          // Turned off, it's asked once yapd is on again, which is no asking of his.
-          const interrupted = (from.interrupted ?? 0) + (how !== "dropped: off" && said !== undefined ? 1 : 0)
+          // Turned off, it's asked once yapd is on again, and out of sight, like rig's while it can't be reached, once its machine's
+          // threads can be seen again: neither is any asking of his, nor anything taking its place.
+          const waits = how === "dropped: off" || how === "dropped: out of sight"
+          const interrupted = (from.interrupted ?? 0) + (!waits && said !== undefined ? 1 : 0)
           const back = said === undefined ? from.back : "here"
-          if (how === "dropped: off") asked.unshift(resumed(from, open, { asks: asking.asks, back }))
+          if (waits) asked.unshift(resumed(from, open, { asks: asking.asks, back }))
           else if (how === "replaced" || how === "dropped: unclear") {
             asked.unshift(resumed(from, open, { asks: asking.asks, back, interrupted, notBefore: due, letGo: interrupted >= interruptions }))
           }
@@ -1033,9 +1048,10 @@ export const make = (options: {
         if (asking?.open.id !== id || asking.held.size > 0 || asking.repeat !== undefined) return
         if (asking.asks >= asks) return yield* letGo(asking.open)
         const now = yield* Clock.currentTimeMillis
-        const { open, from } = asking
-        if (open.kind === "question" && from !== undefined && asked.some(({ notBefore }) => (notBefore ?? now) <= now)) {
-          const back = resumed(from, open, { asks: asking.asks + 1, back: "still", notBefore: now + Duration.toMillis(again) })
+        const { open, from, asks: count } = asking
+        if (open.kind === "question" && from !== undefined && Option.isSome(yield* askable(now))) {
+          if (asking?.open.id !== id) return
+          const back = resumed(from, open, { asks: count + 1, back: "still", notBefore: now + Duration.toMillis(again) })
           yield* close(open, "dropped: unanswered, others waiting")
           asked.push(back)
           return yield* offering
@@ -2503,8 +2519,8 @@ export const make = (options: {
                     if (asking?.open.id !== open.id || asking.held.size > 0) return true
                     if (request === undefined) return false
                     // What a thread waits on him for, dealt with in T3 Code since, or said before, is let go without a word, and what's next is asked.
-                    // Its machine's threads can't be seen, like rig's while it can't be reached, it's let go too, but not as dealt with: it's
-                    // asked again once they can be.
+                    // Its machine's threads can't be seen, like rig's while it can't be reached, it's put by without a word, never as dealt with,
+                    // heard or not: it's asked again once they can be, from the part he'd got to.
                     const ref = open.candidates[0] ?? { machine: "", id: "" }
                     const waits = yield* still(ref, request)
                     if (waits && claim !== undefined && claim.kept === undefined) claim.kept = yield* journal.claim(claim.asking.entry)
@@ -2574,9 +2590,13 @@ export const make = (options: {
       Effect.gen(function* () {
         const { ref, asks: request, asked: words, about, rewordings, parts } = waiting.asking
         if (!(yield* still(ref, request.requestId))) {
-          // Its machine's threads out of sight, it's asked once they're back, as what still waits on him is.
-          const away = Option.isSome(yield* threads.unseen(ref.machine))
-          return yield* Effect.logInfo(`Not asking "${words}", since ${away ? `${ref.machine}'s threads can't be seen right now` : "it no longer waits on it"}`)
+          // Its machine's threads out of sight just now, it's put back to wait for them, since it may still wait on him: it's asked once
+          // they're back, from the part he'd got to, and holds up nothing meanwhile.
+          if (Option.isSome(yield* threads.unseen(ref.machine))) {
+            asked.unshift(waiting)
+            return yield* Effect.logInfo(`Not asking "${words}" until ${ref.machine}'s threads can be seen again`)
+          }
+          return yield* Effect.logInfo(`Not asking "${words}", since it no longer waits on it`)
         }
         const at = yield* Clock.currentTimeMillis
         // Its own, since no request of his is what it's for.
@@ -2591,13 +2611,13 @@ export const make = (options: {
         /** In words not asked lately, of these: brought back, or asked once more, then in full again. */
         const fresh = (wordings: ReadonlyArray<string>) => Brain.reworded({ kind: "question", asked: "", about, rewordings: wordings }, before, said)
         const back = waiting.back ?? (request._tag === "Question" && request.part > 0 ? "here" : undefined)
-        const asked =
+        const wording =
           part === undefined || back === undefined
             ? words
             : back === "still"
               ? fresh([...part.still, part.here, ...part.again])
               : fresh([part.here, ...part.again, ...part.still])
-        if (asked === undefined) {
+        if (wording === undefined) {
           yield* Effect.logInfo(`Letting go of the question on ${about}, since it's been asked in every way lately`)
           return yield* deliver(regarding(part?.letGo ?? said.leaving, Option.some(ref)), { id: utterance, turns })
         }
@@ -2608,7 +2628,7 @@ export const make = (options: {
             heard: "",
             decision: request._tag === "Approval" ? Brain.decision({ act: "decide", how: "accept" }) : Brain.decision({ act: "reply" }),
             candidates: [ref],
-            asked,
+            asked: wording,
             about,
             material: Option.none(),
             resend: Option.none(),
@@ -2660,7 +2680,8 @@ export const make = (options: {
       if (asking === undefined || asking.repeat === undefined || asking.held.size > 0 || presses.size > 0) return
       const { open, from, due } = asking
       const now = yield* Clock.currentTimeMillis
-      if (open.kind !== "question" || from === undefined || due === undefined || !asked.some(({ notBefore }) => (notBefore ?? now) <= now)) return
+      if (open.kind !== "question" || from === undefined || due === undefined || Option.isNone(yield* askable(now))) return
+      if (asking?.open.id !== open.id) return
       if (asking.asks >= asks) return yield* letGo(open)
       const back = resumed(from, open, { asks: asking.asks + 1, back: "still", notBefore: due })
       yield* close(open, "dropped: unanswered, others waiting")
@@ -2681,14 +2702,16 @@ export const make = (options: {
         // Off, it waits for him to be back.
         if (!power.on) return
         const next = restarted.shift()
-        // Then what threads wait on him for, one at a time: the first that's due, or, when none is yet, the soonest once it is.
+        // Then what threads wait on him for, one at a time: the first that's due, or, when none is yet, the soonest once it is. One on a
+        // machine whose threads can't be seen waits for them, which it's asked once they're back.
         if (next === undefined) {
           const now = yield* Clock.currentTimeMillis
-          const due = asked.findIndex(({ notBefore }) => notBefore === undefined || notBefore <= now)
-          if (due === -1) return yield* wake(now)
-          const [waiting] = asked.splice(due, 1)
-          if (waiting === undefined) return
-          yield* put(waiting, power.turns)
+          const due = yield* askable(now)
+          if (Option.isNone(due)) return yield* wake(now)
+          const index = asked.indexOf(due.value)
+          if (index === -1) continue
+          asked.splice(index, 1)
+          yield* put(due.value, power.turns)
           continue
         }
         const { row, offer } = next
@@ -2961,5 +2984,9 @@ export const make = (options: {
           yield* close(open, "dropped: dealt with in T3 Code")
           yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
         }),
+      returned: (machine) =>
+        Effect.suspend(() =>
+          asked.some(({ asking: waiting }) => waiting.ref.machine === machine) ? Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)) : Effect.void,
+        ),
     } satisfies Assistant["Type"]
   })

@@ -159,6 +159,7 @@ export const serve = Effect.gen(function* () {
     mention: assistant.mention,
     ask: assistant.ask,
     settled: assistant.settled,
+    returned: assistant.returned,
     shortest: (yield* Config.minSeconds) * 1000,
   })
   yield* Effect.forkScoped(notices.follow)

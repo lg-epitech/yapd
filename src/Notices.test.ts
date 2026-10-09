@@ -138,6 +138,8 @@ const notices = (
     /** The parts of questions the model was asked to put in words that can be said. */
     const rewritten: Array<string> = []
     const settled: Array<string> = []
+    /** The machines whose T3 Code caught up again, in turn. */
+    const returned: Array<string> = []
     const finished: Array<{ readonly key: string; readonly message: string }> = []
     /** The threads whose turn no hook told of was overtaken, by starting again or going. */
     const overtaken: Array<string> = []
@@ -166,6 +168,7 @@ const notices = (
           yield* journal.markHeard(Option.toArray(kept.value), now)
         }),
       settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
+      returned: (machine) => Effect.sync(() => void returned.push(machine)),
       shortest: 60_000,
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
@@ -179,6 +182,7 @@ const notices = (
       worded,
       rewritten,
       settled,
+      returned,
       finished,
       overtaken,
       /** T3 Code tells of these. */
@@ -945,9 +949,11 @@ describe("Notices", () => {
         yield* made.reconcile
         yield* made.flush
         const kept = yield* made.journal.since(0, { kinds: ["notice"] })
-        return { down, asked: made.asked, back, kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]).toSorted() }
+        return { down, asked: made.asked, back, kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]).toSorted(), returned: made.returned }
       }),
     )
+    // Each time a machine's T3 Code caught up, what was put by while it couldn't be seen is asked.
+    expect(result.returned).toEqual(["Rosie", "rig", "rig"])
     // Rig being down held up nothing here.
     expect(result.down).toEqual(["A question on Migrate Tezos Integration, sir: Which network?"])
     expect(result.asked).toEqual(["A question on Migrate Tezos Integration, sir: Which network?", "A question on Fee table checks on rig, sir: Which fee table?"])

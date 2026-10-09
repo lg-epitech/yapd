@@ -662,6 +662,7 @@ const noticing = (made: {
   readonly mention: Assistant.Assistant["Type"]["mention"]
   readonly ask: Assistant.Assistant["Type"]["ask"]
   readonly settled: Assistant.Assistant["Type"]["settled"]
+  readonly returned: Assistant.Assistant["Type"]["returned"]
 }) =>
   Notices.make({
     threads: made.threads,
@@ -674,6 +675,7 @@ const noticing = (made: {
     mention: made.mention,
     ask: made.ask,
     settled: made.settled,
+    returned: made.returned,
     shortest: 60_000,
   }).pipe(
     Effect.provide(
@@ -7332,5 +7334,91 @@ describe("Assistant", () => {
       Option.some("A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."),
     )
     expect(result.again).toBe(2)
+  })
+
+  test("a rig question he heard, due again as rig drops out, is put by without a word, never let go, and asked from where he'd got to once rig is back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Kept under its key as it comes up to be said, heard to the end, and left unanswered.
+        yield* made.questions().at(-1)!.stale
+        yield* made.play()
+        yield* made.unanswered()
+        // Rig drops out before its minute is up, so asked once more, it's out of sight as it comes up to be said.
+        seen = false
+        yield* made.wait(61)
+        const stale = yield* made.questions().at(-1)!.stale
+        const meanwhile = Option.isSome(yield* made.open)
+        // Rig's back a few minutes later.
+        yield* made.wait(180)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        return { spoken: made.spoken(), stale, meanwhile, open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const here = "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Back to Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      here,
+    ])
+    expect(result.stale).toBe(true)
+    expect(result.meanwhile).toBe(false)
+    expect(result.open).toEqual(Option.some(here))
+  })
+
+  test("a rig question he put off, due while rig is out of sight, waits for rig without holding up one from this Mac, and is asked once rig is back", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, {
+          others: [cloud],
+          items: card("q1", [colour]),
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        yield* made.questions().at(-1)!.stale
+        yield* made.play()
+        yield* made.answer("Later.")
+        // Rig drops out, and its ten minutes are up meanwhile.
+        seen = false
+        yield* made.wait(10 * 60 + 1)
+        const due = made.spoken().length
+        // This Mac's question is asked all the same, and answered.
+        yield* asked(made, cloud)
+        yield* made.play()
+        yield* made.answer("Red.")
+        yield* made.wait(20 * 60)
+        const before = made.spoken().length
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        return { spoken: made.spoken(), due, before, answers: answered(made.dispatched), open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const here = "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I'll bring it back in ten minutes, sir.",
+      "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red it is, sir.",
+      here,
+    ])
+    expect(result.due).toBe(2)
+    expect(result.before).toBe(4)
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+    expect(result.open).toEqual(Option.some(here))
   })
 })

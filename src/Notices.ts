@@ -442,6 +442,8 @@ export const make = (options: {
   readonly ask: (asking: Assistant.Asking) => Effect.Effect<void>
   /** What a thread waited on him for was dealt with, so it isn't asked. */
   readonly settled: (requestId: string) => Effect.Effect<void>
+  /** A machine's T3 Code caught up again: what waits on him there that was put by while its threads couldn't be seen is asked. */
+  readonly returned: (machine: string) => Effect.Effect<void>
   /** Turns shorter than this are taken as watched, as hooks' are. */
   readonly shortest: number
 }) =>
@@ -704,17 +706,21 @@ export const make = (options: {
       follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
       /** What waits on him on every machine whose threads can be seen, each time yapd is turned on. */
       reconcile: reconciling(() => true),
-      /** What waits on him on one machine, each time its T3 Code has caught up, as `lookBack` has it. */
-      reconcileOn: (machine: string) => reconciling((on) => on === machine),
+      /**
+       * What waits on him on one machine, each time its T3 Code has caught up,
+       * as `lookBack` has it: what was put by while it couldn't be seen, then
+       * what he never heard.
+       */
+      reconcileOn: (machine: string) => Effect.zipRight(options.returned(machine), reconciling((on) => on === machine)),
     }
   })
 
 /**
- * What waits on him on `machine` that he never heard, looked for each time
- * its T3 Code has caught up, which `view` tells, asked `every` so often, for
- * as long as yapd runs: once it starts, and again whenever it's back after
- * going down, like rig out of reach a while or T3 Code restarted there, since
- * what was let go of while it couldn't be seen still waits. Each machine
+ * What waits on him on `machine`, looked for each time its T3 Code has caught
+ * up, which `view` tells, asked `every` so often, for as long as yapd runs:
+ * once it starts, and again whenever it's back after going down, like rig out
+ * of reach a while or T3 Code restarted there, since what was put by while it
+ * couldn't be seen, and what it asked meanwhile, still waits. Each machine
  * looks on its own, so one that's down holds up none of the rest.
  */
 export const lookBack = (
