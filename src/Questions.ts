@@ -603,7 +603,8 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
  * anything else, which is the model's to judge. Words like "stop", "skip" or
  * "later" are never taken for an option they're only a word of, and words
  * that let it go but start an option, like "leave it" to "Leave the
- * changelog", are the model's too.
+ * changelog", are the model's too, while "skip it" to a part with more
+ * after it and "Skip the slow tests" asks which of them.
  */
 export const pick = (part: Said, heard: string, asked: { readonly inFull: boolean; readonly parts: number }): Reply | undefined => {
   const said = gist(heard)
@@ -640,8 +641,11 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   // "Leave it" to "Leave the changelog", or "cancel" to "Cancel the deploy", may well be that option, which the model tells. Never words
   // to stop talking, like "skip it" or "stop", which no agent gets, nor "never mind" or "forget it".
   const lead = /^(?:leave|cancel|drop|skip|pass|move)\b/.exec(said)?.[0]
-  if ((leaving.has(said) || skipping.has(said)) && !enough.has(said) && lead !== undefined && starting(lead) !== undefined) return undefined
-  if (skipping.has(said) && asked.parts > 1) return { _tag: "Skip" }
+  const leads = lead !== undefined && starting(lead) !== undefined
+  if ((leaving.has(said) || skipping.has(said)) && !enough.has(said) && leads) return undefined
+  // "Skip it" to "Skip the slow tests", with more parts after it, may be that option too, and leaving the part out would sound as if it
+  // was taken: he's asked which of them instead, since words to stop talking never go to the model.
+  if (skipping.has(said) && asked.parts > 1) return leads ? { _tag: "Which" } : { _tag: "Skip" }
   if (leaving.has(said) || skipping.has(said)) return { _tag: "Leave" }
   return undefined
 }

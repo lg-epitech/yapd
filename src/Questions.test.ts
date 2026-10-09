@@ -216,7 +216,10 @@ describe("Questions", () => {
     const tests = part("The slow tests take ten minutes. What should I do?", ["Skip the slow tests", "Run everything"])
     expect([Questions.pick(changelog, "Leave it.", { inFull: true, parts: 1 }), Questions.pick(deploy, "Cancel.", { inFull: true, parts: 1 })]).toEqual([undefined, undefined])
     expect(Questions.pick(tests, "Skip that one.", { inFull: true, parts: 2 })).toBeUndefined()
-    expect(["Skip it.", "Never mind.", "Forget it."].map((heard) => Questions.pick(tests, heard, { inFull: true, parts: 2 })?._tag)).toEqual(["Skip", "Leave", "Leave"])
+    // With more parts after it, "skip it" to "Skip the slow tests" may be that option too, so it's asked which of them; "next" still skips it.
+    const going = ["Skip it.", "Skip.", "Next.", "Never mind.", "Forget it."].map((heard) => Questions.pick(tests, heard, { inFull: true, parts: 2 })?._tag)
+    expect(going).toEqual(["Which", "Which", "Skip", "Leave", "Leave"])
+    expect(Questions.pick(networks, "Skip it.", { inFull: true, parts: 2 })).toEqual({ _tag: "Skip" })
     expect(["Leave it.", "Cancel."].map((heard) => Questions.pick(networks, heard, { inFull: true, parts: 1 })?._tag)).toEqual(["Leave", "Leave"])
     expect(pick("Ghostnet, but only for the tests.")).toBeUndefined()
     expect(pick("Mainnet and Ghostnet.")).toBeUndefined()

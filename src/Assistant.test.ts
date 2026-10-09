@@ -2617,6 +2617,28 @@ describe("Assistant", () => {
     expect(await answering(deploy, "Cancel.", "Cancel the deploy")).toEqual({ asked: 1, spoken: ["Cancel the deploy it is, sir."], answers: [{ deploy: "Cancel the deploy" }] })
   })
 
+  test("'skip it' to a part with more after it and an option that starts with skip asks which of them, never leaving the part out as if he'd heard it taken", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const tests = { id: "tests", question: "The slow tests take ten minutes. What should I do?", options: [{ label: "Skip the slow tests" }, { label: "Run everything" }] }
+    const answering = (...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [tests, extras]) })
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const last = "And last: Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(await answering("Skip it.", "Skip the slow tests.", "Alpha.")).toEqual({
+      asked: 0,
+      spoken: ["Which one, sir: Skip the slow tests or Run everything?", `Skip the slow tests, sir. ${last}`, "Alpha it is, sir."],
+      answers: [{ tests: "Skip the slow tests", [extras.id]: ["Alpha"] }],
+    })
+    // Another word to go on skips it, as he means.
+    expect(await answering("Next.", "Alpha.")).toEqual({ asked: 0, spoken: [`Skipped, sir. ${last}`, "Alpha it is, sir."], answers: [{ [extras.id]: ["Alpha"] }] })
+  })
+
   test("a plain no to a thread's question that takes any answer is sent as the answer, while 'stop' still lets it go", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "bump", question: "Should I also bump the version?" }] }]
