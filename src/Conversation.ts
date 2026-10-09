@@ -551,7 +551,7 @@ const judged = (heard: string, saying: string, more: string, from: Begun, cut: C
 export interface Question {
   readonly audio: string
   /** What it says, so its own voice getting into the microphone as it starts isn't taken for an answer. */
-  readonly spoken?: string
+  readonly spoken: string
   /** Run once it starts playing the first time, which is when the user hears of it: never when it can't be played. */
   readonly saying?: Effect.Effect<void>
   /** Like `saying`, but once it's known to be playing, which with afplay is only once it has played to the end. */
@@ -1358,7 +1358,7 @@ export const make = (options: {
         let confirmed = question.confirmed ?? Effect.void
         while (true) {
           const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), {
-            text: question.spoken ?? "",
+            text: question.spoken,
             wait: pondering,
             begun,
             confirmed,

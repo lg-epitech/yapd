@@ -153,7 +153,7 @@ const conversation = (
     const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
     /** Asks a question instead, once the update has been given up on, which `answer` works out what's said to. */
     const question = (answer: Conversation.Question["answer"]) =>
-      Fiber.interrupt(fiber).pipe(Effect.zipRight(Effect.fork(made.ask({ audio: "/tmp/question.wav", answer }))))
+      Fiber.interrupt(fiber).pipe(Effect.zipRight(Effect.fork(made.ask({ audio: "/tmp/question.wav", spoken: "Which project is it for?", answer }))))
     /** One that takes what's said after "yes" for an answer. */
     const ask = (answers: Array<string>) =>
       question((heard) =>
@@ -1628,6 +1628,12 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       }),
     )
     expect(result).toEqual({ answered: true, answers: ["Yapd."] })
+  })
+
+  test("can't ask a question without its words, which tell its own voice getting into the microphone from an answer", () => {
+    // @ts-expect-error Without them, any of its voice that got through would be taken for him.
+    const unspoken: Conversation.Question = { audio: "/tmp/question.wav", answer: () => Effect.succeed(Option.none()) }
+    expect(unspoken.audio).toBe("/tmp/question.wav")
   })
 })
 
