@@ -49,7 +49,7 @@ private final class Faded {
       putBack: { _ in },
       wait: { _ in }
     ))
-    following.follow(pointing("c1", fresh: true), connecting: false)
+    following.follow(pointing("c1", fresh: true), revision: nil, connecting: false)
     fading.heard(speaking: true)
     await following.settled()
     await fading.settled()
