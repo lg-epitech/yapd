@@ -1256,7 +1256,7 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.none())
   })
 
-  test("a forced checkout, or a switch that discards changes, is said to be what can't be undone though the model says it's harmless, and a plain yes heard in full never allows it, needs 'approve' though the model says it's harmless, and a plain yes heard in full never allows it", async () => {
+  test("a forced checkout, or a switch that discards changes, is said to be what can't be undone though the model says it's harmless, and a plain yes heard in full never allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     for (const command of ["git checkout -f main", "git switch --discard-changes main"]) {
       const result = await run(
@@ -1278,7 +1278,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("an approval is said to be what can't be undone by all of what it would run, however long, and one whose command can't be read says so, and one whose command can't be read needs 'approve' too", async () => {
+  test("an approval is said to be what can't be undone by all of what it would run, however long, and one whose command can't be read says so, and needs 'approve' too", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     // Something harmless long enough to be cut short before what's risky, under T3 Code's own harmless words for it.
     const long = `echo '${"a".repeat(650)}'; rm -rf /tmp/example-data`
@@ -1308,7 +1308,7 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r2 accept"])
   })
 
-  test("a tool's approval is said to be risky by what it's given as the tool gets it, line breaks and all, or not read in full when T3 Code sends only how that starts, and a yes never allows it as the tool gets it, line breaks and all, and needs 'approve' when T3 Code sends only how that starts", async () => {
+  test("a tool's approval is said to be risky by what it's given as the tool gets it, line breaks and all, or not read in full when T3 Code sends only how that starts, and a yes never allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     /** Asks for a tool given `input` to be allowed, under T3 Code's own harmless words for it, and says yes. */
     const allowing = (input: unknown) =>
@@ -1328,7 +1328,7 @@ describe("Assistant", () => {
     expect(await allowing({ command: "cd build\nrm -rf ~/work" })).toEqual({
       spoken: [
         "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
-"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+        "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
       ],
       dispatched: [],
     })
@@ -1336,7 +1336,7 @@ describe("Assistant", () => {
     expect(await allowing({ summary: '{"command":"echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…', truncated: true })).toEqual({
       spoken: [
         "Cloud deployment discovery wants to run a maintenance check, but I couldn't read all of what it would run, so say 'approve' if you want it, sir.",
-"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+        "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
       ],
       dispatched: [],
     })
@@ -1345,7 +1345,7 @@ describe("Assistant", () => {
       expect(await allowing(input)).toEqual({
         spoken: [
           "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
-  "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+          "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
         ],
         dispatched: [],
       })
@@ -1357,7 +1357,7 @@ describe("Assistant", () => {
     })
   })
 
-  test("an approval is said to be risky by a command that goes on over a backslash onto the next line, and by a tool told to force, to overwrite or to delete all of a tree onto the next line, and by a tool told to force, to overwrite or to delete all of a tree", async () => {
+  test("an approval is said to be risky by a command that goes on over a backslash onto the next line, and by a tool told to force, to overwrite or to delete all of a tree, and a yes never allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     /** Asks for what `items` say it would run to be allowed, under T3 Code's own harmless words for it, and says yes. */
     const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
@@ -1378,7 +1378,7 @@ describe("Assistant", () => {
     const risky = {
       spoken: [
         "Cloud deployment discovery wants to push the branch, which can't be undone, so say 'approve' if you want it, sir.",
-"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+        "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
       ],
       dispatched: [],
     }
@@ -1411,7 +1411,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("an approval is said to be risky by the command in T3 Code's own words for it, never by the tool's name before it for it, never by the tool's name before it", async () => {
+  test("an approval is said to be risky by the command in T3 Code's own words for it, never by the tool's name before it, and a yes never allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     /** Asks for what `items` say it would run to be allowed, in T3 Code's own words for it, and says yes. */
     const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
@@ -1455,7 +1455,7 @@ describe("Assistant", () => {
       expect(await allowing(approval("r1", command))).toEqual({
         spoken: [
           `Cloud deployment discovery wants to run ${command}, which can't be undone, so say 'approve' if you want it, sir.`,
-"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+          "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
         ],
         dispatched: [],
       })
@@ -1511,7 +1511,7 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
-  test("an approval he heard and let go is allowed by dictation only with 'approve', and read back to him otherwise, and read back to him otherwise", async () => {
+  test("an approval he heard and let go is allowed by dictation only with 'approve', and read back to him on a yes in other words", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1537,7 +1537,7 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
-  test("an approval is allowed for the rest of its work only when he says so, whatever the model took his 'approve' for, whatever the model took his yes for", async () => {
+  test("an approval is allowed for the rest of its work only when he says so, whatever the model took his 'approve' for", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1558,7 +1558,7 @@ describe("Assistant", () => {
     expect(result).toEqual(["r1 accept", "r2 acceptForSession"])
   })
 
-  test("an approval dictated before he's heard it asked is read back first, and only an 'approve' to that allows it, and only a yes to that allows it", async () => {
+  test("an approval dictated before he's heard it asked is read back first, and only an 'approve' to that allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1613,7 +1613,7 @@ describe("Assistant", () => {
     expect(waiting).toEqual({ spoken: [allow], open: true, dispatched: [] })
   })
 
-  test("an approval answered in T3 Code meanwhile is not said, and a late 'approve' sends nothing and is told it's been dealt with sends nothing and is told it's been dealt with", async () => {
+  test("an approval answered in T3 Code meanwhile is not said, and a late 'approve' sends nothing and is told it's been dealt with", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1657,7 +1657,7 @@ describe("Assistant", () => {
     expect(result.moot).toBe(1)
   })
 
-  test("'approve' to an approval still waiting behind a newer one asked alongside it allows it, and the newer one is asked after asked alongside it allows it, and the newer one is asked after", async () => {
+  test("'approve' to an approval still waiting behind a newer one asked alongside it allows it, and the newer one is asked after", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1680,7 +1680,7 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
-  test("an approval he heard, now behind a question it asked since, is allowed by dictating 'approve', and read back to him on a yes in other words, is allowed by dictating it, and a risky one read back to him first", async () => {
+  test("an approval he heard, now behind a question it asked since, is allowed by dictating 'approve', and read back to him on a yes in other words, risky or not", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const question = { type: "user_input_request", status: "waiting", requestId: "q2", questions: [{ id: "net", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }] }
     // It asks something else alongside, which T3 Code's summary shows in its place, while the approval still waits.
@@ -6705,7 +6705,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("turned off while the thread is read before an 'approve' to an approval goes once more, after the first never left yapd, nothing goes, and it stays as it was goes once more, after the first never left yapd, nothing goes, and it stays as it was", async () => {
+  test("turned off while the thread is read before an 'approve' to an approval goes once more, after the first never left yapd, nothing goes, and it stays as it was", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -8568,7 +8568,7 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.some(here))
   })
 
-  test("an 'approve' to a rig approval given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
+  test("an 'approve' to a rig approval given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
     const asking = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
     const result = await run(
       Effect.gen(function* () {
