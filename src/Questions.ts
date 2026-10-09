@@ -407,7 +407,7 @@ const fitting = (part: Said, fits: (choice: Choice) => boolean) => part.options.
 const one = (indices: ReadonlyArray<number>) => (indices.length === 1 ? indices[0] : undefined)
 
 /** As it's compared word for word, marks and all: single spaces, any case, and no full stop after it. */
-const written = (text: string) => text.replace(/\s+/g, " ").trim().replace(/[.!?,;:]+$/, "").toLowerCase()
+const verbatim = (text: string) => text.replace(/\s+/g, " ").trim().replace(/[.!?,;:]+$/, "").toLowerCase()
 
 /**
  * The option whose name is just what he or the model wrote, marks and all,
@@ -415,8 +415,8 @@ const written = (text: string) => text.replace(/\s+/g, " ").trim().replace(/[.!?
  * back as an option is always its name as written.
  */
 const exactly = (part: Said, text: string) => {
-  const wanted = written(text)
-  return wanted === "" ? undefined : one(fitting(part, ({ label, said }) => [label, unmarked(label), said].some((name) => written(name) === wanted)))
+  const wanted = verbatim(text)
+  return wanted === "" ? undefined : one(fitting(part, ({ label, said }) => [label, unmarked(label), said].some((name) => verbatim(name) === wanted)))
 }
 
 /** The options a name fits, as written or as said, or failing that by how it sounds: more than one when they're named alike. */
