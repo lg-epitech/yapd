@@ -82,9 +82,12 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(panel).toMatch(/func heard\(speaking: Bool\) \{\s*fading\.heard\(speaking: speaking\)\s*\}/)
       expect(panel).toMatch(/panel\.orderFrontRegardless\(\)\s*fading\.shown\(talking: talking\)\s*\}/)
       expect(panel).toMatch(/func hide\(\) \{\s*fading\.hidden\(\)/)
+      expect(panel).toMatch(/func away\(\) \{\s*fading\.away\(\)\s*\}/)
       expect(panel).not.toMatch(/Task\s*\{/)
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
-      expect(yapd.match(/panel\.heard\([^)]*\)/g)).toEqual(["panel.heard(speaking: false)", 'panel.heard(speaking: status.activity == "speaking")'])
+      // Gone, the panel is told it's away, not that yapd stopped speaking, so a card still being talked about once it's back stays up.
+      expect(yapd.match(/panel\.heard\([^)]*\)/g)).toEqual(['panel.heard(speaking: status.activity == "speaking")'])
+      expect(yapd).toMatch(/panel\.away\(\)\s*following\.away\(\)/)
     },
     120_000,
   )

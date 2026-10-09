@@ -22,8 +22,8 @@ final class Fading {
   /// How long a card that yapd is about to talk about waits for it to start, before it lingers as if it had.
   static let patience: Duration = .seconds(5)
 
-  /// Where a card is in being talked about: not yet, now, or done with.
-  private enum Talk { case coming, talking, done }
+  /// Where a card is in being talked about: not yet, now, done with, or unknown since yapd's state stopped coming in while it was.
+  private enum Talk { case coming, talking, done, away }
 
   private let doing: Doing
   /// Where the card up is in being talked about, and done with while none is.
@@ -45,7 +45,7 @@ final class Fading {
     talk = !talking ? .done : speaking ? .talking : .coming
     switch talk {
     case .coming: fade(after: Self.patience)
-    case .talking: break
+    case .talking, .away: break
     case .done: fade(after: Self.linger)
     }
   }
@@ -54,15 +54,27 @@ final class Fading {
   func heard(speaking: Bool) {
     self.speaking = speaking
     switch talk {
-    case .coming where speaking:
+    case .coming where speaking, .away where speaking:
       talk = .talking
       fading?.cancel()
     case .talking where !speaking:
       talk = .done
       fade(after: Self.linger)
+    case .away:
+      // Back with nothing being said, it goes on lingering from when the state stopped coming in.
+      talk = .done
     default:
       break
     }
+  }
+
+  /// yapd's state stopped coming in. A card it was talking about lingers as if it had finished, unless yapd is back, still talking,
+  /// before it fades: then it stays up until yapd stops.
+  func away() {
+    speaking = false
+    guard talk == .talking else { return }
+    talk = .away
+    fade(after: Self.linger)
   }
 
   /// The card was put away at once, so it no longer fades.

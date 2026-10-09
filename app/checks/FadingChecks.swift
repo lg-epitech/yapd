@@ -82,4 +82,32 @@ private final class Faded {
     await fading.settled()
     check(faded.fades == 0, "leaves a card taken away to stay away, not fading it after \(faded.waits)")
   }
+
+  // yapd's state stops coming in while it talks about the card, and comes back before the card fades, still talking: the card stays up
+  // until yapd stops, then lingers.
+  do {
+    let faded = Faded()
+    let fading = Fading(faded.doing)
+    fading.shown(talking: true)
+    fading.heard(speaking: true)
+    fading.away()
+    fading.heard(speaking: true)
+    await fading.settled()
+    check(faded.fades == 0, "keeps up a card yapd is still talking about once its state comes back, not fading it after \(faded.waits)")
+    fading.heard(speaking: false)
+    await fading.settled()
+    check(faded.fades == 1 && faded.waits.last == .seconds(20), "fades a card a while after yapd stops talking about it, not after \(faded.waits)")
+  }
+
+  // Gone while yapd talks about the card, and not back, or back with nothing said: it lingers once, from when the state stopped.
+  for back in [false, true] {
+    let faded = Faded()
+    let fading = Fading(faded.doing)
+    fading.heard(speaking: true)
+    fading.shown(talking: true)
+    fading.away()
+    if back { fading.heard(speaking: false) }
+    await fading.settled()
+    check(faded.fades == 1 && faded.waits == [.seconds(20)], "fades a card once a while after yapd's state stopped, not after \(faded.waits)")
+  }
 }
