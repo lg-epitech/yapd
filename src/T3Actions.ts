@@ -216,14 +216,23 @@ const given = (value: unknown): ReadonlyArray<string> => {
   return value === undefined || value === null ? [] : [String(value)]
 }
 
-/** A command given apart from its words, like `{"command": "rm", "args": ["-rf", "x"]}`, as the one line it runs as. */
+/** What a tool may call what it runs, given apart from its words, like `program` or `executable`. */
+const whatRuns = ["command", "cmd", "program", "executable", "exe", "binary", "bin", "file"]
+
+/**
+ * A command given apart from its words, like `{"command": "rm", "args":
+ * ["-rf", "x"]}` or `{"program": "rm", …}`, as the one line it runs as,
+ * under each name that could be what runs.
+ */
 const commandLine = (value: object): ReadonlyArray<string> => {
   const fields = value as Readonly<Record<string, unknown>>
-  const command = fields.command ?? fields.cmd
   const words = fields.args ?? fields.argv ?? fields.arguments
-  if (typeof command !== "string") return []
-  if (typeof words === "string") return [`${command} ${words}`]
-  return Array.isArray(words) && words.every((word) => typeof word === "string") ? [[command, ...words].join(" ")] : []
+  const line = typeof words === "string" ? words : Array.isArray(words) && words.every((word) => typeof word === "string") ? words.join(" ") : undefined
+  if (line === undefined) return []
+  return whatRuns.flatMap((name) => {
+    const named = fields[name]
+    return typeof named === "string" ? [`${named} ${line}`] : []
+  })
 }
 
 /**

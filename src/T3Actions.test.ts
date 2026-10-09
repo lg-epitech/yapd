@@ -103,6 +103,11 @@ describe("T3Actions", () => {
     // A command given apart from its words is the one line it runs as too, after the rest.
     expect(Option.map(tool({ command: "rm", args: ["-rf", "~/work"] }), ([, whole]) => whole)).toEqual(Option.some("Monitor\ncommand\nrm\nargs\n-rf ~/work\nrm -rf ~/work"))
     expect(Option.map(tool({ cmd: "git", argv: "push --force" }), ([, whole]) => whole)).toEqual(Option.some("Monitor\ncmd\ngit\nargv\npush --force\ngit push --force"))
+    // However what it runs is named, as a program or an executable too.
+    expect(Option.map(tool({ program: "rm", args: ["-rf", "~/work"] }), ([, whole]) => whole)).toEqual(Option.some("Monitor\nprogram\nrm\nargs\n-rf ~/work\nrm -rf ~/work"))
+    expect(Option.map(tool({ executable: "/bin/rm", arguments: ["-rf", "~/work"] }), ([, whole]) => whole)).toEqual(
+      Option.some("Monitor\nexecutable\n/bin/rm\narguments\n-rf ~/work\n/bin/rm -rf ~/work"),
+    )
     // A secret goes by its own item's id, which is what the thread says it waits on.
     const secret = { type: "secret_request", id: "turn-item:secret-request:t1:deploy", status: "waiting", label: "Deploy key", reason: "To deploy", secretStatus: "pending" }
     expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(

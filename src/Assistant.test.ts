@@ -948,7 +948,7 @@ describe("Assistant", () => {
     })
   })
 
-  test("an approval is risky by a command that goes on over a backslash onto the next line, and by a tool told to force or to delete all of a tree", async () => {
+  test("an approval is risky by a command that goes on over a backslash onto the next line, and by a tool told to force, to overwrite or to delete all of a tree", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     /** Asks for what `items` say it would run to be allowed, under T3 Code's own harmless words for it, and says yes. */
     const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
@@ -983,6 +983,9 @@ describe("Assistant", () => {
     // Told to force with a lease, which still overwrites, and a command given apart from its words, which runs as one line.
     expect(await allowing(tool("mcp__git__git_push", { remote: "origin", branch: "main", force_with_lease: true }))).toEqual(risky)
     expect(await allowing(tool("mcp__shell__run", { command: "rm", args: ["-rf", "~/work"] }))).toEqual(risky)
+    // Named as a program instead, and a tool told to write over what's there.
+    expect(await allowing(tool("mcp__shell__run", { program: "rm", args: ["-rf", "~/work"] }))).toEqual(risky)
+    expect(await allowing(tool("mcp__fs__copy_file", { source: "a.txt", destination: "b.txt", overwrite: true }))).toEqual(risky)
     // Going on over lines with nothing risky in it, or told to take all of a tree it only lists or searches, whatever it looks for, a yes will do.
     for (const items of [
       approval("r1", "git push origin main \\\n  --follow-tags"),
