@@ -2295,6 +2295,24 @@ export const make = (options: {
       })
 
     /**
+     * A thread's question that went unanswered, and waits out its minute to
+     * be asked once more, gives way to another that's due, as it does when
+     * that one is waiting as it goes unanswered: the other is asked at once,
+     * and it comes back once its minute is up. Not while anything being said
+     * may answer it.
+     */
+    const givingWay = Effect.gen(function* () {
+      if (asking === undefined || asking.repeat === undefined || asking.held.size > 0 || presses.size > 0) return
+      const { open, from, due } = asking
+      const now = yield* Clock.currentTimeMillis
+      if (open.kind !== "question" || from === undefined || due === undefined || !asked.some(({ notBefore }) => (notBefore ?? now) <= now)) return
+      if (asking.asks >= asks) return yield* letGo(open)
+      const back = resumed(from, open, { asks: asking.asks + 1, back: "still", notBefore: due })
+      yield* close(open, "dropped: unanswered, others waiting")
+      asked.push(back)
+    })
+
+    /**
      * Says the next thing a restart found, once nothing else is asked, he
      * isn't dictating and yapd is on: one question at a time, each offered
      * once. A message that didn't get there is offered to be sent again, or,
@@ -2302,6 +2320,7 @@ export const make = (options: {
      * step it couldn't confirm is said once, with why.
      */
     const offering: Effect.Effect<void> = Effect.gen(function* () {
+      yield* givingWay
       while (asking === undefined && presses.size === 0) {
         const power = yield* options.power
         // Off, it waits for him to be back.
@@ -2376,6 +2395,8 @@ export const make = (options: {
         )
         yield* deliver(offered, { id: row.utterance, turns: power.turns })
       }
+      // Something's asked, or he's dictating: what's put off is looked at again once it's due, in case what's asked then waits out its minute.
+      yield* wake(yield* Clock.currentTimeMillis)
     }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not say what I found after restarting, or ask what waits on you", cause)))
 
     /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */

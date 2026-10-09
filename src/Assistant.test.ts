@@ -2178,6 +2178,41 @@ describe("Assistant", () => {
     expect(result.answers).toEqual([{ network: "Ghostnet" }])
   })
 
+  test("a question that comes while one unanswered waits out its minute is asked at once, and the first comes back once its minute is up", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const fees = thread(mina.id, mina.title, "connectors", {
+      activeRunId: "run-4",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:17:30.000Z" },
+      updatedAt: "2026-10-01T02:17:30.000Z",
+    })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud, fees], items: [...card("q1", [colour]), ...card("q2", [network])] })
+        yield* asked(made, cloud)
+        // Nothing else waits yet, so it's to be asked once more a minute on.
+        yield* made.unanswered()
+        yield* made.wait(5)
+        yield* asked(made, fees)
+        const next = made.spoken().length
+        yield* made.unanswered()
+        yield* made.wait(54)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        return { next, soon, spoken: made.spoken() }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.next).toBe(2)
+    expect(result.soon).toBe(2)
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      "A question on Open Mina SSV2 Bug Tickets, sir: Which network first? Mainnet or Ghostnet?",
+      `Back to Cloud deployment discovery, sir: ${line}`,
+    ])
+  })
+
   test("a question cut off before he heard it all is asked again, and let go with a word the third time", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
