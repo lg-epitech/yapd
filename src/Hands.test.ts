@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Deferred, type Duration, Effect, type Exit, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Deferred, type Duration, Effect, type Exit, Fiber, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Hands from "./Hands.ts"
+import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Server from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
-import type * as Threads from "./Threads.ts"
+import * as Threads from "./Threads.ts"
+import type * as Tunnel from "./Tunnel.ts"
 
 const now = Date.parse("2026-10-08T22:00:00.000Z")
 
@@ -120,6 +122,7 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
     const threads: Parameters<typeof Hands.make>[0]["threads"] = {
       find: (ref) => Effect.sync(() => (ref.id === current.id ? Option.some(current) : Option.none())),
       actions: (machine) => (machine === "Rosie" ? Option.some(actions) : Option.none()),
+      unseen: () => Effect.succeed(Option.none()),
     }
     const made = Hands.make({ threads, ledger, ...(given.started === undefined ? {} : { started: given.started }) })
     const send = (utterance: string, text: string, how: T3Actions.When = "now", twice = false) =>
@@ -265,7 +268,7 @@ const lookedLate = (
           answer(payload, bounded).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(Effect.orDie)))) as Server.Transport["call"],
       })
       const actions = T3Actions.make(reach)
-      const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions) } })
+      const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions), unseen: () => Effect.succeed(Option.none()) } })
       const look = yield* Effect.fork(back.reconcile)
       looking = look
       yield* Deferred.await(reading)
@@ -1341,7 +1344,7 @@ describe("Hands", () => {
             Effect.tap(kept.leave(commandId, why), () => Effect.map(kept.get(commandId), (row) => offerable.push(Option.exists(row, Ledger.offerable)))),
         }
         // Its machine can't be reached, so it can't be looked for.
-        const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.none()), actions: () => Option.none() } })
+        const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.none()), actions: () => Option.none(), unseen: () => Effect.succeed(Option.none()) } })
         const { unconfirmed } = yield* back.reconcile
         return { offerable, said: unconfirmed.map(({ reason }) => reason), offered: Option.isSome(yield* back.still(commandId)) }
       }),
@@ -2564,5 +2567,103 @@ describe("Hands", () => {
     )
     expect(result.outcomes).toEqual(["Done", "Done", "Done"])
     expect(result.dispatched).toEqual(["yapd:u1:0", "yapd:u2:0", "yapd:u3:0", "yapd:u4:0", "yapd:u5:0", "yapd:u6:0"])
+  })
+})
+
+describe("Hands on another machine", () => {
+  /** T3 Code on one machine, noting each command it's sent there by its id. */
+  const t3 = (name: string, sent: Array<string>): T3Actions.Actions =>
+    T3Actions.make(
+      Effect.succeed({
+        api: (<A, I>(_path: string, schema: Schema.Schema<A, I>) =>
+          Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [] } }).pipe(Effect.orDie)) as Server.Transport["api"],
+        call: (<A, I>(_method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
+          Effect.sync(() => void sent.push(`${name}: ${String(payload.commandId)}`)).pipe(
+            Effect.zipRight(Schema.decodeUnknown(schema)({ sequence: 7 }).pipe(Effect.orDie)),
+          )) as Server.Transport["call"],
+      }),
+    )
+
+  const viewing = (...threads: ReadonlyArray<T3Live.Thread>): T3Live.View => ({
+    projects: new Map(),
+    threads: new Map(threads.map((thread) => [thread.id, thread])),
+    sequence: 1,
+    synced: true,
+  })
+
+  /** Hands over this machine's T3 Code and rig's, each with a thread under the same id, as nothing stops them having. */
+  const both = (rig: { readonly view: Option.Option<T3Live.View>; readonly status: Tunnel.Status }) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const store = yield* Store.make(":memory:")
+      const ledger = Ledger.fromStore(store)
+      const sent: Array<string> = []
+      const threads = yield* Threads.make({
+        machine: "Rosie",
+        live: { view: Effect.succeed(Option.some(viewing(thread(tezos.id)))), changes: Stream.never },
+        actions: Option.some(t3("Rosie", sent)),
+        others: [{ machine: "rig", live: { view: Effect.succeed(rig.view), changes: Stream.never }, actions: t3("rig", sent), status: Effect.succeed(rig.status) }],
+        journal: Journal.fromStore(store),
+        store,
+      })
+      return { hands: Hands.make({ threads, ledger }), ledger, sent }
+    })
+
+  const onRig: Threads.Ref = { machine: "rig", id: tezos.id }
+
+  test("a message for a thread on rig goes to rig's T3 Code, never this machine's", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { hands, ledger, sent } = yield* both({ view: Option.some(viewing(thread(tezos.id))), status: { _tag: "Up" } })
+        const outcome = yield* hands.run({ utterance: "u1", step: 0 }, { _tag: "Message", to: onRig, text: "Add a test.", how: "now" })
+        return { outcome: outcome._tag, sent, machine: Option.map(yield* ledger.get("yapd:u1:0"), ({ machine }) => machine) }
+      }),
+    )
+    expect(result).toEqual({ outcome: "Done", sent: ["rig: yapd:u1:0"], machine: Option.some("rig") })
+  })
+
+  test("an action on rig while it can't be reached fails at once with why, and goes nowhere else", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { hands, ledger, sent } = yield* both({ view: Option.none(), status: { _tag: "Down", reason: "I can't reach rig right now.", outage: 2 } })
+        const told = yield* hands.run({ utterance: "u1", step: 0 }, { _tag: "Message", to: onRig, text: "Add a test.", how: "now" })
+        const stopped = yield* hands.run({ utterance: "u2", step: 0 }, { _tag: "Stop", to: onRig })
+        return { told, stopped, sent, written: yield* ledger.open(0) }
+      }),
+    )
+    expect(result.told).toEqual({ _tag: "Refused", reason: "I can't reach rig right now." })
+    expect(result.stopped).toEqual({ _tag: "Refused", reason: "I can't reach rig right now." })
+    expect(result.sent).toEqual([])
+    expect(result.written).toEqual([])
+  })
+
+  test("a restart looks at each machine's steps on their own, so rig's are left for when it's caught up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { hands, ledger, sent } = yield* both({ view: Option.some(viewing(thread(tezos.id))), status: { _tag: "Up" } })
+        const prepare = (utterance: string, machine: string) =>
+          ledger.prepare({
+            utterance,
+            step: 0,
+            kind: "message",
+            machine,
+            thread: tezos.id,
+            body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+            message: true,
+          })
+        yield* prepare("u1", "Rosie")
+        yield* prepare("u2", "rig")
+        const here = yield* hands.reconcileOn((machine) => machine === "Rosie")
+        const waiting = Option.map(yield* ledger.get("yapd:u2:0"), ({ state }) => state)
+        const there = yield* hands.reconcileOn((machine) => machine === "rig")
+        return {
+          here: here.undelivered.map(({ commandId }) => commandId),
+          waiting,
+          there: there.undelivered.map(({ commandId }) => commandId),
+          sent,
+        }
+      }),
+    )
+    expect(result).toEqual({ here: ["yapd:u1:0"], waiting: Option.some("prepared"), there: ["yapd:u2:0"], sent: [] })
   })
 })
