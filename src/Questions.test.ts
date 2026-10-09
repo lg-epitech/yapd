@@ -227,6 +227,34 @@ describe("Questions", () => {
     expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Which" })
   })
 
+  test("a yes or an okay that starts another option's name, or has its words, is the model's to tell, never yapd's pick", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (options: ReadonlyArray<string>, heard: string, inFull = true) => Questions.pick(part("What now?", options), heard, { inFull, parts: 1 })
+    for (const [options, heard] of [
+      [["Ship it now", "Hold it for QA (Recommended)"], "Ship it."],
+      [["Proceed with the migration", "Wait for review (Recommended)"], "Proceed."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Go ahead."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Do it."],
+      [["Agreed, ship it", "Revise first (Recommended)"], "Agreed."],
+      [["Okay, ship it", "Wait (Recommended)"], "OK."],
+      [["Fine as it is", "Rewrite it (Recommended)"], "Fine."],
+      [["Ship it now", "Ship it tomorrow (Recommended)"], "Ship it."],
+      [["OK, but only on staging", "Not yet (Recommended)"], "Okay, do it."],
+    ] as const) {
+      expect([heard, pick(options, heard)]).toEqual([heard, undefined])
+      // Cut off before yapd's pick, it may be that option all the same.
+      expect([heard, pick(options, heard, false)]).toEqual([heard, undefined])
+    }
+    // "Okay" is "OK" as Whisper writes it either way, so it's the option by that name.
+    expect(pick(["OK", "Wait (Recommended)"], "Okay.")).toEqual(picked(0))
+    expect(pick(["Okay", "Wait (Recommended)"], "OK.")).toEqual(picked(0))
+    // Words only the pick starts with, or that start none, still take it.
+    expect(pick(["Ship it now (Recommended)", "Hold it for QA"], "Ship it.")).toEqual(picked(0))
+    expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "Sounds good.")).toEqual(picked(1))
+    expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "The recommended one.")).toEqual(picked(1))
+    expect(pick(["Go with the old name", "Rename it (Recommended)"], "Yes, go ahead.")).toEqual(picked(1))
+  })
+
   test("a number he says to options named with numbers is the one a name has, never a place, and one no name has is the model's", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const workers = part("How many parallel workers should the test run use?", ["1 worker", "2 workers", "4 workers (Recommended)", "8 workers"])

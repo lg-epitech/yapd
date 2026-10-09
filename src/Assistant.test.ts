@@ -2629,6 +2629,32 @@ describe("Assistant", () => {
     expect(await answering(deploy, "Cancel.", "Cancel the deploy")).toEqual({ asked: 1, spoken: ["Cancel the deploy it is, sir."], answers: [{ deploy: "Cancel the deploy" }] })
   })
 
+  test("a yes or an okay that starts another option's name is the model's to tell, which may take it for that option, never sending yapd's pick in its place", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "next", question: "What now?", options: labels.map((label) => ({ label })) }
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [question]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    for (const [labels, heard] of [
+      [["Ship it now", "Hold it for QA (Recommended)"], "Ship it."],
+      [["Proceed with the migration", "Wait for review (Recommended)"], "Proceed."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Go ahead."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Do it."],
+      [["Agreed, ship it", "Revise first (Recommended)"], "Agreed."],
+    ] as const) {
+      const [named] = labels
+      expect([heard, await answering(labels, heard, named)]).toEqual([heard, { asked: 1, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
+    }
+    // "Okay" to an option called OK is that option, by its name, with no model.
+    expect(await answering(["OK", "Wait (Recommended)"], "Okay.", "Wait (Recommended)")).toEqual({ asked: 0, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
+  })
+
   test("'skip it' to a part with more after it and an option that starts with skip asks which of them, never leaving the part out as if he'd heard it taken", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const tests = { id: "tests", question: "The slow tests take ten minutes. What should I do?", options: [{ label: "Skip the slow tests" }, { label: "Run everything" }] }

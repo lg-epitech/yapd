@@ -381,12 +381,13 @@ const tens: Readonly<Record<string, number>> = { twenty: 20, thirty: 30, forty: 
  * Words as compared, with the numbers in them as figures: "four workers" is
  * "4 workers" and "twenty two" is "22", as Whisper writes them either way.
  * "One" only when it's all there is or comes first, as in "one worker": in
- * "the blue one" it only points.
+ * "the blue one" it only points. "Okay" is "ok", which Whisper writes too.
  */
 const figures = (said: string) => {
   const words = said.split(" ")
   return words
     .flatMap((word, index) => {
+      if (word === "okay") return ["ok"]
       const ten = tens[word]
       const unit = units[words[index + 1] ?? ""] ?? 0
       if (ten !== undefined) return [String(ten + (unit > 0 && unit < 10 ? unit : 0))]
@@ -464,17 +465,37 @@ const pointing: ReadonlySet<string> = new Set([
   "we'll", "want", "choose", "a", "an", "just", "only",
 ])
 
-/** An option by the words he named it with, all of them its own and no other's: "the blue one", "full history", "the four one" for 4 workers. */
-const byWords = (part: Said, said: string) => {
+/** The options whose names have every word he named them with: "the blue one", "full history", "the four one" for 4 workers. */
+const having = (part: Said, said: string) => {
   const named = figures(said)
     .split(" ")
     .filter((word) => !pointing.has(word))
-  if (named.length === 0) return undefined
-  const having = (choice: Choice) => {
+  if (named.length === 0) return []
+  return fitting(part, (choice) => {
     const own = new Set([unmarked(choice.label), choice.said].flatMap((name) => figures(gist(name)).split(" ")))
     return named.every((word) => own.has(word))
-  }
-  return one(fitting(part, having))
+  })
+}
+
+/** An option by the words he named it with, all of them its own and no other's. */
+const byWords = (part: Said, said: string) => one(having(part, said))
+
+/** The options whose names start with these words, as written or as said: "ship it" starts "Ship it now". */
+const opening = (part: Said, said: string) => {
+  const words = `${figures(said)} `
+  return fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => `${figures(gist(written))} `.startsWith(words)))
+}
+
+/**
+ * Whether words that agree may be to another option than yapd's pick: they,
+ * or the word they start with, start its name, or its name has them all,
+ * like "ship it" to "Ship it now", "okay, do it" to "OK, but only on
+ * staging", or "fine" to "Fine as it is".
+ */
+const elsewhere = (part: Said, said: string, pick: number | undefined) => {
+  const [first = ""] = said.split(" ")
+  const starts = first === said || pointing.has(first) ? [said] : [said, first]
+  return [...starts.flatMap((words) => opening(part, words)), ...having(part, said)].some((index) => index !== pick)
 }
 
 /** Words an option's name has that say nothing of which it is. */
@@ -596,7 +617,8 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
  * an option by its name, marks and all, then as compared, how it sounds,
  * its place, or words only it has, though never by a name several share;
  * several, for a part that takes several; yapd's pick, on a yes once he's
- * heard it in full; the option that starts with yes or no, on a plain yes
+ * heard it in full, unless the yes may be to another, like "ship it" to
+ * "Ship it now"; the option that starts with yes or no, on a plain yes
  * or no; his own words for "you decide" or "none of those"; or what he
  * wants done with the question itself. `inFull` is whether he heard the
  * part through to yapd's pick, and `parts` how many it has. Undefined for
@@ -629,7 +651,10 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (yes !== undefined) return picked([yes])
   const no = noes.has(said) ? starting("no") : undefined
   if (no !== undefined) return picked([no])
-  if ((yeses.has(said) || taking.has(said)) && recommended !== undefined) return asked.inFull ? picked([recommended]) : { _tag: "Again" }
+  const agreeing = yeses.has(said) || taking.has(said)
+  // "Ship it" to "Ship it now", heard in full or not, may well be that option rather than a yes to yapd's pick: which is the model's to tell.
+  if (agreeing && elsewhere(part, said, recommended)) return undefined
+  if (agreeing && recommended !== undefined) return asked.inFull ? picked([recommended]) : { _tag: "Again" }
   if (deciding.has(said)) return recommended !== undefined ? picked([recommended]) : words("You decide.")
   if (nones.has(said)) return words("None of those.")
   if (noes.has(said) && recommended !== undefined) return asked.inFull ? { _tag: "Instead" } : undefined
