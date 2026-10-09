@@ -350,6 +350,12 @@ const fill = (asks: QuestionAsks, text: string): { readonly asks: QuestionAsks; 
   return { asks: filled, ack }
 }
 
+/** A thread's question from its first part, with nothing he'd answered of it. */
+const fromTheStart = (asks: QuestionAsks): QuestionAsks => ({ ...asks, part: 0, collected: {}, inFull: false })
+
+/** Whether he's part-way through a thread's question: past its first part, or with some of it answered. */
+const partway = (asks: Asks): asks is QuestionAsks => asks._tag === "Question" && (asks.part > 0 || Object.keys(asks.collected).length > 0)
+
 /** A thread's question as it was asked, the part he'd got to and what he'd answered of it, to be queued to come back. */
 const resumed = (from: Queued, open: Pick<Open, "asks">, changes: Omit<Queued, "asking" | "again" | "kept">): Queued => ({
   ...from,
@@ -2461,6 +2467,15 @@ export const make = (options: {
       drop: Effect.gen(function* () {
         dropped = (yield* options.power).turns
         if (asking !== undefined) yield* close(asking.open, "dropped: off")
+        // What he'd answered of a thread's question is never sent once yapd's been turned off and on (I8): it's brought back from its
+        // first part, and only what he answers then goes. Nor is what he dictates taken for a part until he's heard it again.
+        for (const [index, waiting] of asked.entries()) {
+          const { asks } = waiting.asking
+          if (partway(asks)) asked[index] = { ...waiting, asking: { ...waiting.asking, asks: fromTheStart(asks) }, back: "here" }
+        }
+        for (const [requestId, heard] of known) {
+          if (partway(heard.asks)) known.set(requestId, { ...heard, asks: fromTheStart(heard.asks), through: undefined })
+        }
         // No answer is on its way any more, and the dictations they were for are dropped too.
         const kept = [...presses.values()]
         presses.clear()

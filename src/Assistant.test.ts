@@ -1519,6 +1519,56 @@ describe("Assistant", () => {
     expect(await cut((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Start with mainnet." }))).toEqual({ spoken: [last], sent: [] })
   })
 
+  test("what he answered of a question before yapd was turned off and on is never sent: it's brought back from its first part, being asked or put off", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const cycled = (putOff: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour, extras]) })
+          yield* asked(made, cloud)
+          yield* made.answer("Red.")
+          if (putOff) yield* made.answer("Later.")
+          yield* made.toggle(false)
+          yield* made.toggle(true)
+          yield* made.back
+          yield* made.wait(putOff ? 600 : 0)
+          const back = made.spoken().at(-1)
+          yield* made.answer("Blue.")
+          yield* made.answer("Alpha and Gamma.")
+          return { back, answers: answered(made.dispatched) }
+        }),
+      )
+    for (const putOff of [false, true]) {
+      expect(await cycled(putOff)).toEqual({
+        back: "Here are the two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue.",
+        answers: [{ [colour.id]: "Blue (Recommended)", [extras.id]: ["Alpha", "Gamma"] }],
+      })
+    }
+    // Let go after he answered the first part, then dictated to once yapd's on again: it's read to him from the start, and nothing goes.
+    const dictated = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Alpha" }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour, extras]),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Red.")
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+        yield* made.toggle(false)
+        yield* made.toggle(true)
+        yield* made.heard({ heard: "Tell the cloud one alpha.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 3 })
+        yield* made.flush
+        return { back: made.spoken().at(-1), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(dictated).toEqual({
+      back: "Two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      answers: [],
+    })
+  })
+
   test("a plain yes takes the option yapd said it would go with, but only once he heard that far; cut off, it's asked again in full", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
