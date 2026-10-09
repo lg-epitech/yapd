@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { type Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
+import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
@@ -9,13 +9,16 @@ import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import { Model, ModelError } from "./Model.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
+import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
+import { Warmth } from "./Voice.ts"
 import { type Decision as Written, type Material, Writer } from "./Writer.ts"
 
 /** 22:18 on the evening of the reverted attempt. */
@@ -236,6 +239,8 @@ const assistant = (
     readonly unanswered?: "started" | "not started"
     /** How the thread T3 Code made for new work it never answered for looks at first: begun, unless the test says. */
     readonly made?: Record<string, unknown>
+    /** The persona, when not one that says the lines above every time, like one with lines of his own for going ahead. */
+    readonly persona?: Context.Tag.Service<Persona.Persona>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -332,7 +337,9 @@ const assistant = (
       tell: (notice) =>
         Effect.zipRight(
           Effect.sync(() => void said.push(notice)),
-          given.waiting === true ? Effect.void : Effect.zipRight(notice.saying ?? Effect.void, notice.heard ?? Effect.void),
+          given.waiting === true
+            ? Effect.void
+            : (notice.saying ?? Effect.void).pipe(Effect.zipRight(notice.confirmed ?? Effect.void), Effect.zipRight(notice.heard ?? Effect.void)),
         ),
       power: Effect.sync(() => power),
       lastHeard: Effect.sync(() => listening),
@@ -355,7 +362,7 @@ const assistant = (
                 )
               }).pipe(Effect.delay(`${given.thinking ?? 0} seconds`)),
           }),
-          Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines), onIt: Effect.succeed(lines.onIt), said: () => Effect.void }),
+          Layer.succeed(Persona.Persona, given.persona ?? { lines: Effect.succeed(lines), onIt: Effect.succeed(lines.onIt), said: () => Effect.void }),
         ),
       ),
     )
@@ -390,7 +397,12 @@ const assistant = (
           }),
         ),
       /** Its turn came, after whatever was being said, and it was said to the end. */
-      play: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(notice?.heard ?? Effect.void), Effect.zipRight(flush)),
+      play: (notice = said.at(-1)) =>
+        (notice?.saying ?? Effect.void).pipe(
+          Effect.zipRight(notice?.confirmed ?? Effect.void),
+          Effect.zipRight(notice?.heard ?? Effect.void),
+          Effect.zipRight(flush),
+        ),
       /** Its turn came, and a dictation cut it off before the end. */
       cut: (notice = said.at(-1)) => (notice?.saying ?? Effect.void).pipe(Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
@@ -1806,6 +1818,56 @@ describe("Assistant", () => {
     // It isn't the thread he was hearing about, so it's named: his one-word chance to put it right.
     expect(result.spoken).toEqual(["On it, sir: Migrate Tezos Integration."])
     expect(result.kept).toEqual([{ thread: tezos.id, text: "Use the fee table from the Mina work.", said: "On it, sir: Migrate Tezos Integration." }])
+  })
+
+  test("with lines of his own for going ahead, a message says one, noted only once it's played, so the next says another, and none he didn't hear is noted", async () => {
+    const own = ["Right away, sir.", "Very good, sir.", "Consider it done, sir.", "Very well, sir."]
+    /** Which of his lines a confirmation is, said before the thread's name or on its own. */
+    const going = (said: string) => own.find((line) => said === line || said === `${line.slice(0, -1)}: Migrate Tezos Integration.`)
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* Store.make(":memory:")
+        const built = yield* Layer.build(
+          Persona.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(Warmth, { warm: () => Effect.void }),
+                Layer.succeed(Settings.Settings, Settings.fromStore(store)),
+                Layer.succeed(Model, { ask: () => Effect.fail(new ModelError({ cause: "Without a style, nothing is written." })) }),
+              ),
+            ),
+            Layer.provide(Layer.setConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_ON_IT", own.join("|")]])))),
+          ),
+        )
+        const persona = Context.get(built, Persona.Persona)
+        const noted: Array<string> = []
+        const { dictate, spoken, play } = yield* assistant(
+          (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: situation.utterance.heard, how: "now" }),
+          undefined,
+          { waiting: true, persona: { ...persona, said: (line) => Effect.zipRight(Effect.sync(() => void noted.push(line)), persona.said(line)) } },
+        )
+        yield* dictate("Tell the Tezos migration to use the fee table.")
+        const unplayed = [...noted]
+        yield* play()
+        const played = [...noted]
+        // Never played, like one dropped as yapd was turned off, or that couldn't be.
+        yield* dictate("Tell it to rebase on main.")
+        yield* dictate("Tell it to open a pull request.")
+        return { spoken: spoken(), unplayed, played, noted }
+      }),
+    )
+    expect(result.spoken).toHaveLength(3)
+    const [first, ...after] = result.spoken.map(going)
+    // Before the thread's name, as the written one is.
+    expect(result.spoken[0]).toBe(`${first?.slice(0, -1)}: Migrate Tezos Integration.`)
+    expect(result.unplayed).toEqual([])
+    expect(result.played).toEqual([first!])
+    // Picked from his own, never the one he heard last, which the two he never heard leave as it was.
+    for (const line of after) {
+      expect(own).toContain(line!)
+      expect(line).not.toBe(first)
+    }
+    expect(result.noted).toEqual([first!])
   })
 
   test("a write at medium confidence about a thread that isn't the focus asks once, naming both", async () => {

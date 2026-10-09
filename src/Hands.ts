@@ -1095,7 +1095,7 @@ export const ago = (ms: number) => {
   return minutes < 2 ? "a minute ago" : `${counted[minutes] ?? String(minutes)} minutes ago`
 }
 
-/** A confirmation, naming the thread after it when it isn't the one he's on about: "On it, sir: the Tezos migration." */
+/** A confirmation, naming the thread after it when it isn't the one he's on about: "On it, sir: the Tezos migration.", or "Right away, sir: the Tezos migration." */
 export const naming = (line: string, called: Option.Option<string>) =>
   Option.match(called, { onNone: () => line, onSome: (name) => `${line.trim().replace(/[.!]+$/, "")}: ${name}.` })
 
@@ -1153,6 +1153,18 @@ export const done = (
     called,
   )
 }
+
+/**
+ * Whether what's said once it's done is the line for going ahead, which he
+ * can have lines of his own for, a different one each time: for a message
+ * that went in as asked, not one that waits, was told to a turn stopped for
+ * it, or whose turn has ended since.
+ */
+export const goesAhead = (
+  act: Act,
+  how: Ledger.How,
+  as: { readonly waiting?: Waiting; readonly stopped?: boolean | "ended"; readonly ended?: Ended } = {},
+) => act._tag === "Message" && how !== "queued" && as.stopped !== true && as.ended === undefined && as.waiting === undefined
 
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
