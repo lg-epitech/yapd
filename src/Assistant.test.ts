@@ -4130,6 +4130,43 @@ describe("Assistant", () => {
       expect(await echoed(echo)).toBe("The loader is fixed.")
   })
 
+  test("the model's line for 'say that again' never asks again a question yapd asked lately after news, even without the news, like 'Send it again?' once the news of a message that may not have got there is left out", async () => {
+    const echoed = (asked: "lost" | "twice", echo: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, heard, reading, spoken, open, journal } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Could")
+                ? Brain.decision({ act: "again", how: "same", spoken: echo, pending: Option.isSome(situation.open) ? "replaces" : "" })
+                : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table from the Mina work.", how: "now", sure: "high" }),
+            undefined,
+            asked === "lost" ? { answer: () => () => Effect.fail(new T3CodeServer.Trouble({ reason: "T3 Code is taking too long.", sent: true })) } : {},
+          )
+          // Asked after the news it follows: that the message may not have got there, or that the same words went a minute ago.
+          yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          if (asked === "twice") yield* dictate("Tell the Tesla's migration to use the fee table from the Mina work.")
+          // He heard the question, then an update, which is what he asks to hear again, and which closes the question.
+          yield* reading("yapd", "The loader is fixed.")
+          yield* heard({ heard: "Could you repeat what you told me before?", via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: 1 })
+          const questions = (yield* journal.since(0, { kinds: ["answer"] })).flatMap(({ detail }) =>
+            typeof detail === "object" && detail !== null && "question" in detail ? [detail.question] : [],
+          )
+          return { asked: questions, said: spoken().at(-1), open: Option.isSome(yield* open) }
+        }),
+      )
+    // The question in its own words is noted as it's asked, apart from the news before it.
+    expect(await echoed("lost", "The loader is fixed.")).toEqual({ asked: ["Send it again?"], said: "The loader is fixed.", open: false })
+    expect(await echoed("twice", "The loader is fixed.")).toEqual({ asked: ["Again?"], said: "The loader is fixed.", open: false })
+    // Without the news, wherever it addresses him, if at all, with "it's on your screen" or not, it's the question asked all the same.
+    for (const echo of ["Send it again, sir?", "Sir, send it again?", "send it again", "It's on your screen. Send it again, sir?", "It's, sir, on your screen. Send it again?"])
+      expect((await echoed("lost", echo)).said).toBe("The loader is fixed.")
+    for (const echo of ["Again, sir?", "Sir, again?", "It's, sir, on your screen. Again?"]) expect((await echoed("twice", echo)).said).toBe("The loader is fixed.")
+    // The whole line, news and all, too.
+    expect((await echoed("lost", "I couldn't confirm it got to Migrate Tezos Integration. Send it again, sir?")).said).toBe("The loader is fixed.")
+    // Anything else is said in the model's words.
+    expect((await echoed("lost", "The loader is fixed, sir.")).said).toBe("The loader is fixed, sir.")
+  })
+
   test("a pull request taken on a low guess between two is asked about before anything opens, and the one he picks is opened", async () => {
     const migration = (id: string, coin: string, number: number) =>
       thread(id, `Migrate the ${coin} integration`, "integration", {

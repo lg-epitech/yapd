@@ -370,6 +370,14 @@ describe("Brain", () => {
     expect(Brain.echoes(`It's, sir, on your screen. ${choices}?`, [`${choices}, sir?`], lines)).toBe(true)
     expect(Brain.echoes(`The loader is fixed.`, [`${choices}, sir?`, ""], lines)).toBe(false)
     expect(Brain.echoes(`${choices}ville is up.`, [`${choices}, sir?`], lines)).toBe(false)
+    // After news, the question on its own, which a line saying it again may leave the news out of; one asked again in other words follows none.
+    const called = Option.some("Migrate Tezos Integration")
+    expect(Brain.alone({ asked: Hands.lost(lines, called), news: Hands.missing(lines, called) })).toBe("Send it again?")
+    expect(Brain.alone({ asked: Hands.twice(now - 60_000, now, lines, called), news: Hands.sentBefore(now - 60_000, now, lines, called) })).toBe("Again?")
+    expect(Brain.alone({ asked: Hands.read(lines, called), news: Hands.readAlready(lines, called) })).toBe("Shall I tell it to ignore that?")
+    const reasked = "Shall I still send that to Migrate Tezos Integration again, sir?"
+    expect(Brain.alone({ asked: reasked, news: Hands.missing(lines, called) })).toBe(reasked)
+    expect(Brain.alone({ asked: `${choices}, sir?` })).toBe(`${choices}, sir?`)
   })
 
   test("a near-silence 'Thank you.' is ignored", () => {

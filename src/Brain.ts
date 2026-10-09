@@ -108,7 +108,7 @@ export interface Situation {
   readonly usage: Option.Option<Threads.Usage>
   /** On a second look: what a thread is doing, or what a search found. */
   readonly second: Option.Option<{ readonly ref: Threads.Ref; readonly detail: T3Actions.Detail } | { readonly found: ReadonlyArray<string> }>
-  /** Questions yapd asked in the last ten minutes, so none is asked in the same words again. */
+  /** Questions yapd asked in the last ten minutes, as said and on their own without any news before them, so none is asked in the same words again. */
   readonly asked: ReadonlyArray<string>
   /** What yapd last did for him in the last two minutes, whatever it was, which "scratch that" means. */
   readonly acted: Option.Option<Ledger.Row>
@@ -228,6 +228,14 @@ export const echoes = (line: string, before: ReadonlyArray<string>, lines: Pick<
   return before.some((asked) => compared(asked).trim() !== "" && said.includes(compared(asked)))
 }
 
+/**
+ * A question on its own, without the news it follows: "Send it again?" of "I
+ * couldn't confirm it got there, sir. Send it again?", which a line saying it
+ * again may leave the news out of. One asked again in other words follows none.
+ */
+export const alone = (open: Pick<Assistant.Open, "asked" | "news">) =>
+  open.news !== undefined && open.asked.startsWith(`${open.news} `) ? open.asked.slice(open.news.length).trim() : open.asked
+
 /** The threads a question chooses between, as they're named in it: "A or B". */
 export const choices = (candidates: ReadonlyArray<Threads.Listed>) => either(candidates.slice(0, 3).map((listed) => named(listed, candidates)))
 
@@ -277,17 +285,18 @@ export const confirming = (doing: string, lines: Lines, asked: ReadonlyArray<str
   [`${capital(doing)}${addressed(lines)}?`, `Shall I ${doing}${addressed(lines)}?`].find((wording) => !repeated(wording, asked, lines))
 
 /**
- * A question asked once more, in other words than it was, and than any asked
- * in the last ten minutes. None once every wording has been used.
+ * A question asked once more, in other words than it was, with or without the
+ * news before it, and than any asked in the last ten minutes. None once every
+ * wording has been used.
  */
-export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about">, before: ReadonlyArray<string>, lines: Lines) => {
+export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about" | "news">, before: ReadonlyArray<string>, lines: Lines) => {
   const wordings =
     open.kind === "which"
       ? [`Which one${addressed(lines)}: ${open.about}?`, `I still need to know which you meant${addressed(lines)}: ${open.about}?`]
       : open.kind === "project"
         ? [`Which project should ${open.about || "that"} go in${addressed(lines)}?`, `I still need a project for ${open.about || "that"}${addressed(lines)}.`]
         : [`Shall I still ${open.about}${addressed(lines)}?`, `Do you still want me to ${open.about}${addressed(lines)}?`]
-  return wordings.find((wording) => !repeated(wording, [open.asked, ...before], lines))
+  return wordings.find((wording) => !repeated(wording, [open.asked, alone(open), ...before], lines))
 }
 
 /** A question as it is, unless it was asked in the last ten minutes: then in other words, or none. */

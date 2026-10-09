@@ -84,7 +84,7 @@ export interface Open {
   /** What was understood, minus what's being asked. */
   readonly decision: Brain.Decision
   readonly candidates: ReadonlyArray<Threads.Ref>
-  /** The exact words said. */
+  /** The exact words said: any news, then the question on its own, which is told apart from it, since a line saying it again may leave the news out. */
   readonly asked: string
   /** What it's about in a few words, for asking it again and letting it go: the request, or the threads it chooses between. */
   readonly about: string
@@ -254,6 +254,12 @@ const nowhere: Threads.Desk = { threads: [], away: [] }
 
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
+
+/** The question a journal entry asked on its own, without the news before it, unless it's from a yapd that didn't keep it. */
+const alone = (kept: Kept) => {
+  const asked = (kept.detail as { readonly question?: unknown }).question
+  return typeof asked === "string" ? [asked] : []
+}
 
 /**
  * Whether a journal entry is him catching up, asking what he missed, at once
@@ -484,8 +490,9 @@ export const make = (options: {
     const askedLately = Effect.gen(function* () {
       const kept = yield* journal.since((yield* Clock.currentTimeMillis) - fresh, { kinds: ["answer"] })
       const lines = yield* persona.lines
-      // In its own words, without "it's on your screen" when it went up on a card as it was asked.
-      return kept.filter(question).flatMap(({ said }) => (said === undefined ? [] : [said, Show.offScreen(said, lines)]))
+      // In its own words, without "it's on your screen" when it went up on a card as it was asked, and the question alone, since saying it
+      // again may leave out the news before it, like "Send it again?" without that the message may not have got there.
+      return kept.filter(question).flatMap((kept) => [...(kept.said === undefined ? [] : [kept.said, Show.offScreen(kept.said, lines)]), ...alone(kept)])
     })
 
     /** Threads a search for his words turns up, to add to the desk. T3 Code answers in a few ms, so only what's there within the cap is taken. */
@@ -1667,7 +1674,8 @@ export const make = (options: {
                 ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
                 said: outcome.say,
                 utterance: utterance.id,
-                ...(open === undefined ? {} : { detail: { question: true, open: open.id } }),
+                // The question on its own too, apart from the news before it.
+                ...(open === undefined ? {} : { detail: { question: Brain.alone(open), open: open.id } }),
               })
         yield* Effect.logInfo(`Said: ${outcome.say}`)
         const { subject, missed, card } = outcome
