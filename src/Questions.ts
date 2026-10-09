@@ -415,14 +415,39 @@ const figures = (said: string) => {
 const sound = (said: string) => figures(said).replace(/[^\p{L}\p{N}]+/gu, "")
 
 /**
- * A name as compared, every word of it kept, even one `gist` leaves out of
- * what he says, like "please" in "Please hold" or yapd's own name in
- * "Restart yapd": only his words may go without those.
+ * Words as compared, every one of them kept, even one `gist` leaves out,
+ * like "please" in "Please hold" or yapd's own name in "Restart yapd", in
+ * any case and with any punctuation, an apostrophe however it's written.
  */
-const kept = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").replace(/\s+/g, " ").trim()
+const kept = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/[^\p{L}\p{N}' ]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
 
 /** Without a "the" before it, which says nothing of which. */
 const unled = (said: string) => said.replace(/^the (?=\S)/, "")
+
+/** What only fills a pause, which is never part of what he said. */
+const fillers: ReadonlySet<string> = new Set(["uh", "um", "erm", "hmm"])
+
+/**
+ * His words as compared with a name: as `kept` has them, without what only
+ * fills a pause, like "uh", a "the" before them, or a "please" or "sir"
+ * after them, which say nothing of which. Never without yapd's name or a
+ * "please" anywhere else, as `gist` would have them, since a name may have
+ * those, like "Restart yapd" or "Please hold", and his words without them
+ * may be another's, like Restart.
+ */
+const bare = (heard: string) => {
+  const words = kept(heard)
+    .split(" ")
+    .filter((word) => !fillers.has(word))
+  while (words.length > 1 && ["please", "sir"].includes(words.at(-1) ?? "")) words.pop()
+  return unled(words.join(" "))
+}
 
 /** The places of the options that fit, which settle it only when there's one. */
 const fitting = (part: Said, fits: (choice: Choice) => boolean) => part.options.flatMap((choice, index) => (fits(choice) ? [index] : []))
@@ -445,8 +470,8 @@ const exactly = (part: Said, text: string) => {
  * The options his words are the whole name of, nothing of it left out and
  * nothing added: as written, marks and all, which tells "C#" from "C++";
  * else as compared, in any case and with any punctuation, its
- * "(Recommended)", a "the" before it and a "please" or "sir" after it
- * aside; else by how it sounds, as Whisper may write it, like "ghost net"
+ * "(Recommended)", a "the" before it, a "please" or "sir" after it and an
+ * "uh" aside; else by how it sounds, as Whisper may write it, like "ghost net"
  * for Ghostnet or "four workers" for 4 workers. More than one when they're
  * named alike, which only the model can tell apart. Part of a name, a word
  * of it, or its words in another order are never one: "merge now" is never
@@ -456,8 +481,8 @@ const exactly = (part: Said, text: string) => {
 const wholly = (part: Said, heard: string): ReadonlyArray<number> => {
   const exact = exactly(part, heard)
   if (exact !== undefined) return [exact]
-  // His words without "uh", "please", "sir" or yapd's name, or with every word kept, for a name that has them.
-  const his = [...new Set([gist(heard), kept(heard)].map(unled))].filter((said) => said !== "")
+  // His words without what goes without saying, or with every word kept, for a name that has them, like "Hold please".
+  const his = [...new Set([bare(heard), unled(kept(heard))])].filter((said) => said !== "")
   if (his.length === 0) return []
   const names = ({ label, said }: Choice) => [label, unmarked(label), said].map((name) => unled(kept(name)))
   const compared = fitting(part, (choice) => names(choice).some((name) => his.includes(name)))

@@ -310,6 +310,26 @@ describe("Questions", () => {
     expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Which" })
   })
 
+  test("only a 'the' before a name, a 'please' or 'sir' after it and fillers like 'uh' go without saying, never yapd's name or a 'please' within, so a longer name never comes to a shorter one", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("What should I do?", labels), heard, { inFull: true, parts: 1 })
+    for (const [labels, heard] of [
+      [["Restart", "Restart yapd"], "Restart yapd, please."],
+      [["Voice", "Jarvis voice"], "Jarvis voice, please."],
+      [["Restart", "Restart yapd"], "Um, restart yapd."],
+      [["Restart", "Restart Jarvis"], "Restart Jarvis please."],
+      [["Hold", "Please hold"], "Please hold, sir."],
+    ] as const) {
+      expect([heard, pick(labels, heard)]).toEqual([heard, picked(1)])
+      expect([heard, Questions.resolve(part("What should I do?", labels), heard)]).toEqual([heard, picked(1)])
+    }
+    expect(Questions.resolve(part("What should I do?", ["Restart", "Restart yapd"]), "Restart yapd, sir.")).toEqual(picked(1))
+    // Those still go without saying around a name that hasn't them.
+    expect(["Hold, please.", "Uh, hold, sir.", "The hold."].map((heard) => pick(["Hold", "Wait"], heard))).toEqual([picked(0), picked(0), picked(0)])
+    // A name that ends in "please" is as much his words with it as without: the model tells.
+    expect(pick(["Hold", "Hold please"], "Hold, please.")).toBeUndefined()
+  })
+
   test("taking back what he said, like 'cancel that', is the model's to tell, never an option it's a word of", () => {
     const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
     const deploy = part("The deploy failed. What now?", ["Retry (Recommended)", "Cancel the deploy"])
