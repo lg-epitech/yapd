@@ -417,6 +417,24 @@ describe("Questions", () => {
     expect(["All of them.", "Both.", "The first and the second."].map((heard) => pick(extras, heard))).toEqual([picked(0, 1), picked(0, 1), picked(0, 1)])
   })
 
+  test("when the question names its options so they aren't read, a place is the model's to tell, since he heard them in the question's order, not the agent's", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    // Claude lists the one it recommends first, so "the first one" he heard is Deploy now, which the agent lists second.
+    const deploy = part("Should I deploy now or wait?", ["Wait (Recommended)", "Deploy now"])
+    expect(deploy.read).toBe(false)
+    for (const heard of ["The first one.", "The latter.", "The former.", "First.", "Second.", "Last.", "Option two.", "Number one.", "A.", "B."]) {
+      expect([heard, pick(deploy, heard)]).toEqual([heard, undefined])
+    }
+    expect([Questions.mentions(deploy, 0, "The first one, I think."), Questions.mentions(deploy, 1, "The latter, I think.")]).toEqual([false, false])
+    // By name it's still plain.
+    expect(["Deploy now.", "Wait."].map((heard) => pick(deploy, heard))).toEqual([picked(1), picked(0)])
+    // Once he's heard the others after a no, it's their order he heard.
+    const rollback = { ...part("Should I deploy now, wait or roll back?", ["Wait (Recommended)", "Deploy now", "Roll back"]), recommended: Option.none<number>(), among: [1, 2] }
+    expect(rollback.read).toBe(false)
+    expect(["The first one.", "The last one."].map((heard) => pick(rollback, heard))).toEqual([picked(1), picked(2)])
+  })
+
   test("options named alike but for their marks, like C++ and C#, go by their names as written, never by a letter's place", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const sharp = part("Which language should the bindings use?", ["C++", "C#", "Rust"])

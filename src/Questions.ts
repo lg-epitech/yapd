@@ -477,12 +477,20 @@ const ownWords = (part: Said) =>
 /** The options as he heard them offered last, by their place in the part: all of them, or the others once he turned down yapd's pick. */
 const offeredLast = (part: Said) => part.among ?? part.options.map((_, index) => index)
 
+/**
+ * Whether he heard the options in an order a place counts by: read out, or
+ * the others after a no. Named only in the question, like "Should I deploy
+ * now or wait?" to Wait and Deploy now, they came in its order, not the
+ * agent's, so "the first one" is the model's to tell, seeing both.
+ */
+const ordered = (part: Said) => part.read || part.among !== undefined
+
 /** A place said as one, by its order, like "the first one" or "last one", rather than "first" on its own, which may be a name's word. */
 const ordinally = (said: string) => /^(?:the (?:first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th)(?: one| option)?|(?:first|second|third|fourth|last|1st|2nd|3rd|4th) one)$/.test(said)
 
 const byPlace = (part: Said, said: string) => {
   const found = place.exec(said)
-  if (found === null) return undefined
+  if (found === null || !ordered(part)) return undefined
   const [, the, kind, which = ""] = found
   // A letter on its own only when no option goes by one, and "the one" is no place at all.
   if (kind === undefined && /^[a-d]$/.test(which) && part.options.some(({ said }) => /^\p{L}$/u.test(said.trim()))) return undefined
@@ -573,9 +581,9 @@ export const mentions = (part: Said, index: number, heard: string) => {
   if (choice === undefined) return false
   const words = new Set(figures(gist(heard)).split(" "))
   const own = [unmarked(choice.label), choice.said].flatMap((name) => figures(gist(name)).split(" ")).filter((word) => word !== "" && !pointing.has(word) && !glue.has(word))
-  // Not by a letter, nor "one", which say other things too; and by its place among what he was offered last.
+  // Not by a letter, nor "one", which say other things too; and by its place among what he was offered last, when he heard them in order.
   const offered = offeredLast(part)
-  const place = offered.indexOf(index)
+  const place = ordered(part) ? offered.indexOf(index) : -1
   const placed = Object.entries(places).flatMap(([word, at]) => (place >= 0 && at === place && !/^(?:[a-d]|one)$/.test(word) ? [word] : []))
   const last = place >= 0 && place === offered.length - 1 ? ["last", "latter"] : []
   return [...own, ...placed, ...last].some((word) => words.has(word))

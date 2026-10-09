@@ -2235,6 +2235,27 @@ describe("Assistant", () => {
     expect(await answering(["Blue (Recommended)", "Red"], "The first one.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
   })
 
+  test("a place said to a question that names its options, so they aren't read, is the model's to tell, never counted in the agent's order", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const deploy = { id: "deploy", question: "Should I deploy now or wait?", options: [{ label: "Wait (Recommended)" }, { label: "Deploy now" }] }
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [deploy]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken(), answers: answered(made.dispatched) }
+        }),
+      )
+    // He heard "deploy now" first, which Claude lists second, after the one it recommends.
+    expect(await answering("The first one.", "Deploy now")).toEqual({
+      asked: 1,
+      spoken: ["A question on Cloud deployment discovery, sir: Should I deploy now or wait? I'd go with Wait.", "Deploy now it is, sir."],
+      answers: [{ deploy: "Deploy now" }],
+    })
+    expect(await answering("The latter.", "Wait (Recommended)")).toEqual({ asked: 1, spoken: [expect.stringMatching(/^A question/), "Wait it is, sir."], answers: [{ deploy: "Wait (Recommended)" }] })
+  })
+
   test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes, uses up an ask, and is never asked twice in the same words", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (heard: ReadonlyArray<string>, unanswered = false) =>
