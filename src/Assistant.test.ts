@@ -2964,6 +2964,14 @@ describe("Assistant", () => {
       spoken: [expect.stringMatching(/^A question/), "Drop it it is, sir."],
       answers: [{ part: "Drop it (Recommended)" }],
     })
+    // An okay is as much a yes to the question as to yapd's pick, so two plain yeses never send opposite options.
+    for (const [question, labels, heard, text] of [
+      ["OK to merge now?", ["Not yet (Recommended)", "Merge now"], "OK.", "Merge now"],
+      ["Is it fine to drop the old table?", ["Keep it for now (Recommended)", "Drop it"], "Fine.", "Drop it"],
+      ["Should I deploy?", ["No, wait (Recommended)", "Yes, now"], "OK.", "Yes, now"],
+    ] as const) {
+      expect([heard, await answering(question, labels, heard, text)]).toEqual([heard, { asked: 1, spoken: [expect.stringMatching(/^A question/), `${text} it is, sir.`], answers: [{ part: text }] }])
+    }
   })
 
   test("'skip it' to a part with more after it and an option that starts with skip asks which of them, never leaving the part out as if he'd heard it taken", async () => {

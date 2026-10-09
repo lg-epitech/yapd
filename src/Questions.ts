@@ -592,11 +592,13 @@ export const mentions = (part: Said, index: number, heard: string) => {
 /** Plain yeses. */
 const yeses: ReadonlySet<string> = new Set([...agreed].filter((said) => !/\bboth\b/.test(said)))
 
-/** Taking yapd's pick, besides a plain yes. */
+/** Agreeing, besides a plain yes, which is as much a yes to what the question asks as to yapd's pick, like "OK" to "OK to merge now?". */
+const assenting: ReadonlySet<string> = new Set(["sounds good", "ok", "okay", "fine", "that's fine", "agreed"])
+
+/** Taking yapd's pick by pointing at it, which is never a yes to what the question asks. */
 const taking: ReadonlySet<string> = new Set([
-  "sounds good", "go with that", "go with it", "that one", "your pick", "go with your pick", "the recommended one", "recommended",
-  "what you recommend", "go with what you recommend", "whatever you recommend", "the one you recommend", "your recommendation",
-  "go with your recommendation", "ok", "okay", "fine", "that's fine", "agreed",
+  "go with that", "go with it", "that one", "your pick", "go with your pick", "the recommended one", "recommended", "what you recommend",
+  "go with what you recommend", "whatever you recommend", "the one you recommend", "your recommendation", "go with your recommendation",
 ])
 
 /** Plain noes. */
@@ -655,7 +657,7 @@ const whether = (part: Said) => {
 }
 
 /** Whether it answers how it's asked rather than which option, which then only an option's name in full picks. */
-const steers = (said: string) => [yeses, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
+const steers = (said: string) => [yeses, assenting, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
 
 /** Words to stop yapd talking, put it off, skip it or hear it again: an option named so, like "Stop" or "Later", is only that once he's heard it offered. */
 const hushing = (said: string) => [repeating, later, skipping, leaving].some((phrases) => phrases.has(said))
@@ -748,14 +750,15 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (yes !== undefined) return picked([yes])
   const no = noes.has(said) ? starting("no") : undefined
   if (no !== undefined) return picked([no])
-  const agreeing = yeses.has(said) || taking.has(said)
+  const assents = yeses.has(said) || assenting.has(said)
+  const agreeing = assents || taking.has(said)
   // "Ship it" to "Ship it now", heard in full or not, may well be that option rather than a yes to yapd's pick: which is the model's to tell.
   if (agreeing && elsewhere(part, said, recommended)) return undefined
-  // A plain yes may be to the question, not to yapd's pick, when that's a no, like "No, skip tests" to "Should I add tests?", and so may a
-  // plain no to one a yes or no answers, like "Should I keep the cache?", with no option that's either: the model tells, seeing both.
+  // A plain yes or an okay may be to the question, not to yapd's pick, when that's a no, like "No, skip tests" to "Should I add tests?",
+  // and so may a plain no to one a yes or no answers, like "OK to merge now?", with no option that's either: the model tells, seeing both.
   const pickedNo = recommended !== undefined && /^no\b/i.test(part.options[recommended]?.said ?? "")
   const neither = part.options.length > 0 && fitting(part, ({ said }) => /^(?:yes|no)\b/i.test(said)).length === 0
-  if ((yeses.has(said) && pickedNo) || ((yeses.has(said) || noes.has(said)) && neither && whether(part))) return undefined
+  if ((assents && pickedNo) || ((assents || noes.has(said)) && neither && whether(part))) return undefined
   if (agreeing && recommended !== undefined) return asked.inFull ? picked([recommended]) : { _tag: "Again" }
   if (deciding.has(said)) return recommended !== undefined ? picked([recommended]) : words("You decide.")
   if (nones.has(said)) return words("None of those.")
