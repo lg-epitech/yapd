@@ -19,6 +19,7 @@ import { Vad, VadError } from "./Vad.ts"
 import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
@@ -1209,7 +1210,7 @@ describe("Daemon", () => {
     expect(late).toEqual(["yapd. The loader is fixed."])
   })
 
-  test("a turn no hook told of, once said, is its run's even when its Stop's words can't be told, but never a newer turn's, however alike their words", async () => {
+  test("a turn no hook told of, once said, is its run's even when its Stop's words can't be told, but never a newer turn's by words that can't tell them apart", async () => {
     const origin = { project: "yapd", host: hostname() }
     const stop = (handle: Handle, message: string) =>
       handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: message }, origin, false)
@@ -1255,6 +1256,53 @@ describe("Daemon", () => {
         }),
       ),
     ).toEqual({ played: ["yapd. The loader is fixed.", "yapd. The tests pass now."], through: [] })
+  })
+
+  test("a turn no hook told of, once heard, takes its run's Stop come late by its own words even once the thread started again, and a newer run that ended on them is said from T3 Code's word", async () => {
+    const words = "The loader is fixed and the tests pass."
+    type Step = (harness: Effect.Effect.Success<ReturnType<typeof make>>, run2: Notices.Finished) => Effect.Effect<void>
+    /** The loader's run-1 said in its hook's place and heard, then the thread on to run-2, with what happens `then` and `after` a Stop ending on the same words. */
+    const later = (then: Step, after: Step = () => Effect.void) =>
+      run(
+        Effect.gen(function* () {
+          const harness = yield* make(undefined, { link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }) })
+          const { made, wait, played, handle, journal, nextEvent } = harness
+          let first = true
+          const { turns } = yield* made.power
+          yield* made.finished(unhooked(words, "run-1", turns, Effect.sync(() => first)))
+          yield* nextEvent("Ready:")
+          yield* wait(11)
+          first = false
+          yield* made.overtaken({ machine: "Rosie", id: "t-loader" })
+          // T3 Code reads the run before with it, which ended on the same words.
+          const run2: Notices.Finished = { ...unhooked(words, "run-2", turns), run: { final: words, others: [words], natives: ["native-loader"], startedAt: 0 } }
+          yield* then(harness, run2)
+          yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: words }, { project: "yapd", host: hostname() }, false)
+          yield* wait(11)
+          yield* after(harness, run2)
+          yield* wait(11)
+          yield* wait(11)
+          const kept = yield* journal.since(0, { kinds: ["action"] })
+          return { played: [...played], through: kept.map(({ detail }) => (detail as { through?: string }).through) }
+        }),
+      )
+    // Run-1's own Stop, come once the thread had started again: he heard that turn, so it isn't said again.
+    expect(await later(() => Effect.void)).toEqual({ played: [`yapd. ${words}`], through: ["done:Rosie:run-1"] })
+    // Or run-2's, that ended on the same words: taken for run-1's, it isn't run-2's own, so T3 Code's word that run-2 finished is said.
+    expect(await later(() => Effect.void, ({ made }, run2) => made.finished(run2))).toEqual({
+      played: [`yapd. ${words}`, `yapd. ${words}`],
+      through: ["done:Rosie:run-1"],
+    })
+    // Run-2's turn, from T3 Code's word, waits to be said when the Stop comes: which run it's of can't be told, so it gives way to the Stop, which is said.
+    expect(
+      await later(({ made, finish, nextEvent }, run2) =>
+        Effect.gen(function* () {
+          yield* finish("a", "Something else first.")
+          yield* made.finished(run2)
+          yield* nextEvent("Ready: yapd. The loader")
+        }),
+      ),
+    ).toEqual({ played: [`yapd. ${words}`, "yapd. Something else first.", `yapd. ${words}`], through: [] })
   })
 
   test("a turn no hook told of that he didn't hear after all, broken off or put back to be read again, gives way to a Stop of its own, unless he told it to stop", async () => {

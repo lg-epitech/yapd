@@ -119,6 +119,8 @@ export const make = (
   const followed = new Map<string, Replies>()
   /** Each session's Stops, when they came and what they said last, oldest first, by the agent's own id for it, whether or not they were said, for an hour. */
   const stops = new Map<string, ReadonlyArray<Notices.Stop>>()
+  /** Stops not said since a turn said in their hook's place was theirs, which makes them that run's and no other's. */
+  const taken = new WeakSet<Notices.Stop>()
   /**
    * A turn T3 Code said finished that no hook had told of, said in its hook's
    * place, under the session `finished:<machine>:<thread>`: what tells a Stop
@@ -610,8 +612,17 @@ export const make = (
     )
   }
 
-  /** The Stops of these sessions in the last hour, oldest first, by the agent's own ids for them. */
-  const stopsOf = (sessions: ReadonlyArray<string>) => sessions.flatMap((session) => stops.get(session) ?? []).toSorted((a, b) => a.at - b.at)
+  /**
+   * The Stops of these sessions in the last hour, oldest first, by the
+   * agent's own ids for them, but those taken for a turn said in their hook's
+   * place, which are its run's: a newer run that ended on the same words had
+   * none of its own, and is said from T3 Code's word.
+   */
+  const stopsOf = (sessions: ReadonlyArray<string>) =>
+    sessions
+      .flatMap((session) => stops.get(session) ?? [])
+      .filter((stop) => !taken.has(stop))
+      .toSorted((a, b) => a.at - b.at)
 
   /** Turns said in a hook's place under this session that he isn't hearing and didn't hear, which are dropped with what's waiting under it. */
   const forsake = (session: string) => {
@@ -625,31 +636,38 @@ export const make = (
    * its own, or to one whose words can't be told, which is then dealt with,
    * as the Stop's own update is said in its stead. One he's hearing or heard
    * was the turn's, so such a Stop is given back for its update not to be,
-   * as long as nothing started since: the thread is still on that run, and
-   * no prompt came through the hooks since it was taken on. After that, the
-   * Stop is a newer turn's, however alike their words, and it's said. Called
-   * with the event lock held.
+   * and is that run's from then on: any of its own or whose words can't be
+   * told while nothing started since (the thread is still on that run, and
+   * no prompt came through the hooks since it was taken on); after, only one
+   * with enough of its own words to tell its run by, as when its Stop comes
+   * late, and not once a newer run's turn gave way to it. Anything else, like
+   * a short "Done.", is the newer turn's, and said. Called with the event
+   * lock held.
    */
   const giveWay = (session: string, stop: Notices.Stop, prompted: number | undefined) =>
     Effect.gen(function* () {
-      let through: Fallback | undefined
+      /** The turn of the run its thread is still on that the Stop is, and the newest of a run the thread moved on from that it's by its words. */
+      let still: Fallback | undefined
+      let late: Fallback | undefined
+      let withdrawn = false
       for (const fallback of [...fallbacks.values()].filter((fallback) => fallback.run.natives.includes(session))) {
         const whose = Notices.whose(stop, fallback.run)
         if (whose === "another") continue
         if (fallback.heard) {
-          // A newer turn started since, which a Stop now is: this one stands for nothing more.
-          if (!(yield* fallback.current) || (prompted !== undefined && prompted > fallback.at)) {
-            fallbacks.delete(fallback.key)
-            continue
-          }
-          if (through === undefined || whose === "own") through = fallback
+          const moved = !(yield* fallback.current) || (prompted !== undefined && prompted > fallback.at)
+          if (!moved && (still === undefined || whose === "own")) still = fallback
+          if (moved && whose === "own" && Notices.telling(stop.message) && (late === undefined || fallback.at > late.at)) late = fallback
           continue
         }
+        withdrawn = true
         fallbacks.delete(fallback.key)
         yield* discard(fallback.session)
         yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came after all")
         if (fallback.row !== undefined) yield* journal.markHeard([fallback.row], stop.at)
       }
+      // A turn still to be said gave way to it, like a newer run's that ended on the same words: whose Stop it is can't be told, so the hook wins.
+      const through = still ?? (withdrawn ? undefined : late)
+      if (through !== undefined) taken.add(stop)
       return through
     })
 

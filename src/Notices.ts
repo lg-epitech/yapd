@@ -145,6 +145,9 @@ export const alike = (stop: string, said: string) => {
   return one === other || (Math.min(one.length, other.length) >= ending && (one.endsWith(other) || other.endsWith(one)))
 }
 
+/** Whether last words are enough to tell their run by even once the thread started again: not a short "Done." the next run could end on too. */
+export const telling = (message: string) => plain(message).length >= ending
+
 /**
  * Whose a Stop is, by what it said last: the run's "own", "another" run's
  * read with it, like the one before's come late, or "unknown", when its words
@@ -350,9 +353,9 @@ export interface Finished {
  * Says what T3 Code's threads need the user for, whenever yapd is on, and
  * what failed and what finished with no hook to tell of it, unless yapd was
  * turned off since, as `tell` queues it. `stopped` is the Stop hooks
- * sessions had, oldest first, `finished` says a finished turn as a hook's
- * update, and `mention` makes "it" the thread a notice is about as it starts
- * being said.
+ * sessions had, oldest first, but those a turn said in their hook's place
+ * took as its run's, `finished` says a finished turn as a hook's update, and
+ * `mention` makes "it" the thread a notice is about as it starts being said.
  */
 export const make = (options: {
   readonly threads: Threads.Threads["Type"]
