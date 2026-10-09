@@ -7564,4 +7564,62 @@ describe("Assistant", () => {
     expect(result.sent).toBe(1)
     expect(result.steps).toEqual(["rig unknown"])
   })
+
+  test("a thread's question he let go, however little of it he heard, is never asked again of yapd's own accord as its machine's T3 Code catches up again", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    /** Kept under its key as it comes up to be said, cut off by the shortcut, and let go as `letting` does; then its machine drops out and comes back. */
+    const reconnected = (machine: "rig" | "Rosie", letting: (made: Effect.Effect.Success<ReturnType<typeof assistant>>) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          const seen = { rig: true, Rosie: true }
+          const made = yield* assistant(unasked, undefined, {
+            ...(machine === "Rosie" ? { others: [cloud], items: card("q1", [colour]) } : {}),
+            seen: () => seen.Rosie,
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: machine === "rig" ? [onRig] : [], seen: () => seen.rig, dispatched: [], items: card("q9", [colour]) },
+            waiting: true,
+          })
+          const notices = yield* noticing(made)
+          const view = Effect.map(made.threads.unseen(machine), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() }))
+          yield* Effect.forkScoped(Notices.lookBack(notices, view, machine, "10 seconds"))
+          yield* made.flush
+          yield* letting(made)
+          const before = made.spoken().length
+          seen[machine] = false
+          yield* made.wait(10)
+          seen[machine] = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+          return { said: made.spoken().slice(1, before), after: made.spoken().slice(before), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const cutThen = (words: string) => (made: Effect.Effect.Success<ReturnType<typeof assistant>>) =>
+      Effect.gen(function* () {
+        yield* made.questions().at(-1)!.stale
+        yield* made.cut()
+        yield* made.answer(words)
+      })
+    for (const words of ["Leave it.", "Skip."]) {
+      expect(await reconnected("rig", cutThen(words))).toEqual({ said: ["I'll leave that one, sir."], after: [], open: false })
+    }
+    expect(await reconnected("Rosie", cutThen("Leave it."))).toEqual({ said: ["I'll leave that one, sir."], after: [], open: false })
+    // Put off a third time, cut off each time it's asked.
+    const thrice = (made: Effect.Effect.Success<ReturnType<typeof assistant>>) =>
+      Effect.gen(function* () {
+        for (const time of [1, 2, 3]) {
+          yield* cutThen("Later.")(made)
+          if (time < 3) yield* made.wait(10 * 60)
+        }
+      })
+    expect(await reconnected("rig", thrice)).toEqual({
+      said: [
+        "I'll bring it back in ten minutes, sir.",
+        "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+        "I'll bring it back in ten minutes, sir.",
+        "Again, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+        "I'll leave the question on Fee table checks on rig for now, sir; ask me for it when you're ready.",
+      ],
+      after: [],
+      open: false,
+    })
+  })
 })

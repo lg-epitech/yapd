@@ -888,6 +888,19 @@ export const make = (options: {
       Option.match(open.resend, { onNone: () => Effect.void, onSome: (commandId) => hands.leave(commandId, reason) })
 
     /**
+     * What a thread waits on him for that he let go, or that was let go with
+     * a word, noted as heard under the entry it was asked under, however
+     * little of it he heard: it's never brought up again of yapd's own accord,
+     * as when its machine's T3 Code catches up again, though it still waits
+     * for him in T3 Code, where he can ask for it.
+     */
+    const letBe = (from: Queued | undefined) =>
+      Effect.gen(function* () {
+        const row = from?.kept === undefined ? Option.none<number>() : Option.flatten(from.kept)
+        if (Option.isSome(row)) yield* journal.markHeard([row.value], yield* Clock.currentTimeMillis)
+      })
+
+    /**
      * Opens a question in place of any other, unless yapd was turned off
      * since what it's about was said, or another was asked since, which stays
      * open: only one ever is, so this one is left with a word instead, with
@@ -937,7 +950,9 @@ export const make = (options: {
     /** Lets a question go that went unanswered as often as it's asked, and says so: a thread's is then what "it" means, for him to ask for it. */
     const letGo = (open: Open) =>
       Effect.gen(function* () {
+        const from = asking?.open.id === open.id ? asking.from : undefined
         yield* close(open, "dropped: unanswered")
+        yield* letBe(from)
         const { turns } = yield* options.power
         const said = yield* persona.lines
         const left = regarding(Brain.dropped(open, said), open.kind === "question" ? askedAbout(open) : Option.none())
@@ -959,7 +974,7 @@ export const make = (options: {
       Effect.gen(function* () {
         const before = yield* askedLately
         if (asking === undefined) return quiet({ _tag: "Nothing" })
-        const { open, repeat } = asking
+        const { open, repeat, from } = asking
         asking.repeat = undefined
         asking.due = undefined
         if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
@@ -978,6 +993,7 @@ export const make = (options: {
                 : Brain.reworded({ ...open, rewordings: how === "again" ? wording.again : wording.still }, before, said)
         if (asked === undefined) {
           yield* close(open, "dropped: asked enough")
+          yield* letBe(from)
           const left = wording === undefined ? reply(said.leaving, { _tag: "Nothing" }) : regarding(wording.letGo, askedAbout(open))
           return unfinished(left, open.decision.rest, said)
         }
@@ -1895,7 +1911,10 @@ export const make = (options: {
       Effect.gen(function* () {
         yield* close(open, "dropped: later", thought.utterance.id)
         const snoozed = (from?.snoozed ?? 0) + 1
-        if (from === undefined || snoozed >= interruptions) return regarding(open.wording?.letGo ?? said.leaving, askedAbout(open))
+        if (from === undefined || snoozed >= interruptions) {
+          yield* letBe(from)
+          return regarding(open.wording?.letGo ?? said.leaving, askedAbout(open))
+        }
         asked.push(resumed(from, open, { back: "here", snoozed, notBefore: (yield* Clock.currentTimeMillis) + snooze }))
         yield* Effect.logInfo(`Put off: ${open.asked}`)
         return regarding(`I'll bring it back in ten minutes${addressed(said)}.`, askedAbout(open))
@@ -1969,7 +1988,10 @@ export const make = (options: {
           const words = answered.part === asks.questions.length - 1 ? next.last(ack) : next.next(ack)
           return yield* askingPart(open, from, answered, next, words, thought.utterance)
         }
-        if (Object.values(answered.collected).every(({ _tag }) => _tag === "Skip")) return regarding(said.leaving, Option.some(target.value.ref))
+        if (Object.values(answered.collected).every(({ _tag }) => _tag === "Skip")) {
+          yield* letBe(from)
+          return regarding(said.leaving, Option.some(target.value.ref))
+        }
         return yield* write({ decision: { ...thought.decision, act: "reply", target: target.value.handle }, target }, thought, said, { step: 0, twice: false }, answered)
       })
 
@@ -2327,6 +2349,7 @@ export const make = (options: {
                   return yield* reask(said, "needed")
                 }
                 yield* close(open, "dropped: skipped", utterance.id)
+                yield* letBe(opened.from)
                 return regarding(open.wording?.letGo ?? said.leaving, askedAbout(open))
               }
               break
@@ -2351,6 +2374,7 @@ export const make = (options: {
         if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)
         if (decision.act === "dismiss") {
           yield* forgo(open, "He said not to send it again.")
+          yield* letBe(opened.from)
           // What he asked for after what's let go is left too, and what he says to do after the no is done. Let go of a thread's
           // question, "it" is that thread, so he can ask for its question.
           const left = open.kind === "question" ? regarding(said.leaving, askedAbout(open)) : reply(said.leaving, decided.subject)
@@ -2632,6 +2656,7 @@ export const make = (options: {
         const part = request._tag === "Question" ? parts?.[request.part] : undefined
         if (part !== undefined && waiting.letGo === true) {
           yield* Effect.logInfo(`Letting go of the question on ${about}, since its place was taken too often`)
+          yield* letBe(waiting)
           return yield* deliver(regarding(part.letGo, Option.some(ref)), { id: utterance, turns })
         }
         const before = yield* askedLately
@@ -2650,6 +2675,7 @@ export const make = (options: {
                 : fresh([part.here, ...part.again, ...part.still])
         if (wording === undefined) {
           yield* Effect.logInfo(`Letting go of the question on ${about}, since it's been asked in every way lately`)
+          yield* letBe(waiting)
           return yield* deliver(regarding(part?.letGo ?? said.leaving, Option.some(ref)), { id: utterance, turns })
         }
         const outcome = yield* opening(
