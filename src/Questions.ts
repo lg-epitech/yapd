@@ -475,7 +475,8 @@ const stopped = /(?:^|[^\p{L}\p{N}'’])(?:no|not|nope|nah|never|none|nor|neithe
  * else as compared, in any case and with any punctuation, its
  * "(Recommended)", a "the" before it, a "please" or "sir" after it and an
  * "uh" aside; else by how it sounds, as Whisper may write it, like "ghost net"
- * for Ghostnet or "four workers" for 4 workers. More than one when they're
+ * for Ghostnet or "four workers" for 4 workers, but never across a no the
+ * name hides, like "not able" for Notable. More than one when they're
  * named alike, which only the model can tell apart. Part of a name, a word
  * of it, or its words in another order are never one: "merge now" is never
  * "Do not merge now", "just lint" never "Tests and lint", and "the code,
@@ -494,8 +495,10 @@ const wholly = (part: Said, heard: string): ReadonlyArray<number> => {
   const names = ({ label, said }: Choice) => [label, unmarked(label), said].map((name) => unled(kept(name)))
   const compared = fitting(part, (choice) => names(choice).some((name) => his.includes(name)))
   if (compared.length > 0) return compared
-  const sounds = his.map(sound).filter((said) => said !== "")
-  return fitting(part, (choice) => names(choice).some((name) => sounds.includes(sound(name))))
+  // Never across a no the name hides, like "not able" for Notable or "no body" for Nobody.
+  const denies = (said: string) => said.split(" ").some((word) => denying.test(word))
+  const sounds = (name: string) => his.some((said) => sound(said) !== "" && sound(said) === sound(name) && (denies(name) || !denies(said)))
+  return fitting(part, (choice) => names(choice).some(sounds))
 }
 
 /** The one option his words are the whole name of, when only one is. */

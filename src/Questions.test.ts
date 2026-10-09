@@ -354,6 +354,15 @@ describe("Questions", () => {
     expect(pick(["Merge", "Don't merge"], "Don’t merge.")).toEqual(picked(1))
   })
 
+  test("a no never comes to a name by how it sounds when the name hides it, like 'not able' to Notable or 'no body' to Nobody", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("What should I do?", labels), heard, { inFull: true, parts: 1 })
+    expect([pick(["Notable changes only", "Everything"], "Not able changes only."), pick(["Nobody", "Everyone"], "No body.")]).toEqual([undefined, undefined])
+    expect(Questions.resolve(part("What should I do?", ["Notable changes only", "Everything"]), "Not able changes only")).toEqual({ _tag: "Words", text: "Not able changes only" })
+    // A name with a no of its own still sounds as it's said, and so does one said as written.
+    expect([pick(["Cannot reproduce", "Fixed"], "Can not reproduce."), pick(["Nobody", "Everyone"], "Nobody.")]).toEqual([picked(0), picked(0)])
+  })
+
   test("taking back what he said, like 'cancel that', is the model's to tell, never an option it's a word of", () => {
     const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
     const deploy = part("The deploy failed. What now?", ["Retry (Recommended)", "Cancel the deploy"])
