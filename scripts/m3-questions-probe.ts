@@ -16,6 +16,11 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 // the daemon, and sends nothing unless told to, and then only to threads it
 // starts for itself, with Laurent's OK.
 //
+// Turn yapd off first. On, it would read each of the probe's questions aloud,
+// and what he said or dictated meanwhile could answer one itself, spoiling
+// the step. With --send, it asks yapd's API whether it's on, and stops if it
+// is, or if yapd doesn't say.
+//
 //   bun scripts/m3-questions-probe.ts
 //     Prints every command it would send, in order, with what it can only
 //     know once it's sending standing in, and sends nothing. It doesn't even
@@ -257,6 +262,22 @@ const note = (line: string) =>
     Effect.sync(() => appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`)),
   )
 
+/**
+ * Whether yapd is on, as its API says, which would read the probe's questions
+ * aloud and could answer them: not running, it's off; there but not saying
+ * in time, it's not known.
+ */
+const yapd = Effect.gen(function* () {
+  const port = yield* Config.port
+  return yield* Effect.tryPromise({
+    try: () => fetch(`http://127.0.0.1:${port}/state`, { signal: AbortSignal.timeout(3000) }).then((response) => response.json() as Promise<unknown>),
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.map((state): "on" | "off" | "unknown" => (typeof state === "object" && state !== null && "on" in state && state.on === false ? "off" : "on")),
+    Effect.catchAll((cause) => Effect.succeed(cause instanceof DOMException && cause.name === "TimeoutError" ? ("unknown" as const) : ("off" as const))),
+  )
+})
+
 /** T3 Code, reached with yapd's own token. */
 const connected = Effect.gen(function* () {
   const token = yield* Effect.flatMap(
@@ -451,6 +472,15 @@ const step = (
 
 const probe = (project: string) =>
   Effect.gen(function* () {
+    // Nothing starts while yapd may be on, so it never reads these questions aloud, nor answers one.
+    const state = yield* yapd
+    if (state !== "off") {
+      return yield* Effect.dieMessage(
+        state === "on"
+          ? 'yapd is on, so it would read these questions aloud and could answer them: turn it off first, from the menu bar or with PUT /state {"on": false}, then run this again.'
+          : "yapd didn't say whether it's on, so nothing was started: make sure it's off or not running, then run this again.",
+      )
+    }
     appendFileSync(logFile, `\n${new Date().toISOString()} m3-questions-probe --send --project ${project}\n`)
     const connection = yield* connected
     const { token, reach, call } = connection
@@ -559,7 +589,8 @@ if (project !== undefined && project.startsWith("--")) {
 if (!process.argv.includes("--send")) {
   // What it would send, with what it can only know once it's sending standing in.
   const planned = commands({ claude: "<the probe's own Claude thread>", codex: "<the probe's own Codex thread>" }, "probe<time>", unknown)
-  console.log("Nothing is sent without --send. With --send --project <name or path>, it first starts two threads of its own there, as yapd starts work:")
+  console.log("Nothing is sent without --send. Turn yapd off first: with --send, it stops if yapd is on, since yapd would read its questions aloud and could answer them.")
+  console.log("With --send --project <name or path>, it first starts two threads of its own there, as yapd starts work:")
   for (const [provider, model] of [["Claude", "<--claude, or the first Claude model ready>"], ["Codex", "<--codex, or the first Codex model ready>"]]) {
     console.log(`a ${provider} thread, as yapd's launcher starts one: ${JSON.stringify({ project: project ?? "<the project>", prompt: opening, model, worktree: false })}`)
   }
