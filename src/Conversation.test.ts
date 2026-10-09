@@ -818,6 +818,10 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("Close the pull request.", "Codex opened the pull request, sir.")).toBe("mixed")
     expect(whose("Send it again? Yes.", "Send it again?")).toBe("mixed")
     expect(whose("Over in t3code, what failed?", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("mixed")
+    // Its words, then one of his where its next word would be, unlike it.
+    for (const heard of ["The tests failed.", "The tests broke.", "Is the pull request merged?"]) {
+      expect([heard, whose(heard, long)]).toEqual([heard, "mixed"])
+    }
   })
 
   test("finds the words said around a time by where they fall in the line", () => {

@@ -384,7 +384,7 @@ const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   const [previous, next] = [yapd[first.start - 1], yapd[last.end + 1]]
   const after = words.length - 1 - last.last
   if (telling) {
-    if (next !== undefined && after === 1) its.add(words.length - 1)
+    if (next !== undefined && after === 1 && near(words.at(-1)!, next)) its.add(words.length - 1)
     return { its, telling }
   }
   const named = (word: string | undefined): word is string => word !== undefined && !common.has(word)
