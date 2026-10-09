@@ -785,6 +785,8 @@ describe("Telling yapd's own voice from the user's", () => {
     // A word of its, and words of his it isn't saying, "don't" above all, which turns what it says around.
     expect(whose("Don't merge it.", question)).toBe("mixed")
     expect(whose("The tests don't pass.", saying)).toBe("mixed")
+    // Not one after another as it says them.
+    expect(whose("Can you do it?", "Can the agent do it now")).toBe("his")
     // Its own, with a common word Whisper puts in among its words.
     expect(whose("And all the", line)).toBe("echo")
     expect(whose("Over in yapd and the tests pass.", saying)).toBe("echo")

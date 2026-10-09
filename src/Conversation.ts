@@ -188,18 +188,6 @@ const negations: ReadonlySet<string> = new Set([
   "couldn't", "haven't", "hasn't", "hadn't", "never", "nothing", "none", "neither", "nor",
 ])
 
-/**
- * What he says to yapd in nothing but common words, which it takes for him
- * only said just so, since Whisper makes up the like of "Let's go." and
- * "That's it." of its voice too. As it's compared, without the fillers.
- */
-const curt: ReadonlySet<string> = new Set(
-  [
-    "not now", "not that", "not that one", "not like that", "go on", "do it", "do that", "do it now", "why not", "how come", "what now",
-    "what's that", "what was that", "what is it", "what did you do", "which one", "what", "why", "how",
-  ].map((phrase) => phrase.split(" ").filter((word) => !fillers.has(word)).join(" ")),
-)
-
 /** The words of `text` said between `start` and `end` seconds into its `duration`, as far as that can be told from where they fall in it. */
 export const between = (text: string, duration: number, start: number, end: number) => {
   if (duration <= 0) return text
@@ -502,9 +490,8 @@ export type Whose = "echo" | "his" | "mixed"
  * only ever tells by, never changes. Its own: nothing, nothing but what
  * Whisper makes up, like "That's it.", or what it was saying, in order, as
  * near as Whisper hears it, its name misheard and all. His: a "stop" or
- * "wait" it isn't saying, a few common words said just so, like "Not now.",
- * or none of its words but those nearly anything has. Some of each,
- * otherwise, as when its voice runs into his stop.
+ * "wait" it isn't saying, or none of its words but those nearly anything
+ * has. Some of each, otherwise, as when its voice runs into his stop.
  */
 export const whose = (heard: string, saying: string): Whose => {
   const yapd = vocabulary(saying)
@@ -523,7 +510,8 @@ export const whose = (heard: string, saying: string): Whose => {
     return told(words.slice(0, own.indexOf(true)), 3) || told(words.slice(own.lastIndexOf(true) + 1), 4) ? "mixed" : "his"
   }
   if (inTurn(words, yapd)) return "echo"
-  if (curt.has(words.join(" "))) return "his"
+  // Nothing but words nearly anything has, not one after another as yapd says them, are his, like "Not now." or "Why did it do that?".
+  if (words.every((word) => common.has(word))) return "his"
   const { its, telling } = ours(words, yapd)
   if (words.every((_, index) => its.has(index))) return "echo"
   return telling ? "mixed" : "his"
