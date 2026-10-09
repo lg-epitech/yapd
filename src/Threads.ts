@@ -569,7 +569,7 @@ export const make = (options: {
           const [started, entries] = [yield* startedWork, yield* journal.since(now - days(7), { most: 500 })]
           const noted = (name: string) => ({ started: started.get(name) ?? new Map<string, Started>(), said: latest(entries, name) })
           const others = seen.filter(({ link }) => !link.here).map(({ link, view }): Seen => ({ machine: link.machine, here: false, view, ...noted(link.machine) }))
-          // This machine's threads that can't be seen are none among the others'.
+          // When this machine's can't be seen, only the others' are ranked.
           const own = seen.find(({ link }) => link.here)?.view ?? T3Live.empty
           const threads = shortlist({ machine, view: own, ...noted(machine), others, focus, pending, found, heard, most, more, now })
           return { threads, away }
@@ -589,7 +589,7 @@ export const make = (options: {
           options.others,
           (other) =>
             Effect.map(other.status, (status) => {
-              // As it's said, in a sentence or at its end, whatever's at its start.
+              // Said within a sentence, it loses its full stop, and maybe its capital.
               const reason = status._tag === "Down" ? status.reason.replace(/[.!?]+$/, "").toLowerCase() : ""
               if (status._tag === "Down" && status.outage > 0 && reason !== "" && said.toLowerCase().includes(reason)) told.set(other.machine, telling(status))
             }),
