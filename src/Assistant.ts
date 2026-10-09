@@ -323,6 +323,9 @@ const reply = (say: string, subject: Subject): Outcome => ({ say, subject: { _ta
 /** Something said back about a thread, which "it" then means. */
 const regarding = (say: string, about: Option.Option<Threads.Ref>): Outcome => ({ say, subject: { _tag: "Answer", said: say, about }, kind: say === "" ? "none" : "answer" })
 
+/** What's said once what waits on him is put by till its machine's threads can be seen again, to be asked then. */
+const onceBack = "I'll ask you again once I can."
+
 /** What's said of something left rather than asked about, since a question is open already. */
 const unasked = (about: string, said: Lines) => `I left ${about || "that"} for now, since I'd have to ask you something about it${addressed(said)}.`
 
@@ -1584,14 +1587,15 @@ export const make = (options: {
      * again what may not have got there, under the same ids. Once a step is
      * done, the rest of the request is worked out and done as the next step.
      * `free` is how what follows the note is let be stopped, when the change
-     * and its note can't be.
+     * and its note can't be. `putBy` when what an answer that didn't go was
+     * to is put back to be asked again, which he's told.
      */
     const told = (
       act: Hands.Act,
       outcome: Hands.Outcome,
       thought: Thought,
       said: Lines,
-      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean; readonly besides?: string },
+      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean; readonly besides?: string; readonly putBy?: boolean },
       free: <A>(effect: Effect.Effect<A>) => Effect.Effect<A> = (effect) => effect,
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -1715,7 +1719,7 @@ export const make = (options: {
             return yield* free(onward(thought, { say: line, subject: { ...subject, said: line }, kind: "done" }, Option.fromNullable(ref), at.step + 1, said))
           }
           default: {
-            const line = Hands.failed(act, outcome, said, called)
+            const line = `${Hands.failed(act, outcome, said, called)}${at.putBy === true ? ` ${onceBack}` : ""}`
             yield* noting(line, { reason: outcome.reason, ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }) })
             // What didn't go, and why, without the question, which isn't always put as the line puts it, like "couldn't tell it yet" for "the
             // message didn't get there": so the question is kept as the line asks it, never worked out from the news.
@@ -1866,26 +1870,46 @@ export const make = (options: {
         if (act === undefined) return reply(said.cantTell, thought.subject)
         // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
         // by while its machine's threads couldn't be seen, which its T3 Code may not show as answered just yet.
-        if (asks !== undefined && asks._tag !== "Agent" && (act._tag === "Decide" || act._tag === "Reply")) dequeue(asks.requestId)
+        const queued = asks !== undefined && asks._tag !== "Agent" && (act._tag === "Decide" || act._tag === "Reply") ? dequeue(asks.requestId) : []
         // Once it's begun, it's seen through and noted: turning yapd off meanwhile only stops what's said of it, and any step not written yet, like one after a look at the thread, or telling a turn it stopped (I8).
         const wanted = Effect.map(outdated(utterance.turns), (off) => !off)
         return yield* Effect.uninterruptibleMask((free) =>
           Effect.flatMap(hands.run({ utterance: utterance.id, step: at.step }, act, { twice: at.twice, wanted }), (outcome) =>
-            told(
-              act,
-              outcome,
-              thought,
-              said,
-              {
-                step: at.step,
-                commandId: Ledger.ids(utterance.id, at.step, false).commandId,
-                ...(at.quietly === true ? { quietly: true } : {}),
-                ...(at.besides === undefined ? {} : { besides: at.besides }),
-              },
-              free,
+            Effect.flatMap(restoring(act, outcome, queued), (putBy) =>
+              told(
+                act,
+                outcome,
+                thought,
+                said,
+                {
+                  step: at.step,
+                  commandId: Ledger.ids(utterance.id, at.step, false).commandId,
+                  ...(at.quietly === true ? { quietly: true } : {}),
+                  ...(at.besides === undefined ? {} : { besides: at.besides }),
+                  ...(putBy ? { putBy } : {}),
+                },
+                free,
+              ),
             ),
           ),
         )
+      })
+
+    /**
+     * What was taken out of what's waiting to be asked for an answer that
+     * didn't go, while its machine's threads can't be seen, like rig's as it
+     * drops out while the model works out what he said: it still waits on
+     * him, so it's put back, to be asked from the part he'd got to once they
+     * can be seen again, at no cost to it, as `reaching` puts an answer by.
+     * Whether it was, which he's told.
+     */
+    const restoring = (act: Hands.Act, outcome: Hands.Outcome, queued: ReadonlyArray<Queued>) =>
+      Effect.gen(function* () {
+        if (queued.length === 0 || (act._tag !== "Decide" && act._tag !== "Reply") || (outcome._tag !== "Refused" && outcome._tag !== "NotSent")) return false
+        if (Option.isNone(yield* threads.unseen(act.to.machine))) return false
+        yield* Effect.logInfo(`Putting it back to be asked, since ${act.to.machine}'s threads can't be seen right now`)
+        asked.unshift(...queued.map((waiting): Queued => ({ ...waiting, back: "here", letGo: undefined, costless: true })))
+        return true
       })
 
     /**
@@ -1980,7 +2004,7 @@ export const make = (options: {
         yield* Effect.logInfo(`Not answering it, since ${ref.machine}'s threads can't be seen right now`)
         yield* close(open, "dropped: out of sight", utterance.id)
         const yours = open.kind === "approval" ? (decision.how === "decline" ? "your no" : "your go-ahead") : "your answer"
-        return Either.left(regarding(`I couldn't get ${yours} to it${addressed(said)}: ${Hands.after(why.value)} I'll ask you again once I can.`, askedAbout(open)))
+        return Either.left(regarding(`I couldn't get ${yours} to it${addressed(said)}: ${Hands.after(why.value)} ${onceBack}`, askedAbout(open)))
       })
 
     /**
@@ -2056,7 +2080,7 @@ export const make = (options: {
         if (Option.isNone(why)) return Option.none<Outcome>()
         yield* Effect.logInfo(`Not sending his message as its answer, since ${ref?.machine}'s threads can't be seen right now`)
         yield* close(open, "dropped: out of sight")
-        return Option.some(regarding(`I couldn't get your message to it${addressed(said)}: ${Hands.after(why.value)} I'll ask you again once I can.`, askedAbout(open)))
+        return Option.some(regarding(`I couldn't get your message to it${addressed(said)}: ${Hands.after(why.value)} ${onceBack}`, askedAbout(open)))
       })
 
     /**

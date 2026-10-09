@@ -8055,6 +8055,79 @@ describe("Assistant", () => {
     ).toEqual({ spoken: ["Approved, sir."], sent: 1, open: false })
   })
 
+  test("an answer to the rig question open, dictated as something new, that doesn't go as rig drops out is never sent: he's told why, and it's asked again once rig is back", async () => {
+    /** Rig drops out as `dropping` says: while the model works out what he dictated, or as his answer goes, which never leaves yapd. */
+    const dictated = (dropping: "deciding" | "sending") =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          let dictating = false
+          const rig: Array<Record<string, unknown>> = []
+          // The model takes it for a reply to the thread rather than an answer to the question.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, onRig), text: "Red" }), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+            deciding: Effect.sync(() => {
+              if (dictating && dropping === "deciding") seen = false
+            }),
+            answer: () => (payload, bounded) =>
+              dictating && dropping === "sending" && payload.type === "runtime-request.respond"
+                ? Effect.suspend(() => {
+                    seen = false
+                    return Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." }))
+                  })
+                : takes(payload, bounded),
+            waiting: true,
+          })
+          const notices = yield* noticing(made)
+          yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+          yield* made.flush
+          // Kept under its key as it comes up to be said, and heard to the end.
+          yield* made.questions().at(-1)!.stale
+          yield* made.play()
+          dictating = true
+          yield* made.dictate("Make it red for the fee table checks on rig.")
+          dictating = false
+          // It never left yapd, so rig's thread still waits on it.
+          if (dropping === "sending") yield* made.becomesOnRig(onRig)
+          const meanwhile = (yield* made.ledger.steps(0)).map(({ state }) => state)
+          // Rig's back a minute later, and he answers it.
+          yield* made.wait(60)
+          seen = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          yield* made.answer("Red.")
+          const steps = (yield* made.ledger.steps(0)).map(({ state }) => state)
+          return { spoken: made.spoken(), meanwhile, steps, answers: answered(rig), ids: new Set(rig.map(({ commandId }) => commandId)).size, here: made.dispatched }
+        }),
+      )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const spoken = (why: string) => [
+      `A question on Fee table checks on rig, sir: ${line}`,
+      `I couldn't get your answer to it, sir: ${why} I'll ask you again once I can.`,
+      `Here's the question on Fee table checks on rig, sir: ${line}`,
+      "Red it is, sir.",
+    ]
+    expect(await dictated("deciding")).toEqual({
+      spoken: spoken("I can't follow rig's threads right now."),
+      meanwhile: [],
+      steps: ["sent"],
+      answers: [{ [colour.id]: "Red" }],
+      ids: 1,
+      here: [],
+    })
+    // Never left yapd, it goes once more under the same ids.
+    expect(await dictated("sending")).toEqual({
+      spoken: spoken("no connection."),
+      meanwhile: ["failed"],
+      steps: ["sent"],
+      answers: [{ [colour.id]: "Red" }, { [colour.id]: "Red" }],
+      ids: 1,
+      here: [],
+    })
+  })
+
   test("an answer to a question given while T3 Code restarts on this Mac is never sent nor said to be dealt with: he's told why, and it's asked again once T3 Code is back", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
