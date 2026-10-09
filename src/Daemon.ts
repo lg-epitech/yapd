@@ -182,8 +182,8 @@ export const make = Effect.gen(function* () {
           spoken: introduce(update.project, spoken),
           at,
           stale: Effect.succeed(false),
-          // Only once it plays, so a line for going ahead dropped as yapd was turned off never counts as the last one he heard.
-          saying: persona.said(spoken),
+          // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that afplay couldn't play, never counts as the last one he heard.
+          confirmed: persona.said(spoken),
         },
         readSince.get(update),
       ),
@@ -533,16 +533,20 @@ export const make = Effect.gen(function* () {
       const { question } = said.notice
       if (yield* said.notice.stale) return yield* dealtWith
       const saying = said.notice.saying ?? Effect.void
+      const confirmed = said.notice.confirmed ?? Effect.void
       if (question === undefined) {
         const playback = yield* audio.play(said.audio)
         yield* saying
+        if (playback.confirmed) yield* confirmed
         yield* playback.finished
+        // afplay can't say it's playing, so that's known only now.
+        if (!playback.confirmed) yield* confirmed
         yield* said.notice.heard ?? Effect.void
         return yield* dealtWith
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, saying, answer }).pipe(
+      const answered = yield* conversation.ask({ audio: said.audio, saying, confirmed, answer }).pipe(
         Effect.onError((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
         ),

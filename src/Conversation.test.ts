@@ -31,14 +31,15 @@ const update: Conversation.Update = {
  * Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply,
  * taking what's said to Sam for talk with someone else, the relay `sending` seconds to send, and follow-ups going out
  * as `result` says: sent, queued, or held back as the session has moved on. `render` renders what's said back, and
- * with `unplayable`, nothing but the update can be played, as when the audio helper goes down after it.
+ * with `unplayable`, nothing but the update can be played, as when the audio helper goes down after it. With `afplay`,
+ * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
  */
 const conversation = (
   said: ReadonlyArray<string>,
   sending = 0,
   deliveries: ReadonlyArray<Effect.Effect<void>> = [],
   result: "sent" | "queued" | "moved" = "sent",
-  given: { readonly render?: Context.Tag.Service<Voice>["render"]; readonly unplayable?: boolean } = {},
+  given: { readonly render?: Context.Tag.Service<Voice>["render"]; readonly unplayable?: boolean; readonly afplay?: "plays" | "fails" } = {},
 ) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
@@ -64,7 +65,11 @@ const conversation = (
             ? Effect.fail(new AudioError({ message: "The audio helper didn't start playing" }))
             : Effect.succeed({
                 duration: 10,
-                finished: Effect.sleep("10 seconds"),
+                confirmed: given.afplay === undefined || path === update.audio,
+                finished:
+                  given.afplay === "fails" && path !== update.audio
+                    ? Effect.fail(new AudioError({ message: "Could not play" }))
+                    : Effect.sleep("10 seconds"),
                 stop: Effect.succeed(2),
                 volume: () => Effect.void,
               }),
@@ -334,6 +339,24 @@ describe("Follow-ups", () => {
     // As a dictation does, while it's still rendering.
     expect(await follow({ render: () => Effect.sleep("10 seconds") }, true)).toEqual({ exit: "Failure", noted: [] })
     expect(await follow({})).toEqual({ exit: "Success", noted: ["On it."] })
+  })
+
+  test("with afplay, tells the persona a line is said only once it has played to the end, never when afplay can't play it", async () => {
+    const follow = (afplay: "plays" | "fails") =>
+      scoped(
+        Effect.gen(function* () {
+          const { fiber, speak, wait, noted } = yield* conversation(["Just merge it."], 0, [], "sent", { afplay })
+          yield* speak
+          yield* wait(5)
+          // The line is playing.
+          yield* wait(5)
+          const during = [...noted]
+          yield* wait(20)
+          return { exit: (yield* Fiber.await(fiber))._tag, during, noted }
+        }),
+      )
+    expect(await follow("fails")).toEqual({ exit: "Failure", during: [], noted: [] })
+    expect(await follow("plays")).toEqual({ exit: "Success", during: [], noted: ["On it."] })
   })
 
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {

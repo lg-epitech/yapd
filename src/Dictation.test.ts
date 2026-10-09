@@ -72,6 +72,7 @@ const dictation = (
                 const played = seconds === 0 ? Effect.void : Effect.sleep(`${seconds} seconds`)
                 return {
                   duration: seconds,
+                  confirmed: true,
                   finished: played.pipe(
                     Effect.zipRight(Effect.suspend(() => (playing === id ? Effect.void : Effect.never))),
                     Effect.timeoutFail({

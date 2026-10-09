@@ -43,6 +43,12 @@ export interface Notice {
   readonly stale: Effect.Effect<boolean>
   /** Run as it starts being said, which is when the user hears of it: never when it can't be played, and for a question, undone if it breaks off. */
   readonly saying?: Effect.Effect<void>
+  /**
+   * Run once it's known to be playing, which is as it starts with the audio
+   * helper, but with afplay, which can't say, only once it has played to the
+   * end: never when it can't be played or breaks off before that's known.
+   */
+  readonly confirmed?: Effect.Effect<void>
   /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
   readonly heard?: Effect.Effect<void>
   /**
