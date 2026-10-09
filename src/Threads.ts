@@ -1,11 +1,12 @@
 import type { Database } from "bun:sqlite"
-import { Clock, Context, Data, Effect, Either, Option, Stream } from "effect"
+import { Clock, Context, Data, type Duration, Effect, Either, Option, Stream } from "effect"
 import { realpath } from "node:fs/promises"
 import { english, speakable } from "./Condenser.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import type * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
+import type * as Tunnel from "./Tunnel.ts"
 
 // The threads on the user's machines as yapd keeps them in mind: what each is
 // doing, what it's called when said aloud, and which matter most right now.
@@ -55,6 +56,12 @@ export interface Desk {
   readonly away: ReadonlyArray<{ readonly machine: string; readonly reason: string }>
 }
 
+/** What a search found, and the machines whose threads it couldn't search: unseen, too slow to answer, or failing. */
+export interface Searched {
+  readonly matches: ReadonlyArray<{ readonly ref: Ref; readonly snippet: string }>
+  readonly missed: ReadonlyArray<string>
+}
+
 /** A thread couldn't be read or searched, with why, in words that can be said. */
 export class ThreadsError extends Data.TaggedError("ThreadsError")<{ readonly reason: string; readonly cause?: unknown }> {}
 
@@ -73,12 +80,26 @@ export class Threads extends Context.Tag("yapd/Threads")<
       heard?: string,
     ) => Effect.Effect<Desk>
     readonly find: (ref: Ref) => Effect.Effect<Option.Option<T3Live.Thread>>
+    /** Why a machine's threads can't be seen now, as the desk lists it among those away. None while they can. */
+    readonly unseen: (machine: string) => Effect.Effect<Option.Option<string>>
+    /**
+     * Notes what he was just told: once he's heard why another machine can't
+     * be reached, it's only said that its threads still can't be seen, until
+     * it's been back and gone down again, or can't be reached for another reason.
+     */
+    readonly heard: (said: string) => Effect.Effect<void>
     readonly changes: Stream.Stream<{ readonly machine: string; readonly change: T3Live.Change }>
     readonly actions: (machine: string) => Option.Option<T3Actions.Actions>
     /** Where a thread got to, read from it now. */
     readonly detail: (ref: Ref, pending?: string) => Effect.Effect<T3Actions.Detail, ThreadsError>
-    /** Threads whose messages mention the words. */
-    readonly search: (words: string) => Effect.Effect<ReadonlyArray<{ readonly ref: Ref; readonly snippet: string }>, ThreadsError>
+    /**
+     * Threads whose messages mention the words, on every machine whose threads
+     * can be seen. `within` leaves out a machine that hasn't answered by then,
+     * rather than what the others found, and another machine gets a few
+     * seconds at most either way. Each machine left out is named, so finding
+     * nothing is never taken for there being nothing there.
+     */
+    readonly search: (words: string, within?: Duration.DurationInput) => Effect.Effect<Searched, ThreadsError>
     /** What each provider has used of its limits, as of at most a few minutes ago unless T3 Code stopped answering. */
     readonly usage: Effect.Effect<Option.Option<Usage>>
     /** Asks T3 Code for usage again, when what's known is getting old. */
@@ -88,8 +109,9 @@ export class Threads extends Context.Tag("yapd/Threads")<
     /**
      * The thread a hook on `machine` came from, found by the agent's own id
      * for its session among the threads working in its directory, and only
-     * while that machine's T3 Code is followed (I11). None otherwise, which
-     * keeps its update on the way hooks have always gone. Never fails.
+     * for this machine's hooks while its T3 Code is followed (I11). None
+     * otherwise, which keeps its update on the way hooks have always gone.
+     * Never fails.
      */
     readonly link: (machine: string, session: string, cwd: string) => Effect.Effect<Option.Option<Ref>>
     /** The agent's own ids for a thread's conversations, which its hooks report as their session. */
@@ -174,10 +196,22 @@ export const called = (title: string, description: string | null | undefined, pr
 const subagent = (thread: T3Live.Thread) => thread.lineage?.relationshipToParent === "subagent"
 
 /** What was noted about work yapd started, by thread id. */
-interface Started {
+export interface Started {
   readonly dictated: string
   readonly description: string | null
   readonly at: number
+}
+
+/** One machine's threads as T3 Code there last sent them, and what yapd noted and said about them. */
+export interface Seen {
+  /** What the user calls it. */
+  readonly machine: string
+  /** Whether it's this machine. */
+  readonly here: boolean
+  readonly view: T3Live.View
+  readonly started: ReadonlyMap<string, Started>
+  /** The latest line yapd said about each thread, by id. */
+  readonly said: ReadonlyMap<string, { readonly at: number; readonly said: string }>
 }
 
 /**
@@ -185,7 +219,9 @@ interface Started {
  * ordering that never leaves one out, cut to the `most` first. The question's
  * candidates come first, so "the first" is t1, then what "it" means, then what
  * a search for their words found, what waits on the user, what's running,
- * what failed, and on down to the newest.
+ * what failed, and on down to the newest. `machine` is this one, and `others`
+ * the other machines whose threads can be seen, ranked in among its own, by
+ * the same order: what's running on rig matters as much as what's running here.
  */
 export const shortlist = (input: {
   readonly machine: string
@@ -202,16 +238,21 @@ export const shortlist = (input: {
   readonly started: ReadonlyMap<string, Started>
   /** The latest line yapd said about each thread, by id. */
   readonly said: ReadonlyMap<string, { readonly at: number; readonly said: string }>
+  readonly others?: ReadonlyArray<Seen>
   readonly now: number
 }): ReadonlyArray<Listed> => {
-  const { machine, view, focus, pending, most, started, said, now } = input
+  const { focus, pending, most, now } = input
+  const machines: ReadonlyArray<Seen> = [
+    { machine: input.machine, here: true, view: input.view, started: input.started, said: input.said },
+    ...(input.others ?? []),
+  ]
   const within = (at: number | undefined, span: number) => at !== undefined && now - at < span
-  const titled = new Set(entitled(input.heard ?? "", view))
-  const group = (thread: T3Live.Thread, doing: State) => {
+  const titled = new Set(titles(input.heard ?? "", machines).map(({ machine, id }) => `${machine}\n${id}`))
+  const group = ({ machine, started, said }: Seen, thread: T3Live.Thread, doing: State) => {
     const candidate = pending.findIndex((ref) => ref.machine === machine && ref.id === thread.id)
     if (candidate >= 0) return candidate / 100
     if (Option.isSome(focus) && focus.value.machine === machine && focus.value.id === thread.id) return 1
-    if ((input.found ?? []).some((ref) => ref.machine === machine && ref.id === thread.id) || titled.has(thread.id)) return 1.5
+    if ((input.found ?? []).some((ref) => ref.machine === machine && ref.id === thread.id) || titled.has(`${machine}\n${thread.id}`)) return 1.5
     if (doing === "approval" || doing === "question") return 2
     if (doing === "running" || doing === "finishing" || doing === "queued") return 3
     const settled = thread.settledOverride === "settled"
@@ -222,12 +263,15 @@ export const shortlist = (input: {
     if (!settled && !snoozed && within(time(thread.updatedAt), days(7))) return 7
     return 8
   }
-  const ranked = [...view.threads.values()]
-    .filter((thread) => !subagent(thread) && thread.archivedAt === null)
-    .map((thread) => {
-      const doing = state(thread)
-      return { thread, doing, group: group(thread, doing), updated: time(thread.updatedAt) ?? 0 }
-    })
+  const ranked = machines
+    .flatMap((seen) =>
+      [...seen.view.threads.values()]
+        .filter((thread) => !subagent(thread) && thread.archivedAt === null)
+        .map((thread) => {
+          const doing = state(thread)
+          return { seen, thread, doing, group: group(seen, thread, doing), updated: time(thread.updatedAt) ?? 0 }
+        }),
+    )
     .toSorted((one, other) => one.group - other.group || other.updated - one.updated)
   // A misheard name can only be matched to a name the model sees, so the rest of the month's go too, by name.
   const named = ranked
@@ -235,13 +279,14 @@ export const shortlist = (input: {
     .filter(({ updated }) => within(updated, days(30)))
     .slice(0, input.more ?? 0)
   return [...ranked.slice(0, most), ...named]
-    .map(({ thread, doing }, index): Listed => {
+    .map(({ seen, thread, doing }, index): Listed => {
+      const { machine, here, view, started, said } = seen
       const project = view.projects.get(thread.projectId)
       const own = started.get(thread.id)
       return {
         handle: `t${index + 1}`,
         ref: { machine, id: thread.id },
-        here: true,
+        here,
         called: called(thread.title, own?.description, project?.title ?? "", time(thread.createdAt) ?? now, now),
         project: spoken(project?.title ?? ""),
         directory: Option.fromNullable(thread.worktreePath ?? project?.workspaceRoot),
@@ -286,16 +331,23 @@ const entitledAt = 5
  * the threads said, and only for a phrase as written. Short of that, a
  * thread's name is the model's to recognise by its sound.
  */
-export const entitled = (heard: string, view: T3Live.View): ReadonlyArray<string> => {
+export const entitled = (heard: string, view: T3Live.View): ReadonlyArray<string> =>
+  titles(heard, [{ machine: "", view }]).map(({ id }) => id)
+
+/** The threads `entitled` puts up front, on every machine at once, so one machine's can't crowd out a closer match on another. */
+const titles = (heard: string, machines: ReadonlyArray<Pick<Seen, "machine" | "view">>): ReadonlyArray<Ref> => {
   const said = stems(heard)
   if (said.size < 2) return []
-  return [...view.threads.values()]
-    .filter((thread) => !subagent(thread) && thread.archivedAt === null)
-    .map((thread) => ({ id: thread.id, shared: [...stems(thread.title)].filter((word) => said.has(word)).length, at: time(thread.updatedAt) ?? 0 }))
+  return machines
+    .flatMap(({ machine, view }) =>
+      [...view.threads.values()]
+        .filter((thread) => !subagent(thread) && thread.archivedAt === null)
+        .map((thread) => ({ machine, id: thread.id, shared: [...stems(thread.title)].filter((word) => said.has(word)).length, at: time(thread.updatedAt) ?? 0 })),
+    )
     .filter(({ shared }) => shared >= 2)
     .toSorted((one, other) => other.shared - one.shared || other.at - one.at)
     .slice(0, entitledAt)
-    .map(({ id }) => id)
+    .map(({ machine, id }) => ({ machine, id }))
 }
 
 /** Words searched for at most, and threads a search adds to the desk at most: a third of it. */
@@ -363,6 +415,9 @@ export const matching = <E>(text: string, search: Search<E>) =>
 export const searched = <E>(text: string, search: Search<E>) =>
   Effect.map(matching(text, search), (hits) => hits.slice(0, added).map(({ ref }) => ref))
 
+/** How long another machine's T3 Code gets to search. T3 Code answers in a few ms, and further off, not much later. */
+const elsewhere = "3 seconds"
+
 /** How long usage is good for before it's asked again. */
 const stale = 5 * 60_000
 
@@ -388,9 +443,32 @@ const latest = (entries: ReadonlyArray<Kept>, machine: string) => {
   return said
 }
 
+/** Another machine's threads, followed through T3 Code there, which yapd reaches through an SSH connection it keeps open. */
+export interface Other {
+  /** What the user calls it. */
+  readonly machine: string
+  readonly live: T3Live.T3Live["Type"]
+  readonly actions: T3Actions.Actions
+  /** Whether its T3 Code can be reached now, and when it can't, why, and which time it went down. */
+  readonly status: Effect.Effect<Tunnel.Status>
+}
+
+/** A machine's T3 Code, as the threads on it are followed and acted on. */
+interface Link {
+  readonly machine: string
+  readonly here: boolean
+  readonly live: T3Live.T3Live["Type"]
+  /** None without a T3 Code token. */
+  readonly actions: Option.Option<T3Actions.Actions>
+  /** Why its threads can't be seen, for while they can't. */
+  readonly unseen: Effect.Effect<string>
+}
+
 /**
- * The threads on this machine, followed through T3 Code. Other machines are
- * listed as away, with why, until yapd can follow them too.
+ * The threads on this machine and on the others yapd follows, each through T3
+ * Code there, ranked together. A machine whose threads can't be seen is listed
+ * as away, with why, and never holds up the rest: what's known of each is what
+ * it last sent, and acting on a thread goes to its own machine's T3 Code only.
  */
 export const make = (options: {
   /** What the user calls this machine. */
@@ -398,44 +476,98 @@ export const make = (options: {
   readonly live: T3Live.T3Live["Type"]
   /** None without a T3 Code token. */
   readonly actions: Option.Option<T3Actions.Actions>
-  /** Other machines yapd hears from, whose threads it can't see yet. */
-  readonly others: ReadonlyArray<string>
+  /** Other machines yapd follows, each through its own link. */
+  readonly others: ReadonlyArray<Other>
   readonly journal: Journal["Type"]
   readonly store: Store.Store["Type"]
 }) =>
   Effect.gen(function* () {
-    const { machine, live, journal, store } = options
+    const { machine, journal, store } = options
     const scope = yield* Effect.scope
     let usage: Usage | undefined
 
+    /** Which time each other machine went down that he was told why of, with why: once each time, rather than every time he asks. */
+    const told = new Map<string, string>()
+    /** An outage, as it's told: a new one, or the same one for another reason, is news. */
+    const telling = ({ outage, reason }: { readonly outage: number; readonly reason: string }) => `${outage}\n${reason}`
+    const links: ReadonlyArray<Link> = [
+      {
+        machine,
+        here: true,
+        live: options.live,
+        actions: options.actions,
+        // Named when another machine's threads can be seen, since they're his threads too.
+        unseen: Effect.succeed(
+          options.others.length === 0
+            ? Option.isNone(options.actions)
+              ? "I need a T3 Code token to see your threads."
+              : "T3 Code isn't running, so I can't see your threads."
+            : Option.isNone(options.actions)
+              ? `I need a T3 Code token to see ${machine}'s threads.`
+              : `T3 Code isn't running on ${machine}, so I can't see its threads.`,
+        ),
+      },
+      ...options.others.map(
+        (other): Link => ({
+          machine: other.machine,
+          here: false,
+          live: other.live,
+          actions: Option.some(other.actions),
+          unseen: Effect.map(other.status, (status) => {
+            // Reached, it's still catching up, or T3 Code there won't be followed.
+            if (status._tag === "Up") return `I can't follow ${other.machine}'s threads right now.`
+            // Starting up isn't an outage, so that's said for as long as it lasts.
+            return status.outage > 0 && told.get(other.machine) === telling(status) ? `I still can't see ${other.machine}'s threads.` : status.reason
+          }),
+        }),
+      ),
+    ]
+    const linked = (name: string) => links.find((link) => link.machine === name)
+
+    /** What was noted about work yapd started, by machine, then by thread. */
     const startedWork = store
       .transaction((database: Database) =>
         database
-          .query<{ id: string; dictated: string | null; prompt: string | null; description: string | null; at: string }, [string]>(
-            "select id, dictated, prompt, description, at from threads where machine = ? and started = 1",
+          .query<{ machine: string; id: string; dictated: string | null; prompt: string | null; description: string | null; at: string }, []>(
+            "select machine, id, dictated, prompt, description, at from threads where started = 1",
           )
-          .all(machine),
+          .all(),
       )
       .pipe(
-        Effect.map(
-          (rows) =>
-            new Map(
-              rows.map((row): [string, Started] => [
-                row.id,
-                { dictated: row.dictated ?? row.prompt ?? "", description: row.description, at: time(row.at) ?? 0 },
-              ]),
-            ),
+        Effect.map((rows) => {
+          const started = new Map<string, Map<string, Started>>()
+          for (const row of rows) {
+            const noted = started.get(row.machine) ?? new Map<string, Started>()
+            noted.set(row.id, { dictated: row.dictated ?? row.prompt ?? "", description: row.description, at: time(row.at) ?? 0 })
+            started.set(row.machine, noted)
+          }
+          return started
+        }),
+        Effect.catchAll((error) =>
+          Effect.logWarning("Could not read what work I started", error).pipe(Effect.as(new Map<string, Map<string, Started>>())),
         ),
-        Effect.catchAll((error) => Effect.logWarning("Could not read what work I started", error).pipe(Effect.as(new Map<string, Started>()))),
       )
 
     const reach = (ref: Ref) =>
-      ref.machine === machine
-        ? Option.match(options.actions, {
+      Option.match(Option.fromNullable(linked(ref.machine)), {
+        onNone: () => Effect.fail(new ThreadsError({ reason: `I can't see ${ref.machine}'s threads.` })),
+        onSome: ({ actions }) =>
+          Option.match(actions, {
             onNone: () => Effect.fail(new ThreadsError({ reason: "I need a T3 Code token to read your threads." })),
             onSome: Effect.succeed,
-          })
-        : Effect.fail(new ThreadsError({ reason: `I can't see ${ref.machine}'s threads yet.` }))
+          }),
+      })
+
+    /** Searches one machine's threads, as `search` says. None when it didn't answer in time. */
+    const searching = (link: Link, actions: T3Actions.Actions, words: string, within: Duration.DurationInput | undefined) => {
+      const asked = actions.search(words).pipe(
+        Effect.map((matches) => matches.map(({ threadId, snippet }) => ({ ref: { machine: link.machine, id: threadId }, snippet }))),
+        Effect.mapError((error) => new ThreadsError({ reason: T3Actions.reason(error), cause: error })),
+      )
+      // Another machine's T3 Code stalled, like over a network that's gone quiet, would otherwise keep him waiting for as long as T3 Code is given.
+      const limit = link.here ? within : (within ?? elsewhere)
+      return limit === undefined ? Effect.map(asked, Option.some) : Effect.timeoutOption(asked, limit)
+    }
 
     const sessions = (ref: Ref) =>
       Effect.flatMap(reach(ref), (actions) =>
@@ -459,8 +591,9 @@ export const make = (options: {
       Effect.gen(function* () {
         const unlinked = (why: string) => Effect.as(Effect.logInfo(`Not linked: ${why}`), Option.none<Ref>())
         const linked = (thread: T3Live.Thread) => Effect.as(Effect.logInfo(`Linked to "${thread.title}"`), Option.some<Ref>({ machine, id: thread.id }))
-        if (from !== machine) return yield* unlinked(`${from}'s T3 Code isn't followed`)
-        const view = yield* live.view
+        // Only this machine's hooks, whose directories can be looked at here.
+        if (from !== machine) return yield* unlinked(`${from}'s hooks aren't linked from here`)
+        const view = yield* options.live.view
         if (Option.isNone(view)) return yield* unlinked("T3 Code isn't followed right now")
         const { threads, projects } = view.value
         const owner = threads.get(owners.get(session) ?? "")
@@ -496,6 +629,12 @@ export const make = (options: {
         Effect.annotateLogs({ session }),
       )
 
+    const find = (ref: Ref) =>
+      Option.match(Option.fromNullable(linked(ref.machine)), {
+        onNone: () => Effect.succeed(Option.none<T3Live.Thread>()),
+        onSome: ({ live }) => Effect.map(live.view, Option.flatMap((view) => Option.fromNullable(view.threads.get(ref.id)))),
+      })
+
     /** When usage was last asked for, so a T3 Code that doesn't answer isn't asked on every request. */
     let tried = Number.NEGATIVE_INFINITY
     const refresh = Option.match(options.actions, {
@@ -519,35 +658,68 @@ export const make = (options: {
       desk: (focus, pending, most, found = [], more = 0, heard = "") =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis
-          const away = options.others.map((other) => ({ machine: other, reason: `I can't see ${other}'s threads yet.` }))
-          const view = yield* live.view
-          if (Option.isNone(view)) {
-            const reason = Option.isNone(options.actions)
-              ? "I need a T3 Code token to see your threads."
-              : "T3 Code isn't running, so I can't see your threads."
-            return { threads: [], away: [{ machine, reason }, ...away] }
+          const seen: Array<{ readonly link: Link; readonly view: T3Live.View }> = []
+          const away: Array<{ readonly machine: string; readonly reason: string }> = []
+          for (const link of links) {
+            const view = yield* link.live.view
+            if (Option.isSome(view)) seen.push({ link, view: view.value })
+            else away.push({ machine: link.machine, reason: yield* link.unseen })
           }
+          if (seen.length === 0) return { threads: [], away }
           const [started, entries] = [yield* startedWork, yield* journal.since(now - days(7), { most: 500 })]
-          const threads = shortlist({ machine, view: view.value, focus, pending, found, heard, most, more, started, said: latest(entries, machine), now })
+          const noted = (name: string) => ({ started: started.get(name) ?? new Map<string, Started>(), said: latest(entries, name) })
+          const others = seen.filter(({ link }) => !link.here).map(({ link, view }): Seen => ({ machine: link.machine, here: false, view, ...noted(link.machine) }))
+          // When this machine's can't be seen, only the others' are ranked.
+          const own = seen.find(({ link }) => link.here)?.view ?? T3Live.empty
+          const threads = shortlist({ machine, view: own, ...noted(machine), others, focus, pending, found, heard, most, more, now })
           return { threads, away }
         }),
-      find: (ref) =>
-        ref.machine === machine
-          ? Effect.map(live.view, Option.flatMap((view) => Option.fromNullable(view.threads.get(ref.id))))
-          : Effect.succeed(Option.none()),
-      changes: Stream.map(live.changes, (change) => ({ machine, change })),
-      actions: (name) => (name === machine ? options.actions : Option.none()),
-      detail: (ref, pending) =>
+      find,
+      unseen: (name) =>
+        Option.match(Option.fromNullable(linked(name)), {
+          onNone: () => Effect.succeed(Option.some(`I can't see ${name}'s threads.`)),
+          onSome: (link) => Effect.flatMap(link.live.view, (view) => (Option.isSome(view) ? Effect.succeed(Option.none()) : Effect.map(link.unseen, Option.some))),
+        }),
+      heard: (said) =>
+        Effect.forEach(
+          options.others,
+          (other) =>
+            Effect.map(other.status, (status) => {
+              // Said within a sentence, it loses its full stop, and maybe its capital.
+              const reason = status._tag === "Down" ? status.reason.replace(/[.!?]+$/, "").toLowerCase() : ""
+              if (status._tag === "Down" && status.outage > 0 && reason !== "" && said.toLowerCase().includes(reason)) told.set(other.machine, telling(status))
+            }),
+          { discard: true },
+        ),
+      changes: Stream.mergeAll(
+        links.map((link) => Stream.map(link.live.changes, (change) => ({ machine: link.machine, change }))),
+        { concurrency: "unbounded" },
+      ),
+      actions: (name) => Option.flatMap(Option.fromNullable(linked(name)), ({ actions }) => actions),
+      detail: (ref, pending?) =>
         Effect.flatMap(reach(ref), (actions) =>
           actions.detail(ref.id, pending).pipe(Effect.mapError((error) => new ThreadsError({ reason: T3Actions.reason(error), cause: error }))),
         ),
-      search: (words) =>
-        Effect.flatMap(reach({ machine, id: "" }), (actions) =>
-          actions.search(words).pipe(
-            Effect.map((matches) => matches.map(({ threadId, snippet }) => ({ ref: { machine, id: threadId }, snippet }))),
-            Effect.mapError((error) => new ThreadsError({ reason: T3Actions.reason(error), cause: error })),
-          ),
-        ),
+      search: (words, within?) =>
+        Effect.gen(function* () {
+          // Another machine's only while its threads can be seen: one that's down would only keep him waiting to be told so.
+          const open = yield* Effect.filter(links, (link) => (link.here ? Effect.succeed(true) : Effect.map(link.live.view, Option.isSome)))
+          const asked = open.flatMap((link) => Option.toArray(Option.map(link.actions, (actions) => ({ link, searching: searching(link, actions, words, within) }))))
+          if (asked.length === 0) return yield* reach({ machine, id: "" }).pipe(Effect.as<Searched>({ matches: [], missed: [] }))
+          const each = yield* Effect.forEach(asked, ({ link, searching }) => Effect.either(Effect.map(searching, (found) => ({ link, found }))), {
+            concurrency: "unbounded",
+          })
+          const failed = each.find(Either.isLeft)
+          if (failed !== undefined && each.every(Either.isLeft)) return yield* failed.left
+          const answered = each.flatMap((one) => (Either.isRight(one) && Option.isSome(one.right.found) ? [{ link: one.right.link, matches: one.right.found.value }] : []))
+          // Each machine's best in turn, as its T3 Code ranked them, so one machine's many can't push another's best down.
+          const matches = answered
+            .flatMap(({ matches }) => matches.map((match, place) => ({ match, place })))
+            .toSorted((one, other) => one.place - other.place)
+            .map(({ match }) => match)
+          const missed = links.filter((link) => !answered.some((searched) => searched.link === link)).map((link) => link.machine)
+          return { matches, missed } satisfies Searched
+        }),
       // What's known at once, asked again meanwhile when it's old. With nothing known, or nothing recent enough to say as
       // what's used now, it's waited for, even when it's being asked for already: what's dated is only for a T3 Code that
       // can't answer.
@@ -579,7 +751,7 @@ export const make = (options: {
       waiting: (ref, requestId) =>
         Effect.gen(function* () {
           const pending = Option.flatMap(
-            ref.machine === machine ? Option.flatMap(yield* live.view, (view) => Option.fromNullable(view.threads.get(ref.id))) : Option.none(),
+            ref.machine === machine ? Option.flatMap(yield* options.live.view, (view) => Option.fromNullable(view.threads.get(ref.id))) : Option.none(),
             (thread) => Option.fromNullable(thread.pendingRuntimeRequest),
           )
           if (Option.isNone(pending)) return false

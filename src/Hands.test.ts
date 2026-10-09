@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Effect, Fiber, Option, Schema, type Scope, TestClock, TestContext } from "effect"
+import { Clock, Deferred, type Duration, Effect, type Exit, Fiber, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Hands from "./Hands.ts"
+import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Server from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
-import type * as Threads from "./Threads.ts"
+import * as Threads from "./Threads.ts"
+import type * as Tunnel from "./Tunnel.ts"
 
 const now = Date.parse("2026-10-08T22:00:00.000Z")
 
@@ -34,8 +36,8 @@ const lines: Persona.Lines = { ...Persona.plain, onIt: "On it, sir.", queued: "I
 type Answer = (payload: Record<string, unknown>, bounded: Bounded) => Effect.Effect<unknown, Server.Trouble | Server.Refusal>
 
 interface Bounded {
-  runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string }>
-  messages: Array<{ id: string; role: string; text: string; createdAt: string }>
+  runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string; queueHeld?: boolean }>
+  messages: Array<{ id: string; role: string; text: string; createdAt: string; runId?: string | null }>
   turnItems: Array<Record<string, unknown>>
 }
 
@@ -44,6 +46,7 @@ interface Bounded {
  * into the turn under way or behind it on a busy one. It steers or restarts
  * only a turn that's running, queues behind one getting going, and turns
  * down steering one that's waiting, or restarting one that isn't running.
+ * What it queues behind a run a stop held in the queue is held too.
  */
 const takes =
   (intent: "steer" | "queued_turn" = "steer"): Answer =>
@@ -58,11 +61,24 @@ const takes =
           return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: `Target run ${active.id} is ${active.status} and cannot be steered.` }))
         }
         const queued = (payload.dispatchMode as { type: string }).type === "queue_after_active" || intent === "queued_turn" || into
-        bounded.messages.push({ id: messageId, role: "user", text: String(payload.text), createdAt: "now" })
+        const message = { id: messageId, role: "user", text: String(payload.text), createdAt: "now" }
+        bounded.messages.push(message)
         if (!going || queued) {
-          bounded.runs.push({ id: `run-${bounded.runs.length + 1}`, status: going ? "queued" : "running", ordinal: bounded.runs.length + 1, userMessageId: messageId })
+          // Behind a run a stop held in the queue, it's held too.
+          const held = going && bounded.runs.some(({ status, queueHeld }) => status === "queued" && queueHeld === true)
+          bounded.runs.push({
+            id: `run-${bounded.runs.length + 1}`,
+            status: going ? "queued" : "running",
+            ordinal: bounded.runs.length + 1,
+            userMessageId: messageId,
+            ...(held ? { queueHeld: true } : {}),
+          })
         }
-        if (!going || !queued) bounded.turnItems.push({ type: "user_message", messageId, inputIntent: going ? "steer" : "turn_start" })
+        // Each in the run T3 Code names on it, the message and its item: the run of its own it started or waits in, or the one it was steered into.
+        Object.assign(message, { runId: going && !queued ? active.id : bounded.runs.at(-1)?.id })
+        if (!going || !queued) {
+          bounded.turnItems.push({ type: "user_message", messageId, inputIntent: going ? "steer" : "turn_start", runId: going ? active.id : bounded.runs.at(-1)?.id })
+        }
       }
       if (payload.type === "queued-run.cancel") {
         const run = bounded.runs.find(({ id }) => id === payload.runId)
@@ -75,17 +91,25 @@ const takes =
 const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded["runs"]; readonly started?: number } = {}) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now)
-    const ledger = Ledger.fromStore(yield* Store.make(":memory:"))
+    const store = yield* Store.make(":memory:")
+    const ledger = Ledger.fromStore(store)
     const bounded: Bounded = { runs: [...(given.runs ?? [])], messages: [], turnItems: [] }
     const dispatched: Array<Record<string, unknown>> = []
     let answer: Answer = takes()
     let current = given.thread ?? thread(tezos.id)
     let readable = true
+    // The thread as a whole, once a test has pushed some of it out of its last turns, or too slow to read; otherwise just as they are.
+    let whole: Bounded | "fails" | undefined
+    let wholeReads = 0
     const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
-      api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
-        readable
-          ? Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)
-          : Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." }))) as Server.Transport["api"],
+      api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
+        if (!readable) return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." }))
+        if (path.endsWith("/bounded")) return Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)
+        wholeReads++
+        return whole === "fails"
+          ? Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." }))
+          : Schema.decodeUnknown(schema)({ snapshotSequence: 1, projection: whole ?? bounded }).pipe(Effect.orDie)
+      }) as Server.Transport["api"],
       call: (<A, I>(method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
         method === "orchestration.dispatchCommand"
           ? Effect.suspend(() => {
@@ -98,6 +122,7 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
     const threads: Parameters<typeof Hands.make>[0]["threads"] = {
       find: (ref) => Effect.sync(() => (ref.id === current.id ? Option.some(current) : Option.none())),
       actions: (machine) => (machine === "Rosie" ? Option.some(actions) : Option.none()),
+      unseen: () => Effect.succeed(Option.none()),
     }
     const made = Hands.make({ threads, ledger, ...(given.started === undefined ? {} : { started: given.started }) })
     const send = (utterance: string, text: string, how: T3Actions.When = "now", twice = false) =>
@@ -105,6 +130,8 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
     return {
       ...made,
       ledger,
+      /** yapd's database the ledger is kept in, for a test to make it unwritable. */
+      store,
       bounded,
       dispatched,
       send,
@@ -118,6 +145,12 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
       reads: (ok: boolean) => {
         readable = ok
       },
+      /** The thread as its whole read has it, once some of it is pushed out of its last turns, or that read too slow to answer. */
+      whole: (next: Bounded | "fails") => {
+        whole = next
+      },
+      /** How many times the whole thread was read. */
+      wholeReads: () => wholeReads,
       /** The ids each dispatch went under. */
       ids: () => dispatched.map(({ commandId, messageId }) => [commandId, messageId]),
       /** Hands as yapd has them once it's restarted at `at`, over the same ledger and T3 Code. */
@@ -128,6 +161,213 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
 const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) => Effect.runPromise(test.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
 
 const refusal = new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "Thread t-tezos can't take messages while its provider is offline." })
+
+/** New work's thread as T3 Code shows it: getting its worktree ready, at work in it, or failed to make it, its turn never begun. */
+const preparing = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "preparing", status: "preparing" }
+const begun = { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "running", status: "running", latestRunStartedAt: "2026-10-08T22:02:00.000Z" }
+const unbegun = { latestRunId: "run-1", status: "failed", lastError: "Workspace preparation failed.", latestRunCompletedAt: "2026-10-08T22:02:00.000Z" }
+
+/**
+ * What a restart makes of new work asked for `restart` before it, a minute
+ * unless the test says, its thread shown at first as `first`, then, `after`
+ * that, as `then`: its state once it's been waited for as long as a launch
+ * would be, what's said of it, and how much was sent.
+ */
+const restartOn = (
+  first: Record<string, unknown>,
+  then?: Record<string, unknown>,
+  { after = "2 minutes", restart = "1 minute" }: { readonly after?: Duration.DurationInput; readonly restart?: Duration.DurationInput } = {},
+) =>
+  run(
+    Effect.gen(function* () {
+      const { ledger, becomes, restarted, dispatched } = yield* hands({ thread: thread(tezos.id, first) })
+      const { commandId } = yield* ledger.prepare({
+        utterance: "u1",
+        step: 0,
+        kind: "start",
+        machine: "Rosie",
+        thread: tezos.id,
+        body: ({ commandId, messageId }) => ({ project: "/code/yapd", prompt: "Fix the loader.", worktree: true, ids: { thread: tezos.id, message: messageId, command: commandId } }),
+        message: true,
+      })
+      yield* ledger.settle(commandId, "unknown", { reason: "T3 Code is taking too long, so I don't know if it started." })
+      // yapd restarted a while after asking for it, and T3 Code has made its thread.
+      yield* TestClock.adjust(restart)
+      const { reconcile } = restarted(yield* Clock.currentTimeMillis)
+      // What it's still getting ready is said once it's been waited for, along with whatever else was.
+      const looking = yield* Effect.fork(Effect.flatMap(reconcile, ({ unconfirmed, readying }) => Effect.map(readying, (later) => [...unconfirmed, ...later])))
+      yield* TestClock.adjust(after)
+      if (then !== undefined) becomes(thread(tezos.id, then))
+      yield* TestClock.adjust("4 minutes")
+      const unconfirmed = yield* Fiber.join(looking)
+      return {
+        state: Option.getOrNull(Option.map(yield* ledger.get(commandId), ({ state }) => state)),
+        said: unconfirmed.map((row) => Hands.unsure(row, lines, Option.none(), row.reason ?? undefined)),
+        dispatched: dispatched.length,
+      }
+    }),
+  )
+
+/**
+ * A restart's look at a message that may not have got there, which reads the
+ * thread as it was then, without the message, or `fails` to, and is slow to
+ * answer: it only does once `meanwhile` is done, with T3 Code answering
+ * commands as `answer` says, or, `between` the writes that put back a
+ * message sent once more that never left, as soon as the first is done. The
+ * step was left as may have got there for `reason`. What `meanwhile` came to,
+ * where the step stands after, how many the look gave back to offer or to
+ * say it couldn't confirm, and whether it's still to be offered.
+ */
+const lookedLate = (
+  meanwhile: (hands: Hands.Hands["Type"], commandId: string) => Effect.Effect<string>,
+  {
+    answer = takes(),
+    fails = false,
+    reason,
+    between = false,
+  }: { readonly answer?: Answer; readonly fails?: boolean; readonly reason?: string; readonly between?: boolean } = {},
+) =>
+  run(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const reading = yield* Deferred.make<void>()
+      const done = yield* Deferred.make<void>()
+      let looking: Fiber.Fiber<Hands.Reconciled> | undefined
+      const kept = Ledger.fromStore(yield* Store.make(":memory:"))
+      const ledger: Ledger.Ledger["Type"] = {
+        ...kept,
+        settle: (commandId, state, details) =>
+          Effect.tap(kept.settle(commandId, state, details), () =>
+            between && details?.from?.includes("abandoned") === true && looking !== undefined
+              ? Effect.zipRight(Deferred.succeed(done, undefined), Fiber.await(looking))
+              : Effect.void,
+          ),
+      }
+      const { commandId } = yield* ledger.prepare({
+        utterance: "u1",
+        step: 0,
+        kind: "message",
+        machine: "Rosie",
+        thread: tezos.id,
+        body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+        message: true,
+      })
+      yield* ledger.settle(commandId, "unknown", reason === undefined ? {} : { reason })
+      const bounded: Bounded = { runs: [], messages: [], turnItems: [] }
+      let reads = 0
+      const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
+        api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
+          Effect.suspend(() => {
+            const seen = structuredClone(bounded)
+            const first = ++reads === 1
+            const slow = first ? Effect.zipRight(Deferred.succeed(reading, undefined), Deferred.await(done)) : Effect.void
+            const read = first && fails ? Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." })) : Schema.decodeUnknown(schema)({ projection: seen }).pipe(Effect.orDie)
+            return Effect.zipRight(slow, read)
+          })) as Server.Transport["api"],
+        call: (<A, I>(_: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
+          answer(payload, bounded).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(Effect.orDie)))) as Server.Transport["call"],
+      })
+      const actions = T3Actions.make(reach)
+      const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions), unseen: () => Effect.succeed(Option.none()) } })
+      const look = yield* Effect.fork(back.reconcile)
+      looking = look
+      yield* Deferred.await(reading)
+      const came = yield* meanwhile(back, commandId)
+      yield* Deferred.succeed(done, undefined)
+      const { undelivered, unconfirmed } = yield* Fiber.join(look)
+      return {
+        meanwhile: came,
+        state: Option.map(yield* ledger.get(commandId), ({ state }) => state),
+        undelivered: undelivered.length,
+        unconfirmed: unconfirmed.length,
+        offered: Option.isSome(yield* back.still(commandId)),
+      }
+    }),
+  )
+
+/**
+ * Ten turns begun since, one after the other, as T3 Code's bounded read
+ * reaches back only ten: it keeps every run, but only those ten turns' items,
+ * and the messages they have, or that the newest run, or one going or queued,
+ * has. Gives back the thread as its whole read still has it.
+ */
+const tenTurnsOn = (bounded: Bounded): Bounded => {
+  const first = bounded.runs.length + 1
+  for (let ordinal = first; ordinal < first + 10; ordinal++) {
+    const runId = `run-${ordinal}`
+    const messageId = `later-${ordinal}`
+    bounded.runs.push({ id: runId, status: "completed", ordinal, userMessageId: messageId })
+    bounded.messages.push({ id: messageId, role: "user", text: "And the next thing.", createdAt: "2026-10-08T22:10:00.000Z", runId })
+    bounded.turnItems.push({ type: "user_message", messageId, inputIntent: "turn_start", runId })
+  }
+  const whole = structuredClone(bounded)
+  bounded.turnItems.splice(0, bounded.turnItems.length - 10)
+  const items = new Set(bounded.turnItems.map(({ messageId }) => messageId))
+  const live = bounded.runs.filter(({ status }, at) => at === bounded.runs.length - 1 || [...T3Actions.going, "queued"].includes(status))
+  const kept = bounded.messages.filter(
+    ({ id, runId }) => items.has(id) || live.some(({ userMessageId }) => userMessageId === id) || live.some(({ id }) => id === runId),
+  )
+  bounded.messages.splice(0, bounded.messages.length, ...kept)
+  return whole
+}
+
+/**
+ * He moves a message from the queue into the turn under way, as T3 Code does
+ * it, and that turn ends as `status`: the run it waited in is cancelled, and
+ * the message is the turn's, as is its item, unless the turn was rolled back,
+ * which hides it.
+ */
+const moved = (status: string) => (bounded: Bounded) => {
+  bounded.runs[0]!.status = status
+  bounded.runs[1]!.status = "cancelled"
+  Object.assign(bounded.messages[0]!, { runId: "run-1", createdAt: "2026-10-08T22:01:00.000Z" })
+  if (status !== "rolled_back") bounded.turnItems.push({ type: "user_message", messageId: "yapd:u1:0:m", inputIntent: "promoted_queued_to_steer", runId: "run-1" })
+}
+
+/** He takes a message out of the queue, which T3 Code shows cancelled, or drops from the thread, and the turn ahead of it finishes. */
+const takenOut = (dropped: boolean) => (bounded: Bounded) => {
+  bounded.runs[0]!.status = "completed"
+  bounded.runs[1]!.status = "cancelled"
+  if (dropped) bounded.messages.splice(0)
+}
+
+/**
+ * A message for now behind a turn getting going, its answer lost and the
+ * thread unread, sent again once `meanwhile` has done to the thread what it
+ * does, with T3 Code's answer `kept` this time, or lost again. `meanwhile`
+ * gives back the thread as its whole read has it, when that isn't just its
+ * last turns, or that read failing. What's said, how its step is noted, and
+ * how many times the whole thread was read.
+ */
+const resentLater = (again: "kept" | "lost", meanwhile: (bounded: Bounded) => Bounded | "fails" | void) =>
+  run(
+    Effect.gen(function* () {
+      const { send, again: resend, answering, reads, bounded, becomes, ledger, whole, wholeReads } = yield* hands({
+        thread: thread(tezos.id, preparing),
+        runs: [{ id: "run-1", status: "preparing", ordinal: 1 }],
+      })
+      answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+      reads(false)
+      yield* send("u1", "Open a PR.")
+      const shown = meanwhile(bounded)
+      if (shown) whole(shown)
+      becomes(thread(tezos.id, { latestRunCompletedAt: "2026-10-08T22:12:00.000Z" }))
+      reads(true)
+      answering(() => (again === "kept" ? Effect.succeed({ sequence: 7 }) : Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me again.", sent: true }))))
+      const outcome = yield* resend("yapd:u1:0")
+      const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+      return {
+        said:
+          outcome._tag === "Done"
+            ? Hands.done(message, outcome.how, lines, Option.none(), outcome)
+            : outcome._tag === "Twin" || outcome._tag === "Read" || outcome._tag === "Moot"
+              ? outcome._tag
+              : Hands.failed(message, outcome, lines, Option.none()),
+        noted: Option.getOrNull(Option.map(yield* ledger.get("yapd:u1:0"), ({ state, how, reason }) => ({ state, how, reason }))),
+        wholeReads: wholeReads(),
+      }
+    }),
+  )
 
 describe("Hands", () => {
   test("a step settled three times by settle is dispatched once", async () => {
@@ -435,12 +675,480 @@ describe("Hands", () => {
     }
   })
 
+  test("a yes to sending again a message taken out of the queue since, which T3 Code answers for from what it kept, is never said as sent", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    const message = { _tag: "Message", to: tezos, text: "", how: "after" } as const
+    const withdrawn = (forgotten: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, dispatched, ledger } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          // T3 Code queues it, but its answer is lost, and the thread can't be read to look for it.
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "When it's done, open a PR.", "after")
+          reads(true)
+          // He takes it out of the queue in T3 Code's app, which drops it from the thread, or shows it cancelled.
+          if (forgotten) {
+            bounded.runs.splice(1)
+            bounded.messages.splice(0)
+          } else bounded.runs[1]!.status = "cancelled"
+          // Sent again under the same ids, T3 Code answers as it did the first time, without doing anything.
+          answering(() => Effect.succeed({ sequence: 7 }))
+          const resent = yield* again("yapd:u1:0")
+          const state = Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state)
+          yield* TestClock.adjust("1 minute")
+          answering(takes())
+          const said = yield* send("u2", "When it's done, open a PR.", "after")
+          return {
+            resent: resent._tag === "Refused" || resent._tag === "Unknown" ? Hands.failed(message, resent, lines, Option.none()) : resent._tag,
+            state,
+            said: said._tag === "Refused" ? said.reason : said._tag,
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    // Shown cancelled, it was withdrawn, so the same words go as new.
+    expect(await withdrawn(false)).toEqual({
+      resent: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
+      state: Option.some("abandoned"),
+      said: "Done",
+      dispatched: 3,
+    })
+    // Gone from the thread, it may only be further back than the thread's read reaches: it went, so the same words are asked about.
+    expect(await withdrawn(true)).toEqual({
+      resent: "That got there the first time, sir, but it isn't in the thread now, so it may have been taken out of the queue.",
+      state: Option.some("sent"),
+      said: "Twin",
+      dispatched: 2,
+    })
+  })
+
+  test("a yes to sending again a message T3 Code answers for from what it kept is said as it went in then, whatever the thread is doing now", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    /** A message for now to a thread whose turn is `doing`, its answer lost, then sent again once the turn has ended as `then` leaves it. */
+    const resent = (doing: "preparing" | "running", then: (bounded: Bounded) => void) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, becomes, ledger } = yield* hands({
+            thread: thread(tezos.id, { activeRunId: "run-1", activityRunStatus: doing, status: doing }),
+            runs: [{ id: "run-1", status: doing, ordinal: 1 }],
+          })
+          // T3 Code takes it, into the turn under way or behind it, but its answer is lost, and the thread can't be read to look for it.
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // The turn has ended since, and nothing's going.
+          then(bounded)
+          becomes(thread(tezos.id))
+          reads(true)
+          // Sent again under the same ids, T3 Code answers as it did the first time, without doing anything.
+          answering(() => Effect.succeed({ sequence: 7 }))
+          const outcome = yield* again("yapd:u1:0")
+          return {
+            how: outcome._tag === "Done" ? outcome.how : outcome._tag,
+            said: outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            noted: Option.flatMap(yield* ledger.get("yapd:u1:0"), ({ how }) => Option.fromNullable(how)),
+          }
+        }),
+      )
+    // Behind a turn getting going, which was stopped, holding its queue, so it waits there still: never said as gone in at once.
+    expect(
+      await resent("preparing", (bounded) => {
+        bounded.runs[0]!.status = "interrupted"
+        bounded.runs[1]!.queueHeld = true
+      }),
+    ).toEqual({ how: "queued", said: "Its queue is on hold, sir, so that will go once it's let carry on.", noted: Option.some("queued") })
+    // Steered into the turn under way, which has ended since: never said as a turn of its own, nor as being worked on.
+    expect(
+      await resent("running", (bounded) => {
+        bounded.runs[0]!.status = "completed"
+      }),
+    ).toEqual({ how: "steered", said: "That went in, sir, and it's been dealt with.", noted: Option.some("steered") })
+  })
+
+  test("a yes to sending again a message T3 Code answers for from what it kept, whose own turn has ended since, says it went in and how that turn ended, never that it's being worked on", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    /** A message for now to a thread getting a turn going, so it waits behind it, its answer lost, then sent again once its own turn has ended as `own`. */
+    const resent = (own: string) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, becomes, ledger } = yield* hands({
+            thread: thread(tezos.id, preparing),
+            runs: [{ id: "run-1", status: "preparing", ordinal: 1 }],
+          })
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // The turn ahead finished, its own started, and has ended since, with nothing going now.
+          bounded.runs[0]!.status = "completed"
+          bounded.runs[1]!.status = own
+          becomes(thread(tezos.id))
+          reads(true)
+          answering(() => Effect.succeed({ sequence: 7 }))
+          const outcome = yield* again("yapd:u1:0")
+          const said = (called: Option.Option<string>) => (outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, called, outcome) : outcome._tag)
+          return {
+            said: [said(Option.none()), said(Option.some("the Tezos migration"))],
+            noted: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state),
+          }
+        }),
+      )
+    expect(await resent("completed")).toEqual({
+      said: ["That went in, sir, and it's been dealt with.", "That went to the Tezos migration, sir, and it's been dealt with."],
+      noted: Option.some("sent"),
+    })
+    for (const own of ["interrupted", "failed"]) {
+      expect(await resent(own)).toEqual({
+        said: ["That went in, sir, but the turn it started was cut short.", "That went to the Tezos migration, sir, but the turn it started was cut short."],
+        noted: Option.some("sent"),
+      })
+    }
+    // Undone in T3 Code since, it's said so, never that it's being worked on.
+    expect(await resent("rolled_back")).toEqual({
+      said: ["That went in, sir, but it's been rolled back since.", "That went to the Tezos migration, sir, but it's been rolled back since."],
+      noted: Option.some("sent"),
+    })
+    // Still at it, it's being worked on, as it says.
+    expect(await resent("running")).toEqual({ said: ["On it, sir.", "On it, sir: the Tezos migration."], noted: Option.some("sent") })
+  })
+
+  test("a yes to sending again a message steered into a turn T3 Code rolled back since, which hides that turn's item, says it was rolled back, never that it's being worked on", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    const started = "2026-10-08T21:58:00.000Z"
+    /**
+     * Steered into the turn under way, or waiting behind it till he takes it out of the queue into it, its answer lost, then sent again once
+     * that turn is rolled back, with T3 Code's answer kept, or lost again.
+     */
+    const resent = (again: "kept" | "lost", promoted = false) =>
+      run(
+        Effect.gen(function* () {
+          const doing = promoted ? "preparing" : "running"
+          const { send, again: resend, answering, reads, bounded, becomes, dispatched } = yield* hands({
+            thread: thread(tezos.id, { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: doing, status: doing, latestRunStartedAt: started }),
+            runs: [{ id: "run-1", status: doing, ordinal: 1 }],
+          })
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // Taken out of the queue into the turn as T3 Code does it: the run it waited in is cancelled, and the message is that turn's.
+          if (promoted) {
+            bounded.runs[1]!.status = "cancelled"
+            Object.assign(bounded.messages[0]!, { runId: "run-1" })
+          }
+          // Rolled back, its run says so, and T3 Code no longer shows that turn's items, so only the message names the run it went into.
+          bounded.runs[0]!.status = "rolled_back"
+          bounded.turnItems.length = 0
+          becomes(thread(tezos.id, { latestRunId: "run-1", status: "rolled_back", latestRunStartedAt: started, latestRunCompletedAt: "2026-10-08T22:05:00.000Z" }))
+          reads(true)
+          answering(() => (again === "kept" ? Effect.succeed({ sequence: 7 }) : Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me again.", sent: true }))))
+          const outcome = yield* resend("yapd:u1:0")
+          return {
+            said: outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            ids: dispatched.map(({ commandId }) => commandId),
+          }
+        }),
+      )
+    for (const again of ["kept", "lost"] as const) {
+      expect(await resent(again)).toEqual({ said: "That went in, sir, but it's been rolled back since.", ids: ["yapd:u1:0", "yapd:u1:0"] })
+      // Never taken for withdrawn, though the run it waited in shows cancelled.
+      expect(await resent(again, true)).toEqual({ said: "That went in, sir, but it's been rolled back since.", ids: ["yapd:u1:0", "yapd:u1:0"] })
+    }
+  })
+
+  test("a yes to sending again a message whose answer is lost again, found in the thread, is said as it went in then, as when T3 Code answers for it", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    /** A message for now behind a turn getting going, its answer lost, then sent again once its own run is `own`, and that answer lost too. */
+    const resent = (own: string) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, becomes, ledger, dispatched } = yield* hands({
+            thread: thread(tezos.id, preparing),
+            runs: [{ id: "run-1", status: "preparing", ordinal: 1 }],
+          })
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // The turn ahead finished, and its own has started and ended since, or it still waits in the queue, which a stop has put on hold, or he took it out.
+          bounded.runs[0]!.status = "completed"
+          bounded.runs[1]!.status = own
+          bounded.runs[1]!.queueHeld = own === "queued"
+          becomes(thread(tezos.id))
+          reads(true)
+          // Sent again under the same ids, T3 Code's answer is lost once more, but the thread can be read.
+          answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me again.", sent: true })))
+          const outcome = yield* again("yapd:u1:0")
+          return {
+            said: outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, Option.none(), outcome) : outcome._tag === "Refused" ? Hands.failed(message, outcome, lines, Option.none()) : outcome._tag,
+            noted: Option.map(yield* ledger.get("yapd:u1:0"), ({ state, how }) => [state, how]),
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    expect(await resent("queued")).toEqual({ said: "Its queue is on hold, sir, so that will go once it's let carry on.", noted: Option.some(["sent", "queued"]), dispatched: 2 })
+    expect(await resent("completed")).toEqual({ said: "That went in, sir, and it's been dealt with.", noted: Option.some(["sent", "now"]), dispatched: 2 })
+    for (const own of ["interrupted", "failed"]) {
+      expect(await resent(own)).toEqual({ said: "That went in, sir, but the turn it started was cut short.", noted: Option.some(["sent", "now"]), dispatched: 2 })
+    }
+    expect(await resent("rolled_back")).toEqual({ said: "That went in, sir, but it's been rolled back since.", noted: Option.some(["sent", "now"]), dispatched: 2 })
+    expect(await resent("cancelled")).toEqual({
+      said: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
+      noted: Option.some(["abandoned", null]),
+      dispatched: 2,
+    })
+    // Still at it, it's being worked on, as it says.
+    expect(await resent("running")).toEqual({ said: "On it, sir.", noted: Option.some(["sent", "now"]), dispatched: 2 })
+  })
+
+  test("a yes to sending again a message T3 Code answers for from what it kept, steered into the turn under way or taken out of the queue into it, once that turn has ended, says it went in and how that turn ended, never that it's being worked on", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    const started = "2026-10-08T21:58:00.000Z"
+    const promotedAt = "2026-10-08T22:01:00.000Z"
+    /**
+     * A message for now to a thread whose turn is `doing`, so it's steered in, or waits behind it till he takes it out of the queue into it a
+     * minute on, its answer lost, then sent again once the thread's runs are as `then` leaves them, and the thread is shown as `shows`.
+     */
+    const resent = (doing: "running" | "preparing", then: (bounded: Bounded) => void, shows: Record<string, unknown>) =>
+      run(
+        Effect.gen(function* () {
+          const { send, again, answering, reads, bounded, becomes, ledger } = yield* hands({
+            thread: thread(tezos.id, { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: doing, status: doing, latestRunStartedAt: started }),
+            runs: [{ id: "run-1", status: doing, ordinal: 1 }],
+          })
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // Taken out of the queue into the turn by his hand in T3 Code's app, once it's running, as T3 Code does it: the run it waited in is cancelled
+          // there and then, and the message is the turn's from then, named on it as that turn's run.
+          if (doing === "preparing") {
+            bounded.runs[0]!.status = "running"
+            bounded.runs[1]!.status = "cancelled"
+            bounded.messages[0]!.createdAt = promotedAt
+            bounded.turnItems.push({ type: "user_message", messageId: "yapd:u1:0:m", inputIntent: "promoted_queued_to_steer", runId: "run-1" })
+          }
+          then(bounded)
+          becomes(thread(tezos.id, shows))
+          reads(true)
+          answering(() => Effect.succeed({ sequence: 7 }))
+          const outcome = yield* again("yapd:u1:0")
+          const said = (called: Option.Option<string>) => (outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, called, outcome) : outcome._tag)
+          return {
+            how: outcome._tag === "Done" ? outcome.how : outcome._tag,
+            said: [said(Option.none()), said(Option.some("the Tezos migration"))],
+            noted: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state),
+          }
+        }),
+      )
+    /** The turn's run, `run-1`, as `status`, and any `others` begun since. */
+    const runs =
+      (status: string, ...others: Bounded["runs"]) =>
+      (bounded: Bounded) => {
+        bounded.runs[0]!.status = status
+        bounded.runs.push(...others)
+      }
+    /**
+     * How T3 Code shows the thread: by its newest run, which, once he's taken a message out of the queue into the turn, is the run it waited in,
+     * cancelled as it was, whatever that turn does after, unless another has begun since; with the turn's own run still `going`, it's shown at it.
+     */
+    const shown = (latest: Record<string, unknown>, going?: string) => ({
+      ...latest,
+      ...(going === undefined ? {} : { activeRunId: going === "waiting" ? null : "run-1", activityRunStatus: going }),
+    })
+    const taken = (going?: string) => shown({ latestRunId: "run-2", status: "cancelled", latestRunStartedAt: null, latestRunCompletedAt: promotedAt }, going)
+    const ended = (status: string) => ({ latestRunId: "run-1", status, latestRunStartedAt: started, latestRunCompletedAt: "2026-10-08T22:05:00.000Z" })
+    const atIt = (going: string, completed: string | null = null) =>
+      shown({ latestRunId: "run-1", status: going, latestRunStartedAt: started, latestRunCompletedAt: completed }, going)
+    // Another begun since, and still at it, so the thread shows nothing completed.
+    const newer = { id: "run-3", status: "running", ordinal: 3 }
+    const since = { ...atIt("running"), latestRunId: "run-3", activeRunId: "run-3", latestRunStartedAt: "2026-10-08T22:06:00.000Z" }
+    const finished = {
+      how: "steered" as const,
+      said: ["That went in, sir, and it's been dealt with.", "That went to the Tezos migration, sir, and it's been dealt with."],
+      noted: Option.some<Ledger.State>("sent"),
+    }
+    const cut = {
+      how: "steered" as const,
+      said: ["That went in, sir, but the turn it went into was cut short.", "That went to the Tezos migration, sir, but the turn it went into was cut short."],
+      noted: Option.some<Ledger.State>("sent"),
+    }
+    const onIt = { how: "steered" as const, said: ["On it, sir.", "On it, sir: the Tezos migration."], noted: Option.some<Ledger.State>("sent") }
+    for (const doing of ["running", "preparing"] as const) {
+      const promoted = doing === "preparing"
+      // The turn it went into has ended, as its own run says, however the thread shows it.
+      expect(await resent(doing, runs("completed"), promoted ? taken() : ended("completed"))).toEqual(finished)
+      for (const status of ["interrupted", "failed"]) expect(await resent(doing, runs(status), promoted ? taken() : ended(status))).toEqual(cut)
+      expect(await resent(doing, runs("completed", newer), since)).toEqual(finished)
+      // Still at it, or finishing off, it's being worked on.
+      for (const going of ["running", "waiting"]) {
+        expect(await resent(doing, runs(going), promoted ? taken(going) : atIt(going))).toEqual(onIt)
+      }
+    }
+    // Not named on it, as by a T3 Code that doesn't say whose turn it went into, the thread's newest run says what it can.
+    const unnamed = (status: string, others: Bounded["runs"] = []) => (bounded: Bounded) => {
+      runs(status, ...others)(bounded)
+      for (const item of bounded.turnItems) delete item.runId
+      for (const message of bounded.messages) delete (message as { runId?: string }).runId
+    }
+    expect(await resent("running", unnamed("completed"), ended("completed"))).toEqual(finished)
+    expect(await resent("running", unnamed("failed"), ended("failed"))).toEqual(cut)
+    // The newest run started after it went in, so it isn't the one it went into: that ended before, but how isn't known.
+    expect(
+      await resent("running", unnamed("completed", [{ id: "run-3", status: "failed", ordinal: 3 }]), {
+        ...ended("failed"),
+        latestRunId: "run-3",
+        latestRunStartedAt: "2026-10-08T22:03:00.000Z",
+      }),
+    ).toEqual({ how: "steered", said: ["That went in, sir.", "That went to the Tezos migration, sir."], noted: Option.some("sent") })
+    expect(await resent("running", unnamed("running"), atIt("running", "2026-10-08T21:30:00.000Z"))).toEqual(onIt)
+  })
+
+  test("a yes to sending again a message T3 Code answers for from what it kept, with the thread still unread, says why it can't tell it's there", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, again, answering, reads, ledger } = yield* hands()
+        // T3 Code takes it, but its answer is lost, and the thread can't be read to look for it.
+        answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+        reads(false)
+        yield* send("u1", "Use the fee table.")
+        // Sent again under the same ids, T3 Code answers as it did the first time, and the thread still can't be read.
+        answering(() => Effect.succeed({ sequence: 7 }))
+        const resent = yield* again("yapd:u1:0")
+        const said = (called: Option.Option<string>) => (resent._tag === "Unknown" ? Hands.failed(message, resent, lines, called) : resent._tag)
+        return { said: [said(Option.none()), said(Option.some("the Tezos migration"))], state: Option.map(yield* ledger.get("yapd:u1:0"), ({ state }) => state) }
+      }),
+    )
+    expect(result).toEqual({
+      said: [
+        "That got there, sir, but I couldn't check it's still in the thread: T3 Code is taking too long.",
+        "That got to the Tezos migration, sir, but I couldn't check it's still in the thread: T3 Code is taking too long.",
+      ],
+      state: Option.some("sent"),
+    })
+  })
+
+  test("a yes to sending again a message he moved from the queue into the turn under way, which ten turns since have pushed out of the thread's last turns, is found in the whole thread, and said as gone in and how that turn ended, never as taken out of the queue", async () => {
+    const steered = (said: string) => ({ said, noted: { state: "sent" as const, how: "steered" as const, reason: null }, wholeReads: 1 })
+    for (const again of ["kept", "lost"] as const) {
+      /** Moved into the turn under way, which ended as `status`, then ten turns on: the run it waited in, cancelled, is all its last turns show of it. */
+      const later = (status: string) =>
+        resentLater(again, (bounded) => {
+          moved(status)(bounded)
+          return tenTurnsOn(bounded)
+        })
+      expect(await later("completed")).toEqual(steered("That went in, sir, and it's been dealt with."))
+      expect(await later("interrupted")).toEqual(steered("That went in, sir, but the turn it went into was cut short."))
+      // Rolled back, that turn's item is hidden, so only the message names the turn it went into.
+      expect(await later("rolled_back")).toEqual(steered("That went in, sir, but it's been rolled back since."))
+    }
+  })
+
+  test("a yes to sending again a message taken out of the queue, which ten turns since have pushed out of the thread's last turns, is found withdrawn in the whole thread, whether T3 Code shows it cancelled or dropped it", async () => {
+    for (const again of ["kept", "lost"] as const) {
+      for (const dropped of [false, true]) {
+        expect(
+          await resentLater(again, (bounded) => {
+            takenOut(dropped)(bounded)
+            return tenTurnsOn(bounded)
+          }),
+        ).toEqual({
+          said: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
+          noted: { state: "abandoned", how: null, reason: Ledger.withdrawn },
+          wholeReads: 1,
+        })
+      }
+    }
+  })
+
+  test("a yes to sending again a message the thread's last turns show only by the run it waited in, cancelled, with the whole thread too slow to read, is never taken as withdrawn, and he's told it couldn't be confirmed", async () => {
+    /** Moved into the turn under way, then ten turns on, with the whole thread too slow to read. */
+    const later = (again: "kept" | "lost") =>
+      resentLater(again, (bounded) => {
+        moved("completed")(bounded)
+        tenTurnsOn(bounded)
+        return "fails"
+      })
+    // T3 Code answers for it, so it went, but whether it's still to be read can't be told.
+    expect(await later("kept")).toEqual({
+      said: "That got there, sir, but I couldn't check it's still in the thread: T3 Code isn't answering.",
+      noted: { state: "sent", how: null, reason: "I couldn't check it's still in the thread: T3 Code isn't answering." },
+      wholeReads: 1,
+    })
+    // Its answer lost again, it can't be confirmed, and, sent once more already, it's never offered again.
+    expect(await later("lost")).toEqual({
+      said: "I couldn't confirm it got there, sir.",
+      noted: { state: "abandoned", how: null, reason: "T3 Code hung up on me again." },
+      wholeReads: 1,
+    })
+  })
+
+  test("a yes to sending again reads the whole thread only when its last turns show nothing of the message but the run it waited in, cancelled, and then once", async () => {
+    for (const again of ["kept", "lost"] as const) {
+      // Moved into the turn under way, its item is still among the thread's last turns.
+      expect(await resentLater(again, moved("completed"))).toMatchObject({ said: "That went in, sir, and it's been dealt with.", wholeReads: 0 })
+      // Taken out of the queue, the message itself is still there, naming the run it waited in.
+      expect(await resentLater(again, takenOut(false))).toMatchObject({
+        said: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
+        wholeReads: 0,
+      })
+      // A turn of its own, done with, then ten turns on: its run says how it went, cancelled or not.
+      const own = await resentLater(again, (bounded) => {
+        bounded.runs[0]!.status = "completed"
+        bounded.runs[1]!.status = "completed"
+        return tenTurnsOn(bounded)
+      })
+      expect(own).toMatchObject({ said: "That went in, sir, and it's been dealt with.", wholeReads: 0 })
+      // Only the run it waited in left to show it, cancelled, the whole thread is read, once.
+      const pushedOut = await resentLater(again, (bounded) => {
+        moved("completed")(bounded)
+        return tenTurnsOn(bounded)
+      })
+      expect(pushedOut).toMatchObject({ wholeReads: 1 })
+    }
+  })
+
   test("asking to send again says sir once, however the line to ask it was written", () => {
     const unknown: Hands.Outcome = { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.some("yapd:u1:0") }
     for (const again of ["Shall I send it again, sir?", "Sir, shall I send it again?"]) {
       const styled = { ...lines, again }
       expect(Hands.failed({ _tag: "Message", to: tezos, text: "", how: "now" }, unknown, styled, Option.none())).toBe("I couldn't confirm it got there, sir. Shall I send it again?")
       expect(Hands.lost(styled, Option.none())).toBe("Before I restarted, I couldn't confirm your message got there, sir. Shall I send it again?")
+    }
+  })
+
+  test("his own lines for going ahead read before a thread's name as the written one does, and are said just where it would be", () => {
+    const message: Hands.Act = { _tag: "Message", to: tezos, text: "Use the fee table.", how: "now" }
+    const own = ["Right away, sir.", "Very good, sir.", "Consider it done, sir.", "Very well, sir."]
+    expect(own.map((onIt) => Hands.done(message, "steered", { ...lines, onIt }, Option.some("the Tezos migration")))).toEqual([
+      "Right away, sir: the Tezos migration.",
+      "Very good, sir: the Tezos migration.",
+      "Consider it done, sir: the Tezos migration.",
+      "Very well, sir: the Tezos migration.",
+    ])
+    const acts: ReadonlyArray<Hands.Act> = [
+      message,
+      { _tag: "Stop", to: tezos },
+      { _tag: "Undo", to: Option.some(tezos), carry: true },
+      { _tag: "Undo", to: Option.some(tezos), carry: false },
+    ]
+    const hows: ReadonlyArray<Ledger.How> = ["now", "steered", "queued"]
+    const ways: ReadonlyArray<Parameters<typeof Hands.done>[4]> = [
+      {},
+      { waiting: "asked" },
+      { waiting: "finishing" },
+      { waiting: "held" },
+      { stopped: true },
+      { stopped: "ended" },
+      { stopped: false },
+      { ended: "finished" },
+      { ended: "rolled" },
+    ]
+    for (const act of acts) {
+      for (const how of hows) {
+        for (const as of ways) {
+          const said = Hands.done(act, how, { ...lines, onIt: own[0]! }, Option.some("the Tezos migration"), as)
+          expect([act._tag, how, as, said.startsWith("Right away")]).toEqual([act._tag, how, as, Hands.goesAhead(act, how, as)])
+        }
+      }
     }
   })
 
@@ -607,6 +1315,211 @@ describe("Hands", () => {
     // Said once, never looked at again by a restart.
     expect(result.restart).toEqual([])
     expect(result.dispatched).toBe(0)
+  })
+
+  test("a message a restart couldn't look for is never to be offered from the moment it's noted, so nothing reading it then offers it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(now)
+        const kept = Ledger.fromStore(yield* Store.make(":memory:"))
+        const { commandId } = yield* kept.prepare({
+          utterance: "u1",
+          step: 0,
+          kind: "message",
+          machine: "rig",
+          thread: tezos.id,
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        yield* kept.settle(commandId, "unknown")
+        // Whether it could be offered as each write the restart makes lands, as anything reading it just then would find it.
+        const offerable: Array<boolean> = []
+        const ledger: Ledger.Ledger["Type"] = {
+          ...kept,
+          settle: (commandId, state, details) =>
+            Effect.tap(kept.settle(commandId, state, details), () =>
+              Effect.map(kept.get(commandId), (row) => offerable.push(Option.exists(row, Ledger.offerable))),
+            ),
+          leave: (commandId, why) =>
+            Effect.tap(kept.leave(commandId, why), () => Effect.map(kept.get(commandId), (row) => offerable.push(Option.exists(row, Ledger.offerable)))),
+        }
+        // Its machine can't be reached, so it can't be looked for.
+        const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.none()), actions: () => Option.none(), unseen: () => Effect.succeed(Option.none()) } })
+        const { unconfirmed } = yield* back.reconcile
+        return { offerable, said: unconfirmed.map(({ reason }) => reason), offered: Option.isSome(yield* back.still(commandId)) }
+      }),
+    )
+    expect(result).toEqual({ offerable: [false], said: ["I can't reach the threads on rig right now."], offered: false })
+  })
+
+  test("a restart that can't write down what it found still says what it couldn't confirm, and offers nothing to send again it couldn't keep track of", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { ledger, store, restarted, dispatched } = yield* hands({ runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        const prepare = (utterance: string, kind: Ledger.Kind, machine = "Rosie") =>
+          ledger.prepare({
+            utterance,
+            step: 0,
+            kind,
+            machine,
+            thread: tezos.id,
+            body: ({ messageId }) => (kind === "message" ? { _tag: "Send", text: "Use the fee table.", messageId, how: "now" } : { _tag: "Stop" }),
+            message: kind === "message",
+          })
+        // A message to a machine it can't reach, a stop it can't vouch for, and a message that isn't in the thread.
+        yield* prepare("u1", "message", "rig")
+        yield* prepare("u2", "stop")
+        yield* prepare("u3", "message")
+        yield* TestClock.adjust("1 minute")
+        // yapd's database can still be read, but no longer written.
+        yield* store.transaction((database) => database.exec("PRAGMA query_only = ON"))
+        const { undelivered, unconfirmed } = yield* restarted(yield* Clock.currentTimeMillis).reconcile
+        const called = Option.some("Migrate Tezos Integration")
+        return {
+          undelivered: undelivered.length,
+          said: unconfirmed.map((row) =>
+            row.kind === "message" ? Hands.unoffered(lines, called, row.reason ?? "") : Hands.unsure(row, lines, called, row.reason ?? undefined),
+          ),
+          open: (yield* ledger.open(0)).map(({ commandId }) => commandId),
+          dispatched: dispatched.length,
+        }
+      }),
+    )
+    expect(result).toEqual({
+      undelivered: 0,
+      said: [
+        "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir, and I can't reach the threads on rig right now.",
+        "Before I restarted, I couldn't confirm Migrate Tezos Integration stopped, sir.",
+        "Before I restarted, I couldn't confirm your message to Migrate Tezos Integration got there, sir, and I couldn't note it down, so I can't offer to send it again.",
+      ],
+      // Nothing could be kept of what it found, so the next restart looks again.
+      open: ["yapd:u1:0", "yapd:u2:0", "yapd:u3:0"],
+      dispatched: 0,
+    })
+  })
+
+  test("a restart takes new work as started only once T3 Code shows it begun, waiting while it's being got ready as long after it was asked for as a launch would, and says what didn't start or can't be told yet", async () => {
+    const didnt = "Before I restarted, I asked for new work, sir, but T3 Code couldn't make the worktree, so the thread it made didn't start."
+    expect(await restartOn(preparing, begun)).toEqual({ state: "sent", said: [], dispatched: 0 })
+    // A turn that began and has ended since, however, began.
+    expect(await restartOn({ ...begun, activeRunId: null, activityRunStatus: null, status: "failed", latestRunCompletedAt: "2026-10-08T22:02:30.000Z" })).toEqual({
+      state: "sent",
+      said: [],
+      dispatched: 0,
+    })
+    expect(await restartOn(unbegun)).toEqual({ state: "failed", said: [didnt], dispatched: 0 })
+    expect(await restartOn(preparing, unbegun)).toEqual({ state: "failed", said: [didnt], dispatched: 0 })
+    expect(await restartOn(preparing)).toEqual({
+      state: "abandoned",
+      said: ["Before I restarted, I couldn't confirm the new work you asked for started, sir. T3 Code is still getting it ready."],
+      dispatched: 0,
+    })
+    // Each case looks at the thread every second for minutes, which takes more than the usual few seconds on a busy machine.
+  }, 30_000)
+
+  test("a restart waits for T3 Code to put new work in the thread it made as long after it was asked for as that can take, and still without it then, can't confirm it started, never saying it didn't", async () => {
+    // With no run, the work isn't in it yet. T3 Code makes the thread and puts the work in it as two steps, which it can be slow between: in by a minute after
+    // it was asked for, it's waited for.
+    expect(await restartOn({ status: "idle" }, begun, { restart: "10 seconds", after: "25 seconds" })).toEqual({ state: "sent", said: [], dispatched: 0 })
+    // Not in it by then, it may yet go in, so it's as if T3 Code hadn't shown the thread at all.
+    const unsure = { state: "abandoned" as const, said: ["Before I restarted, I couldn't confirm the new work you asked for started, sir."], dispatched: 0 }
+    expect(await restartOn({ status: "idle" }, undefined, { restart: "10 seconds" })).toEqual(unsure)
+    // The minute is from when it was asked for, not from when the restart looked.
+    expect(await restartOn({ status: "idle" }, begun, { after: "5 seconds" })).toEqual(unsure)
+  })
+
+  test("a restart says what it found at once, never waiting behind new work T3 Code is still getting ready, which is said once it's been waited for", async () => {
+    const restarting = (first: Record<string, unknown>) =>
+      run(
+        Effect.gen(function* () {
+          const { ledger, becomes, restarted, dispatched } = yield* hands({ thread: thread(tezos.id, first) })
+          const start = yield* ledger.prepare({
+            utterance: "u1",
+            step: 0,
+            kind: "start",
+            machine: "Rosie",
+            thread: tezos.id,
+            body: ({ commandId, messageId }) => ({ project: "/code/yapd", prompt: "Fix the loader.", worktree: true, ids: { thread: tezos.id, message: messageId, command: commandId } }),
+            message: true,
+          })
+          yield* ledger.settle(start.commandId, "unknown", { reason: "T3 Code is taking too long, so I don't know if it started." })
+          const message = yield* ledger.prepare({
+            utterance: "u2",
+            step: 0,
+            kind: "message",
+            machine: "Rosie",
+            thread: tezos.id,
+            body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+            message: true,
+          })
+          yield* ledger.settle(message.commandId, "unknown")
+          // yapd restarted ten seconds after asking for both, with T3 Code still getting the new work ready.
+          yield* TestClock.adjust("10 seconds")
+          const looking = yield* Effect.fork(restarted(now + 5_000).reconcile)
+          let looked = Option.none<Exit.Exit<Hands.Reconciled>>()
+          for (let second = 0; second < 10 && Option.isNone(looked); second++) {
+            yield* TestClock.adjust("1 second")
+            looked = yield* Fiber.poll(looking)
+          }
+          if (Option.isNone(looked)) return { looked: false }
+          const { undelivered, unconfirmed, readying } = yield* Fiber.join(looking)
+          const meanwhile = Option.getOrNull(Option.map(yield* ledger.get(start.commandId), ({ state }) => state))
+          const later = yield* Effect.fork(readying)
+          yield* TestClock.adjust("30 seconds")
+          becomes(thread(tezos.id, unbegun))
+          yield* TestClock.adjust("5 seconds")
+          const said = yield* Fiber.join(later)
+          return {
+            looked: true,
+            undelivered: undelivered.map(({ commandId }) => commandId),
+            unconfirmed: unconfirmed.length,
+            meanwhile,
+            said: said.map((row) => Hands.unsure(row, lines, Option.none(), row.reason ?? undefined)),
+            state: Option.getOrNull(Option.map(yield* ledger.get(start.commandId), ({ state }) => state)),
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    // Getting its worktree ready, or yet to have the work put in the thread it made.
+    for (const first of [preparing, { status: "idle" }]) {
+      expect(await restarting(first)).toEqual({
+        looked: true,
+        // The message that may not have got there is offered at once.
+        undelivered: ["yapd:u2:0"],
+        unconfirmed: 0,
+        meanwhile: "unknown",
+        said: ["Before I restarted, I asked for new work, sir, but T3 Code couldn't make the worktree, so the thread it made didn't start."],
+        state: "failed",
+        dispatched: 0,
+      })
+    }
+  })
+
+  test("a restart's look that comes back only once he's said yes to sending it again, and it went, leaves it sent, never offered again", async () => {
+    const result = await lookedLate((hands, commandId) => Effect.map(hands.again(commandId), ({ _tag }) => _tag))
+    // What it found, from before it went, never takes it back to may not have got there, which would offer it again.
+    expect(result).toEqual({ meanwhile: "Done", state: Option.some("sent"), undelivered: 0, unconfirmed: 0, offered: false })
+  })
+
+  test("a restart's look that comes back only once he's said no to sending it again, or yes, whatever came of that, stands by what he heard then", async () => {
+    const yes = (hands: Hands.Hands["Type"], commandId: string) => Effect.map(hands.again(commandId), ({ _tag }) => _tag)
+    const no = (hands: Hands.Hands["Type"], commandId: string) => Effect.as(hands.leave(commandId, "He said no."), "Left")
+    // Sending it again never left yapd.
+    const offline = { answer: () => Effect.fail(new Server.Trouble({ reason: "T3 Code is offline." })) }
+    // What it found, from before either, never takes back that it's not to be offered again, so it isn't.
+    expect(await lookedLate(no)).toEqual({ meanwhile: "Left", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    expect(await lookedLate(yes, offline)).toEqual({ meanwhile: "NotSent", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    // Nor is a look that failed said as one that couldn't confirm it, once what came of it was said already.
+    expect(await lookedLate(no, { fails: true })).toEqual({ meanwhile: "Left", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    expect(await lookedLate(yes, { fails: true })).toEqual({ meanwhile: "Done", state: Option.some("sent"), undelivered: 0, unconfirmed: 0, offered: false })
+  })
+
+  test("a restart's look that comes back as a yes to sending it again is put back, never having left, for the same reason as the first time, never offers it again", async () => {
+    const yes = (hands: Hands.Hands["Type"], commandId: string) => Effect.map(hands.again(commandId), ({ _tag }) => _tag)
+    // T3 Code went offline as the first try was sent, and was still when sending it again, which never left yapd.
+    const offline = { answer: () => Effect.fail(new Server.Trouble({ reason: "T3 Code is offline." })), reason: "T3 Code is offline.", between: true }
+    expect(await lookedLate(yes, offline)).toEqual({ meanwhile: "NotSent", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
+    expect(await lookedLate(yes, { ...offline, fails: true })).toEqual({ meanwhile: "NotSent", state: Option.some("unknown"), undelivered: 0, unconfirmed: 0, offered: false })
   })
 
   test("a different message to the same thread goes straight through", async () => {
@@ -884,6 +1797,48 @@ describe("Hands", () => {
     const finishing = await waiting(false)
     expect(finishing.outcome).toEqual(["queued", "finishing"])
     expect(finishing.said).toBe("Migrate Tezos Integration is finishing something off, sir, so that will go once it's done.")
+  })
+
+  test("a message that goes into a queue a stop put on hold, behind a turn begun since, is said to wait till it's let carry on, whether T3 Code answers, its answer is lost, or it goes on his yes", async () => {
+    /**
+     * A message sent `how` to a thread at work on a turn `doing`, begun since a stop held what waits in its queue, `holding` it still, which
+     * T3 Code holds what it queues behind too: as T3 Code answers, once its answer is lost and it's found, or on his yes once it never left.
+     */
+    const sent = (how: T3Actions.When, doing: "running" | "waiting", answer: "answers" | "lost" | "again", holding = true) =>
+      run(
+        Effect.gen(function* () {
+          const asked = doing === "waiting" ? { pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } } : {}
+          const { send, again, answering, ledger, dispatched } = yield* hands({
+            thread: thread(tezos.id, { latestRunId: "run-3", activeRunId: "run-3", activityRunStatus: doing, status: doing, ...asked }),
+            runs: [
+              { id: "run-1", status: "interrupted", ordinal: 1 },
+              { id: "run-2", status: "queued", ordinal: 2, userMessageId: "m-before", queueHeld: holding },
+              { id: "run-3", status: doing, ordinal: 3 },
+            ],
+          })
+          if (answer === "lost") answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          if (answer === "again") answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." })))
+          const first = yield* send("u1", "Open a PR.", how)
+          answering(takes())
+          const outcome = answer === "again" ? yield* again("yapd:u1:0") : first
+          return {
+            said: outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how }, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            noted: Option.map(yield* ledger.get("yapd:u1:0"), ({ state, how }) => [state, how]),
+            dispatched: dispatched.length,
+          }
+        }),
+      )
+    const onHold = "Its queue is on hold, sir, so that will go once it's let carry on."
+    for (const answer of ["answers", "lost", "again"] as const) {
+      const dispatched = answer === "again" ? 2 : 1
+      // Behind the turn, or for now to a turn waiting on him, which takes nothing in, so it goes behind it: on hold either way, whatever the turn does.
+      expect(await sent("after", "running", answer)).toEqual({ said: onHold, noted: Option.some(["sent", "queued"]), dispatched })
+      expect(await sent("now", "waiting", answer)).toEqual({ said: onHold, noted: Option.some(["sent", "queued"]), dispatched })
+      // Steered into the turn under way, it's being worked on, whatever waits in the queue.
+      expect(await sent("now", "running", answer)).toEqual({ said: "On it, sir.", noted: Option.some(["sent", "steered"]), dispatched })
+      // With the queue let go of, it goes once the turn is done.
+      expect(await sent("after", "running", answer, false)).toEqual({ said: "I'll get to it once the current task is done, sir.", noted: Option.some(["sent", "queued"]), dispatched })
+    }
   })
 
   test("a yes to sending again a message for now, once the thread is waiting on him, sends it behind the turn under the same ids, and he's told why", async () => {
@@ -1262,6 +2217,64 @@ describe("Hands", () => {
     expect(result).toEqual({ scratched: "Unknown", message: Option.some("sent"), again: "Twin", dispatched: ["message.dispatch", "queued-run.cancel"] })
   })
 
+  test("a restart after scratch that whose answer was lost, ten turns on, reads the whole thread to tell a message he moved into the turn under way from one withdrawn, and never takes the first as withdrawn", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    /**
+     * Scratch that for a message waiting in the queue, its answer lost and
+     * nothing found of it then, after which `meanwhile` does to the thread
+     * what it does, giving back the thread as its whole read has it, or that
+     * read failing. Where the cancel stands after a restart, what's said of
+     * it, and how many times the whole thread was read.
+     */
+    const restartedAfter = (meanwhile: (bounded: Bounded) => Bounded | "fails" | void) =>
+      run(
+        Effect.gen(function* () {
+          const { send, run: act, answering, bounded, ledger, whole, wholeReads, restarted } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          yield* send("u1", "When it's done, open a PR.", "after")
+          answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+          const scratched = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+          const shown = meanwhile(bounded)
+          if (shown) whole(shown)
+          yield* TestClock.adjust("1 minute")
+          const { unconfirmed } = yield* restarted(yield* Clock.currentTimeMillis).reconcile
+          return {
+            scratched: scratched._tag,
+            state: Option.getOrNull(Option.map(yield* ledger.get("yapd:u2:0"), ({ state }) => state)),
+            said: unconfirmed.map((row) => Hands.unsure(row, lines, Option.none(), row.reason ?? undefined)),
+            wholeReads: wholeReads(),
+          }
+        }),
+      )
+    const unsure = { scratched: "Unknown" as const, state: "abandoned" as const, said: ["Before I restarted, I couldn't confirm your message was withdrawn, sir."], wholeReads: 1 }
+    // Moved into the turn under way, then ten turns on: only the whole thread shows it went into that turn, so it was never withdrawn.
+    expect(
+      await restartedAfter((bounded) => {
+        moved("completed")(bounded)
+        return tenTurnsOn(bounded)
+      }),
+    ).toEqual(unsure)
+    // Taken out of the queue, then ten turns on, whether T3 Code shows it cancelled or dropped it: withdrawn, as the whole thread shows too.
+    for (const dropped of [false, true]) {
+      expect(
+        await restartedAfter((bounded) => {
+          takenOut(dropped)(bounded)
+          return tenTurnsOn(bounded)
+        }),
+      ).toEqual({ scratched: "Unknown", state: "sent" as const, said: [], wholeReads: 1 })
+    }
+    // The whole thread too slow to read, it can't be told, so it's never taken as withdrawn.
+    expect(
+      await restartedAfter((bounded) => {
+        moved("completed")(bounded)
+        tenTurnsOn(bounded)
+        return "fails"
+      }),
+    ).toEqual({ ...unsure, said: ["Before I restarted, I couldn't confirm your message was withdrawn, sir. I couldn't look for it just now: T3 Code isn't answering."] })
+    // Its last turns enough to tell, the whole thread is never read.
+    expect(await restartedAfter(moved("completed"))).toEqual({ ...unsure, wholeReads: 0 })
+    expect(await restartedAfter(takenOut(false))).toEqual({ scratched: "Unknown", state: "sent" as const, said: [], wholeReads: 0 })
+  })
+
   test("scratch that is about the last thing done, never a message before it", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -1388,6 +2401,62 @@ describe("Hands", () => {
       ["message.dispatch", "yapd:u2:1"],
       ["message.dispatch", "yapd:u2:1"],
     ])
+  })
+
+  test("carry on turned down as it lets go of the queue, like for a thread archived since it was looked at, asks nothing more of it, and says why", async () => {
+    const carry = { _tag: "Undo", to: Option.none(), carry: true } as const
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { run: act, answering, becomes, bounded, dispatched, ledger } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })
+        bounded.runs[0]!.status = "interrupted"
+        becomes(thread(tezos.id, { status: "interrupted" }))
+        // Archived once yapd has looked at it, T3 Code turns down letting go of its queue, though it would still take a message.
+        answering((payload, bounded) => {
+          if (payload.type !== "queue.resume") return takes()(payload, bounded)
+          becomes(thread(tezos.id, { status: "interrupted", archivedAt: "2026-10-08T22:00:00.000Z" }))
+          return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: `Thread ${tezos.id} is not active.` }))
+        })
+        const carried = yield* act({ utterance: "u2", step: 0 }, carry)
+        return {
+          carried: carried._tag === "Refused" ? Hands.failed(carry, carried, lines, Option.none()) : carried._tag,
+          stop: Option.map(yield* ledger.get("yapd:u1:0"), ({ state, reason }) => [state, reason]),
+          dispatched: dispatched.map(({ type }) => type),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      carried: "I couldn't get it going again, sir: it's been archived or deleted.",
+      // Never let carry on, the stop stands.
+      stop: Option.some(["sent", null]),
+      dispatched: ["run.interrupt", "queue.resume"],
+    })
+  })
+
+  test("carry on turned down since a turn ran into a usage limit says so plainly, never as T3 Code tells its app to carry on", async () => {
+    const carry = { _tag: "Undo", to: Option.none(), carry: true } as const
+    const result = await run(
+      Effect.gen(function* () {
+        const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+        const { run: act, answering, becomes, bounded, dispatched } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        yield* act({ utterance: "u1", step: 0 }, { _tag: "Stop", to: tezos })
+        bounded.runs[0]!.status = "interrupted"
+        becomes(thread(tezos.id, { status: "interrupted" }))
+        // As T3 Code words it, for a thread whose last turn ran into a usage limit.
+        answering((payload, bounded) =>
+          payload.type === "queue.resume"
+            ? Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: "Continue the limited thread before resuming its queue." }))
+            : takes()(payload, bounded),
+        )
+        const carried = yield* act({ utterance: "u2", step: 0 }, carry)
+        return {
+          carried: carried._tag === "Refused" ? Hands.failed(carry, carried, lines, Option.none()) : carried._tag,
+          dispatched: dispatched.map(({ type }) => type),
+        }
+      }),
+    )
+    expect(result).toEqual({ carried: "I couldn't get it going again, sir: it's hit a usage limit.", dispatched: ["run.interrupt", "queue.resume"] })
   })
 
   test("guards: a restart leaves what this run did alone, an archived thread is sent nothing, a busy one isn't told to carry on, and a read message isn't cancelled", async () => {
@@ -1783,5 +2852,139 @@ describe("Hands", () => {
       }),
     )
     expect(restarted).toEqual({ said: "I couldn't confirm it got your go-ahead before, sir, so I won't risk sending it again: it needs T3 Code.", dispatched: ["yapd:u1:0 accept"] })
+  })
+})
+
+describe("Hands on another machine", () => {
+  /** T3 Code on one machine, noting each command it's sent there by its id. */
+  const t3 = (name: string, sent: Array<string>): T3Actions.Actions =>
+    T3Actions.make(
+      Effect.succeed({
+        api: (<A, I>(_path: string, schema: Schema.Schema<A, I>) =>
+          Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [] } }).pipe(Effect.orDie)) as Server.Transport["api"],
+        call: (<A, I>(_method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
+          Effect.sync(() => void sent.push(`${name}: ${String(payload.commandId)}`)).pipe(
+            Effect.zipRight(Schema.decodeUnknown(schema)({ sequence: 7 }).pipe(Effect.orDie)),
+          )) as Server.Transport["call"],
+      }),
+    )
+
+  const viewing = (...threads: ReadonlyArray<T3Live.Thread>): T3Live.View => ({
+    projects: new Map(),
+    threads: new Map(threads.map((thread) => [thread.id, thread])),
+    sequence: 1,
+    synced: true,
+  })
+
+  /** Hands over this machine's T3 Code and rig's, each with a thread under the same id, as nothing stops them having. */
+  const both = (rig: { readonly view: Option.Option<T3Live.View>; readonly status: Tunnel.Status }) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const store = yield* Store.make(":memory:")
+      const ledger = Ledger.fromStore(store)
+      const sent: Array<string> = []
+      const threads = yield* Threads.make({
+        machine: "Rosie",
+        live: { view: Effect.succeed(Option.some(viewing(thread(tezos.id)))), changes: Stream.never },
+        actions: Option.some(t3("Rosie", sent)),
+        others: [{ machine: "rig", live: { view: Effect.succeed(rig.view), changes: Stream.never }, actions: t3("rig", sent), status: Effect.succeed(rig.status) }],
+        journal: Journal.fromStore(store),
+        store,
+      })
+      return { hands: Hands.make({ threads, ledger }), ledger, sent }
+    })
+
+  const onRig: Threads.Ref = { machine: "rig", id: tezos.id }
+
+  test("a message for a thread on rig goes to rig's T3 Code, never this machine's", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { hands, ledger, sent } = yield* both({ view: Option.some(viewing(thread(tezos.id))), status: { _tag: "Up" } })
+        const outcome = yield* hands.run({ utterance: "u1", step: 0 }, { _tag: "Message", to: onRig, text: "Add a test.", how: "now" })
+        return { outcome: outcome._tag, sent, machine: Option.map(yield* ledger.get("yapd:u1:0"), ({ machine }) => machine) }
+      }),
+    )
+    expect(result).toEqual({ outcome: "Done", sent: ["rig: yapd:u1:0"], machine: Option.some("rig") })
+  })
+
+  test("an action on rig while it can't be reached fails at once with why, and goes nowhere else", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { hands, ledger, sent } = yield* both({ view: Option.none(), status: { _tag: "Down", reason: "I can't reach rig right now.", outage: 2 } })
+        const told = yield* hands.run({ utterance: "u1", step: 0 }, { _tag: "Message", to: onRig, text: "Add a test.", how: "now" })
+        const stopped = yield* hands.run({ utterance: "u2", step: 0 }, { _tag: "Stop", to: onRig })
+        return { told, stopped, sent, written: yield* ledger.open(0) }
+      }),
+    )
+    expect(result.told).toEqual({ _tag: "Refused", reason: "I can't reach rig right now." })
+    expect(result.stopped).toEqual({ _tag: "Refused", reason: "I can't reach rig right now." })
+    expect(result.sent).toEqual([])
+    expect(result.written).toEqual([])
+  })
+
+  test("a restart looks at each machine's steps on their own, so rig's are left for when it's caught up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { hands, ledger, sent } = yield* both({ view: Option.some(viewing(thread(tezos.id))), status: { _tag: "Up" } })
+        const prepare = (utterance: string, machine: string) =>
+          ledger.prepare({
+            utterance,
+            step: 0,
+            kind: "message",
+            machine,
+            thread: tezos.id,
+            body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+            message: true,
+          })
+        yield* prepare("u1", "Rosie")
+        yield* prepare("u2", "rig")
+        const here = yield* hands.reconcileOn((machine) => machine === "Rosie")
+        const waiting = Option.map(yield* ledger.get("yapd:u2:0"), ({ state }) => state)
+        const there = yield* hands.reconcileOn((machine) => machine === "rig")
+        return {
+          here: here.undelivered.map(({ commandId }) => commandId),
+          waiting,
+          there: there.undelivered.map(({ commandId }) => commandId),
+          sent,
+        }
+      }),
+    )
+    expect(result).toEqual({ here: ["yapd:u1:0"], waiting: Option.some("prepared"), there: ["yapd:u2:0"], sent: [] })
+  })
+
+  test("each machine's restart looks at its own steps, and this one's at those on a machine no longer followed, never rig's", () => {
+    const followed = ["Rosie", "rig"]
+    const mine = Hands.whose("Rosie", "Rosie", followed)
+    const rigs = Hands.whose("rig", "Rosie", followed)
+    expect(["Rosie", "rig", "laptop"].map(mine)).toEqual([true, false, true])
+    expect(["Rosie", "rig", "laptop"].map(rigs)).toEqual([false, true, false])
+  })
+
+  test("a restart looks at rig's steps once rig's T3 Code catches up, however long it's away, where this one's gives up after a while", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const looked: Array<string> = []
+        const hands = {
+          reconcileOn: (on: (machine: string) => boolean) =>
+            Effect.sync((): Hands.Reconciled => {
+              looked.push(...["Rosie", "rig"].filter(on))
+              return { undelivered: [], unconfirmed: [], readying: Effect.succeed([]) }
+            }),
+        }
+        let up = false
+        const view = Effect.sync(() => (up ? Option.some({}) : Option.none()))
+        const followed = ["Rosie", "rig"]
+        // Asked about once a minute, so an hour goes by quickly.
+        const rig = yield* Effect.fork(Hands.lookBack(hands, view, "rig", "Rosie", followed, "1 minute"))
+        const mine = yield* Effect.fork(Effect.flip(Hands.lookBack(hands, view, "Rosie", "Rosie", followed, "1 minute")))
+        // Rig asleep for an hour, and T3 Code here closed all along.
+        yield* TestClock.adjust("1 hour")
+        up = true
+        yield* TestClock.adjust("1 minute")
+        yield* Fiber.join(rig)
+        return { mine: yield* Fiber.join(mine), looked }
+      }),
+    )
+    expect(result).toEqual({ mine: "T3 Code didn't catch up in time", looked: ["rig"] })
   })
 })

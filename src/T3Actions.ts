@@ -7,7 +7,7 @@ import * as Server from "./T3CodeServer.ts"
 
 const Message = Schema.Struct({
   id: Schema.optional(Schema.String),
-  /** The run it was said in. */
+  /** The run it was said in; for a message yapd sent, the run whose turn it went into, as T3 Code names it on the message: its own, or the one under way it was steered into. */
   runId: Schema.optional(Schema.NullOr(Schema.String)),
   role: Schema.String,
   text: Schema.String,
@@ -25,6 +25,8 @@ const Run = Schema.Struct({
   startedAt: Schema.optional(Schema.NullOr(Schema.String)),
   /** When it ended, or, for one that went well, when what it changed was taken stock of, a moment after. */
   completedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  /** Waiting in a queue a stop put on hold, which starts nothing till it's let go. */
+  queueHeld: Schema.optional(Schema.Boolean),
 })
 
 const Option_ = Schema.Struct({ decision: Schema.String, label: Schema.String })
@@ -61,6 +63,7 @@ const Failure = Schema.Struct({
 const Item = Schema.Struct({
   type: Schema.String,
   id: Schema.optional(Schema.String),
+  /** The run it belongs to: for a message steered into a turn, even from the queue, the run whose turn it went into. */
   runId: Schema.optional(Schema.NullOr(Schema.String)),
   /** The agent's own id for what it did, which an approval shares with the command or change it's for. */
   nativeItemRef: Schema.optional(Schema.NullOr(Schema.Struct({ nativeId: Schema.optional(Schema.NullOr(Schema.String)) }))),
@@ -102,7 +105,8 @@ const ProviderThread = Schema.Struct({
 /** A request T3 Code keeps for a thread, and whether it still waits on it: "pending" until it's answered, expires or is cancelled. */
 const RuntimeRequest = Schema.Struct({ id: Schema.String, status: Schema.String })
 
-const Bounded = Schema.Struct({
+/** A thread as T3 Code reads it out: its last turns, as it bounds them, or the whole of it, which comes the same way. */
+const Snapshot = Schema.Struct({
   projection: Schema.Struct({
     runs: Schema.Array(Run),
     messages: Schema.Array(Message),
@@ -183,7 +187,7 @@ const asking: ReadonlyArray<string> = ["approval_request", "user_input_request",
  * own record of each, which keeps one asked alongside a newer one that the
  * thread's summary shows instead, or by its turn items when it keeps none.
  */
-export const waitingOn = (projection: Pick<(typeof Bounded.Type)["projection"], "runtimeRequests" | "turnItems">): ReadonlyArray<string> => {
+export const waitingOn = (projection: Pick<Projection, "runtimeRequests" | "turnItems">): ReadonlyArray<string> => {
   const kept = projection.runtimeRequests.flatMap((request) => Option.toArray(decodeRuntimeRequest(request)))
   if (kept.length > 0) return kept.filter(({ status }) => status === "pending").map(({ id }) => id)
   return projection.turnItems
@@ -443,14 +447,14 @@ const instant = (iso: string | null | undefined) =>
   Option.filter(Option.map(Option.fromNullable(iso), Date.parse), (at) => !Number.isNaN(at))
 
 /** What a run said back, oldest first: only what's done being said, and not empty. */
-const answers = (projection: (typeof Bounded.Type)["projection"], runId: string) =>
+const answers = (projection: Projection, runId: string) =>
   projection.messages
     .filter(({ role, runId: said, streaming }) => role === "assistant" && said === runId && !streaming)
     .map(({ text }) => text.trim())
     .filter((text) => text !== "")
 
 /** How one of the thread's runs went, by its id, out of a bounded read. */
-export const ran = (projection: (typeof Bounded.Type)["projection"], runId: string): Option.Option<Ran> => {
+export const ran = (projection: Projection, runId: string): Option.Option<Ran> => {
   const run = projection.runs.find(({ id }) => id === runId)
   if (run === undefined) return Option.none()
   const said = answers(projection, runId)
@@ -578,7 +582,7 @@ export const command = (threadId: string, what: Command, runId: string | undefin
 }
 
 /** Runs that are still going, and can be stopped. */
-const going: ReadonlyArray<string> = ["preparing", "starting", "running", "waiting"]
+export const going: ReadonlyArray<string> = ["preparing", "starting", "running", "waiting"]
 
 /** How a message went into a thread, as T3 Code says: starting a turn, into the turn under way, or in the queue behind it. */
 export type Intent = "turn_start" | "queued_turn" | "steer" | "promoted_queued_to_steer"
@@ -589,30 +593,65 @@ const intents: ReadonlyArray<string> = ["turn_start", "queued_turn", "steer", "p
 export interface Found {
   /** How it went in, when the thread says. */
   readonly intent: Option.Option<Intent>
-  /** The run it started, or waits in the queue to start, if there's one. */
-  readonly run: Option.Option<{ readonly id: string; readonly status: string }>
+  /** The run it started, or waits in the queue to start, if there's one, and whether that queue is on hold. */
+  readonly run: Option.Option<{ readonly id: string; readonly status: string; readonly held: boolean }>
+  /**
+   * The run its turn item belongs to, when the read has it, or else the run
+   * the message itself names, as when T3 Code hides the item of a turn it
+   * rolled back: for one steered into the turn under way, even from the
+   * queue, the run whose turn it went into, never the run it waited in.
+   */
+  readonly into: Option.Option<{ readonly id: string; readonly status: string }>
   /** When T3 Code took it in, in ms by its own clock, when the thread shows the message itself. */
   readonly at: Option.Option<number>
 }
 
-/** Finds a message yapd sent in a thread's bounded read: among its messages, the runs they started, or its turn items. */
-export const found = (projection: (typeof Bounded.Type)["projection"], messageId: string): Option.Option<Found> => {
-  const run = projection.runs.find(({ userMessageId }) => userMessageId === messageId)
-  const item = projection.turnItems
+/** What a thread's read holds: its runs, messages, turn items and plans. */
+type Projection = (typeof Snapshot.Type)["projection"]
+
+/** What a thread's read has of a message yapd sent: the run it started or waits in, its turn item, and the message itself. */
+const parts = (projection: Projection, messageId: string) => ({
+  run: projection.runs.find(({ userMessageId }) => userMessageId === messageId),
+  item: projection.turnItems
     .flatMap((item) => Option.toArray(decodeItem(item)))
-    .find((item) => item.type === "user_message" && item.messageId === messageId)
-  const message = projection.messages.find(({ id }) => id === messageId)
+    .find((item) => item.type === "user_message" && item.messageId === messageId),
+  message: projection.messages.find(({ id }) => id === messageId),
+})
+
+/**
+ * Whether a read shows a message yapd sent only by the run it waited in,
+ * cancelled, with neither the message nor its turn item: as the bounded read
+ * does once enough turns after it have pushed both out of it. Then one taken
+ * out of the queue can't be told from one he moved from the queue into the
+ * turn under way, which cancels the run it waited in too.
+ */
+const thin = (projection: Projection, messageId: string) => {
+  const { run, item, message } = parts(projection, messageId)
+  return run?.status === "cancelled" && item === undefined && message === undefined
+}
+
+/** Finds a message yapd sent in a thread's read, bounded or whole: among its messages, the runs they started, or its turn items. */
+export const found = (projection: Projection, messageId: string): Option.Option<Found> => {
+  const { run, item, message } = parts(projection, messageId)
   if (run === undefined && item === undefined && message === undefined) return Option.none()
   const intent = item?.inputIntent
+  const target = item?.runId ?? message?.runId
+  const into = Option.flatMap(Option.fromNullable(target), (runId) => Option.fromNullable(projection.runs.find(({ id }) => id === runId)))
+  // Taken out of the queue into the turn under way, with that turn's item hidden since, as T3 Code hides a rolled-back turn's: the run it
+  // waited in is cancelled, and the message names another, the one it went into.
+  const promoted = item === undefined && run?.status === "cancelled" && target != null && target !== run.id
   return Option.some({
     // One with no turn item yet still has its run to say: one it started is a turn of its own, unless it waits in the queue or was taken out of it.
     intent:
       intent !== undefined && intents.includes(intent)
         ? Option.some(intent as Intent)
-        : run === undefined || run.status === "cancelled"
+        : promoted
+          ? Option.some("promoted_queued_to_steer" as const)
+          : run === undefined || run.status === "cancelled"
           ? Option.none()
           : Option.some(run.status === "queued" ? ("queued_turn" as const) : ("turn_start" as const)),
-    run: Option.map(Option.fromNullable(run), ({ id, status }) => ({ id, status })),
+    run: Option.map(Option.fromNullable(run), ({ id, status, queueHeld }) => ({ id, status, held: queueHeld === true })),
+    into: Option.map(into, ({ id, status }) => ({ id, status })),
     at: Option.filter(Option.map(Option.fromNullable(message), ({ createdAt }) => Date.parse(createdAt)), (at) => !Number.isNaN(at)),
   })
 }
@@ -683,7 +722,10 @@ export const reason = (error: Server.Trouble | Server.Refusal) =>
 export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => {
   /** The thread's last turns, as T3 Code bounds them. */
   const bounded = (threadId: string) =>
-    Effect.flatMap(reach, ({ api }) => api(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`, Bounded))
+    Effect.flatMap(reach, ({ api }) => api(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`, Snapshot))
+
+  /** The whole thread, every message and turn item of it, which can be large and slow to read, so it's only read when its last turns can't tell. */
+  const whole = (threadId: string) => Effect.flatMap(reach, ({ api }) => api(`/api/orchestration/threads/${encodeURIComponent(threadId)}`, Snapshot))
 
   /** Where a message yapd sent got to in the thread, if it's there at all. */
   const message = (threadId: string, messageId: string) => Effect.map(bounded(threadId), ({ projection }) => found(projection, messageId))
@@ -729,11 +771,23 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
 
     message,
 
+    /**
+     * Where a message yapd sent got to, as `message` has it, unless the
+     * thread's last turns show it only by the run it waited in, cancelled:
+     * then as the whole thread has it, read once, since enough turns after it
+     * push out of the bounded read all that tells one he moved into the turn
+     * under way from one taken out of the queue. That read failing, as a
+     * large thread can be too slow to, fails it, so it's taken as neither.
+     */
+    traced: (threadId: string, messageId: string) =>
+      Effect.gen(function* () {
+        const { projection } = yield* bounded(threadId)
+        if (!thin(projection, messageId)) return found(projection, messageId)
+        return found((yield* whole(threadId)).projection, messageId)
+      }),
+
     /** Whether a message yapd sent is in the thread. */
     has: (threadId: string, messageId: string) => Effect.map(message(threadId, messageId), Option.isSome),
-
-    /** How a message yapd sent went into the thread, when it says. */
-    inputIntent: (threadId: string, messageId: string) => Effect.map(message(threadId, messageId), Option.flatMap(({ intent }) => intent)),
 
     /** How one of its runs went, or none when the thread doesn't have it. */
     ran: (threadId: string, runId: string) => Effect.map(bounded(threadId), ({ projection }) => ran(projection, runId)),

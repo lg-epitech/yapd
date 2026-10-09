@@ -2,9 +2,9 @@
 
 A short list of what this branch changed and what yapd can do now. The commit log has the detail, including every fix that came out of review.
 
-Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until it comes back with nothing to fix, then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before its first migration, to `~/.yapd/yapd.before-jarvis.sqlite`, and again before the assistant went live, to `~/.yapd/yapd.before-m1.sqlite`.
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite` and `yapd.before-m2.sqlite`.
 
-Live on `dev` now: everything below except doing things to threads by voice (message, steer, stop, carry on), which is merged here and waits on its live check, and "Needs you", which is built and waits on review and its live check. Being built: showing what you ask for on screen.
+Live on `dev` now: everything below except rig and "Needs you". Cards for "show me" appear once the menu bar app is rebuilt from this branch; until then yapd says the gist without them. Built, waiting on review and a first run with you: "Needs you", on this Mac and rig alike, and rig.
 
 ## Talk to it (the shortcut)
 
@@ -22,13 +22,23 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 
 ## Needs you (built, waiting on review and its live check)
 
-- An agent's question is read out as it comes, in its own words, a part at a time, with the option it recommends said as yapd's pick ("I'd go with Blue."). Answer with an option, a few, "yes" to the pick, or your own words, which it gets as you said them; "what are the options?", "later" and "what's the question?" work too. Approvals are no longer announced, since your agents run with full access: "who needs me?" still lists them, and you can approve one by voice, a risky one only with "approve". Nothing you said before you heard a question answers it. Failures, usage limits and finished work from agents without hooks are said once, and a finished turn from its hook or from T3 Code, never both. Secrets are never taken by voice, nor kept when you say one.
+- An agent's question, on this Mac or rig, is read out as it comes, in its own words, a part at a time, with the option it recommends said as yapd's pick ("I'd go with Blue."). Answer with an option, a few, "yes" to the pick, or your own words, which it gets as you said them, sent back only to the machine that asked; "what are the options?", "later" and "what's the question?" work too. Approvals are no longer announced, since your agents run with full access: "who needs me?" still lists them, and you can approve one by voice, a risky one only with "approve". Nothing you said before you heard a question answers it. Failures, usage limits and finished work from agents without hooks are said once, and a finished turn from its hook or from T3 Code, never both. After a restart, what still waits on you is asked once each machine's T3 Code has caught up, so rig being down holds up nothing here. Secrets are never taken by voice, nor kept when you say one.
 - Updates are tied to their T3 Code thread, so "tell it to…" after one goes into that thread.
+
+## Show me
+
+- "Show me what's running", "show me that PR", "show me my usage" or "what I missed" puts a card in a panel under the menu bar icon as yapd says it; "hide that" takes it down, and "open that PR" opens it in your browser, https only. A thread waiting on a command that can't be read aloud gets its card with the answer, and "say that again" puts it back up. "Show me the question" puts an agent's question up as it's asked again.
+- The API gains `/cards`, `/threads` and `/journal` to read from.
+
+## Rig
+
+- Rig's threads count as much as this Mac's: the desk, "who needs me?", "what's running?", cards, agents' questions and messages or stops by voice cover both, each sent only to its own machine, through an SSH tunnel to rig's T3 Code whose token is fetched at startup and kept in memory only. While rig can't be reached, yapd says why the first time something needs rig, then only that it still can't see rig's threads, and this Mac's carry on regardless. Needs rig on a yapd with `yapd t3`.
 
 ## Faster
 
 - "Yes" or "go ahead" to an update that asked something, and "thanks" or "skip it", are handled without the model: about two seconds saved on the most common replies.
-- Short lines like "On it, sir." are rendered once and kept; your usual lines are written in your `YAPD_STYLE` once and rendered at startup.
+- Short lines like "Right away, sir." are rendered once and kept; your usual lines are written in your `YAPD_STYLE` once and rendered at startup.
+- Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message goes by voice or new work starts, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
 - "Who needs me?" and usage need no model call; a status question takes one, against a minute or more in the reverted attempt.
@@ -39,6 +49,15 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 - A live link to T3 Code's threads that reconnects and catches up on its own, and actions on threads (message, steer, stop, approve, answer, archive, rename, snooze, search, usage). Messages, stops and starts by voice go through them now.
 - Every message, stop and start is written down before it goes out, under ids that make T3 Code do it once however often it's sent. A restart only looks; it never sends. Turned off and on, nothing more goes out for what you said before.
 - `scripts/m2-probe.ts` checks those T3 Code receipts once, on a thread it starts for itself; it sends nothing without `--send`, and `--thread` repeats only the restart check, on a thread it started.
-- Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
+- Groundwork, not switched on yet: streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
 - yapd's local API turns away anything a web page sends, so no site you visit can have it start work or talk to your threads.
+
+## Known, left for now
+
+- With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
+- After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.
+- With an older yapd on rig, a connection dropped while starting work there is said as "I can't reach rig" rather than "it may have started".
+- "Show Last Card" just after closing a card can come to nothing if the close reaches yapd after it: choose it again.
+- A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.
+- Rig's hooks aren't tied to their thread yet, so "tell it to…" after one of rig's updates goes the way hooks always have.

@@ -142,7 +142,7 @@ describe("Remote launcher", () => {
     expect(await why(answering('{"reason":"T3 Code isn\'t running."}').start(request))).toBe("T3 Code isn't running.")
     expect(await why(failing(255).start(request))).toBe("I can't reach rig.")
     expect(await why(failing(1, "usage: yapd serve | yapd install").start(request))).toBe("yapd on rig needs updating.")
-    expect(await why(answering("not json").start(request))).toBe("yapd on rig answered in a way I don't understand.")
+    expect(await why(answering("not json").start(request))).toBe("yapd on rig answered in a way I don't understand, so I don't know if it started.")
     const silent = Remote.launcher("rig", "rig", () => Effect.never)
     /** How a start that never hears back stands after a while: still waiting, or given up and why. */
     const after = (duration: `${number} minutes`) =>
@@ -157,6 +157,81 @@ describe("Remote launcher", () => {
     // A worktree can take minutes.
     expect(await after("6 minutes")).toBe("waiting")
     expect(await after("7 minutes")).toBe("rig isn't answering, so I don't know if it started.")
+  })
+
+  test("says when the machine's T3 Code may have started it all the same, as it does there, or it stops answering, and never when nothing started", async () => {
+    /** What `yapd start` there makes of what its own launcher came to, as it comes back here: the reason, and whether it may have started. */
+    const through = (start: Launcher.Launcher["start"]) =>
+      Effect.runPromise(
+        Remote.launcher("rig", "rig", (_, stdin) => Launcher.serve({ ...own, start }, stdin))
+          .start(request)
+          .pipe(
+            Effect.flip,
+            Effect.map(({ reason, sent }) => ({ reason, sent: sent === true })),
+          ),
+      )
+    // T3 Code there took it, and its answer was lost.
+    expect(await through(() => Effect.fail(new Launcher.LaunchError({ reason: "T3 Code is taking too long, so I don't know if it started.", sent: true })))).toEqual({
+      reason: "T3 Code is taking too long, so I don't know if it started.",
+      sent: true,
+    })
+    expect(await through(() => Effect.fail(new Launcher.LaunchError({ reason: "T3 Code isn't running." })))).toEqual({ reason: "T3 Code isn't running.", sent: false })
+    // It was handed to yapd there, which never answered.
+    const silent = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.fork(Effect.flip(Remote.launcher("rig", "rig", () => Effect.never).start(request)))
+        yield* TestClock.adjust("7 minutes")
+        return yield* fiber
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    )
+    expect({ reason: silent.reason, sent: silent.sent === true }).toEqual({ reason: "rig isn't answering, so I don't know if it started.", sent: true })
+    // Never handed over, it can't have started.
+    expect((await Effect.runPromise(Effect.flip(failing(255).start(request)))).sent).toBeUndefined()
+  })
+
+  test("takes work as maybe started once yapd there said it has it, however SSH or yapd there ends after, and never before", async () => {
+    /**
+     * `yapd start` there, as SSH brings it back: given the request, it ends
+     * as `ends` says before its answer gets here, with what it said on stderr
+     * ahead of SSH's own.
+     */
+    const there =
+      (ends: (said: string) => ProcessError): Remote.Exec =>
+      (_, stdin) =>
+        Effect.gen(function* () {
+          const said: Array<string> = []
+          yield* Launcher.serve(own, stdin, Effect.sync(() => void said.push(`${Launcher.asking}\n`)))
+          return yield* ends(said.join(""))
+        })
+    const through = (exec: Remote.Exec, asked: Launcher.Request = request) =>
+      Effect.runPromise(
+        Remote.launcher("rig", "rig", exec)
+          .start(asked)
+          .pipe(
+            Effect.flip,
+            Effect.map(({ reason, sent }) => ({ reason, sent: sent === true })),
+          ),
+      )
+    const dropped = (said: string) => new ProcessError({ command: "ssh", code: 255, stderr: `${said}client_loop: send disconnect: Broken pipe` })
+    const cut = { reason: "rig cut out partway, so I don't know if it started.", sent: true }
+    // The connection dropped while T3 Code there was getting it ready, or yapd there stopped partway.
+    expect(await through(there(dropped))).toEqual(cut)
+    expect(await through(there((said) => new ProcessError({ command: "ssh", code: 1, stderr: `${said}error: out of memory` })))).toEqual(cut)
+    // An answer that can't be read may be work it started.
+    expect(await through(() => Effect.succeed("Segmentation fault"))).toEqual({
+      reason: "yapd on rig answered in a way I don't understand, so I don't know if it started.",
+      sent: true,
+    })
+    // Never connected, or ended before it had anything to start, it can't have started.
+    expect(await through(() => Effect.fail(new ProcessError({ command: "ssh", code: 255, stderr: "ssh: connect to host rig port 22: Connection refused" })))).toEqual({
+      reason: "I can't reach rig.",
+      sent: false,
+    })
+    expect(await through(there(dropped), { ...request, prompt: " " })).toEqual({ reason: "I can't reach rig.", sent: false })
+    expect(await through(() => Effect.fail(new ProcessError({ command: "ssh", code: 1, stderr: "error: out of memory" })))).toEqual({
+      reason: "yapd on rig couldn't start it.",
+      sent: false,
+    })
   })
 
   test("picks the launcher by the machine's name, which for this one can be what the user calls it", async () => {

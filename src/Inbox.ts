@@ -39,12 +39,31 @@ export interface Notice {
   readonly spoken: string
   /** When what it's about came up, like when the user sent the dictation, which is where it goes among updates. */
   readonly at: number
-  /** Whether it's no longer worth saying, asked as its turn comes. */
+  /** Whether it's no longer worth saying, asked as its turn comes, and again once words said in its place are rendered, just before it's played. */
   readonly stale: Effect.Effect<boolean>
+  /**
+   * What's said in its place when `when`, asked just before it's played, says
+   * so, like the line without "it's on your screen" once no app is there to
+   * show its card: rendered only then, and `used` once it's what's played,
+   * never when it can't be rendered and its own words go after all, nor when
+   * it went stale meanwhile.
+   */
+  readonly instead?: { readonly spoken: string; readonly when: Effect.Effect<boolean>; readonly used?: Effect.Effect<void> }
   /** Run as it starts being said, which is when the user hears of it: never when it can't be played, and for a question, undone if it breaks off. */
   readonly saying?: Effect.Effect<void>
+  /**
+   * Run once it's known to be playing, which is as it starts with the audio
+   * helper, but with afplay, which can't say, only once it has played to the
+   * end: never when it can't be played or breaks off before that's known.
+   */
+  readonly confirmed?: Effect.Effect<void>
   /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
   readonly heard?: Effect.Effect<void>
+  /**
+   * Run once it's done with, said or not, like gone stale, dropped or never
+   * queued as yapd was off: never while it's put back to be said again.
+   */
+  readonly gone?: Effect.Effect<void>
   /**
    * For a question: what to do with the answer, and when there's none; and
    * when it can't be asked in full, like when the audio helper quits midway,

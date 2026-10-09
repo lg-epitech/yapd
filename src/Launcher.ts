@@ -87,20 +87,29 @@ export interface Launcher {
   readonly catalog: Effect.Effect<Catalog, LaunchError>
 }
 
-/** Either what started, or the reason nothing did. */
-export const Response = Schema.Struct({ started: Schema.optional(Started), reason: Schema.optional(Schema.String) })
+/** Either what started, or the reason nothing did, and whether it was asked for before that went wrong, so it may have started all the same. */
+export const Response = Schema.Struct({ started: Schema.optional(Started), reason: Schema.optional(Schema.String), sent: Schema.optional(Schema.Boolean) })
 
-/** `yapd start`: starts the work described on stdin and prints how it went. */
-export const serve = (launcher: Launcher, input: string) =>
+/**
+ * What `yapd start` says on stderr once it has what to start, just before it
+ * asks for it. SSH reports a connection that drops before the answer as it
+ * does one it never made, so this is how the machine that asked tells that
+ * it may have started all the same.
+ */
+export const asking = "yapd: asking for it to start."
+
+/** `yapd start`: starts the work described on stdin and prints how it went, doing `asking` once it has what to start, before it asks for it. */
+export const serve = (launcher: Launcher, input: string, asking: Effect.Effect<void> = Effect.void) =>
   Schema.decodeUnknown(Schema.parseJson(Request))(input).pipe(
     Effect.mapError(() => new LaunchError({ reason: "yapd here and on the machine that speaks don't match. Update both." })),
     Effect.filterOrFail(
       ({ prompt }) => prompt.trim() !== "",
       () => new LaunchError({ reason: "I didn't catch what to start." }),
     ),
+    Effect.tap(() => asking),
     Effect.flatMap(launcher.start),
     Effect.map((started) => Response.make({ started })),
-    Effect.catchTag("LaunchError", ({ reason }) => Effect.succeed(Response.make({ reason }))),
+    Effect.catchTag("LaunchError", ({ reason, sent }) => Effect.succeed(Response.make({ reason, ...(sent === true ? { sent } : {}) }))),
     Effect.map((response) => JSON.stringify(response)),
   )
 

@@ -2,7 +2,7 @@ import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import { aloud, inEnglish, styled, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
-import { Persona } from "./Persona.ts"
+import { afterOnIt, Persona, withOnIt } from "./Persona.ts"
 
 export const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
 export type Intent = typeof Intent.Type
@@ -51,7 +51,7 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 "spoken": what you say back. They're listening, not reading.
 ${aloud}
 - For "answer", the answer in at most 50 words.
-- For "send", a few words that it's in hand, like "On it." or "Consider it done." Don't repeat back what they asked for: they've just said it.
+- For "send", empty: you say your usual line that it's in hand. Only when there's more they must know than that, say just that, in a few words, like "I took that to mean the staging branch." Don't repeat back what they asked for: they've just said it.
 - Empty for "dismiss" and "resume".
 
 "message": for "send", the message for the agent, written as the user would type it: first person, keeping their intent and wording, with anything they referred to spelled out so it stands on its own. Keep every request they made, in their order, including what to do once something's done, like "when that's merged, update the deployment". Empty otherwise.
@@ -143,15 +143,18 @@ const typed = (heard: string) => {
  * anything said to an update that asked something that isn't a plain yes, is
  * left to the model.
  */
-export const quick = (interruption: Interruption, onIt: string): Reply | undefined => {
+export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): Effect.Effect<Reply | undefined> => {
   const said = gist(interruption.heard)
-  if (said === "") return undefined
-  if (enough.has(said)) return { intent: "dismiss", spoken: "", message: "" }
+  if (said === "") return Effect.succeed(undefined)
+  if (enough.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
   if (asked(interruption)) {
-    return agreed.has(said) ? { intent: "send", spoken: onIt, message: typed(interruption.heard) } : undefined
+    // Only picked: it's noted as said once it's passed on, since he may yet carry on talking and this reply be dropped.
+    return agreed.has(said)
+      ? Effect.map(onIt, (spoken) => ({ intent: "send", spoken, message: typed(interruption.heard) }))
+      : Effect.succeed(undefined)
   }
-  if (noted.has(said) && !interruption.needsYou) return { intent: "dismiss", spoken: "", message: "" }
-  return undefined
+  if (noted.has(said) && !interruption.needsYou) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
+  return Effect.succeed(undefined)
 }
 
 export const ProviderResponder = Layer.effect(
@@ -163,12 +166,15 @@ export const ProviderResponder = Layer.effect(
     return {
       respond: (interruption) =>
         Effect.gen(function* () {
-          const fast = quick(interruption, (yield* persona.lines).onIt)
+          const fast = yield* quick(interruption, persona.onIt())
           if (fast !== undefined) return fast
-          return yield* model.ask(Reply, prompt(interruption, style)).pipe(
-            Effect.mapError((cause) => new RespondError({ cause })),
-            Effect.flatMap((reply) => Effect.map(inEnglish(model, reply.spoken), (spoken) => ({ ...reply, spoken }))),
-          )
+          const reply = yield* model.ask(Reply, prompt(interruption, style)).pipe(Effect.mapError((cause) => new RespondError({ cause })))
+          // Going ahead, an "On it" the model wrote anyway gives way to a line of yapd's own: picked as it's passed on
+          // when that was all of it, or put in its place now, with the rest after it.
+          const said = reply.spoken.trim()
+          const rest = reply.intent === "send" ? afterOnIt(said, yield* persona.lines) : said
+          const spoken = yield* inEnglish(model, rest)
+          return { ...reply, spoken: rest === said || spoken === "" ? spoken : withOnIt(yield* persona.onIt(), spoken) }
         }),
     }
   }),

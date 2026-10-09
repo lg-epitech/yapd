@@ -59,11 +59,21 @@ export const digest = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}
 /** How the reason of a step that's never to be offered again on its own starts. */
 const unoffered = "Not to be offered again"
 
+/** The reason of a step that's never to be offered again on its own, for why, as `leave` notes it. */
+export const leftBe = (why: string) => `${unoffered}: ${why.charAt(0).toLowerCase()}${why.slice(1)}`
+
 /** The reason of a message he took back while it was still in the queue, which never reached the thread. */
 export const withdrawn = "Withdrawn."
 
 /** Whether a step may still be offered to go again: it didn't get through, or may not have, and he hasn't been offered it, or taken it back, already. */
 export const offerable = (row: Row) => (row.state === "failed" || row.state === "unknown") && !(row.reason ?? "").startsWith(unoffered)
+
+/**
+ * What came of noting what came of a step: noted; left as it is, since it's
+ * no longer where `from` says, or as it was read; or not written, as yapd's
+ * database couldn't be, which says nothing of where the step is.
+ */
+export type Noted = "noted" | "stale" | "unwritten"
 
 /** Which rows `latest` looks at. */
 export interface Filter {
@@ -89,12 +99,25 @@ export class Ledger extends Context.Tag("yapd/Ledger")<
       readonly message: boolean
       readonly digest?: string
     }) => Effect.Effect<Prepared, Store.StoreError>
-    /** Notes what came of a step, only while it's in one of `from` when that's given. Never fails: what can't be noted is only logged. */
+    /**
+     * Notes what came of a step, only while it's in one of `from` when that's
+     * given, and only while it's still as `as` was read, in the same state for
+     * the same reason, when that's given: what came of it since, like his no
+     * to sending it again, which only changes its reason, stands. Whether it
+     * was noted, left as it is for that, or not written, which is never taken
+     * for that. Never fails: what can't be written is logged, and given back
+     * as such.
+     */
     readonly settle: (
       commandId: string,
       state: Exclude<State, "prepared">,
-      details?: { readonly reason?: string; readonly how?: How; readonly from?: ReadonlyArray<State> },
-    ) => Effect.Effect<void>
+      details?: {
+        readonly reason?: string
+        readonly how?: How
+        readonly from?: ReadonlyArray<State>
+        readonly as?: Pick<Row, "state" | "reason">
+      },
+    ) => Effect.Effect<Noted>
     /**
      * Leaves a step that didn't get through, may not have, or never said what
      * came of it, as it is, but never to be offered again on its own, noting
@@ -217,23 +240,25 @@ export const fromStore = (store: Store.Store["Type"]): Ledger["Type"] => ({
     }),
   settle: (commandId, state, details = {}) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
-      store.transaction((database: Database) => {
+      store.transaction((database: Database): Noted => {
         const from = details.from ?? []
-        database
+        const as = details.as === undefined ? [] : [details.as.state, details.as.reason]
+        const { changes } = database
           .query(
             `update actions set state = ?, how = coalesce(?, how), reason = ?, settled_at = ? where command_id = ?${
               from.length === 0 ? "" : ` and state in (${from.map(() => "?").join(", ")})`
-            }`,
+            }${as.length === 0 ? "" : " and state = ? and reason is ?"}`,
           )
-          .run(state, details.how ?? null, details.reason ?? null, at, commandId, ...from)
+          .run(state, details.how ?? null, details.reason ?? null, at, commandId, ...from, ...as)
+        return changes > 0 ? "noted" : "stale"
       }),
-    ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note what came of ${commandId}`, error))),
+    ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note what came of ${commandId}`, error).pipe(Effect.as<Noted>("unwritten")))),
   leave: (commandId, why) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
       store.transaction((database: Database) => {
         database
           .query("update actions set reason = ?, settled_at = ? where command_id = ? and state in ('prepared', 'failed', 'unknown')")
-          .run(`${unoffered}: ${why.charAt(0).toLowerCase()}${why.slice(1)}`, at, commandId)
+          .run(leftBe(why), at, commandId)
       }),
     ).pipe(Effect.catchAll((error) => Effect.logWarning(`Could not note that ${commandId} is left be`, error))),
   resending: (commandId) =>

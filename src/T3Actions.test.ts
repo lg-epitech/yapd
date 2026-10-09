@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Option, Schema } from "effect"
 import * as T3Actions from "./T3Actions.ts"
-import type * as Server from "./T3CodeServer.ts"
+import * as Server from "./T3CodeServer.ts"
 
 const approval = {
   type: "approval_request",
@@ -22,17 +22,27 @@ const question = {
   questions: [{ id: "Which database?", header: "Storage", question: "Which database?", options: [{ label: "SQLite" }, { label: "Postgres" }] }],
 }
 
-/** A T3 Code that answers from what it's given, and keeps what it was sent. */
-const transport = (bounded: object) => {
+/**
+ * A T3 Code that answers from what it's given, the thread's last turns as
+ * `bounded`, and the whole of it as `whole`, or too slow to; and keeps what it
+ * was sent, and where it was read.
+ */
+const transport = (bounded: object, whole: object | "fails" = bounded) => {
   const sent: Array<{ method: string; payload: Record<string, unknown> }> = []
+  const read: Array<string> = []
   const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
-    api: (<A, I>(_: string, schema: Schema.Schema<A, I>) => Schema.decodeUnknown(schema)(bounded).pipe(Effect.orDie)) as Server.Transport["api"],
+    api: (<A, I>(path: string, schema: Schema.Schema<A, I>) =>
+      Effect.suspend(() => {
+        read.push(path)
+        const answer = path.endsWith("/bounded") ? bounded : whole
+        return answer === "fails" ? Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." })) : Schema.decodeUnknown(schema)(answer).pipe(Effect.orDie)
+      })) as Server.Transport["api"],
     call: (<A, I>(method: string, payload: unknown, schema: Schema.Schema<A, I>) =>
       Effect.sync(() => sent.push({ method, payload: payload as Record<string, unknown> })).pipe(
         Effect.zipRight(Schema.decodeUnknown(schema)({ sequence: 1 }).pipe(Effect.orDie)),
       )) as Server.Transport["call"],
   })
-  return { actions: T3Actions.make(reach), sent }
+  return { actions: T3Actions.make(reach), sent, read }
 }
 
 const projection = (overrides: object = {}) => ({
@@ -235,23 +245,80 @@ describe("T3Actions", () => {
     expect(idle.sent).toEqual([])
   })
 
-  test("finds a message it sent by its id, how it went in, and the run it waits in", async () => {
+  test("finds a message it sent by its id, how it went in, the run it waits in, held or not, and the run whose turn it went into", async () => {
     const queued = projection({
       runs: [
         { id: "run-2", status: "running", ordinal: 2, userMessageId: "m-2" },
         { id: "run-3", status: "queued", ordinal: 3, userMessageId: "m-3" },
+        { id: "run-5", status: "queued", ordinal: 5, userMessageId: "m-5", queueHeld: true },
+        // Taken out of the queue into the turn under way, which cancels the run it waited in.
+        { id: "run-6", status: "cancelled", ordinal: 6, userMessageId: "m-6" },
       ],
       messages: [{ id: "m-2", role: "user", text: "Fix it.", createdAt: "a" }],
-      turnItems: [{ type: "user_message", messageId: "m-4", inputIntent: "steer", status: "completed" }],
+      turnItems: [
+        { type: "user_message", messageId: "m-4", inputIntent: "steer", status: "completed", runId: "run-2" },
+        { type: "user_message", messageId: "m-6", inputIntent: "promoted_queued_to_steer", status: "completed", runId: "run-2" },
+        // Steered into a run the read doesn't have.
+        { type: "user_message", messageId: "m-7", inputIntent: "steer", status: "completed", runId: "run-1-gone" },
+      ],
     })
     const { actions } = transport(queued)
     const found = (messageId: string) =>
-      Effect.runPromise(Effect.map(actions.message("t1", messageId), Option.map(({ intent, run }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run) }))))
-    expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued" } }))
-    expect(await found("m-4")).toEqual(Option.some({ intent: "steer", run: null }))
+      Effect.runPromise(
+        Effect.map(
+          actions.message("t1", messageId),
+          Option.map(({ intent, run, into }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run), into: Option.getOrNull(into) })),
+        ),
+      )
+    expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued", held: false }, into: null }))
+    // In a queue a stop put on hold.
+    expect(await found("m-5")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-5", status: "queued", held: true }, into: null }))
+    // Steered in, even from the queue, it's in the turn T3 Code names on it, never the run it waited in.
+    expect(await found("m-4")).toEqual(Option.some({ intent: "steer", run: null, into: { id: "run-2", status: "running" } }))
+    expect(await found("m-6")).toEqual(
+      Option.some({ intent: "promoted_queued_to_steer", run: { id: "run-6", status: "cancelled", held: false }, into: { id: "run-2", status: "running" } }),
+    )
+    expect(await found("m-7")).toEqual(Option.some({ intent: "steer", run: null, into: null }))
     // A run it started that has no turn item yet, as right after it went in: a turn of its own.
-    expect(await found("m-2")).toEqual(Option.some({ intent: "turn_start", run: { id: "run-2", status: "running" } }))
+    expect(await found("m-2")).toEqual(Option.some({ intent: "turn_start", run: { id: "run-2", status: "running", held: false }, into: null }))
     expect(await Effect.runPromise(actions.has("t1", "m-9"))).toBe(false)
+  })
+
+  test("traces a message the thread's last turns show only by the run it waited in, cancelled, through the whole thread, read once, and only then", async () => {
+    const whole = projection({
+      runs: [
+        { id: "run-1", status: "completed", ordinal: 1, userMessageId: "m-1" },
+        { id: "run-2", status: "cancelled", ordinal: 2, userMessageId: "m-2" },
+        { id: "run-3", status: "cancelled", ordinal: 3, userMessageId: "m-3" },
+        { id: "run-4", status: "completed", ordinal: 4, userMessageId: "m-4" },
+      ],
+      messages: [
+        // Moved from the queue into the turn under way, it's that turn's.
+        { id: "m-2", role: "user", text: "Open a PR.", createdAt: "2026-10-08T22:01:00.000Z", runId: "run-1" },
+        // Taken out of the queue, it names the run it waited in.
+        { id: "m-3", role: "user", text: "Rename it.", createdAt: "2026-10-08T22:02:00.000Z", runId: "run-3" },
+      ],
+      turnItems: [{ type: "user_message", messageId: "m-2", inputIntent: "promoted_queued_to_steer", runId: "run-1" }],
+    })
+    // Enough turns since have pushed every message and turn item out of the bounded read, which keeps every run.
+    const bounded = projection({ runs: whole.projection.runs, messages: [], turnItems: [] })
+    const traced = async (messageId: string, reads = transport(bounded, whole)) => {
+      const found = await Effect.runPromise(
+        Effect.map(
+          reads.actions.traced("t1", messageId),
+          Option.map(({ intent, run, into }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run)?.status, into: Option.getOrNull(into)?.id })),
+        ),
+      )
+      return { found, read: reads.read.map((path) => path.replace("/api/orchestration/threads/t1", "") || "whole") }
+    }
+    expect(await traced("m-2")).toEqual({ found: Option.some({ intent: "promoted_queued_to_steer", run: "cancelled", into: "run-1" }), read: ["/bounded", "whole"] })
+    expect(await traced("m-3")).toEqual({ found: Option.some({ intent: null, run: "cancelled", into: "run-3" }), read: ["/bounded", "whole"] })
+    // Its run not cancelled, it says what came of it, so the bounded read is enough.
+    expect(await traced("m-4")).toEqual({ found: Option.some({ intent: "turn_start", run: "completed", into: undefined }), read: ["/bounded"] })
+    // Its message still in the bounded read, it's found there.
+    expect(await traced("m-3", transport(whole, "fails"))).toEqual({ found: Option.some({ intent: null, run: "cancelled", into: "run-3" }), read: ["/bounded"] })
+    // The whole thread too slow to read, it's taken as neither.
+    expect(await Effect.runPromise(Effect.flip(transport(bounded, "fails").actions.traced("t1", "m-2")))).toMatchObject({ _tag: "Trouble" })
   })
 
   test("sends what the app sends", () => {

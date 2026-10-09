@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, FiberSet, Option, Schema, Stream } from "effect"
+import { Cause, Clock, type Duration, Effect, FiberSet, Option, Schema, Stream } from "effect"
 import type * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import { Condenser, english } from "./Condenser.ts"
@@ -670,23 +670,20 @@ export const make = (options: {
         yield* FiberSet.run(running, looking.pipe(trouble, Effect.annotateLogs({ thread: news.value.thread.title })))
       })
 
-    return {
-      /** Follows what happens to the threads, for as long as yapd runs. */
-      follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
-      /**
-       * The questions waiting on him that he hasn't heard: run once T3 Code has
-       * caught up after a start, and each time yapd is turned on. One begun
-       * and never heard to the end, as when yapd was turned off or restarted
-       * while saying it, is said again, under the entry it was kept under.
-       * Nothing while it's off.
-       */
-      reconcile: Effect.gen(function* () {
-        const { on } = yield* options.power
-        if (!on) return
+    /**
+     * The questions waiting on him that he hasn't heard, on the machines `on`
+     * picks, by what he calls them. One begun and never heard to the end, as
+     * when yapd was turned off or restarted while saying it, is said again,
+     * under the entry it was kept under. Nothing while it's off.
+     */
+    const reconciling = (on: (machine: string) => boolean) =>
+      Effect.gen(function* () {
+        if (!(yield* options.power).on) return
         const now = yield* Clock.currentTimeMillis
         const said = new Map((yield* journal.since(now - pending, { kinds: ["notice"], most: 1000 })).flatMap((kept) => (kept.key === undefined ? [] : [[kept.key, kept] as const])))
         const desk = yield* threads.desk(Option.none(), [], 1000)
         for (const { ref, thread } of desk.threads) {
+          if (!on(ref.machine)) continue
           const request = thread.pendingRuntimeRequest
           const created = request === null ? Number.NaN : Date.parse(request.createdAt)
           // Nor an approval, after a restart or once yapd is on.
@@ -695,6 +692,38 @@ export const make = (options: {
           if (before?.heardAt !== undefined) continue
           yield* FiberSet.run(running, asked(ref, request.id, now, before?.id).pipe(trouble, Effect.annotateLogs({ thread: thread.title })))
         }
-      }),
+      })
+
+    return {
+      /** Follows what happens to the threads on every machine yapd follows, for as long as yapd runs. */
+      follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
+      /** What waits on him on every machine whose threads can be seen, each time yapd is turned on. */
+      reconcile: reconciling(() => true),
+      /** What waits on him on one machine, each time its T3 Code has caught up, as `lookBack` has it. */
+      reconcileOn: (machine: string) => reconciling((on) => on === machine),
+    }
+  })
+
+/**
+ * What waits on him on `machine` that he never heard, looked for each time
+ * its T3 Code has caught up, which `view` tells, asked `every` so often, for
+ * as long as yapd runs: once it starts, and again whenever it's back after
+ * going down, like rig out of reach a while or T3 Code restarted there, since
+ * what was let go of while it couldn't be seen still waits. Each machine
+ * looks on its own, so one that's down holds up none of the rest.
+ */
+export const lookBack = (
+  notices: { readonly reconcileOn: (machine: string) => Effect.Effect<void> },
+  view: Effect.Effect<Option.Option<unknown>>,
+  machine: string,
+  every: Duration.DurationInput = "1 second",
+) =>
+  Effect.gen(function* () {
+    let seen = false
+    while (true) {
+      const now = Option.isSome(yield* view)
+      if (now && !seen) yield* notices.reconcileOn(machine)
+      seen = now
+      yield* Effect.sleep(every)
     }
   })

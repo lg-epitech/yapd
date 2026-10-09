@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Option } from "effect"
 import * as Ledger from "./Ledger.ts"
+import * as Store from "./Store.ts"
 
 describe("Ledger", () => {
   test("preparing the same step twice gives one row", async () => {
@@ -54,5 +55,30 @@ describe("Ledger", () => {
       }).pipe(Effect.provide(Ledger.memory)),
     )
     expect(result).toEqual({ taken: true, open: [], again: false })
+  })
+
+  test("noting what came of a step tells one that's moved on since it was read from one yapd's database couldn't write", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* Store.make(":memory:")
+        const ledger = Ledger.fromStore(store)
+        const row = yield* ledger.prepare({
+          utterance: "u1",
+          step: 0,
+          kind: "message",
+          machine: "Rosie",
+          thread: "t-tezos",
+          body: ({ messageId }) => ({ _tag: "Send", text: "Use the fee table.", messageId, how: "now" }),
+          message: true,
+        })
+        const noted = yield* ledger.settle(row.commandId, "unknown", { as: row })
+        // As it was read before that, it's moved on since.
+        const stale = yield* ledger.settle(row.commandId, "abandoned", { as: row })
+        yield* store.transaction((database) => database.exec("PRAGMA query_only = ON"))
+        const unwritten = yield* ledger.settle(row.commandId, "abandoned", { as: { state: "unknown", reason: null } })
+        return { noted, stale, unwritten, state: Option.map(yield* ledger.get(row.commandId), ({ state }) => state) }
+      }).pipe(Effect.scoped),
+    )
+    expect(result).toEqual({ noted: "noted", stale: "stale", unwritten: "unwritten", state: Option.some("unknown") })
   })
 })

@@ -51,6 +51,16 @@ export const preferences = optional("YAPD_PREFERENCES")
 /** How yapd talks, in the user's words, like "Talk like Jarvis and call me sir". Unset, it talks plainly. */
 export const style = optional("YAPD_STYLE")
 
+/**
+ * What yapd says once the user has asked for something, in their own words,
+ * separated by "|", like "Right away, sir.|Very good, sir.". It says a
+ * different one from last time, in place of the line written in their style.
+ */
+export const onIt = Config.string("YAPD_ON_IT").pipe(
+  Config.withDefault(""),
+  Config.map((value) => value.split("|").map((line) => line.trim()).filter((line) => line !== "")),
+)
+
 /** Kokoro voice, see https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md */
 export const voice = Config.string("YAPD_VOICE").pipe(Config.withDefault("bm_fable"))
 

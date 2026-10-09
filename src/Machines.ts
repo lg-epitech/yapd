@@ -36,28 +36,30 @@ export const short = (host: string) => host.split(".")[0] ?? host
 /**
  * This machine first, by the name the user gave it, then the ones in
  * `YAPD_REMOTES`. Its hostname is read each time, since a Mac's changes with
- * the network.
+ * the network. What starts work or reads through a project on another machine
+ * goes through the connection to it `masters` has open, when there is one.
  */
-export const machines = Effect.gen(function* () {
-  const remotes = yield* Config.remotes
-  const called = Option.getOrUndefined(yield* Config.name)
-  const launchers = Remote.launchers(remotes, hostname, yield* own, undefined, called)
-  const researchers = Remote.researchers(remotes, hostname, yield* researcher, undefined, called)
-  const here: Machine = {
-    get name() {
-      return called ?? short(hostname())
-    },
-    here: true,
-    get hosts() {
-      return [hostname()]
-    },
-    launcher: launchers(),
-    researcher: researchers(),
-  }
-  return [
-    here,
-    ...[...remotes.keys()].map(
-      (remote): Machine => ({ name: remote, here: false, hosts: [remote], launcher: launchers(remote), researcher: researchers(remote) }),
-    ),
-  ]
-})
+export const machines = (masters?: Remote.Masters) =>
+  Effect.gen(function* () {
+    const remotes = yield* Config.remotes
+    const called = Option.getOrUndefined(yield* Config.name)
+    const launchers = Remote.launchers(remotes, hostname, yield* own, undefined, called, masters)
+    const researchers = Remote.researchers(remotes, hostname, yield* researcher, undefined, called, masters)
+    const here: Machine = {
+      get name() {
+        return called ?? short(hostname())
+      },
+      here: true,
+      get hosts() {
+        return [hostname()]
+      },
+      launcher: launchers(),
+      researcher: researchers(),
+    }
+    return [
+      here,
+      ...[...remotes.keys()].map(
+        (remote): Machine => ({ name: remote, here: false, hosts: [remote], launcher: launchers(remote), researcher: researchers(remote) }),
+      ),
+    ]
+  })

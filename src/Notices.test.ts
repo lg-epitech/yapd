@@ -51,7 +51,11 @@ const failure = (runId: string, kind: string, message: string, resetAt?: string)
   failure: { class: kind, message, code: null, retryable: null, ...(resetAt === undefined ? {} : { resetAt }) },
 })
 
-const persona = Layer.succeed(Persona.Persona, { lines: Effect.succeed({ ...Persona.plain, address: "sir" }) })
+const persona = Layer.succeed(Persona.Persona, {
+  lines: Effect.succeed({ ...Persona.plain, address: "sir" }),
+  onIt: () => Effect.succeed(Persona.plain.onIt),
+  said: () => Effect.void,
+})
 
 /** The model, which words an approval, and a part of a question whose words can't be said as they are, kept in `rewritten`. */
 const condenser = (rewritten: Array<string>) =>

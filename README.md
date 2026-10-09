@@ -54,6 +54,8 @@ From a clone, `bun run app` builds it with Xcode into `~/Applications` and opens
 
 Off, yapd says nothing, never opens the microphone and lets go of the shortcut. Turning it off drops whatever hasn't started yet: what it was about to say, a dictation, and new work it was still writing up or asking you about. Updates that finish meanwhile aren't said later, and it stays off when it restarts, until you turn it on again. The menu also has the last few updates, to hear one again and reply to it.
 
+Ask yapd to show you something, like "show me what's running" or "show me that PR", and the card goes up in a panel under the icon, to read only, until a while after yapd has finished talking about it. "Hide that" takes it down sooner, and Show Last Card in the menu brings it back.
+
 The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux too.
 
 ## Interrupting
@@ -200,6 +202,8 @@ A bare `YAPD_REMOTES=server` uses `ssh server`, so an alias from `~/.ssh/config`
 
 Claude Code sessions in a terminal on the server get replies through their waiting hook, as they do on the Mac. T3 Code threads and Codex sessions there get them through `yapd relay`, so a T3 Code token for the server's own T3 Code goes in `~/.yapd/.env` on the server. [New work](#on-other-machines) starts there the same way, with the server's own settings.
 
+While it runs, yapd also keeps one SSH connection to each server open, asks `yapd t3` there where its T3 Code listens and for that token, which it keeps in memory only, and forwards a port on the Mac's `127.0.0.1` to it. The server's threads then show up beside the Mac's, by machine, and take messages and stops by voice the same way, and follow-ups and new work go through that connection rather than a fresh login. A server that can't be reached is tried again in the background, and said to be out of reach once you ask for something there. The server's yapd needs to be one with `yapd t3`.
+
 ## Providers
 
 The summaries are written by a coding agent CLI you're already signed in to. The default is Codex with GPT-6 Luna on high, on its fast tier, which for Luna costs no extra usage. yapd keeps Codex running between calls, with a thread ready for the next one and without your MCP servers, apps or plugins, which saves a few seconds each time. To use a different one, put this in `~/.yapd/.env` and run `yapd install` again:
@@ -231,6 +235,14 @@ YAPD_STYLE="Talk like Jarvis from Iron Man: calm, precise, with a dry British wi
 ```
 
 The style applies to the summaries, to its answers when you interrupt, and to what it says about new work. It doesn't change what it passes on to the agent or the prompts it writes, and summaries stay a sentence or two.
+
+To choose what it says once you've asked for something, when it passes a reply on, sends a message by voice or starts new work, rather than the line written in your style, list your own, separated by `|`. It says a different one from the last you heard, and from one about to be said, and renders them all ahead:
+
+```sh
+YAPD_ON_IT="Right away, sir.|Very good, sir.|Consider it done, sir.|Very well, sir."
+```
+
+A line that asks something is left out, since you'd answer it.
 
 ## Quick turns
 

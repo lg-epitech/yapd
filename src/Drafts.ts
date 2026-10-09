@@ -1,9 +1,11 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type * as Ledger from "./Ledger.ts"
+import { afterOnIt, type Lines, Persona, withOnIt } from "./Persona.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
+import { progress, readied, unstarted } from "./T3CodeLauncher.ts"
 import type * as T3Live from "./T3Live.ts"
 import { type Decision, type Destination, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
@@ -94,20 +96,38 @@ export const resolve = (
 }
 
 /**
+ * Whether the line for going ahead goes in front of what's said once new work
+ * started: only before the writer's own words, when they match what started.
+ * An "On it" the writer put in front anyway goes, since the line takes its
+ * place, and with only that there are no words of its own.
+ */
+export const ahead = (spoken: string, { request }: Pick<Resolved, "request">, started: Started, lines: Pick<Lines, "address">) =>
+  started.worktree === request.worktree &&
+  (request.model === undefined || same(request.model, started.model)) &&
+  afterOnIt(spoken, lines) !== ""
+
+/**
  * What's said once it started. The writer's own words when they match what
- * started, since it says names the way people do. Otherwise the plain facts,
+ * started, since it says names the way people do, after the line for going
+ * ahead, `lines.onIt`, which they leave to yapd. Otherwise the plain facts,
  * with what the launcher had to add.
  */
-export const confirmation = (spoken: string, { unsure, machine, project, catalog, request }: Resolved, started: Started) => {
-  const asked = started.worktree === request.worktree && (request.model === undefined || same(request.model, started.model))
+export const confirmation = (
+  spoken: string,
+  { unsure, machine, project, catalog, request }: Resolved,
+  started: Started,
+  lines: Pick<Lines, "onIt" | "address">,
+) => {
   const title = catalog.models.find(({ name }) => same(name, started.model))?.title ?? started.model
   const where = started.worktree ? "in a worktree" : "without a worktree"
   const plain = `Started in ${project.name}${machine.here ? "" : ` on ${machine.name}`}, on ${title}, ${where}.`
-  const said = asked && spoken.trim() !== "" ? spoken.trim() : plain
+  // The writer's own words, or the plain facts: whether they say where it is goes by them alone, not by a line of his that may name a worktree.
+  const own = ahead(spoken, { request }, started, lines)
+  const told = own ? afterOnIt(spoken, lines) : plain
   return [
-    said,
+    own ? withOnIt(lines.onIt, told) : plain,
     // It's how they catch a worktree that was misheard, so it's never left to the writer alone.
-    ...(/work\s?-?tree/i.test(said) ? [] : [`That's ${where}.`]),
+    ...(/work\s?-?tree/i.test(told) ? [] : [`That's ${where}.`]),
     ...(unsure ? [`I couldn't tell whether you wanted a worktree, so I went by your rules.`] : []),
     ...(started.warning === undefined ? [] : [started.warning]),
   ].join(" ")
@@ -158,6 +178,9 @@ export interface Step {
 /** How long T3 Code has to show new work it didn't answer for, before it's looked for. */
 const settling = "2 seconds"
 
+/** Why new work T3 Code never answered for can't be told to have started: it was still getting it ready when a launch would have given up. */
+export const readying = "T3 Code is still getting it ready, so I don't know if it started."
+
 /** New work as T3 Code shows it, for one it started without saying so. */
 const seen = (thread: T3Live.Thread, resolved: Pick<Resolved, "project">): Started => ({
   thread: thread.id,
@@ -187,6 +210,7 @@ export const make = (options: {
 }) =>
   Effect.gen(function* () {
     const writer = yield* Writer
+    const persona = yield* Persona
     const scope = yield* Effect.scope
     const writing = yield* Effect.makeSemaphore(writers)
     const research = options.machines.some(({ researcher }) => researcher.available)
@@ -280,24 +304,33 @@ export const make = (options: {
         )
         yield* Effect.logInfo(`Prompt: ${request.prompt}`)
         const launching = yield* Effect.gen(function* () {
+          const asked = yield* Clock.currentTimeMillis
           const outcome = yield* Effect.either(machine.launcher.start(request))
-          // Asked for and not answered, it may have started all the same: it's looked for once, under the id it was asked for with.
+          // Asked for and not answered, it may have started all the same: it's looked for under the id it was asked for with, and, found,
+          // waited for while T3 Code is still getting it ready, as a launch that answers is, since a thread made for it doesn't say it started.
+          // One T3 Code still hasn't put the work in by then is taken as not found, since it may yet put it in.
           const found =
             Either.isLeft(outcome) && outcome.left.sent === true && request.ids !== undefined && options.find !== undefined
-              ? yield* Effect.zipRight(Effect.sleep(settling), options.find(machine.name, request.ids.thread))
+              ? yield* Effect.zipRight(Effect.sleep(settling), readied(options.find(machine.name, request.ids.thread), asked))
               : Option.none<T3Live.Thread>()
-          if (Either.isLeft(outcome) && Option.isNone(found)) {
-            yield* Effect.logWarning("Could not start", outcome.left)
-            yield* settle(outcome.left.sent === true ? "unknown" : "failed", outcome.left.reason)
-            return { _tag: "Said", spoken: about === "" ? outcome.left.reason : `About ${about}: ${outcome.left.reason}`, failed: true } satisfies Outcome
+          if (Either.isLeft(outcome) && !Option.exists(found, (thread) => progress(thread) === "begun")) {
+            // Ended before it began, it didn't start; still being got ready by the time a launch would have given up, or not found, it can't be told yet.
+            const ended = Option.flatMap(found, (thread) => unstarted(thread, request.worktree === true, project.name))
+            const why = Option.getOrElse(ended, () => (Option.isSome(found) ? readying : outcome.left.reason))
+            yield* Effect.logWarning(`Could not start: ${why}`, outcome.left)
+            yield* settle(outcome.left.sent === true && Option.isNone(ended) ? "unknown" : "failed", why)
+            return { _tag: "Said", spoken: about === "" ? why : `About ${about}: ${why}`, failed: true } satisfies Outcome
           }
           const started = Either.isRight(outcome) ? outcome.right : seen(Option.getOrThrow(found), resolved)
           if (Either.isLeft(outcome)) yield* Effect.logInfo(`Found ${started.thread} after all: ${outcome.left.reason}`)
           yield* settle("sent")
           yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
+          // Picked only when it's said, so a pick never played doesn't keep it from coming up, and noted as heard by whoever says it, once it is.
+          const written = yield* persona.lines
+          const lines = ahead(spoken, resolved, started, written) ? { ...written, onIt: yield* persona.onIt() } : written
           const begun = {
             _tag: "Started",
-            spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
+            spoken: [confirmation(spoken, resolved, started, lines), warning].filter(Boolean).join(" "),
             started,
             machine,
             request,
