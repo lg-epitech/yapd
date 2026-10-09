@@ -33,13 +33,21 @@ const update: Conversation.Update = {
  * as `result` says: sent, queued, or held back as the session has moved on. `render` renders what's said back, and
  * with `unplayable`, nothing but the update can be played, as when the audio helper goes down after it. With `afplay`,
  * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
+ * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
+ * lines are `lines`, or the plain ones.
  */
 const conversation = (
   said: ReadonlyArray<string>,
   sending = 0,
   deliveries: ReadonlyArray<Effect.Effect<void>> = [],
   result: "sent" | "queued" | "moved" = "sent",
-  given: { readonly render?: Context.Tag.Service<Voice>["render"]; readonly unplayable?: boolean; readonly afplay?: "plays" | "fails" } = {},
+  given: {
+    readonly render?: Context.Tag.Service<Voice>["render"]
+    readonly unplayable?: boolean
+    readonly afplay?: "plays" | "fails"
+    readonly lines?: Persona.Lines
+    readonly model?: Layer.Layer<Model>
+  } = {},
 ) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
@@ -52,12 +60,14 @@ const conversation = (
     const transcripts = [...said]
     let dispatches = 0
     let replies = 0
+    const lines = given.lines ?? Persona.plain
+    const persona = Layer.succeed(Persona.Persona, {
+      lines: Effect.succeed(lines),
+      onIt: () => Effect.succeed(lines.onIt),
+      said: (line) => Effect.sync(() => void noted.push(line)),
+    })
     const layer = Layer.mergeAll(
-      Layer.succeed(Persona.Persona, {
-        lines: Effect.succeed(Persona.plain),
-        onIt: () => Effect.succeed(Persona.plain.onIt),
-        said: (line) => Effect.sync(() => void noted.push(line)),
-      }),
+      persona,
       Journal.memory,
       Layer.succeed(Audio, {
         play: (path) =>
@@ -80,17 +90,19 @@ const conversation = (
       // Each frame holds the probability that it's speech.
       Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),
       Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? "") }),
-      Layer.succeed(Responder.Responder, {
-        respond: ({ heard: text }) =>
-          Effect.sync(() => heard.push(text)).pipe(
-            Effect.zipRight(Effect.sleep("5 seconds")),
-            Effect.as(
-              text.startsWith("Sam,")
-                ? { intent: "resume" as const, spoken: "", message: "" }
-                : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text },
-            ),
-          ),
-      }),
+      given.model === undefined
+        ? Layer.succeed(Responder.Responder, {
+            respond: ({ heard: text }) =>
+              Effect.sync(() => heard.push(text)).pipe(
+                Effect.zipRight(Effect.sleep("5 seconds")),
+                Effect.as(
+                  text.startsWith("Sam,")
+                    ? { intent: "resume" as const, spoken: "", message: "" }
+                    : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text },
+                ),
+              ),
+          })
+        : Responder.ProviderResponder.pipe(Layer.provide(Layer.merge(given.model, persona))),
       Layer.succeed(Relays, {
         send: (_, text) => Effect.suspend(() => deliveries[dispatches++] ?? Effect.sleep(`${sending} seconds`)).pipe(
           Effect.zipRight(Effect.sync(() => void sent.push(text))),
@@ -302,6 +314,25 @@ describe("Follow-ups", () => {
       }),
     )
     expect(result).toEqual({ sent: ["Just merge it."], saying: ["On it."] })
+  })
+
+  test("says a line of the persona's own in place of an \"On it\" the model wrote anyway, before whatever more it had to say", async () => {
+    const follow = (spoken: string) =>
+      scoped(
+        Effect.gen(function* () {
+          const { layer } = scripted([{ intent: "send", spoken, message: "Merge the staging branch." }])
+          const lines = { ...Persona.plain, onIt: "Right away, sir.", address: "sir" }
+          const { fiber, sent, speak, wait, saying } = yield* conversation(["Merge it."], 0, [], "sent", { lines, model: layer })
+          yield* speak
+          yield* wait(20)
+          yield* Fiber.join(fiber)
+          return { sent, saying }
+        }),
+      )
+    expect(await follow("On it, sir.")).toEqual({ sent: ["Merge the staging branch."], saying: ["Right away, sir."] })
+    expect((await follow("On it, sir. I took that to mean the staging branch.")).saying).toEqual(["Right away, sir. I took that to mean the staging branch."])
+    // Anything else it had to say is said as it is.
+    expect((await follow("I took that to mean the staging branch.")).saying).toEqual(["I took that to mean the staging branch."])
   })
 
   test("tells the persona only the line said of a follow-up, never one for going ahead when it's queued or held back", async () => {
@@ -562,7 +593,11 @@ describe("Responder", () => {
       Option.none(),
     )
     expect(prompt).toContain("Keep every request they made, in their order")
-    expect(prompt).toContain(`a few words that it's in hand, like "On it." or "Consider it done." Don't repeat back what they asked for`)
+    // Going ahead, yapd says a line of its own, so the model only adds what more there is, and is never taught to say "On it".
+    expect(prompt).toContain(
+      `- For "send", empty: you say your usual line that it's in hand. Only when there's more they must know than that, say just that, in a few words, like "I took that to mean the staging branch." Don't repeat back what they asked for`,
+    )
+    expect(prompt).not.toMatch(/\bon it\b/i)
   })
 
   test("doesn't send a reply that tells the agent to do nothing", () => {

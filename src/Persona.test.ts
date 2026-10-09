@@ -192,6 +192,42 @@ describe("Persona", () => {
     expect(Effect.runSync(none.persona.onIt(jarvis.onIt))).toBe(jarvis.onIt)
   })
 
+  test("a line of his own counts as heard said with more after it, the longest that fits, and nothing else does", async () => {
+    const mine = ["Right away, sir.", "Very good", "Very good, sir."]
+    const { persona: said } = await persona(undefined, jarvis, { YAPD_ON_IT: mine.join("|") })
+    /** What may be said for going ahead once `spoken` has been. */
+    const after = (spoken: string) => {
+      Effect.runSync(said.said(spoken))
+      return new Set(Effect.runSync(Effect.replicateEffect(said.onIt(), 40).pipe(Effect.withRandom(Random.make("yapd")))))
+    }
+    expect(after("Very good, sir. In yapd, on Fable, in a worktree.")).toEqual(new Set(["Right away, sir.", "Very good"]))
+    expect(after("Very good. I took that to mean the staging branch.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
+    // Not one of his, or not at the start: the last one he heard stays as it was.
+    expect(after("Very goodness, that was quick.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
+    expect(after("I took that to mean staging. Right away, sir.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
+    expect(after(" Right away, sir. ")).toEqual(new Set(["Very good", "Very good, sir."]))
+  })
+
+  test("what's said past an \"On it\" a model wrote anyway, addressing him or not, is all that's left of it", () => {
+    const sir = { address: "sir" }
+    expect(Persona.afterOnIt("On it, sir.", sir)).toBe("")
+    expect(Persona.afterOnIt("on it sir!", sir)).toBe("")
+    expect(Persona.afterOnIt("On it.", Persona.plain)).toBe("")
+    expect(Persona.afterOnIt("On it, sir, in yapd, on Fable, in a worktree.", sir)).toBe("In yapd, on Fable, in a worktree.")
+    expect(Persona.afterOnIt("On it, in yapd, on Fable, without a worktree.", Persona.plain)).toBe("In yapd, on Fable, without a worktree.")
+    expect(Persona.afterOnIt("On it — I took that to mean the staging branch.", sir)).toBe("I took that to mean the staging branch.")
+    // Anything else is as it was.
+    expect(Persona.afterOnIt("On items like that, sir, I'd wait.", sir)).toBe("On items like that, sir, I'd wait.")
+    expect(Persona.afterOnIt(" Consider it done, sir. ", sir)).toBe("Consider it done, sir.")
+    expect(Persona.afterOnIt("yapd's on it, sir.", sir)).toBe("yapd's on it, sir.")
+  })
+
+  test("a line for going ahead with more after it is a sentence of its own", () => {
+    expect(Persona.withOnIt("Right away, sir.", "In yapd, on Fable, in a worktree.")).toBe("Right away, sir. In yapd, on Fable, in a worktree.")
+    expect(Persona.withOnIt(" Right away, sir ", "In yapd.")).toBe("Right away, sir. In yapd.")
+    expect(Persona.withOnIt("On it!", "In yapd.")).toBe("On it! In yapd.")
+  })
+
   test("renders all his own lines ahead, and not the written one they replace", async () => {
     const result = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") })
     expect(result.warmed).toEqual(expect.arrayContaining([...own, jarvis.queued, jarvis.cantTell]))

@@ -45,6 +45,25 @@ export const sayable = (lines: Lines) => [lines.onIt, lines.queued, lines.mishea
 export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
 
 /**
+ * What's said past an "On it" it starts with, addressing him or not, which a
+ * model may still write where yapd says a line of its own for going ahead:
+ * "On it, sir, in yapd." is "In yapd.", and "On it, sir." is nothing.
+ */
+export const afterOnIt = (spoken: string, lines: Pick<Lines, "address">) => {
+  const address = lines.address.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const onIt = new RegExp(`^on it${address === "" ? "" : `(?:,?\\s*${address})?`}(?![\\p{L}\\p{N}])[\\s\\p{P}]*`, "iu")
+  const said = spoken.trim()
+  const rest = said.replace(onIt, "")
+  return rest === said ? said : `${rest.charAt(0).toUpperCase()}${rest.slice(1)}`
+}
+
+/** A line for going ahead with more said after it, as a sentence of its own. */
+export const withOnIt = (onIt: string, rest: string) => {
+  const line = onIt.trim()
+  return [line === "" || /[.!?…]$/.test(line) ? line : `${line}.`, rest.trim()].filter((part) => part !== "").join(" ")
+}
+
+/**
  * The lines that tell rather than ask: worded as a question, he'd answer one
  * yapd isn't waiting on. Not "misheard", which may well ask him to say it again.
  */
@@ -78,8 +97,12 @@ export class Persona extends Context.Tag("yapd/Persona")<
      * may yet be dropped or say something else.
      */
     readonly onIt: (besides?: string) => Effect.Effect<string>
-    /** Notes a line as being said, so the next line for going ahead is a different one. Only his own count. */
-    readonly said: (line: string) => Effect.Effect<void>
+    /**
+     * Notes what's being said, so the next line for going ahead is a
+     * different one from his own it starts with, said on its own or with more
+     * after it. Only his own count.
+     */
+    readonly said: (spoken: string) => Effect.Effect<void>
   }
 >() {}
 
@@ -121,7 +144,14 @@ const alternating = (own: ReadonlyArray<string>, lines: Effect.Effect<Lines>) =>
               const others = [own.filter((line) => line !== said && line !== besides), own.filter((line) => line !== besides), own].find((lines) => lines.length > 0)!
               return Effect.map(Random.nextIntBetween(0, others.length), (index) => others[index]!)
             }),
-      said: (line: string) => (own.includes(line) ? Ref.set(last, line) : Effect.void),
+      said: (spoken: string) => {
+        const said = spoken.trim()
+        // The longest that fits, in case one of his lines starts another.
+        const [heard] = own
+          .filter((line) => said.startsWith(line) && !/^[\p{L}\p{N}]/u.test(said.slice(line.length)))
+          .toSorted((one, other) => other.length - one.length)
+        return heard === undefined ? Effect.void : Ref.set(last, heard)
+      },
     }
   })
 
