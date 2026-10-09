@@ -732,17 +732,21 @@ const listed = (part: Said, heard: string): ReadonlyArray<number> | undefined =>
 
 /**
  * What he said to a part comes to, without the model, only when that's
- * plain: an option's whole name, as `wholly` has it; its place, when he
- * heard them in order and no name has a word a place is said with; for a
- * part that takes several, a list of whole names; a plain yes or no to the option named Yes or No, or "Yes, …" or
- * "No, …"; yapd's pick, on a plain yes once he's heard it in full, unless
- * the question asks whether or an option starts with a yes or a no, or on
- * "your pick"; his own words for "you decide" or "none of those"; or what
- * he wants done with the question itself.
+ * plain: an option's whole name, as `wholly` has it; its place said as one,
+ * like "the second one" or "option two", when he heard them in order and no
+ * name has a word a place is said with, and "the last one" only once he's
+ * heard them all; for a part that takes several, a list of whole names; a
+ * plain yes or no to the option named Yes or No, or "Yes, …" or "No, …";
+ * yapd's pick, on a plain yes once he's heard it in full, only to a
+ * question that plainly asks which or names its options with "or", and
+ * with no option starting with a yes or a no, or on "your pick"; his own
+ * words for "you decide" or "none of those"; or what he wants done with
+ * the question itself.
  * `inFull` is whether he heard the part through to yapd's pick, and
  * `parts` how many it has. Undefined for anything else, which is the
  * model's to judge: part of a name, a word of it, words in another order,
- * a no or "just" or "instead" with a name. Words like "stop", "skip" or
+ * a no or "just" or "instead" with a name, a bare number or letter, or
+ * "all" or "all but" one. Words like "stop", "skip" or
  * "later" are never taken for an option named just so before he's heard
  * it in full, and words that let it go but start an option, like "leave
  * it" to "Leave the changelog", are the model's too once he has, while
