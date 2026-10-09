@@ -701,6 +701,11 @@ describe("Hands", () => {
         noted: Option.some("sent"),
       })
     }
+    // Undone in T3 Code since, it's said so, never that it's being worked on.
+    expect(await resent("rolled_back")).toEqual({
+      said: ["That went in, sir, but it's been rolled back since.", "That went to the Tezos migration, sir, but it's been rolled back since."],
+      noted: Option.some("sent"),
+    })
     // Still at it, it's being worked on, as it says.
     expect(await resent("running")).toEqual({ said: ["On it, sir.", "On it, sir: the Tezos migration."], noted: Option.some("sent") })
   })
@@ -739,6 +744,7 @@ describe("Hands", () => {
     for (const own of ["interrupted", "failed"]) {
       expect(await resent(own)).toEqual({ said: "That went in, sir, but the turn it started was cut short.", noted: Option.some(["sent", "now"]), dispatched: 2 })
     }
+    expect(await resent("rolled_back")).toEqual({ said: "That went in, sir, but it's been rolled back since.", noted: Option.some(["sent", "now"]), dispatched: 2 })
     expect(await resent("cancelled")).toEqual({
       said: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
       noted: Option.some(["abandoned", null]),

@@ -75,10 +75,10 @@ export type Waiting = "asked" | "finishing" | "held"
 
 /**
  * How the turn a message started or went into has ended: done with, cut
- * short, by a stop or something going wrong, or just ended, when which run
- * that turn was, and so how it ended, can't be told.
+ * short, by a stop or something going wrong, rolled back in T3 Code since, or
+ * just ended, when which run that turn was, and so how it ended, can't be told.
  */
-export type Ended = "finished" | "cut" | "ended"
+export type Ended = "finished" | "cut" | "rolled" | "ended"
 
 /** What a restart's look found never said what came of it. */
 export interface Reconciled {
@@ -275,7 +275,7 @@ const shown = ({ intent, run }: T3Actions.Found): Ledger.How =>
 const onHold = ({ run }: T3Actions.Found, how: Ledger.How) => how === "queued" && Option.exists(run, ({ held }) => held)
 
 /** How a run has ended, by its status, when it has. */
-const ends: Readonly<Partial<Record<string, Ended>>> = { completed: "finished", interrupted: "cut", failed: "cut", cancelled: "cut" }
+const ends: Readonly<Partial<Record<string, Ended>>> = { completed: "finished", interrupted: "cut", failed: "cut", cancelled: "cut", rolled_back: "rolled" }
 
 /**
  * How the turn a message went into at `at` has ended, if it has. One that
@@ -1116,6 +1116,8 @@ export const done = (
     const went = `That went ${Option.match(called, { onNone: () => "in", onSome: (name) => `to ${name}` })}${addressed(lines)}`
     // Not known to have finished, it isn't said to have been dealt with, nor cut short when it isn't known to have been.
     if (as.ended === "ended") return `${went}.`
+    // Its work was undone in T3 Code since, so it's neither dealt with nor still to be.
+    if (as.ended === "rolled") return `${went}, but it's been rolled back since.`
     return as.ended === "finished" ? `${went}, and it's been dealt with.` : `${went}, but the turn it ${how === "steered" ? "went into" : "started"} was cut short.`
   }
   if (waiting !== undefined) {
