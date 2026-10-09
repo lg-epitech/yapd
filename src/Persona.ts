@@ -148,8 +148,9 @@ export const layer = Layer.scoped(
     const ref = yield* SubscriptionRef.make(plain)
     const lines = Effect.map(SubscriptionRef.get(ref), owning(own))
     const persona = { lines, ...(yield* alternating(own, lines)) }
-    // All of his own, so whichever comes up plays at once.
-    const warm = (lines: Lines) => warmth.warm([...sayable(owning(own)(lines)), ...own.slice(1)])
+    // All of his own, so whichever comes up plays at once. Straight away, since they need no model, even if the rest can't be written.
+    yield* Effect.forkScoped(warmth.warm(own))
+    const warm = (lines: Lines) => warmth.warm(sayable(owning(own)(lines)).filter((line) => !own.includes(line)))
     if (Option.isNone(style)) {
       yield* Effect.forkScoped(warm(plain))
       return persona

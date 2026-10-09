@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Deferred, Effect, Layer, Logger, LogLevel, Option, Random, Schema } from "effect"
-import { Model } from "./Model.ts"
+import { ConfigProvider, Context, Deferred, Effect, Exit, Layer, Logger, LogLevel, Option, Random, Schema } from "effect"
+import { Model, ModelError } from "./Model.ts"
 import * as Persona from "./Persona.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
@@ -20,16 +20,17 @@ const jarvis: Persona.Lines = {
 
 /**
  * The lines yapd says in that style, from those kept in its database if any,
- * with a model that writes `written`, once they're ready, and the persona that
- * says them. Also how often the model was asked, what's kept afterwards, what
- * was rendered ahead and the warnings logged. `env` adds to the style, or with
- * `style: false` there's none.
+ * with a model that writes `written`, once they're ready or couldn't be
+ * written, and the persona that says them. Also how often the model was
+ * asked, what's kept afterwards, what was rendered ahead and the warnings
+ * logged. `env` adds to the style, or with `style: false` there's none. With
+ * `failing`, the model can't be reached.
  */
 const persona = (
   kept: Persona.Lines | undefined,
   written: Persona.Lines,
   env: Record<string, string> = {},
-  options = { style: true },
+  options: { style: boolean; failing?: boolean } = { style: true },
 ) =>
   Effect.runPromise(
     Effect.scoped(
@@ -40,18 +41,25 @@ const persona = (
         const warmed: Array<string> = []
         const warnings: Array<string> = []
         const ready = yield* Deferred.make<void>()
+        const mine = (env.YAPD_ON_IT ?? "").split("|").map((line) => line.trim())
         const built = yield* Layer.build(
           Persona.layer.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(Settings.Settings, settings),
                 Layer.succeed(Warmth, {
-                  warm: (lines) => Effect.zipRight(Effect.sync(() => warmed.push(...lines)), Deferred.complete(ready, Effect.void)),
+                  warm: (lines) =>
+                    Effect.sync(() => warmed.push(...lines)).pipe(
+                      // His own lines are rendered on their own, so it's the rest that tells they're ready.
+                      Effect.zipRight(lines.some((line) => !mine.includes(line)) ? Deferred.complete(ready, Effect.void) : Effect.void),
+                    ),
                 }),
                 Layer.succeed(Model, {
                   ask: <A, I>(schema: Schema.Schema<A, I>) => {
                     asked++
-                    return Schema.decodeUnknown(schema)(written).pipe(Effect.orDie)
+                    return options.failing
+                      ? Effect.fail(new ModelError({ cause: "The model can't be reached" }))
+                      : Schema.decodeUnknown(schema)(written).pipe(Effect.orDie)
                   },
                 }),
               ),
@@ -65,7 +73,9 @@ const persona = (
               Logger.replace(
                 Logger.defaultLogger,
                 Logger.make(({ logLevel, message }) => {
-                  if (logLevel === LogLevel.Warning) warnings.push([message].flat().join(" "))
+                  if (logLevel !== LogLevel.Warning) return
+                  warnings.push([message].flat().join(" "))
+                  if (warnings.at(-1)!.startsWith("Could not write my usual lines")) Deferred.unsafeDone(ready, Exit.void)
                 }),
               ),
             ),
@@ -162,6 +172,13 @@ describe("Persona", () => {
     expect(plainly.lines).toEqual({ ...Persona.plain, onIt: "Right away, sir." })
     expect(plainly.warmed).toEqual(expect.arrayContaining([...own, Persona.plain.queued]))
     expect(plainly.asked).toBe(0)
+  })
+
+  test("renders his own lines ahead even when the rest can't be written, since they don't need the model", async () => {
+    const result = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") }, { style: true, failing: true })
+    expect(result.asked).toBe(1)
+    expect(result.lines).toEqual({ ...Persona.plain, onIt: "Right away, sir." })
+    expect(result.warmed).toEqual(own)
   })
 
   test("without lines of his own, the written one is said every time", async () => {
