@@ -1954,6 +1954,42 @@ describe("Daemon", () => {
     expect(result.again).toEqual(["You missed this: yapd. The loader fix is ready."])
   })
 
+  test("thanks after a card shown for a follow-up said over a catch-up answer still leaves what he missed to be told", async () => {
+    const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader")
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, dictating, speak, played, show } = yield* assisted(
+          (situation) => {
+            if (situation.utterance.via === "reply") return Brain.decision({ act: "show", how: "thread", target: situation.desk.threads[0]?.handle ?? "" })
+            const told = situation.unheard.map(({ said }) => said).join(" ")
+            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+          },
+          { microphone: true, transcripts: ["Show me that.", "Thanks."] },
+          [loader],
+        )
+        yield* finish("a", "The loader fix is ready.")
+        yield* wait(2)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* dictating("What did I miss?")
+        yield* wait(3)
+        // Asked to see it over the catch-up answer, which that cuts off, and thanks comes once what's said of the card is over.
+        yield* speak
+        yield* wait(11)
+        const up = Option.map(yield* Stream.runHead(show.showing).pipe(Effect.map(Option.flatten)), ({ kind }) => kind)
+        yield* speak
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        const told = played.length
+        yield* dictating("What did I miss?")
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        return { up, played: played.slice(0, told), again: played.slice(told) }
+      }),
+    )
+    expect(result.up).toEqual(Option.some("thread"))
+    expect(result.played).toEqual(["yapd. The loader fix is ready.", "You missed this: yapd. The loader fix is ready.", "Fix the loader is idle."])
+    expect(result.again).toEqual(["You missed this: yapd. The loader fix is ready."])
+  })
+
   test.each([
     ["What did I miss?", "Nothing else.", "catch-up"],
     ["What's going on?", "Two things are running, sir.", undefined],
