@@ -88,8 +88,8 @@ type Outcome =
       readonly ear: Ear
       /** What yapd was saying as it stopped, the last of which may still come in after, as he carries on. */
       readonly last: string
-      /** When what he said last ended, by the clock, when that can't stand on its own, so what he goes on with straight after is the rest of it. */
-      readonly going?: number
+      /** Whether what he said last can't stand on its own, so all he goes on with before yapd has worked out what to say back is the rest of it. */
+      readonly open?: true
     }
 
 type Interrupted = Extract<Outcome, { readonly _tag: "Interrupted" }>
@@ -981,7 +981,7 @@ export const make = (options: {
             )
             return id
           })
-        const interrupted = (said: ReadonlyArray<Piece>, began = Number.POSITIVE_INFINITY, going?: number): Outcome => ({
+        const interrupted = (said: ReadonlyArray<Piece>, began = Number.POSITIVE_INFINITY, open = false): Outcome => ({
           _tag: "Interrupted",
           // Stopped for him only once it made out it was him, it goes back to where he began, as it would have stopped there otherwise.
           // Played to the end meanwhile, there's nothing to go back to.
@@ -991,7 +991,7 @@ export const make = (options: {
           said,
           ear,
           last: between(line.text, playback.duration, (stoppedAt ?? playback.duration) - reach, (stoppedAt ?? playback.duration) + reach),
-          ...(going === undefined ? {} : { going }),
+          ...(open ? { open } : {}),
         })
         /**
          * Takes what he went on with straight after something he said over the
@@ -1035,7 +1035,7 @@ export const make = (options: {
           return interrupted(
             taken.map((talk): Piece => ({ audio: talk.audio, heard: talk.told?.taken ?? "" })),
             from(taken),
-            after?.ended,
+            after !== undefined,
           )
         }
         /** How it ends once the microphone has gone and nothing's left to make out: not yet while it's still playing. */
@@ -1188,9 +1188,9 @@ export const make = (options: {
      * last of yapd's voice is still coming in, just after it stopped, is told
      * apart by what it was saying `last`, as over its first seconds: all of it
      * added when it's clearly theirs, only a stop or wait of theirs, and none
-     * when it's unclear. What they go on with straight after what they said,
-     * when that can't stand on its own and ended when it's `going`, is the
-     * rest of it, of which only a stop or wait of theirs is added.
+     * when it's unclear. When what they said can't stand on its own, `open`,
+     * all they go on with before the reply is the rest of it, of which only a
+     * stop or wait of theirs is added.
      */
     const settle = <R>(
       ear: Ear,
@@ -1199,13 +1199,12 @@ export const make = (options: {
       transcribe: (audio: Float32Array) => Effect.Effect<string>,
       respond: (heard: string, voiced: number) => Effect.Effect<R>,
       last = "",
-      going?: number,
+      open = false,
     ) =>
       Effect.gen(function* () {
         const until = (yield* Clock.currentTimeMillis) + rambling
         let heard = first
         let speech = voiced(audio)
-        let gone = going
         while (true) {
           const replying = unfinished(heard) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech)) : respond(heard, speech)
           if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, reply: yield* replying }
@@ -1220,8 +1219,6 @@ export const make = (options: {
           let held: R | undefined
           let more: Float32Array | undefined
           let fading = false
-          /** When what they went on with began, by the clock. */
-          let begun = 0
           waiting: while (true) {
             const signal = yield* (speaking || carryingOn)
               ? Queue.take(ear.signals).pipe(
@@ -1239,7 +1236,6 @@ export const make = (options: {
                 break
               case "Onset":
                 speaking = true
-                begun = yield* Clock.currentTimeMillis
                 break
               case "Abandoned":
                 speaking = false
@@ -1270,13 +1266,11 @@ export const make = (options: {
           yield* Fiber.interrupt(fiber)
           if (more === undefined) continue
           const said = yield* transcribe(more)
-          // Gone on with straight after what can't stand on its own, it's the rest of that. Begun as the last of its voice was still
-          // coming in, it may be just that, or some of it.
-          const rest = gone !== undefined && begun - gone <= goingOn
-          gone = rest ? yield* Clock.currentTimeMillis : undefined
-          const { whose: told, taken: after } = rest ? taking(said, last, "stop") : fading ? taking(said, last, "whole") : { whose: "his", taken: said }
+          // Gone on with after what can't stand on its own, it's the rest of that. Begun as the last of its voice was still coming in,
+          // it may be just that, or some of it.
+          const { whose: told, taken: after } = open ? taking(said, last, "stop") : fading ? taking(said, last, "whole") : { whose: "his", taken: said }
           if (told === "unclear") {
-            if (said !== "") yield* Effect.logInfo(`Let go of ${rest ? "what he went on with, as the rest of what can't stand on its own" : "what may be the last of its own voice"}: ${said}`)
+            if (said !== "") yield* Effect.logInfo(`Let go of ${open ? "what he went on with, as the rest of what can't stand on its own" : "what may be the last of its own voice"}: ${said}`)
             continue
           }
           if (told === "stop") yield* Effect.logInfo(`Heard him stop it over the last of its own voice, taking only that: ${after}`)
@@ -1356,7 +1350,7 @@ export const make = (options: {
     const heardOver = <R>(outcome: Interrupted, respond: (heard: string, voiced: number) => Effect.Effect<R>) =>
       Effect.gen(function* () {
         const first = yield* hear(outcome.said)
-        return first === "" ? undefined : yield* settle(outcome.ear, first, outcome.audio, transcribe, respond, outcome.last, outcome.going)
+        return first === "" ? undefined : yield* settle(outcome.ear, first, outcome.audio, transcribe, respond, outcome.last, outcome.open)
       })
 
     /**

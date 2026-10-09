@@ -2560,6 +2560,33 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ responded: "Stop. Tell it to open a PR.", sent: ["Stop. Tell it to open a PR."], replies: ["Stop. Tell it to open a PR."] })
   })
 
+  test("takes only the stop of what the user said over them, never adding what he goes on with before it has worked out what to do, however long he pauses first", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes half a second, and working out what to do two.
+        const helper = yield* overHelper([[0.9, "Wait for the tests to pass,"], [0.91, "then merge it."]], {
+          live: true,
+          delays: [0.5],
+          responding: 2,
+          intent: "dismiss",
+        })
+        yield* helper.wait(0.5)
+        // A look as he pauses after "Wait" stops it while he goes on.
+        yield* helper.talk(0.9, 12)
+        yield* helper.talk(0, 6)
+        yield* helper.talk(0.9, 13)
+        yield* helper.quiet
+        // Over a second after what he said ends.
+        yield* helper.talk(0, 34)
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "stop"], sent: [], replies: ["Wait."] })
+  })
+
   test("can't ask a question without its words, which tell its own voice getting into the microphone from an answer", () => {
     // @ts-expect-error Without them, any of its voice that got through would be taken for him.
     const unspoken: Conversation.Question = { audio: "/tmp/question.wav", answer: () => Effect.succeed(Option.none()) }
