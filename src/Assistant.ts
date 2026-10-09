@@ -7,6 +7,7 @@ import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal, Kept } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
+import type * as Questions from "./Questions.ts"
 import { enough, gist, type Line } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -42,7 +43,19 @@ export type Asks =
       readonly decisions: ReadonlyArray<string>
       readonly inFull: boolean
     }
-  | { readonly _tag: "Question"; readonly requestId: string; readonly questions: Extract<T3Actions.Request, { readonly _tag: "Question" }>["questions"] }
+  | {
+      readonly _tag: "Question"
+      readonly requestId: string
+      readonly questions: Extract<T3Actions.Request, { readonly _tag: "Question" }>["questions"]
+      /** How T3 Code takes the answer: straight to the agent, or as a message, which needs every part it needs. */
+      readonly mode: Extract<T3Actions.Request, { readonly _tag: "Question" }>["mode"]
+      /** The part being asked, from the first. */
+      readonly part: number
+      /** What he answered of the parts before it, by their ids, sent all together once the last is answered. */
+      readonly collected: Readonly<Record<string, Questions.Answer>>
+      /** Whether he heard the part being asked through to yapd's pick. */
+      readonly inFull: boolean
+    }
   /** The agent's own message ended on a question. */
   | { readonly _tag: "Agent" }
 
@@ -67,6 +80,8 @@ export interface Asking {
   readonly about: string
   /** How it's asked again, in other words, each once. */
   readonly rewordings: ReadonlyArray<string>
+  /** For a question: how each of its parts is put to him. */
+  readonly parts?: ReadonlyArray<Questions.Wording>
   /** What it's kept as in the journal, under the key it's said once under, ever. */
   readonly entry: Entry & { readonly key: string }
   /** The entry it was kept under already, and he never heard, as when yapd restarted while asking it: it's asked under that one. */

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Deferred, Effect, Layer, Option, Queue, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import type * as Assistant from "./Assistant.ts"
 import { Condenser } from "./Condenser.ts"
 import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
@@ -52,10 +53,13 @@ const failure = (runId: string, kind: string, message: string, resetAt?: string)
 
 const persona = Layer.succeed(Persona.Persona, { lines: Effect.succeed({ ...Persona.plain, address: "sir" }) })
 
-const condenser = Layer.succeed(Condenser, {
-  condense: () => Effect.die("not expected"),
-  ask: (request) => Effect.succeed({ spoken: request._tag === "Approval" ? "wants to push the branch" : "asks which database to use", risk: "low" as const }),
-})
+/** The model, which words an approval, and a part of a question whose words can't be said as they are, kept in `rewritten`. */
+const condenser = (rewritten: Array<string>) =>
+  Layer.succeed(Condenser, {
+    condense: () => Effect.die("not expected"),
+    ask: () => Effect.succeed({ spoken: "wants to push the branch", risk: "low" as const }),
+    question: (part) => Effect.sync(() => (rewritten.push(part.question), { spoken: "Which date helper should the fee table use?" })),
+  })
 
 /**
  * Notices on Rosie over a journal of its own, or one kept from before a
@@ -110,6 +114,10 @@ const notices = (
     const told: Array<string> = []
     /** What was asked as the one question open, as the assistant asks it: kept under its key, or the entry it was kept under before, and heard to the end. */
     const asked: Array<string> = []
+    /** And how it was worded, every part of it. */
+    const worded: Array<Assistant.Asking> = []
+    /** The parts of questions the model was asked to put in words that can be said. */
+    const rewritten: Array<string> = []
     const settled: Array<string> = []
     const finished: Array<{ readonly key: string; readonly message: string }> = []
     /** The threads whose turn no hook told of was overtaken, by starting again or going. */
@@ -135,11 +143,12 @@ const notices = (
           const kept = asking.kept === undefined ? yield* journal.claim(asking.entry) : Option.some(Option.some(asking.kept))
           if (Option.isNone(kept)) return
           asked.push(asking.asked)
+          worded.push(asking)
           yield* journal.markHeard(Option.toArray(kept.value), now)
         }),
       settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
       shortest: 60_000,
-    }).pipe(Effect.provide(Layer.merge(persona, condenser)))
+    }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     return {
@@ -148,6 +157,8 @@ const notices = (
       journal,
       told,
       asked,
+      worded,
+      rewritten,
       settled,
       finished,
       overtaken,
@@ -601,8 +612,48 @@ describe("Notices", () => {
         return { live: [...live.told, ...live.asked], restarted: [...restarted.told, ...restarted.asked] }
       }),
     )
-    const question = "Open Mina SSV2 Bug Tickets asks which database to use, sir. What shall I tell it?"
+    const question = "A question on Open Mina SSV2 Bug Tickets, sir: Which database?"
     expect(result).toEqual({ live: [question], restarted: [question] })
+  })
+
+  test("a question is asked in its own words with no model call when they can be said, and only a part that can't is rewritten", async () => {
+    const question = (header: string, asked: string, options: ReadonlyArray<string>) => ({ id: asked, question: asked, options: options.map((label) => ({ label, description: "" })), ...(header === "" ? {} : { header }) })
+    const tezos = thread("tezos", "Migrate Tezos Integration", { activeRunId: "run-1", pendingRuntimeRequest: { id: "r1", kind: "user_input", createdAt: minutes(0) } })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { activeRunId: "run-2", pendingRuntimeRequest: { id: "r2", kind: "user_input", createdAt: minutes(0) } })
+    const tricky = "Should it import `formatDate` from src/utils/date.ts or date-fns?"
+    const bounded = {
+      tezos: {
+        turnItems: [
+          {
+            type: "user_input_request",
+            status: "waiting",
+            requestId: "r1",
+            questions: [question("Colour", "Which colour should the test use?", ["Red", "Blue (Recommended)"]), question("Dates", tricky, ["The helper", "date-fns"])],
+          },
+        ],
+      },
+      mina: { turnItems: [{ type: "user_input_request", status: "waiting", requestId: "r2", questions: [question("", "Should I also file the rounding bug?", [])] }] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos, mina], bounded })
+        yield* made.hear({ _tag: "Asked", thread: tezos, request: tezos.pendingRuntimeRequest! }, { _tag: "Asked", thread: mina, request: mina.pendingRuntimeRequest! })
+        const [colour] = made.worded.filter(({ ref }) => ref.id === "tezos")
+        return {
+          asked: made.asked.toSorted(),
+          rewritten: made.rewritten,
+          asks: colour?.asks,
+          last: colour?.parts?.[1]?.last("Red"),
+        }
+      }),
+    )
+    expect(result.asked).toEqual([
+      "A question on Open Mina SSV2 Bug Tickets, sir: Should I also file the rounding bug?",
+      "Two questions on Migrate Tezos Integration, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue.",
+    ])
+    expect(result.rewritten).toEqual([tricky])
+    expect(result.last).toBe("Red, sir. And last: Which date helper should the fee table use? The helper or date-fns?")
+    expect(result.asks).toMatchObject({ _tag: "Question", requestId: "r1", mode: "live", part: 0, collected: {}, inFull: false })
   })
 
   test("a pending question is announced once after a restart, and not at all if it was already said", async () => {
@@ -637,7 +688,7 @@ describe("Notices", () => {
         return { first: [...first.told, ...first.asked], second: [...second.told, ...second.asked] }
       }),
     )
-    expect(result.first).toEqual(["Migrate Tezos Integration asks which database to use, sir. What shall I tell it?"])
+    expect(result.first).toEqual(["A question on Migrate Tezos Integration, sir: Which fee table?"])
     expect(result.second).toEqual([])
   })
 
@@ -663,7 +714,7 @@ describe("Notices", () => {
         return { first: first.asked, kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]), second: second.asked }
       }),
     )
-    expect(result.first).toEqual(["Migrate Tezos Integration asks which database to use, sir. What shall I tell it?"])
+    expect(result.first).toEqual(["A question on Migrate Tezos Integration, sir: Which fee table?"])
     expect(result.kept).toEqual([["ask:Rosie:r1", true]])
     expect(result.second).toEqual([])
   })

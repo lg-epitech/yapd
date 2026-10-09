@@ -6,6 +6,7 @@ import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal } from "./Journal.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
+import * as Questions from "./Questions.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import type * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
@@ -213,35 +214,34 @@ export const lines = {
   waiting: (called: string, what: string, said: Lines) => `${capital(called)} ${what}${addressed(said)}: it's waiting for you in T3 Code.`,
 }
 
-/** What a request is said to want when the model can't say. */
+/** What a request is said to want when it can't be read, or the model can't say. */
 const unworded = (kind: string) => (kind === "user_input" ? "has a question for you" : "wants your go-ahead on something")
 
-/** "A", "A or B", "A, B or C". */
-const either = (names: ReadonlyArray<string>) => (names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`)
-
-/** How many options a question can have to be asked by voice: more is too many to take in. */
-const choices = 4
-
-/** An option of a question as it's said, when it can be said as it is. */
-const option = (label: string) => {
-  const trimmed = label.trim().replace(/[.!?]+$/, "")
-  return trimmed !== "" && sayable.test(trimmed) && english(trimmed) && Brain.speakable(trimmed, { threads: [], away: [] }) === trimmed ? trimmed : undefined
-}
+/** What's said of what a thread waits on, kept in the journal under the key it's said once under, ever. */
+const noted = (ref: Threads.Ref, project: string, request: Pick<T3Actions.Request, "_tag" | "id">, at: number, spoken: string) => ({
+  at,
+  kind: "notice" as const,
+  machine: ref.machine,
+  thread: ref.id,
+  project,
+  said: spoken,
+  key: key.asked(ref.machine, request.id),
+  detail: { request: request._tag },
+})
 
 /**
- * What a thread waits on him for, worded from what the model made of it,
- * `what`, which follows the thread's name: asked, as an approval, which
- * needs "approve" when it's risky by the model's word or by all of what it
- * would run, or when that couldn't be read in full, and says so; or as a
- * question with one part and a few options that can be said, or none, when
- * any answer will do. Anything else is only told, as it's answered in T3 Code.
+ * What a thread waits on him to allow, worded from what the model made of
+ * it, `what`, which follows the thread's name: asked, needing "approve" when
+ * it's risky by the model's word or by all of what it would run, or when
+ * that couldn't be read in full, and saying so. It's never brought up of
+ * yapd's own accord, only read back when he brings it up himself.
  */
 export const asking = (
   input: {
     readonly ref: Threads.Ref
     readonly called: string
     readonly project: string
-    readonly request: Exclude<T3Actions.Request, { readonly _tag: "Secret" }>
+    readonly request: Extract<T3Actions.Request, { readonly _tag: "Approval" }>
     readonly what: string
     readonly risk: "low" | "high"
     readonly at: number
@@ -252,68 +252,81 @@ export const asking = (
   // It follows the thread's name, so it starts as the rest of a sentence.
   const what = input.what.replace(/^(Wants|Asks|Needs|Has) /, (word) => word.toLowerCase())
   const sir = addressed(said)
-  const entry = (spoken: string) => ({
-    at,
-    kind: "notice" as const,
-    machine: ref.machine,
-    thread: ref.id,
-    project,
-    said: spoken,
-    key: key.asked(ref.machine, request.id),
-    detail: { request: request._tag },
-  })
-  const tell = (): Assistant.Worded => {
-    const spoken = lines.waiting(called, what, said)
-    return { _tag: "Tell", spoken, entry: entry(spoken) }
-  }
-  if (request._tag === "Approval") {
-    // By all of what it would run, never what's cut short to be said, which can leave out the risky part, and that first, as a tool's name is.
-    const risky = risk === "high" || Brain.dangerous(request.whole === undefined ? request.what : `${request.whole}\n${request.what}`)
-    // Not shown in full, what it would run could be anything, so it's taken for risky too.
-    const unread = request.whole === undefined
-    const dangerous = risky || unread
-    const doing = /^wants to /i.test(what) ? what.replace(/^wants to /i, "") : undefined
-    const about = doing === undefined ? `give ${called} your go-ahead` : `allow ${called} to ${doing}`
-    const asked = risky
-      ? `${capital(called)} ${what}, which can't be undone, so say 'approve' if you want it${sir}.`
-      : unread
-        ? `${capital(called)} ${what}, but I couldn't read all of what it would run, so say 'approve' if you want it${sir}.`
-        : `${capital(called)} ${what}. Allow it${sir}?`
-    const rewordings = dangerous
-      ? [`Shall I still ${about}${sir}? Only 'approve' will do.`, `Do you still want me to ${about}${sir}? Say 'approve' if you do.`]
-      : [`Shall I still ${about}${sir}?`, `Do you still want me to ${about}${sir}?`]
-    return {
-      _tag: "Ask",
-      asking: {
-        ref,
-        asks: { _tag: "Approval", requestId: request.id, dangerous, decisions: request.decisions.map(({ decision }) => decision), inFull: false },
-        asked,
-        about,
-        rewordings,
-        entry: entry(asked),
-      },
-    }
-  }
-  const [only, ...more] = request.questions
-  if (only === undefined || more.length > 0 || only.options.length > choices) return tell()
-  const options = only.options.map(({ label }) => option(label))
-  if (options.some((label) => label === undefined)) return tell()
-  const picks = either(options.flatMap((label) => (label === undefined ? [] : [label])))
-  const asked = picks === "" ? `${capital(called)} ${what}${sir}. What shall I tell it?` : `${capital(called)} ${what}: ${picks}${sir}?`
-  const rewordings =
-    picks === ""
-      ? [`What shall I tell ${called}${sir}?`, `${capital(called)} is still waiting on your answer${sir}. What shall I tell it?`]
-      : [`What shall I tell ${called}${sir}: ${picks}?`, `${capital(called)} is still waiting on your answer${sir}: ${picks}?`]
+  // By all of what it would run, never what's cut short to be said, which can leave out the risky part, and that first, as a tool's name is.
+  const risky = risk === "high" || Brain.dangerous(request.whole === undefined ? request.what : `${request.whole}\n${request.what}`)
+  // Not shown in full, what it would run could be anything, so it's taken for risky too.
+  const unread = request.whole === undefined
+  const dangerous = risky || unread
+  const doing = /^wants to /i.test(what) ? what.replace(/^wants to /i, "") : undefined
+  const about = doing === undefined ? `give ${called} your go-ahead` : `allow ${called} to ${doing}`
+  const asked = risky
+    ? `${capital(called)} ${what}, which can't be undone, so say 'approve' if you want it${sir}.`
+    : unread
+      ? `${capital(called)} ${what}, but I couldn't read all of what it would run, so say 'approve' if you want it${sir}.`
+      : `${capital(called)} ${what}. Allow it${sir}?`
+  const rewordings = dangerous
+    ? [`Shall I still ${about}${sir}? Only 'approve' will do.`, `Do you still want me to ${about}${sir}? Say 'approve' if you do.`]
+    : [`Shall I still ${about}${sir}?`, `Do you still want me to ${about}${sir}?`]
   return {
     _tag: "Ask",
-    asking: { ref, asks: { _tag: "Question", requestId: request.id, questions: request.questions }, asked, about: `${called}'s question`, rewordings, entry: entry(asked) },
+    asking: {
+      ref,
+      asks: { _tag: "Approval", requestId: request.id, dangerous, decisions: request.decisions.map(({ decision }) => decision), inFull: false },
+      asked,
+      about,
+      rewordings,
+      entry: noted(ref, project, request, at, asked),
+    },
+  }
+}
+
+/**
+ * A thread's question, worded to be asked a part at a time, each part's
+ * question in the words `spoken` has for it, the agent's own or the model's,
+ * when they can be said. Only told when it can't be asked: too many parts or
+ * options to take in, or nothing of it that can be said.
+ */
+export const questioning = (
+  input: {
+    readonly ref: Threads.Ref
+    readonly called: string
+    readonly project: string
+    readonly request: Extract<T3Actions.Request, { readonly _tag: "Question" }>
+    readonly spoken: ReadonlyArray<Option.Option<string>>
+    readonly at: number
+  },
+  said: Lines,
+): Assistant.Worded => {
+  const { ref, called, project, request, at } = input
+  const parts = request.questions.map((question, index) => Questions.said(question, input.spoken[index] ?? Option.none()))
+  const worded = Questions.worded({ called, parts, lines: said })
+  const first = worded._tag === "Ask" ? worded.parts[0] : undefined
+  if (worded._tag === "Tell" || first === undefined) {
+    // When nothing of it can be said, only that it's there.
+    const spoken = Option.getOrElse(worded._tag === "Tell" ? worded.spoken : Option.none(), () => lines.waiting(called, unworded("user_input"), said))
+    return { _tag: "Tell", spoken, entry: noted(ref, project, request, at, spoken) }
+  }
+  return {
+    _tag: "Ask",
+    asking: {
+      ref,
+      asks: { _tag: "Question", requestId: request.id, questions: request.questions, mode: request.mode, part: 0, collected: {}, inFull: false },
+      asked: first.first,
+      about: `the question on ${called}`,
+      // Asked again as it is when it goes unanswered, in full each time.
+      rewordings: first.still,
+      parts: worded.parts,
+      entry: noted(ref, project, request, at, first.first),
+    },
   }
 }
 
 /**
  * Reads what a thread waits on him for and words it, to be asked, or only
- * told, like a secret, which is never answered by voice, or one the model
- * couldn't word, which isn't asked blind. None while the thread doesn't wait
+ * told, like a secret, which is never answered by voice, or one that can't
+ * be read, or an approval the model couldn't word, which isn't asked blind.
+ * A question is read in the agent's own words, and only a part that can't
+ * be said as it is goes to the model. None while the thread doesn't wait
  * on it, even behind something it asked since, or isn't on the desk.
  */
 export const composer = (threads: Threads.Threads["Type"]) =>
@@ -342,6 +355,25 @@ export const composer = (threads: Threads.Threads["Type"]) =>
         if (Option.isNone(request)) return Option.some(told(lines.waiting(called, unworded(kind), said), kind))
         const found = request.value
         if (found._tag === "Secret") return Option.some(told(lines.secret(called, found.label, said), found._tag))
+        if (found._tag === "Question") {
+          // Asked as the agent put it whenever that can be said; the rest, two at a time, by the model, or failing that by its header.
+          // One with more parts than are asked is only told so, in no part's words.
+          const wording = found.questions.length > Questions.most ? [] : found.questions
+          const spoken = yield* Effect.forEach(
+            wording,
+            (part) =>
+              Option.match(Questions.sayQuestion(part.question), {
+                onSome: (question) => Effect.succeed(Option.some(question)),
+                onNone: () =>
+                  condenser.question(part, called).pipe(
+                    Effect.map(({ spoken }) => Questions.sayQuestion(spoken)),
+                    Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not word a question", error), Option.none<string>())),
+                  ),
+              }),
+            { concurrency: 2 },
+          )
+          return Option.some(questioning({ ref, called, project, request: found, spoken, at: when }, said))
+        }
         return Option.some(
           yield* condenser.ask(found, called).pipe(
             Effect.map(({ spoken, risk }) =>

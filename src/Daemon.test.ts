@@ -94,7 +94,8 @@ const make = (says?: string, options: {
         condensed.push(turn)
         return { priority: options.trivialMessages?.includes(turn.message) ? "trivial" as const : "done" as const, spoken: turn.message }
       }),
-      ask: (request) => Effect.succeed({ spoken: request._tag === "Approval" ? `wants to ${request.what}` : "asks something", risk: "low" as const }),
+      ask: (request) => Effect.succeed({ spoken: `wants to ${request.what}`, risk: "low" as const }),
+      question: () => Effect.succeed({ spoken: "Which one should it use?" }),
     }),
     Layer.succeed(Voice, {
       render: (text, path) =>

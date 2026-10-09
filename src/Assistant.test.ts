@@ -342,12 +342,9 @@ const assistant = (
         Layer.mergeAll(
           Layer.succeed(Condenser, {
             condense: () => Effect.die("not expected"),
-            ask: (request) =>
-              Effect.succeed(
-                request._tag === "Approval"
-                  ? { spoken: `wants to ${request.what.replace(/^[\w.-]+: /, "run ")}`, risk: "low" as const }
-                  : { spoken: "asks which network to start with", risk: "low" as const },
-              ),
+            ask: (request) => Effect.succeed({ spoken: `wants to ${request.what.replace(/^[\w.-]+: /, "run ")}`, risk: "low" as const }),
+            // Only for a part of a question whose words can't be said as they are.
+            question: () => Effect.succeed({ spoken: "Which network should we start with?" }),
           }),
           Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines) }),
         ),
@@ -837,7 +834,7 @@ describe("Assistant", () => {
       }),
     )
     expect(told).toEqual({
-      spoken: ["Cloud deployment discovery asks which network to start with, sir: it's waiting for you in T3 Code."],
+      spoken: ["A question on Cloud deployment discovery, sir: Which network first? It has five options, so it's waiting for you in T3 Code."],
       dispatched: 0,
       unheard: [],
     })
@@ -1343,8 +1340,27 @@ describe("Assistant", () => {
         return { spoken: made.spoken(), dispatched: made.dispatched.map(({ type, requestId, answers }) => ({ type, requestId, answers })) }
       }),
     )
-    expect(result.spoken).toEqual(["Cloud deployment discovery asks which network to start with: Mainnet or Ghostnet, sir?", "Ghostnet it is, sir."])
+    expect(result.spoken).toEqual(["A question on Cloud deployment discovery, sir: Which network first? Mainnet or Ghostnet?", "Ghostnet it is, sir."])
     expect(result.dispatched).toEqual([{ type: "runtime-request.respond", requestId: "q1", answers: { "Which network first?": "Ghostnet" } }])
+  })
+
+  test("a question with a label in code, or with four parts, is still asked, never only told", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const part = (question: string, options: ReadonlyArray<{ readonly label: string; readonly description?: string }> = []) => ({ id: question, question, options })
+    const asking = async (questions: ReadonlyArray<ReturnType<typeof part>>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: [{ type: "user_input_request", status: "waiting", requestId: "q1", questions }] })
+          yield* asked(made, cloud)
+          return made.spoken()
+        }),
+      )
+    expect(await asking([part("Which date library should the fee table use?", [{ label: "`date-fns`" }, { label: "src/utils/date.ts", description: "Keep the helper we wrote." }])])).toEqual([
+      "A question on Cloud deployment discovery, sir: Which date library should the fee table use? date-fns or option two, keep the helper we wrote?",
+    ])
+    expect(await asking([part("Which network first?", [{ label: "Mainnet" }, { label: "Ghostnet" }]), part("Which fee table?"), part("Should I file the bugs?"), part("Anything else?")])).toEqual([
+      "Four questions on Cloud deployment discovery, sir. First: Which network first? Mainnet or Ghostnet?",
+    ])
   })
 
   test("'stop', 'skip', 'cancel' or 'enough' over a question lets it go, never picking an option it's a word of, which only its name in full picks", async () => {
@@ -1388,7 +1404,7 @@ describe("Assistant", () => {
         return { stopped, spoken: made.spoken(), answers: made.dispatched.map(({ answers }) => answers) }
       }),
     )
-    const asking = "Cloud deployment discovery asks which network to start with, sir. What shall I tell it?"
+    const asking = "A question on Cloud deployment discovery, sir: Should I also bump the version?"
     expect(result.stopped).toEqual({ dispatched: 0, open: false })
     expect(result.spoken).toEqual([asking, "I'll leave that one, sir.", asking, "On it, sir."])
     expect(result.answers).toEqual([{ bump: "No" }])
@@ -1521,7 +1537,7 @@ describe("Assistant", () => {
       }),
     )
     expect(result.spoken).toEqual([
-      "Cloud deployment discovery asks which network to start with, sir. What shall I tell it?",
+      "A question on Cloud deployment discovery, sir: What does the dialog show?",
       "I couldn't get your answer to it, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
       "That didn't go through, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
     ])
