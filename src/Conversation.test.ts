@@ -694,12 +694,22 @@ describe("Telling yapd's own voice from the user's", () => {
   })
 
   test("takes the words it says around its name for its own, with its name misheard as another word, or two of its words as two others", () => {
-    for (const heard of ["In Japan.", "In yacht.", "The Japan.", "Japan now."]) {
+    for (const heard of ["In Japan.", "In yacht.", "Japan, the."]) {
       expect([heard, whose(heard, "In yapd, the tests pass now")]).toEqual([heard, "echo"])
     }
     for (const heard of ["Of Erin yapped.", "Of her in yapped.", "Over in Rennie app tests.", "In Rennie app tests."]) {
       expect([heard, whose(heard, saying)]).toEqual([heard, "echo"])
     }
+  })
+
+  test("takes a word beside its words for its name misheard only when it sounds like it, never a word of his like \"Deploy\" in \"Deploy it.\"", () => {
+    for (const heard of ["Deploy it.", "Retry it.", "Fix it.", "Kill it.", "Is it done?"]) {
+      expect([heard, whose(heard, "the build is green. It wants to know whether to")]).toEqual([heard, "his"])
+    }
+    expect(whose("The other one.", "Over in rig, the migration is still running")).toBe("his")
+    expect(whose("Over in production.", saying)).toBe("his")
+    // As Whisper writes its name, said as it is.
+    expect(whose("Rick, it.", "the migration on rig, it wants")).toBe("echo")
   })
 
   test("takes what yapd was saying for its own voice, misheard or not, even with a word misheard as its voice stops getting in", () => {
@@ -2065,6 +2075,20 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       expect([said, result]).toEqual([said, { commands: ["play", "stop"], sent: [said], replies: [said] }])
     }
   }, 30_000)
+
+  test("stops for a word of his beside its words over them, and passes it on, rather than take it for its name misheard", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Deploy it."]], { live: true, spoken: "The build is green. It wants to know whether to deploy, sir." })
+        yield* helper.wait(1.8)
+        yield* helper.talk(0.9, 12)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "stop"], sent: ["Deploy it."], replies: ["Deploy it."] })
+  })
 
   test("passes on what the user says over them on either side of a pause, as he said it, like \"Don't... merge it yet.\"", async () => {
     const result = await overHelperScoped(

@@ -244,6 +244,44 @@ const alike = (heard: string, spoken: string) => {
   return shorter >= 4 && distance * 2 <= Math.max(first.length, second.length) && sound(first).length >= 3 && sound(first) === sound(second)
 }
 
+/** Letters as they sound, loosely, for telling a name: "c", "q" and "g" as "k", "j" as "y", and the voiced as the unvoiced. */
+const loose: Readonly<Record<string, string>> = { ...unvoiced, c: "k", q: "k", j: "y" }
+
+/** A word's consonants, as they sound, loosely, each once in a row, after its first letter, any vowel as "a": "Japan" is "ypn", like "yapd"'s "ypt". */
+const skeleton = (word: string) => {
+  const spelt = stem(word).replace(/ck/g, "k").replace(/ph/g, "f").replace(/x/g, "ks").replace(/'/g, "")
+  return `${spelt.charAt(0).replace(/[aeiou]/, "a")}${spelt.slice(1).replace(/[aeiouyhw]/g, "")}`
+    .replace(/[bdgvzcqj]/g, (letter) => loose[letter]!)
+    .replace(/(.)\1+/g, "$1")
+}
+
+/** How many letters the two have in common, in order. */
+const shared = (one: string, other: string) => {
+  let above = Array.from({ length: other.length + 1 }, () => 0)
+  for (const letter of one) {
+    const here = [0]
+    for (let column = 1; column <= other.length; column++) {
+      here[column] = letter === other[column - 1] ? above[column - 1]! + 1 : Math.max(above[column]!, here[column - 1]!)
+    }
+    above = here
+  }
+  return above[other.length]!
+}
+
+/**
+ * Whether `heard`, one word or two run together, may be how Whisper wrote a
+ * name of yapd's it doesn't know: like it, or starting the same, with all but
+ * one of its consonants, like "Japan" or "your app" for "yapd", "Rick" for
+ * "rig", but never "fix" for "green".
+ */
+const near = (heard: string, spoken: string) => {
+  if (alike(heard, spoken)) return true
+  if (common.has(heard) || negations.has(heard)) return false
+  const [one, other] = [skeleton(heard), skeleton(spoken)]
+  const same = shared(one, other)
+  return one.charAt(0) === other.charAt(0) && same >= 2 && same >= Math.max(one.length, other.length) - 1
+}
+
 /** Words as they're matched: with names, which Whisper hears wrong more than anything, but not the "sir" or the "um" around them. */
 const vocabulary = (text: string) =>
   text.toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").split(/\s+/).filter((word) => gist(word) !== "")
@@ -349,14 +387,15 @@ const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
     if (next !== undefined && after === 1) its.add(words.length - 1)
     return { its, telling }
   }
-  const named = (word: string | undefined) => word !== undefined && !common.has(word)
-  // All that's left, or, after two or more of its, the one word in place of its next: more than that may be his own.
-  const misheard = after <= 2 ? after : matches.reduce((count, match) => count + match.last - match.first + 1, 0) >= 2 ? 1 : 0
-  if (named(next) && first.first === 0 && misheard > 0) {
-    for (let at = last.last + 1; at <= last.last + misheard; at++) its.add(at)
+  const named = (word: string | undefined): word is string => word !== undefined && !common.has(word)
+  // All that's left, or, after two or more of its, the word or two in place of its next: more than that may be his own.
+  const misheard = after <= 2 || matches.reduce((count, match) => count + match.last - match.first + 1, 0) >= 2 ? Math.min(after, 2) : 0
+  const name = [misheard, 1].find((count) => count > 0 && count <= misheard && near(words.slice(last.last + 1, last.last + 1 + count).join(""), next ?? ""))
+  if (named(next) && first.first === 0 && name !== undefined) {
+    for (let at = last.last + 1; at <= last.last + name; at++) its.add(at)
     return { its, telling: true }
   }
-  if (named(previous) && first.first === 1 && after === 0) {
+  if (named(previous) && first.first === 1 && after === 0 && near(words[0]!, previous)) {
     its.add(0)
     return { its, telling: true }
   }
