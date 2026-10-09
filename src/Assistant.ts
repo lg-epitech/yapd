@@ -59,11 +59,16 @@ export type Asks =
   /** The agent's own message ended on a question. */
   | { readonly _tag: "Agent" }
 
-/** What a thread waits on him for that he heard asked, the thread, and when he first heard all of it, which only what he said after can answer. */
+/**
+ * What a thread waits on him for that he heard asked, the thread, and when he
+ * first heard all of it, which only what he said after can answer: for a
+ * question, all of the part he's got to, none yet once he's only answered
+ * the one before, so nothing he said before he heard a part answers it.
+ */
 interface Heard {
   readonly ref: Threads.Ref
   readonly asks: Exclude<Asks, { readonly _tag: "Agent" }>
-  readonly through: number
+  readonly through: number | undefined
 }
 
 /**
@@ -1637,9 +1642,9 @@ export const make = (options: {
         const answered: QuestionAsks = { ...asks, collected: { ...asks.collected, [question.id]: answer }, part: asks.part + 1, inFull: false }
         const next = from?.asking.parts?.[answered.part]
         if (next !== undefined) {
-          // Where he's got to, so a dictation, or the question brought back, picks up from there.
+          // Where he's got to, so a dictation, or the question brought back, picks up from there: a part he's yet to hear.
           const heard = known.get(asks.requestId)
-          if (heard !== undefined) known.set(asks.requestId, { ...heard, asks: answered })
+          if (heard !== undefined) known.set(asks.requestId, { ...heard, asks: answered, through: undefined })
           const ack = Questions.ack(open.wording?.part ?? Questions.said(question, Option.none()), answer)
           const words = answered.part === asks.questions.length - 1 ? next.last(ack) : next.next(ack)
           return yield* askingPart(open, from, answered, next, words, thought.utterance)
@@ -1690,8 +1695,8 @@ export const make = (options: {
         if (heard?._tag === "Question" && !hearing) {
           if (filled === undefined) return reply(said.cantTell, thought.subject)
           if (filled.asks.part >= filled.asks.questions.length) return yield* write(plan, thought, said, at, filled.asks)
-          // Where he's got to, so what's asked next picks up from there.
-          known.set(heard.requestId, { ...(known.get(heard.requestId) ?? { ref: target.ref, through: thought.utterance.at }), asks: filled.asks })
+          // Where he's got to, so what's asked next picks up from there: a part he's yet to hear.
+          known.set(heard.requestId, { ref: target.ref, asks: filled.asks, through: undefined })
         }
         const request = heard?.requestId ?? pending.id
         // Asked since he said this, it's the question open, his to answer now he's heard it: it isn't read back over itself.
@@ -1751,16 +1756,17 @@ export const make = (options: {
      * What a message for now goes as instead, to a thread waiting on a
      * question he's heard and it still waits on: its answer, since a message
      * steered into the turn meanwhile may sit unread, or end the question.
-     * Never for one T3 Code takes as a message itself, nor one he hasn't
-     * heard, which its own notice asks.
+     * Never for one T3 Code takes as a message itself, nor a part he hadn't
+     * heard all of by the time he said it, like the next one cut off, which
+     * is asked after.
      */
-    const answerFor = (plan: Brain.Plan) =>
+    const answerFor = (plan: Brain.Plan, utterance: Pick<Utterance, "at">) =>
       Effect.gen(function* () {
         const { decision, target } = plan
         if (Option.isNone(target) || when(decision.how) !== "now") return undefined
         const pending = target.value.thread.pendingRuntimeRequest
         const heard = pending === null ? undefined : known.get(pending.id)
-        if (heard?.asks._tag !== "Question" || heard.asks.mode !== "live" || !Threads.same(heard.ref, target.value.ref)) return undefined
+        if (heard?.asks._tag !== "Question" || heard.asks.mode !== "live" || !Threads.same(heard.ref, target.value.ref) || !heardBy(utterance, heard.through)) return undefined
         return (yield* still(heard.ref, heard.asks.requestId)) ? heard.asks : undefined
       })
 
@@ -1769,7 +1775,7 @@ export const make = (options: {
       const { decision, target } = plan
       switch (decision.act) {
         case "send":
-          return Effect.flatMap(answerFor(plan), (asks) => write(plan, thought, said, at, asks))
+          return Effect.flatMap(answerFor(plan, thought.utterance), (asks) => write(plan, thought, said, at, asks))
         case "stop":
         case "undo":
           return write(plan, thought, said, at)
@@ -2105,9 +2111,12 @@ export const make = (options: {
                         if (asking?.open.id !== open.id) return
                         asking.whole ??= now
                         const [ref] = open.candidates
-                        // From when he first heard all of it, which what he said before, however late it's handed on, can't answer.
+                        // From when he first heard all of it, which what he said before, however late it's handed on, can't answer: for a
+                        // thread's question, all of this part, since what he said before he heard it was about the part before, or nothing.
                         if (open.asks !== undefined && open.asks._tag !== "Agent" && ref !== undefined) {
-                          known.set(open.asks.requestId, { ref, asks: open.asks, through: known.get(open.asks.requestId)?.through ?? now })
+                          const was = known.get(open.asks.requestId)
+                          const same = was !== undefined && (was.asks._tag !== "Question" || (open.asks._tag === "Question" && was.asks.part === open.asks.part))
+                          known.set(open.asks.requestId, { ref, asks: open.asks, through: (same ? was.through : undefined) ?? now })
                         }
                       }),
                     ),

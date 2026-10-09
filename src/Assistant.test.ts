@@ -1477,6 +1477,48 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a part of a thread's question is answered only by what he said once he'd heard it: what he dictated before it was asked, or once it was cut off, never goes as its answer", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const last = "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?"
+    // He answers the first part in his own words, and dictates more before the second is asked.
+    const early = await run(
+      Effect.gen(function* () {
+        let decided = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Red, but only for the unit tests.", pending: "answers" })
+        const made = yield* assistant((situation) => decided(situation), undefined, { others: [cloud], items: card("q1", [colour, extras]) })
+        yield* asked(made, cloud)
+        const before = yield* TestClock.currentTimeMillis
+        yield* made.wait(2)
+        yield* made.answer("Red, but only for the unit tests.")
+        decided = (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Keep the old fixtures." })
+        yield* made.heard({ heard: "And tell it to keep the old fixtures.", via: "shortcut", at: before + 1000, voiced: 3, turns: 1 })
+        yield* made.flush
+        const between = answered(made.dispatched)
+        yield* made.answer("Just Alpha.")
+        return { between, answers: answered(made.dispatched) }
+      }),
+    )
+    expect(early.between).toEqual([])
+    expect(early.answers).toEqual([{ [colour.id]: "Red, but only for the unit tests.", [extras.id]: ["Alpha"] }])
+    // He answers the first part, and the second is cut off before he's heard it: a message goes as a message, and a reply reads it to him.
+    const cut = (decided: (situation: Brain.Situation) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(decided, undefined, { others: [cloud], items: card("q1", [colour, extras]), waiting: true })
+          yield* asked(made, cloud)
+          yield* made.play()
+          yield* made.answer("Red.")
+          yield* made.cut()
+          yield* made.dictate("Tell the cloud one to start with mainnet.")
+          return { spoken: made.spoken().slice(2), sent: made.dispatched.map(({ type, answers, text }) => (type === "runtime-request.respond" ? { answers } : { text })) }
+        }),
+      )
+    expect(await cut((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" }))).toEqual({
+      spoken: [expect.stringMatching(/^(On it|Right away|Very good)/), last],
+      sent: [{ text: "Start with mainnet." }],
+    })
+    expect(await cut((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Start with mainnet." }))).toEqual({ spoken: [last], sent: [] })
+  })
+
   test("a plain yes takes the option yapd said it would go with, but only once he heard that far; cut off, it's asked again in full", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
