@@ -4103,7 +4103,7 @@ describe("Assistant", () => {
     expect(await said("update")).toBe("The loader is fixed.")
   })
 
-  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation, or with 'it's on your screen' before it, however that's written", async () => {
+  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation, wherever it addresses him, or with 'it's on your screen' before or after it, however that's written", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const echoed = (echo: string) =>
       run(
@@ -4122,7 +4122,9 @@ describe("Assistant", () => {
       )
     // However the model writes it: in capitals, with other marks or spacing, a curly apostrophe, or addressing him.
     const screens = ["It's on your screen.", "IT'S ON YOUR SCREEN.", "It's on your screen!", "It\u2019s on your screen.", "it's  on your screen,", "It's on your screen, sir."]
-    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, ...screens.map((screen) => `${screen} ${choices}, sir?`)])
+    // Addressing him first, or not at all, or with the address going along with "it's on your screen" after it.
+    const addressed = [`Sir, ${choices}?`, `Sir, ${choices}, sir?`, `${choices}?`, `Sir, it's on your screen. ${choices}, sir?`, `${choices}, it's on your screen, sir?`]
+    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, ...screens.map((screen) => `${screen} ${choices}, sir?`), ...addressed])
       expect(await echoed(echo)).toBe("The loader is fixed.")
   })
 

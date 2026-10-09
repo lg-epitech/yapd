@@ -197,9 +197,6 @@ const between = "[^\\p{L}\\p{N}]+"
 /** How a question compares with another: the same words, whatever the punctuation. */
 const words = (text: string) => text.toLowerCase().replace(new RegExp(between, "gu"), " ").trim()
 
-/** Whether a question was asked before in the same words. */
-export const repeated = (question: string, before: ReadonlyArray<string>) => before.some((asked) => words(asked) === words(question))
-
 /**
  * A line without a phrase in it, wherever it is and however it's written, as
  * words compare: in any case, spacing or punctuation, like "IT’S ON YOUR
@@ -209,6 +206,15 @@ export const without = (line: string, phrase: string) => {
   const said = words(phrase)
   if (said === "") return line
   return line.replace(new RegExp(`(?<![\\p{L}\\p{N}])${said.split(" ").join(between)}(?![\\p{L}\\p{N}])[^\\p{L}\\p{N}\\s]*`, "giu"), "")
+}
+
+/**
+ * Whether a question was asked before in the same words, wherever it
+ * addresses him, if at all: "Sir, A or B?" asks "A or B, sir?" again.
+ */
+export const repeated = (question: string, before: ReadonlyArray<string>, lines: Pick<Lines, "address">) => {
+  const compared = (text: string) => words(without(text, lines.address))
+  return before.some((asked) => compared(asked) === compared(question))
 }
 
 /** The threads a question chooses between, as they're named in it: "A or B". */
@@ -221,9 +227,9 @@ export const choices = (candidates: ReadonlyArray<Threads.Listed>) => either(can
  */
 export const which = (candidates: ReadonlyArray<Threads.Listed>, lines: Lines, asked: ReadonlyArray<string>): string | undefined => {
   const first = capital(`${choices(candidates)}${addressed(lines)}?`)
-  if (!repeated(first, asked)) return first
+  if (!repeated(first, asked, lines)) return first
   const second = `Which one${addressed(lines)}: ${choices(candidates)}?`
-  return repeated(second, asked) ? undefined : second
+  return repeated(second, asked, lines) ? undefined : second
 }
 
 /** Whether it's yes or no to doing something, like "Stop the Tezos migration?", whose `about` says what, as "stop the Tezos migration". */
@@ -257,7 +263,7 @@ export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, de
 
 /** A yes or no question about doing something: "Stop the Tezos migration, sir?", or in other words when that was asked lately, or none. */
 export const confirming = (doing: string, lines: Lines, asked: ReadonlyArray<string>) =>
-  [`${capital(doing)}${addressed(lines)}?`, `Shall I ${doing}${addressed(lines)}?`].find((wording) => !repeated(wording, asked))
+  [`${capital(doing)}${addressed(lines)}?`, `Shall I ${doing}${addressed(lines)}?`].find((wording) => !repeated(wording, asked, lines))
 
 /**
  * A question asked once more, in other words than it was, and than any asked
@@ -270,12 +276,12 @@ export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about">,
       : open.kind === "project"
         ? [`Which project should ${open.about || "that"} go in${addressed(lines)}?`, `I still need a project for ${open.about || "that"}${addressed(lines)}.`]
         : [`Shall I still ${open.about}${addressed(lines)}?`, `Do you still want me to ${open.about}${addressed(lines)}?`]
-  return wordings.find((wording) => !repeated(wording, [open.asked, ...before]))
+  return wordings.find((wording) => !repeated(wording, [open.asked, ...before], lines))
 }
 
 /** A question as it is, unless it was asked in the last ten minutes: then in other words, or none. */
 export const unrepeated = (open: Pick<Assistant.Open, "kind" | "asked" | "about">, before: ReadonlyArray<string>, lines: Lines) =>
-  repeated(open.asked, before) ? reworded(open, before, lines) : open.asked
+  repeated(open.asked, before, lines) ? reworded(open, before, lines) : open.asked
 
 /** What's said when a question went unanswered twice, and is let go. */
 export const dropped = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines) =>
