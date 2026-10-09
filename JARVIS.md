@@ -52,3 +52,5 @@ Live on `dev` now: everything below. Cards for "show me" appear once the menu ba
 - With an older yapd on rig, a connection dropped while starting work there is said as "I can't reach rig" rather than "it may have started".
 - "Show Last Card" just after closing a card can come to nothing if the close reaches yapd after it: choose it again.
 - A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.
+- Catching up, if yapd has to ask "which one?" about your follow-up, the next "what did I miss?" may say "Nothing else." though an update is still unheard.
+- After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
