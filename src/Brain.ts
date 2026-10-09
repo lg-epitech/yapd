@@ -930,8 +930,8 @@ const afterApprove = / (?:thanks|thank you|cheers)$/
  * second", nor one asked, put off or held back, like "should I approve
  * it?", "approve it later" or "approve it if the tests pass", nor with
  * anything against it, like "wouldn't", "no" or "never", however the
- * apostrophe was written. A plain yes, "sure", "OK", "go ahead" or "do it"
- * never does.
+ * apostrophe was written. A plain yes, "sure", "OK", "go ahead", "do it" or
+ * "confirm" never does.
  */
 export const approving = (heard: string) => {
   const written = heard.replace(/[’‘`]/g, "'")
@@ -939,7 +939,7 @@ export const approving = (heard: string) => {
   const said = gist(written).replace(sessionly, " ").replace(/\s+/g, " ").trim().replace(beforeApprove, "").replace(afterApprove, "")
   if (/n't\b|\b(not|never|no|nope|dont|cant|wont|wouldnt|shouldnt|couldnt|didnt)\b/.test(said)) return false
   if (/\b(later|should|shall|can|could|would|will|maybe|if|once|when|after|before|until)\b/.test(said)) return false
-  return /^(?:i )?(?:approve[ds]?|confirm(?:ed)?)\b/.test(said) || /^(?:i )?allow(?: (?:it|that|this)\b.*)?$/.test(said)
+  return /^(?:i )?approve[ds]?\b/.test(said) || /^(?:i )?allow(?: (?:it|that|this)\b.*)?$/.test(said)
 }
 
 /** "Say that again", with nothing said lately. */
@@ -1147,7 +1147,7 @@ const ordinals: ReadonlyArray<readonly [RegExp, (count: number) => number]> = [
 /** Allowing what a thread waits on him for in so many words, which every one needs: a plain yes never does. */
 const allows: ReadonlySet<string> = new Set([
   "approve", "approve it", "approve that", "approved", "i approve", "yes approve", "yes approve it", "yes i approve", "allow", "allow it",
-  "allow that", "yes allow it", "confirm", "confirm it", "confirmed", "i confirm", "yes confirm",
+  "allow that", "yes allow it",
 ])
 
 /** Turning down what a thread waits on him for, however it's put. */

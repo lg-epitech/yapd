@@ -824,7 +824,7 @@ describe("Brain", () => {
     expect(risky.filter((text) => !Brain.dangerous(asked(text)))).toEqual([])
     expect(ordinary.filter((text) => Brain.dangerous(asked(text)))).toEqual([])
     // The words that allow any approval, and never one turned down in the same breath, nor a yes in other words.
-    expect(["Approve.", "Approve it.", "Approved.", "Yes, approve it.", "Allow it.", "Allow.", "Confirm.", "I approve."].filter((heard) => !Brain.approving(heard))).toEqual([])
+    expect(["Approve.", "Approve it.", "Approved.", "Yes, approve it.", "Allow it.", "Allow.", "I approve."].filter((heard) => !Brain.approving(heard))).toEqual([])
     expect(
       [
         "Yes.",
@@ -844,6 +844,12 @@ describe("Brain", () => {
         "I wouldn't approve that.",
         "Can't approve that.",
         "Approve? No.",
+        // Nor does "confirm", which isn't among the words that approve.
+        "Confirm.",
+        "Confirmed.",
+        "I confirm.",
+        "Yes, confirm.",
+        "Yes, confirm with the team after.",
       ].filter(Brain.approving),
     ).toEqual([])
     // Only when the approve is his answer itself, a plain yes or okay before it at most: never one in another clause, nor asked, nor put off.
