@@ -513,12 +513,13 @@ export const make = (options: {
       return kept.filter(question).flatMap((kept) => [...(kept.said === undefined ? [] : [kept.said, Show.offScreen(kept.said, lines)]), ...alone(kept)])
     })
 
-    /** Threads a search for his words turns up, to add to the desk. T3 Code answers in a few ms, so only what's there within the cap is taken. */
+    /**
+     * Threads a search for his words turns up, to add to the desk. T3 Code
+     * answers in a few ms, so only what each machine found within the cap is
+     * taken: rig, further off, being slow never costs what this one found.
+     */
     const searching = (heard: string) =>
-      Threads.searched(heard, threads.search).pipe(
-        Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []),
-        Effect.timeoutTo({ duration: cap, onTimeout: () => [], onSuccess: (found): ReadonlyArray<Threads.Ref> => found }),
-      )
+      Threads.searched(heard, (words) => threads.search(words, cap)).pipe(Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []))
 
     /** What the brain goes by, from memory: the desk, the journal and what's known of usage. */
     const situate = (utterance: Utterance, meant: Subject, lines: ReadonlyArray<Line>) =>

@@ -248,8 +248,8 @@ const assistant = (
     readonly persona?: Context.Tag.Service<Persona.Persona>
     /** The persona's line for going ahead, in place of the written one. */
     readonly onIt?: string
-    /** How the tunnel to rig stands, for rig to be followed too: its threads are never seen. */
-    readonly rig?: Effect.Effect<Tunnel.Status>
+    /** Rig, followed too: how its tunnel stands, and its threads, when they can be seen. */
+    readonly rig?: { readonly status: Effect.Effect<Tunnel.Status>; readonly threads?: ReadonlyArray<T3Live.Thread> }
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -279,18 +279,21 @@ const assistant = (
         changes: Stream.never,
       },
       actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer, given.reading, given.items))),
-      // Rig, whose threads can't be seen, as its tunnel says why.
-      others:
-        given.rig === undefined
-          ? []
-          : [
-              {
-                machine: "rig",
-                live: { view: Effect.succeed(Option.none()), changes: Stream.never },
-                actions: T3Actions.make(Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." }))),
-                status: given.rig,
-              },
-            ],
+      // Rig, whose threads can be seen when the test gives them, and which never answers then, nor can be reached otherwise.
+      others: Option.match(Option.fromNullable(given.rig), {
+        onNone: () => [],
+        onSome: (rig) => [
+          {
+            machine: "rig",
+            live: {
+              view: Effect.succeed(Option.map(Option.fromNullable(rig.threads), (threads) => ({ ...view, threads: new Map(threads.map((thread) => [thread.id, thread] as const)) }))),
+              changes: Stream.never,
+            },
+            actions: T3Actions.make(rig.threads === undefined ? Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." })) : Effect.never),
+            status: rig.status,
+          },
+        ],
+      }),
       journal,
       store,
     })
@@ -4805,6 +4808,34 @@ describe("Assistant", () => {
     expect(result.opened).toEqual([url, url])
   })
 
+  test("rig being slow to search never keeps what this machine's search found from the model", async () => {
+    // Settled three days ago, behind thirty newer threads, so only the search for "tezos" puts it in front of the model.
+    const settled = thread(tezos.id, tezos.title, "integration", { updatedAt: new Date(now - 3 * 24 * 60 * 60_000).toISOString() })
+    const newer = Array.from({ length: 30 }, (_, index) =>
+      thread(`e${index}-0000-4000-8000-${String(index).padStart(12, "0")}`, `Grades export part ${index + 1}`, "std", {
+        updatedAt: new Date(now - (index + 1) * 60_000).toISOString(),
+      }),
+    )
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, seen } = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration finished three days ago, sir." }),
+          undefined,
+          {
+            others: [settled, ...newer],
+            search: (query) => (query === "tezos" ? [tezos.id] : []),
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [thread("std", "Add the std fee test", "std")] },
+          },
+        )
+        const asked = yield* Effect.fork(dictate("My grades tezos."))
+        yield* TestClock.adjust("1 second")
+        yield* Fiber.join(asked)
+        return { shown: seen[0]?.desk.threads.some(({ ref, brief }) => ref.machine === "Rosie" && ref.id === tezos.id && !brief) }
+      }),
+    )
+    expect(result.shown).toBe(true)
+  })
+
   test("'can't reach rig' is said once each time it goes down, and only when something's asked of rig", async () => {
     let rig: Tunnel.Status = { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }
     const result = await run(
@@ -4815,7 +4846,7 @@ describe("Assistant", () => {
               ? Brain.decision({ act: "send", machine: "rig", text: "Add a test." })
               : Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing both request formats, sir." }),
           undefined,
-          { rig: Effect.sync(() => rig) },
+          { rig: { status: Effect.sync(() => rig) } },
         )
         yield* dictate("What's the Tezos one doing?")
         yield* dictate("Tell the std thread on rig to add a test.")
