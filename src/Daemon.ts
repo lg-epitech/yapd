@@ -969,7 +969,14 @@ export const make = (
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, saying, answer, ...(question.through === undefined ? {} : { through: question.through }) }).pipe(
+      const asked = {
+        audio: said.audio,
+        saying,
+        answer,
+        ...(question.through === undefined ? {} : { through: question.through }),
+        ...(question.terms === undefined ? {} : { terms: question.terms }),
+      }
+      const answered = yield* conversation.ask(asked).pipe(
         Effect.onError((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
         ),

@@ -2112,6 +2112,8 @@ export const make = (options: {
                       }),
                     ),
                     answer: listen(open),
+                    // What a thread's question offers, for what he says back to be heard listening for.
+                    ...(open.wording === undefined ? {} : { terms: open.wording.terms }),
                     unanswered: background(turn.withPermits(1)(unanswered(open.id)), utterance.turns),
                     // Broken off, he can't be taken to have heard it, so what he says next is something new, as before it was said.
                     unsaid: Effect.suspend(() => unsaid),
@@ -2418,7 +2420,11 @@ export const make = (options: {
           presses.set(press, { subject: about, arrived })
           yield* hold(`press:${press}`, at)
           const shortlist = yield* threads.desk(Option.none(), [], desk.vocabulary)
-          yield* drafts.prepare(shortlist.threads.map(({ thread }) => thread.title))
+          // What the open question offers first, since what he dictates may answer it.
+          yield* drafts.prepare(
+            shortlist.threads.map(({ thread }) => thread.title),
+            asking?.open.wording?.terms ?? [],
+          )
           yield* Effect.forkIn(threads.refreshUsage, scope)
         }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not get ready for the dictation", cause))),
       // Whatever it held is let go of: a press from before yapd was turned off holds nothing that's open now anyway.

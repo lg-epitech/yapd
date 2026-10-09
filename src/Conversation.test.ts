@@ -38,6 +38,8 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
     const late: Array<string> = []
     const saying: Array<string> = []
     const transcripts = [...said]
+    /** What Whisper was told to listen for, each time it heard something. */
+    const glossaries: Array<ReadonlyArray<string>> = []
     let dispatches = 0
     let replies = 0
     const layer = Layer.mergeAll(
@@ -57,7 +59,13 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       }),
       // Each frame holds the probability that it's speech.
       Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),
-      Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? "") }),
+      Layer.succeed(Transcriber, {
+        transcribe: (_, terms) =>
+          Effect.sync(() => {
+            glossaries.push(terms ?? [])
+            return transcripts.shift() ?? ""
+          }),
+      }),
       Layer.succeed(Responder.Responder, {
         respond: ({ heard: text }) =>
           Effect.sync(() => heard.push(text)).pipe(
@@ -96,15 +104,30 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       )
     const speak = frames(0.9, 10).pipe(Effect.zipRight(frames(0, defaults.silence)))
     const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
-    /** Asks a question instead, once the update has been given up on, which `answer` works out what's said to. */
-    const question = (answer: Conversation.Question["answer"]) =>
-      Fiber.interrupt(fiber).pipe(Effect.zipRight(Effect.fork(made.ask({ audio: "/tmp/question.wav", answer }))))
+    /** Asks a question instead, once the update has been given up on, which `answer` works out what's said to, with options called `terms`. */
+    const question = (answer: Conversation.Question["answer"], terms?: ReadonlyArray<string>) =>
+      Fiber.interrupt(fiber).pipe(Effect.zipRight(Effect.fork(made.ask({ audio: "/tmp/question.wav", answer, ...(terms === undefined ? {} : { terms }) }))))
     /** One that takes what's said after "yes" for an answer. */
     const ask = (answers: Array<string>) =>
       question((heard) =>
         Effect.succeed(heard.startsWith("Yes") ? Option.some(Effect.sync(() => void answers.push(heard))) : Option.none()),
       )
-    return { ...made, fiber, heard, sent, late, saying, speak, wait, question, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
+    return {
+      ...made,
+      fiber,
+      heard,
+      sent,
+      late,
+      saying,
+      speak,
+      wait,
+      question,
+      ask,
+      frames,
+      disconnect: Queue.shutdown(microphone),
+      replies: () => replies,
+      glossaries: () => glossaries,
+    }
   })
 
 /** Talks, then waits for the reply to be sent and read out. */
@@ -340,6 +363,20 @@ describe("Questions", () => {
       }),
     )
     expect(result).toEqual({ answered: true, answers: ["Yes, in yapd."] })
+  })
+
+  test("an answer to a question is heard with its options as Whisper's glossary", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const { question, speak, wait, glossaries } = yield* conversation(["The ghost net one."])
+        const asking = yield* question((heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))), ["Mainnet", "Ghostnet"])
+        yield* wait(10)
+        yield* speak
+        return { answered: yield* Fiber.join(asking), answers, glossaries: glossaries() }
+      }),
+    )
+    expect(result).toEqual({ answered: true, answers: ["The ghost net one."], glossaries: [["Mainnet", "Ghostnet"]] })
   })
 
   test("tells the answer how much of all the user said was speech, when they carry on after a pause", async () => {

@@ -115,6 +115,8 @@ export interface Question {
   readonly saying?: Effect.Effect<void>
   /** Run each time it plays to the end, before the wait for an answer: the user has heard all of it, whatever they say next. */
   readonly through?: Effect.Effect<void>
+  /** What its options are called, which what's said back is heard listening for, since Whisper mishears names it doesn't expect. */
+  readonly terms?: ReadonlyArray<string>
   /**
    * Works out what the user meant by what they said, and how many seconds of
    * it were speech, which may be called again with all of it if they carry
@@ -481,11 +483,12 @@ export const make = (options: {
         return result
       })
 
-    /** What the user said, logged once it's known it's fit to be, as what's said over an update may not be. */
-    const unlogged = (audio: Float32Array) =>
-      transcriber.transcribe(audio).pipe(Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))))
+    /** What the user said, logged once it's known it's fit to be, as what's said over an update may not be; listening for `terms`, when there are any. */
+    const unlogged = (audio: Float32Array, terms?: ReadonlyArray<string>) =>
+      transcriber.transcribe(audio, terms).pipe(Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))))
 
-    const transcribe = (audio: Float32Array) => unlogged(audio).pipe(Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))))
+    const transcribe = (audio: Float32Array, terms?: ReadonlyArray<string>) =>
+      unlogged(audio, terms).pipe(Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))))
 
     /**
      * Reads an update out and talks it over. `through` runs as soon as the
@@ -597,6 +600,8 @@ export const make = (options: {
     const ask = (question: Question) =>
       Effect.gen(function* () {
         const ear = hearing(yield* Effect.scope)
+        // Listening for its options, all of what he says back, however long he goes on.
+        const hear = (audio: Float32Array) => transcribe(audio, question.terms)
         let from = 0
         let missed = 0
         let begun = question.saying ?? Effect.void
@@ -608,8 +613,8 @@ export const make = (options: {
           })
           begun = Effect.void
           if (outcome._tag === "Finished") return false
-          const first = yield* transcribe(outcome.audio)
-          const answer = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, transcribe, question.answer)).reply
+          const first = yield* hear(outcome.audio)
+          const answer = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, hear, question.answer)).reply
           if (Option.isSome(answer)) {
             // They've answered, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(answer.value)

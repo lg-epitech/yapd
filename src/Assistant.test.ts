@@ -286,6 +286,8 @@ const assistant = (
     })
     const hands = Hands.make({ threads, ledger })
     const started: Array<Request> = []
+    /** What each dictation was to be heard listening for. */
+    const expected: Array<ReadonlyArray<string>> = []
     const said: Array<Notice> = []
     const seen: Array<Brain.Situation> = []
     const drafts = yield* Drafts.make({
@@ -317,6 +319,7 @@ const assistant = (
         },
       ],
       rules: Effect.succeed(Option.none()),
+      expect: (terms) => Effect.sync(() => void expected.push(terms)),
       ledger,
       find: (machine, id) => threads.find({ machine, id }),
       recent: Effect.succeed([]),
@@ -400,6 +403,7 @@ const assistant = (
       dispatched,
       ledger,
       started,
+      expected,
       seen,
       journal,
       spoken: () => said.map(({ spoken }) => spoken),
@@ -1732,6 +1736,23 @@ describe("Assistant", () => {
     ])
     expect(result.open).toEqual(Option.none())
     expect(result.dispatched).toBe(0)
+  })
+
+  test("a thread's question goes with its options, for what he says over it, or dictates, to be heard listening for them", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const library = { id: "library", question: "Which date library should we use?", options: [{ label: "`date-fns` (Recommended)" }, { label: "Day.js" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [library]) })
+        yield* asked(made, cloud)
+        // He presses the shortcut to answer it by dictation.
+        yield* made.prepare(1, 1)
+        yield* made.flush
+        return { terms: made.questions().at(-1)!.question!.terms, dictated: made.expected.at(-1)?.slice(0, 3) }
+      }),
+    )
+    expect(result.terms).toEqual(["date-fns", "Day.js"])
+    expect(result.dictated).toEqual(["date-fns", "Day.js", "Rosie"])
   })
 
   test("'stop', 'skip', 'cancel' or 'enough' over a question lets it go, never picking an option it's a word of, which only its name in full picks", async () => {

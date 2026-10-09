@@ -16,8 +16,12 @@ export class UnreadyError extends Data.TaggedError("UnreadyError")<{
 export class Transcriber extends Context.Tag("yapd/Transcriber")<
   Transcriber,
   {
-    /** 16 kHz mono in, words out. Empty when there were none. Whisper hears 30 seconds at most. */
-    readonly transcribe: (audio: Float32Array) => Effect.Effect<string, TranscribeError>
+    /**
+     * 16 kHz mono in, words out. Empty when there were none. Whisper hears 30
+     * seconds at most. With `terms`, like the options of a question he's
+     * answering, it listens for those.
+     */
+    readonly transcribe: (audio: Float32Array, terms?: ReadonlyArray<string>) => Effect.Effect<string, TranscribeError>
   }
 >() {}
 
@@ -172,7 +176,7 @@ const load = (repo: string, without: string) =>
     ))
   })
 
-/** `patience` includes waiting for the model to load. `expected` is the vocabulary to listen for, if any. */
+/** `patience` includes waiting for the model to load. `expected` is the vocabulary to listen for, if any, unless what's heard is given its own `terms`. */
 const transcribe =
   (
     model: Effect.Effect<AutomaticSpeechRecognitionPipeline, Hub.LoadError>,
@@ -180,9 +184,10 @@ const transcribe =
     patience: Duration.DurationInput,
     expected?: () => ReadonlyArray<string>,
   ) =>
-  (audio: Float32Array) =>
+  (audio: Float32Array, terms?: ReadonlyArray<string>) =>
     Effect.suspend(() => {
       let ready = false
+      const listening = terms !== undefined && terms.length > 0 ? () => terms : expected
       return model.pipe(
         Effect.tap(() =>
           Effect.sync(() => {
@@ -193,9 +198,9 @@ const transcribe =
           Effect.gen(function* () {
             // Anything that goes wrong with the glossary, like it coming back changed, and it's heard without.
             const told =
-              expected === undefined
+              listening === undefined
                 ? undefined
-                : yield* Effect.tryPromise(() => prompted(asr, audio, language, expected())).pipe(
+                : yield* Effect.tryPromise(() => prompted(asr, audio, language, listening())).pipe(
                     Effect.catchAll((error) => Effect.logWarning("Could not give Whisper its glossary", error).pipe(Effect.as(undefined))),
                   )
             if (told !== undefined) return told
@@ -238,7 +243,7 @@ export const WhisperTranscriber = Layer.scopedContext(
     let expected: ReadonlyArray<string> = []
     const interruption = transcribe(model, language, "30 seconds")
     return Context.make(Transcriber, {
-      transcribe: (audio) => interruption(audio).pipe(Effect.mapError(({ cause }) => new TranscribeError({ cause }))),
+      transcribe: (audio, terms) => interruption(audio, terms).pipe(Effect.mapError(({ cause }) => new TranscribeError({ cause }))),
     }).pipe(
       Context.add(DictationTranscriber, {
         // Long enough for the model to finish downloading, when they dictate as soon as yapd starts.
