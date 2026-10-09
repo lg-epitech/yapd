@@ -857,6 +857,8 @@ const overHelper = (
     readonly whole?: readonly [ReadonlyArray<number>, string]
     /** Whether the clock moves on as frames come in, as it does live, rather than only when told to. */
     readonly live?: boolean
+    /** How long working out what to do about what's said takes, in seconds, as a model call does: at once unless said. */
+    readonly responding?: number
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -966,7 +968,9 @@ const overHelper = (
       Layer.succeed(Responder.Responder, {
         respond: ({ heard }) => {
           const intent = options.intent ?? "send"
-          return Effect.succeed({ intent, spoken: intent === "send" ? "Okay." : "", message: intent === "send" ? heard : "" })
+          return Effect.sleep(`${options.responding ?? 0} seconds`).pipe(
+            Effect.as({ intent, spoken: intent === "send" ? "Okay." : "", message: intent === "send" ? heard : "" }),
+          )
         },
       }),
       Layer.succeed(Voice, { render: () => Effect.void }),
@@ -1432,6 +1436,29 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       }),
     )
     expect(result).toEqual({ stopped: ["play", "stop"], sent: ["Hold on."], replies: ["Hold on."] })
+  })
+
+  test("lets go of its voice still coming in just after it stops for him, rather than adding it to what he said while it works out what to do", async () => {
+    for (const [then, added] of [[[], ""], [[[0.91, 10]], " and merge it"]] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          // Working out what to do takes two seconds, as a model call does.
+          const helper = yield* overHelper([[0.9, "Tell it to open a PR."], [0.8, "the tests pass now"], [0.91, "and merge it"]], { responding: 2 })
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 10)
+          yield* helper.quiet
+          const stopped = [...helper.commands]
+          // The last of its voice, still coming in once it has stopped, and what he may carry on with straight after.
+          yield* helper.talk(0.8, 6)
+          for (const [value, count] of then) yield* helper.talk(value, count)
+          yield* helper.quiet
+          yield* helper.wait(3)
+          return { stopped, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      const said = `Tell it to open a PR.${added}`
+      expect([added, result]).toEqual([added, { stopped: ["play", "stop"], sent: [said], replies: [said] }])
+    }
   })
 
   test("doesn't stop for a word of its own cut off partway by a look at what's been said so far, like the \"stop\" of \"stopped\"", async () => {

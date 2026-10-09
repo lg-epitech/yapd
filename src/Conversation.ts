@@ -33,8 +33,10 @@ type Signal =
   /**
    * They've finished. Begun as yapd stopped talking, with the last of its
    * voice still coming in, `past` says whether he talked on past that.
+   * Begun just after, with the last of it still coming in, it's `fading`,
+   * since that's what it may be.
    */
-  | { readonly _tag: "Utterance"; readonly audio: Float32Array; readonly past?: boolean }
+  | { readonly _tag: "Utterance"; readonly audio: Float32Array; readonly past?: boolean; readonly fading?: boolean }
   /** All the user has said so far of what may be yapd's own voice, passed on as it goes, so he needn't finish before it's told apart. */
   | { readonly _tag: "Partial"; readonly audio: Float32Array }
   /**
@@ -104,6 +106,8 @@ type Outcome =
       readonly audio: Float32Array
       readonly said: ReadonlyArray<Piece>
       readonly ear: Ear
+      /** What yapd was saying as it stopped, the last of which may still come in after, as he carries on. */
+      readonly last: string
     }
 
 /** Something the user said over a line, kept in order while what came before it may yet turn out to be yapd's own voice. */
@@ -686,12 +690,15 @@ export const make = (options: {
         /** Whether yapd stopped talking during that, with the last of its voice still coming in after, and whether he has talked on past that. */
         let faded = false
         let past = false
+        /** Whether what's being said began once yapd had stopped, with the last of its voice still coming in. */
+        let fading = false
         const reset = () => {
           unsure = false
           since = undefined
           cleared = undefined
           faded = false
           past = false
+          fading = false
         }
         yield* Stream.fromQueue(microphone.value).pipe(
           Stream.mapEffect((frame) =>
@@ -722,13 +729,14 @@ export const make = (options: {
                   // As it starts, since by the time it's made out, yapd may well have learnt its own voice. Only
                   // while it talks: what begins as it stops is far likelier him answering than the last of its voice.
                   unsure = echo === "talking"
+                  fading = echo === "fading"
                   return { _tag: "Onset", echo: unsure } satisfies Signal
                 case "Speech":
                   since = unsure ? 0 : undefined
                   return event
                 case "Utterance": {
                   const start = cleared ?? 0
-                  const after = faded ? { past } : {}
+                  const after = { ...(faded ? { past } : {}), ...(fading ? { fading } : {}) }
                   reset()
                   return { _tag: "Utterance", audio: start === 0 ? event.audio : event.audio.subarray(start), ...after } satisfies Signal
                 }
@@ -943,6 +951,7 @@ export const make = (options: {
           audio: said.length === 1 ? said[0]!.audio : Endpointer.concat(said.map((piece) => piece.audio)),
           said,
           ear,
+          last: between(line.text, playback.duration, (stoppedAt ?? playback.duration) - reach, (stoppedAt ?? playback.duration) + reach),
         })
         /**
          * What he said over the line, once none of it is still being made out
@@ -1161,7 +1170,8 @@ export const make = (options: {
      * Works out a reply while still listening, so pausing mid-thought doesn't cut
      * the user off: if they carry on before it's ready, it starts again with all
      * they said, and how many seconds of all of it were speech. Nothing's done
-     * with a reply while they might still be talking.
+     * with a reply while they might still be talking. What yapd said `last`,
+     * still coming in just after it stopped, is never taken for them carrying on.
      */
     const settle = <R>(
       ear: Ear,
@@ -1169,6 +1179,7 @@ export const make = (options: {
       audio: Float32Array,
       transcribe: (audio: Float32Array) => Effect.Effect<string>,
       respond: (heard: string, voiced: number) => Effect.Effect<R>,
+      last = "",
     ) =>
       Effect.gen(function* () {
         const until = (yield* Clock.currentTimeMillis) + rambling
@@ -1187,6 +1198,7 @@ export const make = (options: {
           let carryingOn = false
           let held: R | undefined
           let more: Float32Array | undefined
+          let fading = false
           waiting: while (true) {
             const signal = yield* (speaking || carryingOn)
               ? Queue.take(ear.signals).pipe(
@@ -1216,6 +1228,7 @@ export const make = (options: {
                 break
               case "Utterance":
                 more = signal.audio
+                fading = signal.fading === true
                 break waiting
               case "Deaf":
                 speaking = false
@@ -1233,7 +1246,10 @@ export const make = (options: {
           }
           yield* Fiber.interrupt(fiber)
           if (more === undefined) continue
-          const after = yield* transcribe(more)
+          const said = yield* transcribe(more)
+          // Begun as the last of its voice was still coming in, that's left out of it, so it may be nothing at all.
+          const after = fading ? unechoed(said, last, "") : said
+          if (after !== said) yield* Effect.logInfo(`Left out its own voice, keeping: ${after}`)
           heard = together(heard, after)
           // Only what added words, since speech Whisper made nothing of isn't in what was heard.
           if (after !== "") speech += voiced(more)
@@ -1370,6 +1386,7 @@ export const make = (options: {
                     ),
                   ),
                 ),
+              outcome.last,
             )
             yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
             if (reply.intent !== "resume") {
@@ -1442,7 +1459,7 @@ export const make = (options: {
           confirmed = Effect.void
           if (outcome._tag === "Finished") return false
           const first = yield* hear(outcome.said)
-          const reply = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, transcribe, respond)).reply
+          const reply = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, transcribe, respond, outcome.last)).reply
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(reply.value)
