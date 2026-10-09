@@ -96,4 +96,22 @@ describe("Journal", () => {
     expect(found.after.map(({ at }) => at)).toEqual([30])
     expect(Option.map(found.last, ({ heardAt, project }) => ({ heardAt, project }))).toEqual(Option.some({ heardAt: 50, project: "std" }))
   })
+
+  test("what he heard can be noted as still to be heard, like a question put by to be asked again, and heard again after", async () => {
+    const found = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const asked = Option.getOrThrow(Option.flatten(yield* journal.claim({ at: 10, kind: "notice", key: "ask:rig:q9", said: "A question on Fee table checks on rig." })))
+        yield* journal.markHeard([asked], 20)
+        const heard = yield* journal.unheard(0, 12)
+        yield* journal.markUnheard([asked])
+        const putBy = yield* journal.unheard(0, 12)
+        yield* journal.markHeard([asked], 30)
+        return { heard, putBy, again: yield* journal.since(0) }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(found.heard).toEqual([])
+    expect(found.putBy.map(({ key, heardAt }) => ({ key, heardAt }))).toEqual([{ key: "ask:rig:q9", heardAt: undefined }])
+    expect(found.again.map(({ heardAt }) => heardAt)).toEqual([30])
+  })
 })

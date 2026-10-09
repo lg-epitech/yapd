@@ -7731,6 +7731,58 @@ describe("Assistant", () => {
     ).toEqual({ spoken: ["Approved, sir."], sent: [{ requestId: "r9", answers: undefined, decision: "accept" }], open: false })
   })
 
+  test("a rig question he heard, put by while rig is out of sight, is asked once rig is back, even by a yapd restarted meanwhile, under the entry it was kept under", async () => {
+    /** Heard to the end, then put by as `putting` has it while rig is out of sight; rig comes back, and a restarted yapd looks at what waits there too. */
+    const restarted = (putting: (made: Effect.Effect.Success<ReturnType<typeof assistant>>, question: Notice) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const made = yield* assistant(unasked, undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+            waiting: true,
+          })
+          const notices = yield* noticing(made)
+          yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+          yield* made.flush
+          const question = made.questions().at(-1)!
+          yield* question.stale
+          yield* made.play(question)
+          seen = false
+          yield* putting(made, question)
+          const [kept] = yield* made.journal.since(0, { kinds: ["notice"] })
+          // A yapd started afresh over the same journal, which asks what it finds waits on him.
+          const asks: Array<Assistant.Asking> = []
+          const fresh = yield* noticing({ ...made, ask: (asking) => Effect.sync(() => void asks.push(asking)), returned: () => Effect.void })
+          yield* made.wait(120)
+          seen = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+          yield* fresh.reconcileOn("rig")
+          yield* made.flush
+          return {
+            heard: kept?.heardAt !== undefined,
+            asked: made.questions().length,
+            open: Option.map(yield* made.open, ({ asked }) => asked),
+            restarted: asks.map(({ asks, kept: under }) => ({ requestId: asks.requestId, kept: under === kept?.id })),
+          }
+        }),
+      )
+    const here = "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    const after = { heard: false, asked: 2, open: Option.some(here), restarted: [{ requestId: "q9", kept: true }] }
+    // Answered, as the Daemon notes it heard once he's answered it.
+    expect(await restarted((made, question) => Effect.zipRight(made.answer("Red.", question), question.heard ?? Effect.void))).toEqual(after)
+    // Left unanswered, then out of sight as it comes up to be asked once more at its minute.
+    expect(
+      await restarted((made, question) =>
+        Effect.gen(function* () {
+          yield* made.unanswered(question)
+          yield* made.wait(61)
+          yield* made.questions().at(-1)!.stale
+        }),
+      ),
+    ).toEqual({ ...after, asked: 3 })
+  })
+
   test("an answer to a question given while T3 Code restarts on this Mac is never sent nor said to be dealt with: he's told why, and it's asked again once T3 Code is back", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(

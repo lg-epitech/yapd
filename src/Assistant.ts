@@ -593,6 +593,8 @@ export const make = (options: {
     const asked: Array<Queued> = []
     /** Questions about what a thread waited on him for that was dealt with in T3 Code, which a late answer does nothing to. */
     const gone = new Set<string>()
+    /** Questions put by while their machine's threads couldn't be seen, which his hearing or answering them then doesn't note as heard. */
+    const putBy = new Set<string>()
     /** What threads wait on him for that he's heard asked, by request, oldest first: answered by dictation, it's done as he says. */
     const known = new Map<string, Heard>()
 
@@ -845,6 +847,10 @@ export const make = (options: {
       Effect.gen(function* () {
         if (asking?.open.id !== open.id) return
         const { repeat, whole, from, said, due } = asking
+        // Put by till its machine's threads can be seen again, a thread's question is still to be heard, even by a yapd restarted
+        // meanwhile, which asks what waits on him that he hasn't heard, under the entry it was kept under.
+        const unheard = from?.kept !== undefined && open.kind === "question" && how === "dropped: out of sight" ? Option.flatten(from.kept) : Option.none<number>()
+        if (how === "dropped: out of sight" && open.kind === "question") putBy.add(open.id)
         if (from !== undefined && open.kind === "question") {
           // A thread's question still waits for him in T3 Code, so whatever took its place, even what made no sense, it's asked again
           // first thing after, from the part he'd got to, or when it was due to be anyway; the third time it's let go with a word.
@@ -868,6 +874,7 @@ export const make = (options: {
         asking = undefined
         version++
         if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
+        if (Option.isSome(unheard)) yield* journal.markUnheard([unheard.value])
         yield* Effect.logInfo(`Closed the question, ${how}: ${open.asked}`)
         yield* journal.write({
           at: yield* Clock.currentTimeMillis,
@@ -2572,8 +2579,10 @@ export const make = (options: {
             ...(open === undefined || request === undefined
               ? {}
               : {
-                  // Heard, or answered, its entry is noted as heard, however many times it took to ask it.
+                  // Heard, or answered, its entry is noted as heard, however many times it took to ask it: not once it's put by, since it's
+                  // still to be asked.
                   heard: Effect.gen(function* () {
+                    if (putBy.has(open.id)) return
                     const row = from?.kept === undefined ? Option.none() : Option.flatten(from.kept)
                     if (Option.isSome(row)) yield* journal.markHeard([row.value], yield* Clock.currentTimeMillis)
                   }),
