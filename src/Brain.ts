@@ -6,7 +6,7 @@ import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
 import { Model } from "./Model.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
-import { agreed, enough, gist, hallucinated, type Line } from "./Responder.ts"
+import { agreed, enough, gist, hallucinated, type Line, noted } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 
@@ -337,6 +337,17 @@ export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.
 /** "Say that again", with nothing said lately. */
 export const nothingSaid = (lines: Lines) => `I haven't said anything just now${addressed(lines)}.`
 
+/**
+ * Where what it found is, said after it when there's a machine it can't see,
+ * since it's only what's there: " here", or " on rig" with only rig's threads
+ * to be seen. Nothing with every machine seen, or with several of them.
+ */
+export const whereSeen = (desk: Threads.Desk) => {
+  if (desk.away.length === 0) return ""
+  const machines = [...new Set(desk.threads.map(({ ref }) => ref.machine))]
+  return desk.threads.every((listed) => listed.here) ? " here" : machines.length === 1 ? ` on ${machines[0]}` : ""
+}
+
 /** What each thread waits on the user for, for "who needs me". */
 export const needing = (desk: Threads.Desk, lines: Lines, now: number) => {
   const day = 24 * 60 * 60_000
@@ -358,10 +369,10 @@ export const needing = (desk: Threads.Desk, lines: Lines, now: number) => {
   const away = desk.away.map(({ reason }) => reason)
   // Seeing no threads at all, it can't say nothing needs him, only why it can't see.
   if (parts.length === 0 && desk.threads.length === 0 && away.length > 0) return away.join(" ")
-  // With a machine it can't see, nothing it can see needs him, which is only what's here: there may well be something there.
+  // With a machine it can't see, nothing it can see needs him, which is only what's on the one it can: there may well be something there.
   const said =
     parts.length === 0
-      ? `Nothing needs you${away.length > 0 ? " here" : ""} right now${addressed(lines)}.`
+      ? `Nothing needs you${whereSeen(desk)} right now${addressed(lines)}.`
       : parts.length === 1
         ? `${capital(parts[0]!)}${addressed(lines)}.`
         : `${capital(count(parts.length))} things${addressed(lines)}: ${both(parts)}.`
@@ -582,6 +593,21 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
 /** Whether there's a run to stop: one going, finishing, or waiting on him. */
 const stoppable = (listed: Threads.Listed) => ["running", "finishing", "approval", "question"].includes(listed.state)
 
+/** Whether what "it" means asks something of him, which taking it in, like "okay", may be his answer to. */
+const asksHim = (situation: Pick<Situation, "subject" | "desk">) => {
+  const { subject } = situation
+  switch (subject._tag) {
+    case "Nothing":
+      return false
+    case "Thread":
+      return Option.isSome(subject.asks)
+    case "Session":
+      return subject.update.needsYou
+    case "Answer":
+      return subject.question !== undefined || Option.exists(focused(situation), ({ state }) => state === "approval" || state === "question")
+  }
+}
+
 /**
  * What needs no model to work out, from what he said as a whole, never a
  * word in it: ignoring what nobody said, saying something again, who needs
@@ -670,6 +696,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   }
   // On its own, only ever yapd talking: a thread is stopped by saying so.
   if (enough.has(said)) return decision({ act: "dismiss" })
+  // Said back to what asked him nothing, like an answer, taking it in is all it is, as after an update.
+  if (noted.has(said) && utterance.via === "reply" && !asksHim(situation)) return decision({ act: "dismiss" })
   return undefined
 }
 
@@ -697,7 +725,9 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
 
   const machine = choice.machine.trim().toLowerCase()
   const away = desk.away.find((away) => away.machine.toLowerCase() === machine)
-  if (machine !== "" && away !== undefined && (Option.isNone(target) || target.value.ref.machine.toLowerCase() === machine)) {
+  // A write he meant for a machine it can't see is never sent to a thread elsewhere: that machine is most likely only down
+  // for now, and what he meant to tell a thread there would go to one on another machine.
+  if (machine !== "" && away !== undefined && (Option.isNone(target) || target.value.ref.machine.toLowerCase() === machine || writes.has(choice.act))) {
     return { _tag: "Say", spoken: `${away.reason.replace(/\.$/, "")}${addressed(lines)}.` }
   }
   const candidates = [
@@ -723,7 +753,7 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       },
     }
   }
-  // A machine that can't be seen may be what the work is about, so a thread he plainly meant isn't turned down for it.
+  // A machine that can't be seen may be what the work is about, so a thread he plainly meant is still read or shown for it.
   const trusted = away !== undefined && choice.sure === "high"
   if (machine !== "" && Option.isSome(target) && target.value.ref.machine.toLowerCase() !== machine && !trusted) {
     const there = desk.threads.filter(({ ref }) => ref.machine.toLowerCase() === machine)

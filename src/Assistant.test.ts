@@ -19,6 +19,7 @@ import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
+import type * as Tunnel from "./Tunnel.ts"
 import { Warmth } from "./Voice.ts"
 import { type Decision as Written, type Material, Writer } from "./Writer.ts"
 
@@ -247,6 +248,8 @@ const assistant = (
     readonly persona?: Context.Tag.Service<Persona.Persona>
     /** The persona's line for going ahead, in place of the written one. */
     readonly onIt?: string
+    /** Rig, followed too: how its tunnel stands, and its threads, when they can be seen. */
+    readonly rig?: { readonly status: Effect.Effect<Tunnel.Status>; readonly threads?: ReadonlyArray<T3Live.Thread> }
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -276,7 +279,21 @@ const assistant = (
         changes: Stream.never,
       },
       actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer, given.reading, given.items))),
-      others: [],
+      // Rig, whose threads can be seen when the test gives them, and which never answers then, nor can be reached otherwise.
+      others: Option.match(Option.fromNullable(given.rig), {
+        onNone: () => [],
+        onSome: (rig) => [
+          {
+            machine: "rig",
+            live: {
+              view: Effect.succeed(Option.map(Option.fromNullable(rig.threads), (threads) => ({ ...view, threads: new Map(threads.map((thread) => [thread.id, thread] as const)) }))),
+              changes: Stream.never,
+            },
+            actions: T3Actions.make(rig.threads === undefined ? Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." })) : Effect.never),
+            status: rig.status,
+          },
+        ],
+      }),
       journal,
       store,
     })
@@ -477,6 +494,14 @@ const assistant = (
         }),
       /** Nothing was said in the time the question leaves for an answer. */
       unanswered: (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush)),
+      /** Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on, unless it isn't taken. */
+      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer")) =>
+        Effect.gen(function* () {
+          const taken = yield* to!.followUp!(heard, voiced)
+          if (Option.isSome(taken)) yield* taken.value
+          yield* flush
+          return Option.isSome(taken)
+        }),
     }
   })
 
@@ -4789,5 +4814,218 @@ describe("Assistant", () => {
     )
     expect(result.said).toEqual(["Fix the loader: checks pass and it's waiting for a review, sir.", "Checks pass and it's waiting for a review, sir."])
     expect(result.opened).toEqual([url, url])
+  })
+
+  test("rig being slow to search never keeps what this machine's search found from the model", async () => {
+    // Settled three days ago, behind thirty newer threads, so only the search for "tezos" puts it in front of the model.
+    const settled = thread(tezos.id, tezos.title, "integration", { updatedAt: new Date(now - 3 * 24 * 60 * 60_000).toISOString() })
+    const newer = Array.from({ length: 30 }, (_, index) =>
+      thread(`e${index}-0000-4000-8000-${String(index).padStart(12, "0")}`, `Grades export part ${index + 1}`, "std", {
+        updatedAt: new Date(now - (index + 1) * 60_000).toISOString(),
+      }),
+    )
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, seen } = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration finished three days ago, sir." }),
+          undefined,
+          {
+            others: [settled, ...newer],
+            search: (query) => (query === "tezos" ? [tezos.id] : []),
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [thread("std", "Add the std fee test", "std")] },
+          },
+        )
+        const asked = yield* Effect.fork(dictate("My grades tezos."))
+        yield* TestClock.adjust("1 second")
+        yield* Fiber.join(asked)
+        return { shown: seen[0]?.desk.threads.some(({ ref, brief }) => ref.machine === "Rosie" && ref.id === tezos.id && !brief) }
+      }),
+    )
+    expect(result.shown).toBe(true)
+  })
+
+  test("looking for something by name answers from what this machine found while rig's search is stalled, after a few seconds at most", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken } = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.second)
+              ? Brain.decision({ act: "find", how: "threads", text: "tezos" })
+              : Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing both request formats, sir." }),
+          undefined,
+          // Rig's threads can be seen, but its T3 Code never answers a search.
+          { search: (query) => (query === "tezos" ? [tezos.id] : []), rig: { status: Effect.succeed({ _tag: "Up" }), threads: [thread("std", "Add the std fee test", "std")] } },
+        )
+        const asked = yield* Effect.fork(dictate("Where's the Tezos thing at?"))
+        for (let second = 0; second < 4; second++) {
+          yield* TestClock.adjust("1 second")
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)))
+        }
+        yield* Fiber.join(asked)
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["The Tezos migration is comparing both request formats, sir."])
+  })
+
+  test("finding nothing says it couldn't search rig's threads, rather than that there's nothing there", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken } = yield* assistant(() => Brain.decision({ act: "find", how: "threads", text: "fee table" }), undefined, {
+          rig: { status: Effect.succeed({ _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }) },
+        })
+        yield* dictate("Find the thread about the fee table.")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["I couldn't find anything like that, sir, but I couldn't search rig's threads just now."])
+  })
+
+  test("'can't reach rig' is said once each time it goes down, and only when something's asked of rig", async () => {
+    let rig: Tunnel.Status = { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, seen } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.includes("rig")
+              ? Brain.decision({ act: "send", machine: "rig", text: "Add a test." })
+              : Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing both request formats, sir." }),
+          undefined,
+          { rig: { status: Effect.sync(() => rig) } },
+        )
+        yield* dictate("What's the Tezos one doing?")
+        yield* dictate("Tell the std thread on rig to add a test.")
+        yield* dictate("Tell the std thread on rig to add a test, I said.")
+        // Back, then down again.
+        rig = { _tag: "Up" }
+        rig = { _tag: "Down", reason: "I can't reach rig right now.", outage: 2 }
+        yield* dictate("Tell the std thread on rig to add a test.")
+        return { spoken: spoken(), away: seen.map(({ desk }) => desk.away) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      // Nothing was asked of rig, so nothing is said of it.
+      "The Tezos migration is comparing both request formats, sir.",
+      "I can't reach rig right now, sir.",
+      "I still can't see rig's threads, sir.",
+      "I can't reach rig right now, sir.",
+    ])
+    // The model always knows why.
+    expect(result.away[0]).toEqual([{ machine: "rig", reason: "I can't reach rig right now." }])
+  })
+
+  test("an answer can be followed up as anything dictated is, with \"it\" the thread it was about, so a message goes there", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, notices, spoken, dispatched, seen, journal } = yield* assistant((situation) =>
+          Option.isSome(situation.second)
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "It's comparing fee tables: three of eight networks done, sir." })
+            : situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "look", target: handle(situation, tezos) })
+              : // What "it" is, as the model is shown it.
+                Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Use the Mina fee table.", how: "now" }),
+        )
+        yield* dictate("Get me the status of the Tezos one.")
+        const followed = yield* followUp("Tell it to use the Mina fee table.")
+        const asked = seen.at(-1)!
+        return {
+          followed,
+          spoken: spoken(),
+          // Only the answer is listened to after: not the line said while it's looked up, nor what came of the message.
+          listened: notices().filter(({ followUp }) => followUp !== undefined).map(({ spoken }) => spoken),
+          sent: dispatched.map(({ type, threadId, text }) => [type, threadId, text]),
+          via: asked.utterance.via,
+          lines: asked.lines,
+          replies: (yield* journal.since(0, { kinds: ["reply"] })).map(({ text }) => text),
+        }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    // The thread goes unnamed, since it's the one he was just told about.
+    expect(result.spoken).toEqual(["One moment.", "It's comparing fee tables: three of eight networks done, sir.", "On it, sir."])
+    expect(result.listened).toEqual(["It's comparing fee tables: three of eight networks done, sir."])
+    expect(result.sent).toEqual([["message.dispatch", tezos.id, "Use the Mina fee table."]])
+    expect(result.via).toBe("reply")
+    expect(result.lines).toEqual([{ speaker: "yapd", text: "It's comparing fee tables: three of eight networks done, sir." }])
+    expect(result.replies).toEqual(["Tell it to use the Mina fee table."])
+  })
+
+  test("thanks or stop said back to an answer ends it without the model, and noise or a change too faint to be his isn't taken", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, seen, dispatched, journal } = yield* assistant((situation) =>
+          situation.utterance.via === "shortcut" ? minaStatus(situation) : Brain.decision({ act: "send", target: handle(situation, mina), text: "Fix the rounding.", how: "now" }),
+        )
+        yield* dictate("What's the status on the Mina tickets?")
+        const before = seen.length
+        const taken: Array<boolean> = []
+        for (const heard of ["Thanks.", "Thank you, sir.", "Stop."]) taken.push(yield* followUp(heard))
+        const thanked = seen.length - before
+        // Whisper's words for a cough, and a message said under the breath.
+        const noise = [yield* followUp("Thank you.", 0.1), yield* followUp("Fix the rounding.", 0.2)]
+        const replies = yield* journal.since(0, { kinds: ["reply"] })
+        return {
+          taken,
+          thanked,
+          noise,
+          spoken: spoken(),
+          sent: dispatched.length,
+          replies: replies.map(({ text, detail }) => [text, (detail as { source: string; decision: Brain.Decision }).source, (detail as { decision: Brain.Decision }).decision.act]),
+        }
+      }),
+    )
+    expect(result.taken).toEqual([true, true, true])
+    expect(result.thanked).toBe(0)
+    expect(result.noise).toEqual([false, false])
+    expect(result.spoken).toEqual(["The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."])
+    expect(result.sent).toBe(0)
+    expect(result.replies).toEqual([
+      ["Thanks.", "fast", "dismiss"],
+      ["Thank you, sir.", "fast", "dismiss"],
+      ["Stop.", "fast", "dismiss"],
+    ])
+  })
+
+  test("a follow-up to an answer holds what's waiting to be read until what came of it is said", async () => {
+    let slow = false
+    let reads = 0
+    let spokenSoFar: () => ReadonlyArray<string> = () => []
+    /** What had been said each time what's waiting to be read was let go, in order. */
+    const letGo: Array<ReadonlyArray<string>> = []
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, until, wait } = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.second)
+              ? Brain.decision({ act: "look", target: handle(situation, tezos) })
+              : Brain.decision({
+                  act: "answer",
+                  target: handle(situation, tezos),
+                  spoken: situation.utterance.via === "reply" ? "It's waiting on the Mina fee table, sir." : "It's comparing fee tables: three of eight networks done, sir.",
+                }),
+          undefined,
+          {
+            // Reading the thread again for the follow-up is slow once the test says.
+            reading: Effect.suspend(() => (slow ? Effect.zipRight(Effect.sync(() => reads++), Effect.sleep("5 seconds")) : Effect.void)),
+            awaiting: Effect.succeed(Effect.sync(() => void letGo.push(spokenSoFar()))),
+          },
+        )
+        spokenSoFar = spoken
+        yield* dictate("Get me the status of the Tezos one.")
+        const before = letGo.length
+        slow = true
+        const following = yield* Effect.fork(followUp("What's it waiting on?"))
+        yield* until(() => reads > 0)
+        // Still reading the thread, so nothing waiting has been let go.
+        const reading = letGo.length - before
+        yield* wait(5)
+        const followed = yield* Fiber.join(following)
+        return { followed, reading, letGo: letGo.slice(before) }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    expect(result.reading).toBe(0)
+    expect(result.letGo).toHaveLength(1)
+    expect(result.letGo[0]!.at(-1)).toBe("It's waiting on the Mina fee table, sir.")
   })
 })

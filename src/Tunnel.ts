@@ -43,14 +43,32 @@ export const serve = (token: Option.Option<Redacted.Redacted>, locate: Effect.Ef
   }).pipe(Effect.map((answer) => JSON.stringify(answer)))
 
 /** Where a machine's T3 Code answers from here, and the token for it. */
-export interface Located {
-  readonly server: Server.Server
-  readonly token: Redacted.Redacted
-}
+export type Located = Server.Located
 
-/** What T3 Code is reached through, from wherever `locate` finds it, as T3Actions takes it. */
-export const transport = (locate: Effect.Effect<Located, Server.Trouble>): Effect.Effect<Server.Transport, Server.Trouble> =>
-  Effect.map(locate, ({ server, token }) => ({ api: Server.api(server, token), call: Server.call(server, token) }))
+/**
+ * What `machine`'s T3 Code is reached through, from wherever `locate` finds
+ * it, as T3Actions takes it. What goes wrong there is said as that machine's,
+ * like "rig's T3 Code isn't answering.", so it's never taken for this one's,
+ * with what it was said as kept as its cause, so the log still says what
+ * actually went wrong. The token is taken out of whatever comes back, should
+ * it ever be in it: the token is never to be logged or said.
+ */
+export const transport = (locate: Effect.Effect<Located, Server.Trouble>, machine: string): Effect.Effect<Server.Transport, Server.Trouble> =>
+  Effect.map(locate, ({ server, token }) => {
+    const api = Server.api(server, token)
+    const call = Server.call(server, token)
+    // Spreading an error leaves its cause behind, so that's always named.
+    const trouble = (error: Server.Trouble) =>
+      error.reason.startsWith("T3 Code ")
+        ? new Server.Trouble({ ...error, reason: `${machine}'s ${error.reason}`, cause: Server.harmless(error, token) })
+        : new Server.Trouble({ ...error, cause: Server.harmless(error.cause, token) })
+    const theirs = (error: Server.Trouble | Server.Refusal) =>
+      error._tag === "Refusal" ? new Server.Refusal({ tag: error.tag, message: Server.withheld(error.message, token) }) : trouble(error)
+    return {
+      api: (path, schema, init) => Effect.mapError(api(path, schema, init), trouble),
+      call: (method, payload, schema, patience) => Effect.mapError(call(method, payload, schema, patience), theirs),
+    }
+  })
 
 /**
  * Whether the machine's T3 Code can be reached now. While it can't, the reason
@@ -80,6 +98,12 @@ export interface Tunnel {
   /** The open connection's socket, for other yapd commands to that machine to go through. */
   readonly master: Remote.Master
 }
+
+/** The connection each tunnel holds open, by its machine's hostname in lowercase, for other yapd commands to go through. */
+export const masters =
+  (tunnels: ReadonlyMap<string, Pick<Tunnel, "master">>): Remote.Masters =>
+  (host) =>
+    tunnels.get(host)?.master ?? Effect.succeed(Option.none())
 
 /**
  * Runs SSH here. Opening the connection leaves it running in the background,

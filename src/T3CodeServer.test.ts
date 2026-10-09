@@ -140,6 +140,23 @@ describe("T3CodeServer WebSocket", () => {
     expect(unsent._tag === "Trouble" && unsent.sent === true).toBe(false)
   })
 
+  test("a request that went out keeps what went wrong with it as its cause", async () => {
+    // Takes the request in, then breaks.
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request, server) => (server.upgrade(request) ? undefined : new Response("no", { status: 400 })),
+      websocket: { message: (socket) => void socket.send(JSON.stringify({ _tag: "Defect", defect: "the orchestrator crashed" })) },
+    })
+    const call = Server.call({ origin: `http://127.0.0.1:${server.port}` }, Redacted.make("test-token"))
+    try {
+      const broke = await Effect.runPromise(Effect.flip(call("orchestration.dispatchCommand", {}, Schema.Unknown, "2 seconds")))
+      expect(broke).toMatchObject({ _tag: "Trouble", reason: "T3 Code answered in a way I don't understand.", sent: true })
+      expect(broke.cause).toBe(JSON.stringify({ _tag: "Defect", defect: "the orchestrator crashed" }))
+    } finally {
+      await server.stop(true)
+    }
+  })
+
   test("a request T3 Code took and never answered is given up on in its time even where nothing can cut it short, like a step once it's written", async () => {
     const server = Bun.serve({
       port: 0,

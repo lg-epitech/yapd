@@ -1,4 +1,4 @@
-import { Clock, Context, Duration, Effect, Either, Option, Schema } from "effect"
+import { Clock, Context, Duration, Effect, Either, Option, Schedule, Schema } from "effect"
 import * as Brain from "./Brain.ts"
 import * as Launcher from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
@@ -140,6 +140,13 @@ export class Hands extends Context.Tag("yapd/Hands")<
      * with new work T3 Code is still getting ready to wait for on its own.
      */
     readonly reconcile: Effect.Effect<Reconciled>
+    /**
+     * As `reconcile`, for only what was done on the machines `on` picks, by
+     * what the user calls them: each machine's is looked at once its own T3
+     * Code has caught up, so rig being down neither holds up this machine's
+     * nor has what went to rig taken for lost.
+     */
+    readonly reconcileOn: (on: (machine: string) => boolean) => Effect.Effect<Reconciled>
     /** A message a restart found didn't get there, while it's still to be offered: nothing came of it since, and it's recent enough to. */
     readonly still: (commandId: string) => Effect.Effect<Option.Option<Ledger.Row>>
   }
@@ -388,10 +395,44 @@ const settled = (row: Ledger.Row): Went => {
   }
 }
 
+/**
+ * Whose steps a restart looks at once `machine`'s T3 Code has caught up: its
+ * own, and, for this machine, `here`, those on machines yapd no longer
+ * follows too, which nothing else would look at. Never another followed
+ * machine's, which wait for it.
+ */
+export const whose = (machine: string, here: string, followed: ReadonlyArray<string>) => (on: string) =>
+  machine === here ? on === here || !followed.includes(on) : on === machine
+
+/** How long a restart waits for this machine's T3 Code, almost always up, to catch up, before leaving its steps to the next restart. */
+const catchingUp = "15 minutes"
+
+/**
+ * A restart's look at `machine`'s steps, as `whose` says, once its T3 Code
+ * has caught up, which `view` tells. Another machine's waits as long as yapd
+ * runs: one asleep or out of reach for a while is ordinary, and what went to
+ * it would otherwise go unlooked at till the next restart, too old by then to
+ * offer again. Waiting holds up nothing, as each machine's looks on its own.
+ * Whether it has is asked `every` so often.
+ */
+export const lookBack = (
+  hands: Pick<Hands["Type"], "reconcileOn">,
+  view: Effect.Effect<Option.Option<unknown>>,
+  machine: string,
+  here: string,
+  followed: ReadonlyArray<string>,
+  every: Duration.DurationInput = "1 second",
+) =>
+  Effect.gen(function* () {
+    const caughtUp = Effect.repeat(view, { schedule: Schedule.spaced(every), until: Option.isSome })
+    yield* machine === here ? Effect.timeoutFail(caughtUp, { duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }) : caughtUp
+    return yield* hands.reconcileOn(whose(machine, here, followed))
+  })
+
 /** Hands that reach threads through `threads` and write each step in `ledger` first. */
 export const make = (options: {
-  /** Where each thread is, and what reaches its machine. */
-  readonly threads: Pick<Threads.Threads["Type"], "find" | "actions">
+  /** Where each thread is, what reaches its machine, and why it can't when it can't. */
+  readonly threads: Pick<Threads.Threads["Type"], "find" | "actions" | "unseen">
   readonly ledger: Ledger.Ledger["Type"]
   /** When yapd started, in ms: what it did since is its own to settle, which a restart's look leaves alone. */
   readonly started?: number
@@ -408,7 +449,8 @@ export const make = (options: {
       const actions = threads.actions(to.machine)
       if (Option.isNone(actions)) return Either.left(`I can't reach the threads on ${to.machine} right now.`)
       const thread = yield* threads.find(to)
-      if (Option.isNone(thread)) return Either.left("I can't find it among your threads right now.")
+      // Its machine's threads can't be seen, like rig's while it can't be reached: that's why, and nothing goes anywhere else in its place.
+      if (Option.isNone(thread)) return Either.left(Option.getOrElse(yield* threads.unseen(to.machine), () => "I can't find it among your threads right now."))
       if (thread.value.archivedAt !== null) return Either.left("It's been archived.")
       if (thread.value.lineage?.relationshipToParent === "subagent") return Either.left("It's part of another thread, and takes nothing on its own.")
       return Either.right({ actions: actions.value, thread: thread.value })
@@ -970,6 +1012,72 @@ export const make = (options: {
       return Option.some<Ledger.Row>({ ...row, state: "failed", reason: ended.value })
     })
 
+  /** What a restart finds never said what came of it, on the machines `on` picks, as `reconcile` and `reconcileOn` say. */
+  const reconciling = (on: (machine: string) => boolean) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const open = yield* ledger.open(0)
+      const undelivered: Array<Ledger.Row> = []
+      const unconfirmed: Array<Ledger.Row> = []
+      const readying: Array<Ledger.Row> = []
+      // What this run did is settled, or offered again, as it happens.
+      for (const row of open.filter(({ at, machine }) => at < started && on(machine))) {
+        // Only from where it was, in case something came of it since it was read.
+        const from = [row.state]
+        const actions = threads.actions(row.machine)
+        if (Option.isNone(actions)) {
+          unconfirmed.push(...Option.toArray(yield* unverified(row, `I can't reach the threads on ${row.machine} right now.`)))
+          continue
+        }
+        // New work T3 Code is still getting ready is waited for on its own, so nothing else waits behind it, and what isn't is told now.
+        if (row.kind === "start") {
+          if (Option.exists(yield* threads.find(refOf(row)), (thread) => readies.includes(T3CodeLauncher.progress(thread)))) readying.push(row)
+          else unconfirmed.push(...Option.toArray(yield* launched(row)))
+          continue
+        }
+        const found = yield* Effect.either(landed(row, actions.value))
+        if (Either.isLeft(found)) {
+          unconfirmed.push(...Option.toArray(yield* unverified(row, `I couldn't look for it just now: ${after(plainly(found.left.reason))}`)))
+          continue
+        }
+        if (found.right) {
+          yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }), from })
+          yield* Effect.logInfo(`Found ${row.commandId} after restarting: it got there`)
+        } else if (row.kind !== "message") unconfirmed.push(...Option.toArray(yield* unverified(row, unconfirmable)))
+        // Too long ago to send again, it's only said.
+        else if (now - row.at > recent) unconfirmed.push(...Option.toArray(yield* unverified(row, tooLong)))
+        // Only while it's as it was read, since his no to sending it again, or a yes that never left yapd, only change its reason: that
+        // stands, so it's never offered again.
+        else {
+          const noted = yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", as: row })
+          if (noted === "noted") {
+            yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
+            undelivered.push(row)
+          }
+          // Not written, a yes to sending it again couldn't be kept track of either, so it's only said, with why.
+          if (noted === "unwritten") {
+            yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, and I couldn't note it down to offer it`)
+            unconfirmed.push({ ...row, reason: unnoted })
+          }
+        }
+      }
+      // A turn stopped to be told something in its place, or let go of its queue to be asked to carry on, that yapd restarted before
+      // telling: it's never told now, only said, once.
+      for (const row of yield* ledger.steps(now - followed, { kinds: ["stop", "undo"], states: ["sent"] })) {
+        const next = Option.flatMap(command(row.body), (body) => (body._tag === "Stop" || body._tag === "Resume" ? Option.fromNullable(body.then) : Option.none()))
+        if (row.at >= started || !on(row.machine) || row.reason !== null || Option.isNone(next)) continue
+        if (Option.isSome(yield* ledger.get(Ledger.ids(row.utterance, row.step + 1, true).commandId))) continue
+        yield* ledger.settle(row.commandId, "sent", { reason: unfollowed, from: ["sent"] })
+        yield* Effect.logWarning(`${row.commandId} went, but I restarted before I could do what came next: ${next.value}`)
+        unconfirmed.push({ ...row, reason: unfollowed })
+      }
+      return {
+        undelivered,
+        unconfirmed,
+        readying: Effect.map(Effect.forEach(readying, launched, { concurrency: "unbounded" }), (rows) => rows.flatMap(Option.toArray)),
+      } satisfies Reconciled
+    })
+
   return {
     run: (step, act, options = {}) => {
       const wanted = options.wanted ?? Effect.succeed(true)
@@ -1019,69 +1127,8 @@ export const make = (options: {
         const now = yield* Clock.currentTimeMillis
         return Option.filter(yield* ledger.get(commandId), (row) => Ledger.offerable(row) && now - row.at <= recent)
       }),
-    reconcile: Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis
-      const open = yield* ledger.open(0)
-      const undelivered: Array<Ledger.Row> = []
-      const unconfirmed: Array<Ledger.Row> = []
-      const readying: Array<Ledger.Row> = []
-      // What this run did is settled, or offered again, as it happens.
-      for (const row of open.filter(({ at }) => at < started)) {
-        // Only from where it was, in case something came of it since it was read.
-        const from = [row.state]
-        const actions = threads.actions(row.machine)
-        if (Option.isNone(actions)) {
-          unconfirmed.push(...Option.toArray(yield* unverified(row, `I can't reach the threads on ${row.machine} right now.`)))
-          continue
-        }
-        // New work T3 Code is still getting ready is waited for on its own, so nothing else waits behind it, and what isn't is told now.
-        if (row.kind === "start") {
-          if (Option.exists(yield* threads.find(refOf(row)), (thread) => readies.includes(T3CodeLauncher.progress(thread)))) readying.push(row)
-          else unconfirmed.push(...Option.toArray(yield* launched(row)))
-          continue
-        }
-        const found = yield* Effect.either(landed(row, actions.value))
-        if (Either.isLeft(found)) {
-          unconfirmed.push(...Option.toArray(yield* unverified(row, `I couldn't look for it just now: ${after(plainly(found.left.reason))}`)))
-          continue
-        }
-        if (found.right) {
-          yield* ledger.settle(row.commandId, "sent", { ...(row.how === null ? {} : { how: row.how }), from })
-          yield* Effect.logInfo(`Found ${row.commandId} after restarting: it got there`)
-        } else if (row.kind !== "message") unconfirmed.push(...Option.toArray(yield* unverified(row, unconfirmable)))
-        // Too long ago to send again, it's only said.
-        else if (now - row.at > recent) unconfirmed.push(...Option.toArray(yield* unverified(row, tooLong)))
-        // Only while it's as it was read, since his no to sending it again, or a yes that never left yapd, only change its reason: that
-        // stands, so it's never offered again.
-        else {
-          const noted = yield* ledger.settle(row.commandId, "unknown", { reason: "I couldn't find it in the thread after restarting.", as: row })
-          if (noted === "noted") {
-            yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, so I'll offer to send it again`)
-            undelivered.push(row)
-          }
-          // Not written, a yes to sending it again couldn't be kept track of either, so it's only said, with why.
-          if (noted === "unwritten") {
-            yield* Effect.logWarning(`${row.commandId} isn't in the thread after restarting, and I couldn't note it down to offer it`)
-            unconfirmed.push({ ...row, reason: unnoted })
-          }
-        }
-      }
-      // A turn stopped to be told something in its place, or let go of its queue to be asked to carry on, that yapd restarted before
-      // telling: it's never told now, only said, once.
-      for (const row of yield* ledger.steps(now - followed, { kinds: ["stop", "undo"], states: ["sent"] })) {
-        const next = Option.flatMap(command(row.body), (body) => (body._tag === "Stop" || body._tag === "Resume" ? Option.fromNullable(body.then) : Option.none()))
-        if (row.at >= started || row.reason !== null || Option.isNone(next)) continue
-        if (Option.isSome(yield* ledger.get(Ledger.ids(row.utterance, row.step + 1, true).commandId))) continue
-        yield* ledger.settle(row.commandId, "sent", { reason: unfollowed, from: ["sent"] })
-        yield* Effect.logWarning(`${row.commandId} went, but I restarted before I could do what came next: ${next.value}`)
-        unconfirmed.push({ ...row, reason: unfollowed })
-      }
-      return {
-        undelivered,
-        unconfirmed,
-        readying: Effect.map(Effect.forEach(readying, launched, { concurrency: "unbounded" }), (rows) => rows.flatMap(Option.toArray)),
-      } satisfies Reconciled
-    }),
+    reconcile: reconciling(() => true),
+    reconcileOn: reconciling,
   }
 }
 

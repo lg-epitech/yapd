@@ -25,6 +25,34 @@ export class Trouble extends Data.TaggedError("Trouble")<{
 /** T3 Code was asked and said no, in its own words. */
 export class Refusal extends Data.TaggedError("Refusal")<{ readonly tag: string; readonly message: string }> {}
 
+/** As a logger that writes JSON would print it, or nothing when it can't be. */
+const json = (value: unknown) => {
+  try {
+    return JSON.stringify(value) ?? ""
+  } catch {
+    return ""
+  }
+}
+
+/** Text with the token taken out, wherever it came from, for whatever's logged or said. */
+export const withheld = (text: string, token: Redacted.Redacted) => {
+  const secret = Redacted.value(token)
+  return secret === "" ? text : text.replaceAll(secret, "[token]")
+}
+
+/**
+ * What went wrong, to keep as a cause: as it is, unless the token is
+ * anywhere in it, as the log would print it, and then only how it reads with
+ * the token taken out. Nothing T3 Code or the socket says is known to carry
+ * it, but a cause is printed whole, however deep, so it's never left to chance.
+ */
+export const harmless = (cause: unknown, token: Redacted.Redacted): unknown => {
+  if (cause === undefined) return cause
+  const secret = Redacted.value(token)
+  const printed = [Bun.inspect(cause), json(cause)]
+  return secret !== "" && printed.some((text) => text.includes(secret)) ? withheld(printed[0]!, token) : cause
+}
+
 export const locate = Effect.tryPromise(() => Bun.file(runtimeState).text()).pipe(
   Effect.flatMap(Schema.decodeUnknown(Server)),
   Effect.mapError((cause) => new Trouble({ reason: "T3 Code isn't running.", cause })),
@@ -131,7 +159,10 @@ export const call =
       let sent = false
       return asked(server, token, method, payload, schema, patience, () => {
         sent = true
-      }).pipe(Effect.mapError((error) => (error._tag === "Trouble" && sent ? new Trouble({ ...error, sent: true }) : error)))
+      }).pipe(
+        // With its cause named, since spreading an error leaves its cause behind.
+        Effect.mapError((error) => (error._tag === "Trouble" && sent ? new Trouble({ ...error, cause: error.cause, sent: true }) : error)),
+      )
     })
 
 /** The request itself, saying through `went` once it has gone out. */
@@ -204,6 +235,12 @@ const asked = <A, I>(
     (request) => patiently(request, patience, () => new Trouble({ reason: "T3 Code is taking too long." })),
     Effect.flatMap((value) => Effect.mapError(Schema.decodeUnknown(schema)(value), misunderstood)),
   )
+
+/** Where a machine's T3 Code answers from here, and the token for it. */
+export interface Located {
+  readonly server: Server
+  readonly token: Redacted.Redacted
+}
 
 /** How T3 Code is reached, so tests can stand in for it. */
 export interface Transport {

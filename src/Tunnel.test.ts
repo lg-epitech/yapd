@@ -1,10 +1,10 @@
-import { describe, expect, test } from "bun:test"
-import { Clock, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Scope, TestClock, TestContext } from "effect"
+import { describe, expect, spyOn, test } from "bun:test"
+import { Clock, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Schema, Scope, TestClock, TestContext } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ProcessError } from "./Process.ts"
-import type { Exec } from "./Remote.ts"
+import * as Remote from "./Remote.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Server from "./T3CodeServer.ts"
 import * as Tunnel from "./Tunnel.ts"
@@ -69,7 +69,7 @@ const machine = (
   /** When each try to connect was made, by the test's clock. */
   const tries: Array<number> = []
   let tokens = 0
-  const exec: Exec = (command) =>
+  const exec: Remote.Exec = (command) =>
     Effect.gen(function* () {
       yield* settle
       const line = command.join(" ")
@@ -347,7 +347,7 @@ describe("Tunnel", () => {
           const tunnel = yield* open(rig)
           yield* flush
           const asked = rig.calls.length
-          const actions = T3Actions.make(Tunnel.transport(tunnel.locate))
+          const actions = T3Actions.make(Tunnel.transport(tunnel.locate, "rig"))
           const sending = yield* Effect.fork(Effect.flip(actions.run("thread-1", { _tag: "Send", text: "Merge it.", messageId: "message-1", how: "now" }, "yapd:u1:0")))
           yield* flush
           const exit = Option.getOrUndefined(yield* sending.poll)
@@ -357,6 +357,72 @@ describe("Tunnel", () => {
         }
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
+
+  test("what goes wrong with rig's T3 Code is said as rig's, never as this machine's", async () => {
+    const located = Effect.succeed<Tunnel.Located>({ server: { origin: "http://127.0.0.1:1" }, token: Redacted.make("token") })
+    // Rig's network stalls with the tunnel still up, then its T3 Code turns the token down.
+    const answers: Array<() => Promise<Response>> = [() => Promise.reject(new TypeError("fetch failed")), async () => new Response(null, { status: 401 })]
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(() => answers.shift()!(), { preconnect: globalThis.fetch.preconnect }))
+    try {
+      const reasons = await Effect.runPromise(
+        Effect.gen(function* () {
+          const { api } = yield* Tunnel.transport(located, "rig")
+          return yield* Effect.forEach([0, 1], () => Effect.map(Effect.flip(api("/api/test", Schema.Unknown)), ({ reason }) => reason))
+        }),
+      )
+      expect(reasons).toEqual(["rig's T3 Code isn't answering.", "rig's T3 Code turned down my token. It may have expired."])
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  test("what went wrong with rig's T3 Code is kept under how it's said, so the log still has it", async () => {
+    const located = Effect.succeed<Tunnel.Located>({ server: { origin: "http://127.0.0.1:1" }, token: Redacted.make("token") })
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(
+      Object.assign(() => Promise.reject(new TypeError("Unable to connect. Is the computer able to access the url?")), { preconnect: globalThis.fetch.preconnect }),
+    )
+    try {
+      const error = await Effect.runPromise(Effect.flip(Effect.flatMap(Tunnel.transport(located, "rig"), ({ api }) => api("/api/test", Schema.Unknown))))
+      expect(error.reason).toBe("rig's T3 Code isn't answering.")
+      expect(error.cause).toMatchObject({ _tag: "Trouble", reason: "T3 Code isn't answering." })
+      expect(String((error.cause as Error).cause)).toBe("TypeError: Unable to connect. Is the computer able to access the url?")
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  test("never puts the token in the log, nor in what's said, whatever rig's T3 Code or the way there says", async () => {
+    const secret = "t3-secret-token"
+    const located = Effect.succeed<Tunnel.Located>({ server: { origin: "http://127.0.0.1:1" }, token: Redacted.make(secret) })
+    // The worst a failing transport could do: quote the token, in its error and in what T3 Code says no with.
+    const answers: Array<() => Promise<Response>> = [
+      () => Promise.reject(new TypeError(`fetch failed with authorization: Bearer ${secret}`)),
+      async () => new Response(JSON.stringify({ token: secret }), { status: 200 }),
+    ]
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(() => answers.shift()!(), { preconnect: globalThis.fetch.preconnect }))
+    const lines: Array<string> = []
+    // As the log prints it, whole, causes and all.
+    const logger = Logger.make(({ message }) => void lines.push(Bun.inspect(message)))
+    try {
+      const reasons = await Effect.runPromise(
+        Effect.gen(function* () {
+          const { api } = yield* Tunnel.transport(located, "rig")
+          const failed = [
+            yield* Effect.flip(api("/api/test", Schema.Unknown)),
+            yield* Effect.flip(api("/api/test", Schema.Struct({ token: Schema.Number }))),
+          ]
+          for (const error of failed) yield* Effect.logWarning(`Couldn't read rig's thread: ${error.reason}`, error)
+          return failed.map(({ reason }) => reason)
+        }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+      )
+      expect(reasons).toEqual(["rig's T3 Code isn't answering.", "rig's T3 Code answered in a way I don't understand."])
+      expect(lines).toHaveLength(2)
+      expect(lines[0]).toContain("fetch failed with authorization: Bearer [token]")
+      expect(lines.some((line) => line.includes(secret))).toBe(false)
+    } finally {
+      fetch.mockRestore()
+    }
+  })
 
   test("right after yapd starts, says it's still connecting rather than wait for SSH", () =>
     Effect.runPromise(
@@ -461,5 +527,24 @@ describe("Tunnel", () => {
     expect(statuses).toEqual([{ _tag: "Down", reason: "yapd on rig answered in a way I don't understand.", outage: 1 }, { _tag: "Up" }])
     expect(lines.length).toBeGreaterThan(0)
     expect(lines.filter((line) => line.includes(secret))).toEqual([])
+  })
+
+  test("a reply to an update from rig goes through the connection its tunnel holds open, however its hook spells the machine", async () => {
+    const calls: Array<ReadonlyArray<string>> = []
+    const tunnels = new Map([["rig", { master: Effect.succeed(Option.some("/home/me/.yapd/ssh-rig.sock")) }]])
+    const relay = Remote.relay(
+      new Map([["rig", "me@rig.example.com"], ["box", "box"]]),
+      () => "rosie",
+      (command) => Effect.sync(() => void calls.push(command)).pipe(Effect.as("{}")),
+      Tunnel.masters(tunnels),
+    )
+    const from = (host: string) => ({ agent: "claude" as const, session: "s", cwd: "/home/me/std", message: "Done.", origin: { host } })
+    await Effect.runPromise(relay.send(from("Rig"), "Add a test."))
+    // A machine with no tunnel connects as it always did.
+    await Effect.runPromise(relay.send(from("box"), "Add a test."))
+    expect(calls.map((command) => command.slice(0, 3))).toEqual([
+      ["ssh", "-S", "/home/me/.yapd/ssh-rig.sock"],
+      ["ssh", "-o", "BatchMode=yes"],
+    ])
   })
 })

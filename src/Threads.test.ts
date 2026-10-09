@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { Clock, Effect, Option, Schema, Stream, TestClock, TestContext } from "effect"
+import { Clock, Effect, Fiber, Option, Schema, Stream, TestClock, TestContext } from "effect"
 import * as Brain from "./Brain.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import type * as T3Actions from "./T3Actions.ts"
+import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
+import type * as Tunnel from "./Tunnel.ts"
 
 const now = Date.parse("2026-10-08T22:00:00.000Z")
 
@@ -132,5 +134,128 @@ describe("Threads", () => {
       "In integration, review the process used for the Mina migration and begin work on the Tezos migration in the main checkout."
     expect(Threads.called("Migrate Tezos Integration", long, "integration", at, now)).toBe("Migrate Tezos Integration")
     expect(Threads.called("Migrate Tezos Integration", "the Tezos migration", "integration", at, now)).toBe("the Tezos migration")
+  })
+})
+
+describe("Threads on several machines", () => {
+  /** What a machine's T3 Code is asked, by which machine, and what it answers a search with. */
+  const machine = (name: string, asked: Array<string>, found: Effect.Effect<ReadonlyArray<{ threadId: string; snippet: string }>, T3CodeServer.Trouble> = Effect.succeed([])) =>
+    ({
+      detail: (threadId: string) => Effect.sync(() => void asked.push(`${name}: detail ${threadId}`)).pipe(Effect.as({ messages: [], runs: [], request: Option.none(), plan: Option.none() })),
+      search: (query: string) => Effect.zipRight(Effect.sync(() => void asked.push(`${name}: search ${query}`)), found),
+    }) as unknown as T3Actions.Actions
+
+  const live = (view: Option.Option<T3Live.View>): T3Live.T3Live["Type"] => ({ view: Effect.succeed(view), changes: Stream.never })
+
+  const make = (rig: { readonly view: Option.Option<T3Live.View>; readonly status: Tunnel.Status; readonly found?: Effect.Effect<ReadonlyArray<{ threadId: string; snippet: string }>, T3CodeServer.Trouble> }, asked: Array<string>) =>
+    Effect.gen(function* () {
+      const store = yield* Store.make(":memory:")
+      return yield* Threads.make({
+        machine: "Rosie",
+        live: live(Option.some(viewing(thread("tests", "Fix the flaky tests", "2026-10-08T21:00:00.000Z")))),
+        actions: Option.some(machine("Rosie", asked, Effect.succeed([{ threadId: "tests", snippet: "the std tests" }]))),
+        others: [{ machine: "rig", live: live(rig.view), actions: machine("rig", asked, rig.found), status: Effect.succeed(rig.status) }],
+        journal: Journal.fromStore(store),
+        store,
+      })
+    })
+
+  test("ranks rig's threads in with this machine's, by its machine, and reads one from the machine it's on", async () => {
+    const asked: Array<string> = []
+    // The same id on both machines, as nothing stops it being: only its machine tells them apart.
+    const running = thread("tests", "Add the std fee test", "2026-10-08T20:00:00.000Z", { activeRunId: "run-1" })
+    const seen = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const threads = yield* make({ view: Option.some(viewing(running)), status: { _tag: "Up" } }, asked)
+      const desk = yield* threads.desk(Option.none(), [], 30)
+      yield* threads.detail({ machine: "rig", id: "tests" })
+      return {
+        desk: desk.threads.map(({ handle, ref, here, state }) => ({ handle, ref, here, state })),
+        away: desk.away,
+        found: Option.map(yield* threads.find({ machine: "rig", id: "tests" }), ({ title }) => title),
+        actions: Option.isSome(threads.actions("rig")),
+      }
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    // What's running on rig matters more than what's idle here.
+    expect(seen.desk).toEqual([
+      { handle: "t1", ref: { machine: "rig", id: "tests" }, here: false, state: "running" },
+      { handle: "t2", ref: { machine: "Rosie", id: "tests" }, here: true, state: "idle" },
+    ])
+    expect(seen.away).toEqual([])
+    expect(seen.found).toEqual(Option.some("Add the std fee test"))
+    expect(seen.actions).toBe(true)
+    expect(asked).toEqual(["rig: detail tests"])
+  })
+
+  test("lists rig as away with why while it can't be reached, without keeping this machine's threads from being seen or searched", async () => {
+    const asked: Array<string> = []
+    const seen = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const threads = yield* make({ view: Option.none(), status: { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 } }, asked)
+      const desk = yield* threads.desk(Option.none(), [], 30)
+      return {
+        threads: desk.threads.map(({ ref }) => ref),
+        away: desk.away,
+        unseen: yield* threads.unseen("rig"),
+        search: yield* threads.search("std tests"),
+      }
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(seen.threads).toEqual([{ machine: "Rosie", id: "tests" }])
+    expect(seen.away).toEqual([{ machine: "rig", reason: "I can't reach rig right now." }])
+    expect(seen.unseen).toEqual(Option.some("I can't reach rig right now."))
+    expect(seen.search).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
+    // Down, rig isn't even asked.
+    expect(asked).toEqual(["Rosie: search std tests"])
+  })
+
+  test("a search leaves out a machine that hasn't answered in time, keeping what the others found", async () => {
+    const asked: Array<string> = []
+    const found = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const threads = yield* make({ view: Option.some(viewing()), status: { _tag: "Up" }, found: Effect.never }, asked)
+      const searching = yield* Effect.fork(threads.search("std tests", "100 millis"))
+      yield* TestClock.adjust("100 millis")
+      return yield* Fiber.join(searching)
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
+    expect(asked.toSorted()).toEqual(["Rosie: search std tests", "rig: search std tests"])
+  })
+
+  test("a search gives rig a few seconds at most, however long T3 Code there is given, and says it left rig out", async () => {
+    const found = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const threads = yield* make({ view: Option.some(viewing()), status: { _tag: "Up" }, found: Effect.never }, [])
+      const searching = yield* Effect.fork(threads.search("std tests"))
+      yield* TestClock.adjust("3 seconds")
+      return yield* Fiber.join(searching)
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
+  })
+
+  test("a search names rig as left out when rig's T3 Code fails it, keeping what this machine found", async () => {
+    const found = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const failing = Effect.fail(new T3CodeServer.Trouble({ reason: "rig's T3 Code isn't answering." }))
+      const threads = yield* make({ view: Option.some(viewing()), status: { _tag: "Up" }, found: failing }, [])
+      return yield* threads.search("std tests")
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
+  })
+
+  test("names this machine when its T3 Code isn't running while rig's threads can be seen, since rig's are his threads too", async () => {
+    const away = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const store = yield* Store.make(":memory:")
+      const threads = yield* Threads.make({
+        machine: "Rosie",
+        live: live(Option.none()),
+        actions: Option.some(machine("Rosie", [])),
+        others: [{ machine: "rig", live: live(Option.some(viewing(thread("std", "Add the std fee test", "2026-10-08T20:00:00.000Z")))), actions: machine("rig", []), status: Effect.succeed({ _tag: "Up" }) }],
+        journal: Journal.fromStore(store),
+        store,
+      })
+      return (yield* threads.desk(Option.none(), [], 30)).away
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(away).toEqual([{ machine: "Rosie", reason: "T3 Code isn't running on Rosie, so I can't see its threads." }])
   })
 })

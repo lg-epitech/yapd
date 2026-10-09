@@ -449,8 +449,9 @@ export const overview = (desk: Threads.Desk, now: number): Draft => {
 
 /**
  * What a card of threads comes to in a line, like "Two running and one needs
- * you.". With machines it can't see, it's only what's here, and it says so,
- * with why it can't see them, since what's running may well be there.
+ * you.". With machines it can't see, it's only what's on the one it can, here
+ * or on rig, and it says so, with why it can't see the others, since what's
+ * running may well be there.
  */
 export const tally = (desk: Threads.Desk, address: string, now: number) => {
   const [needs = 0, running = 0, failed = 0] = grouped(desk, now).map(([, threads]) => threads.length)
@@ -461,7 +462,7 @@ export const tally = (desk: Threads.Desk, address: string, now: number) => {
     ...(needs === 0 ? [] : [`${Brain.count(needs)} ${needs === 1 ? "needs" : "need"} you`]),
     ...(failed === 0 ? [] : [`${Brain.count(failed)} failed`]),
   ]
-  const here = away.length > 0 ? " here" : ""
+  const here = Brain.whereSeen(desk)
   return [parts.length === 0 ? `Nothing's running${here}${address}.` : `${Brain.capital(Brain.both(parts))}${here}${address}.`, ...away].join(" ")
 }
 
