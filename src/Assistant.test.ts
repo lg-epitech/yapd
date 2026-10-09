@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
+import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import { Condenser } from "./Condenser.ts"
@@ -252,8 +252,19 @@ const assistant = (
     readonly persona?: Context.Tag.Service<Persona.Persona>
     /** The persona's line for going ahead, in place of the written one. */
     readonly onIt?: string
-    /** Rig, followed too: how its tunnel stands, and its threads, when they can be seen. */
-    readonly rig?: { readonly status: Effect.Effect<Tunnel.Status>; readonly threads?: ReadonlyArray<T3Live.Thread> }
+    /**
+     * Rig, followed too: how its tunnel stands, and its threads, when they can
+     * be seen; with `dispatched`, a T3 Code of its own that answers, keeping
+     * what it's sent there, what its threads wait on as `items`, and what it
+     * tells of as `changes`.
+     */
+    readonly rig?: {
+      readonly status: Effect.Effect<Tunnel.Status>
+      readonly threads?: ReadonlyArray<T3Live.Thread>
+      readonly dispatched?: Array<Record<string, unknown>>
+      readonly items?: ReadonlyArray<Record<string, unknown>>
+      readonly changes?: Stream.Stream<T3Live.Change>
+    }
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -276,16 +287,23 @@ const assistant = (
     const appeared: Array<T3Live.Thread> = []
     /** Threads as T3 Code has them since, like once what one waited on was answered. */
     const changed = new Map<string, T3Live.Thread>()
-    /** As T3 Code answers a request, which the thread then no longer waits on. */
-    const answering = (): Answer => (payload, bounded) =>
-      Effect.zipRight(
-        Effect.sync(() => {
-          if (payload.type !== "runtime-request.respond") return
-          const before = changed.get(String(payload.threadId)) ?? [...(given.others ?? []), ...view.threads.values()].find(({ id }) => id === payload.threadId)
-          if (before !== undefined && before.pendingRuntimeRequest?.id === payload.requestId) changed.set(before.id, { ...before, pendingRuntimeRequest: null })
-        }),
-        (given.answer ?? (() => takes))()(payload, bounded),
-      )
+    /** Rig's threads as its T3 Code has them since, like once what one waited on was answered there. */
+    const rigChanged = new Map<string, T3Live.Thread>()
+    /** As a machine's T3 Code answers a request, which the thread there then no longer waits on, as `known` had it before. */
+    const answeringOn =
+      (since: Map<string, T3Live.Thread>, known: ReadonlyArray<T3Live.Thread>) =>
+      (): Answer =>
+      (payload, bounded) =>
+        Effect.zipRight(
+          Effect.sync(() => {
+            if (payload.type !== "runtime-request.respond") return
+            const before = since.get(String(payload.threadId)) ?? known.find(({ id }) => id === payload.threadId)
+            if (before !== undefined && before.pendingRuntimeRequest?.id === payload.requestId) since.set(before.id, { ...before, pendingRuntimeRequest: null })
+          }),
+          (given.answer ?? (() => takes))()(payload, bounded),
+        )
+    /** As T3 Code here answers a request. */
+    const answering = answeringOn(changed, [...(given.others ?? []), ...view.threads.values()])
     const threads = yield* Threads.make({
       machine: "Rosie",
       live: {
@@ -298,17 +316,29 @@ const assistant = (
         changes: Stream.never,
       },
       actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, answering, given.reading, given.items))),
-      // Rig, whose threads can be seen when the test gives them, and which never answers then, nor can be reached otherwise.
+      // Rig, whose threads can be seen when the test gives them, and which answers then only when the test gives it a T3 Code of its own,
+      // never otherwise, nor can be reached while its threads can't be seen.
       others: Option.match(Option.fromNullable(given.rig), {
         onNone: () => [],
         onSome: (rig) => [
           {
             machine: "rig",
             live: {
-              view: Effect.succeed(Option.map(Option.fromNullable(rig.threads), (threads) => ({ ...view, threads: new Map(threads.map((thread) => [thread.id, thread] as const)) }))),
-              changes: Stream.never,
+              view: Effect.sync(() =>
+                Option.map(Option.fromNullable(rig.threads), (threads) => ({
+                  ...view,
+                  threads: new Map([...threads, ...rigChanged.values()].map((thread) => [thread.id, thread] as const)),
+                })),
+              ),
+              changes: rig.changes ?? Stream.never,
             },
-            actions: T3Actions.make(rig.threads === undefined ? Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." })) : Effect.never),
+            actions: T3Actions.make(
+              rig.threads === undefined
+                ? Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." }))
+                : rig.dispatched === undefined
+                  ? Effect.never
+                  : transport(() => [], rig.dispatched, answeringOn(rigChanged, rig.threads), Effect.void, rig.items),
+            ),
             status: rig.status,
           },
         ],
@@ -464,6 +494,7 @@ const assistant = (
     const questions = () => said.filter(({ kind }) => kind === "question")
     return {
       ...made,
+      threads,
       dispatched,
       ledger,
       told: said,
@@ -504,12 +535,17 @@ const assistant = (
           Effect.zipRight(notice?.heard ?? Effect.void),
           Effect.zipRight(flush),
         ),
-      /** What a thread waits on him for, read and worded as notices word it, if it still waits on it. */
-      compose: (of: T3Live.Thread) => compose({ machine: "Rosie", id: of.id }, of.pendingRuntimeRequest?.id ?? ""),
+      /** What a thread waits on him for, read and worded as notices word it, if it still waits on it, on this machine unless `machine` says. */
+      compose: (of: T3Live.Thread, machine = "Rosie") => compose({ machine, id: of.id }, of.pendingRuntimeRequest?.id ?? ""),
       /** T3 Code has the thread as it is now, like once what it waited on was answered there. */
       becomes: (next: T3Live.Thread) =>
         Effect.sync(() => {
           changed.set(next.id, next)
+        }).pipe(Effect.zipRight(flush)),
+      /** Rig's T3 Code has its thread as it is now. */
+      becomesOnRig: (next: T3Live.Thread) =>
+        Effect.sync(() => {
+          rigChanged.set(next.id, next)
         }).pipe(Effect.zipRight(flush)),
       /** Its turn came, and a dictation cut it off before the end. */
       cut: (notice = said.at(-1)) => voice(notice).pipe(Effect.zipRight(notice?.saying ?? Effect.void), Effect.zipRight(flush)),
@@ -572,9 +608,13 @@ const commanded = (requestId: string, command: string) => [
 ]
 
 /** What a thread waits on him for, worded and asked as notices have it asked. */
-const asked = (made: { readonly compose: (of: T3Live.Thread) => Effect.Effect<Option.Option<Assistant.Worded>>; readonly ask: (asking: Assistant.Asking) => Effect.Effect<void> }, of: T3Live.Thread) =>
+const asked = (
+  made: { readonly compose: (of: T3Live.Thread, machine?: string) => Effect.Effect<Option.Option<Assistant.Worded>>; readonly ask: (asking: Assistant.Asking) => Effect.Effect<void> },
+  of: T3Live.Thread,
+  machine?: string,
+) =>
   Effect.gen(function* () {
-    const worded = Option.getOrThrow(yield* made.compose(of))
+    const worded = Option.getOrThrow(yield* made.compose(of, machine))
     if (worded._tag !== "Ask") return yield* Effect.die(`Only told: ${worded.spoken}`)
     yield* made.ask(worded.asking)
     yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -609,6 +649,51 @@ const extras = {
 
 /** What's sent in answer to the questions threads asked. */
 const answered = (dispatched: ReadonlyArray<Record<string, unknown>>) => dispatched.filter(({ type }) => type === "runtime-request.respond").map(({ answers }) => answers)
+
+/**
+ * Notices over the assistant's threads, as `yapd serve` has them: what a
+ * thread on any machine yapd follows waits on him for is asked through the
+ * assistant, worded by a model that only words what can't be said as it is.
+ */
+const noticing = (made: {
+  readonly threads: Threads.Threads["Type"]
+  readonly journal: Journal.Journal["Type"]
+  readonly mention: Assistant.Assistant["Type"]["mention"]
+  readonly ask: Assistant.Assistant["Type"]["ask"]
+  readonly settled: Assistant.Assistant["Type"]["settled"]
+}) =>
+  Notices.make({
+    threads: made.threads,
+    journal: made.journal,
+    tell: () => Effect.void,
+    power: Effect.succeed({ on: true, turns: 1 }),
+    stopped: () => Effect.succeed([]),
+    finished: () => Effect.void,
+    overtaken: () => Effect.void,
+    mention: made.mention,
+    ask: made.ask,
+    settled: made.settled,
+    shortest: 60_000,
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(Condenser, {
+          condense: () => Effect.die("not expected"),
+          ask: () => Effect.die("not expected"),
+          question: () => Effect.die("not expected"),
+        }),
+        Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines), onIt: () => Effect.succeed(lines.onIt), said: () => Effect.void }),
+      ),
+    ),
+  )
+
+/** A thread on rig asking him which colour the test should use. */
+const onRig = thread("rig-fees", "Fee table checks", "connectors", {
+  activeRunId: "run-9",
+  activityRunStatus: "running",
+  pendingRuntimeRequest: { id: "q9", kind: "user_input", createdAt: "2026-10-01T02:17:00.000Z" },
+  updatedAt: "2026-10-01T02:17:00.000Z",
+})
 
 describe("Assistant", () => {
   test("status on MiNAS SV2 is answered about the Mina tickets first time, with no question", async () => {
@@ -7058,5 +7143,94 @@ describe("Assistant", () => {
     ])
     // The model always knows why.
     expect(result.away[0]).toEqual([{ machine: "rig", reason: "I can't reach rig right now." }])
+  })
+
+  test("a question on a rig thread, heard from rig's T3 Code, is asked aloud, and his answer goes once to rig's T3 Code for that thread, never this Mac's", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const rig: Array<Record<string, unknown>> = []
+        const changes = yield* Queue.unbounded<T3Live.Change>()
+        /** What the ledger held as each command went out: written first, under the one command id it went with. */
+        const written: Array<{ readonly sent: unknown; readonly rows: ReadonlyArray<string> }> = []
+        let ledger: Ledger.Ledger["Type"] | undefined
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], dispatched: rig, items: card("q9", [colour]), changes: Stream.fromQueue(changes) },
+          answer: () => (payload, bounded) =>
+            Effect.flatMap(ledger === undefined ? Effect.succeed([]) : ledger.steps(0), (rows) =>
+              Effect.zipRight(
+                Effect.sync(() => void written.push({ sent: payload.commandId, rows: rows.map(({ commandId, machine, thread, state }) => `${commandId} ${machine} ${thread} ${state}`) })),
+                takes(payload, bounded),
+              ),
+            ),
+        })
+        ledger = made.ledger
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(notices.follow)
+        yield* made.flush
+        // Rig's T3 Code tells of it, as this Mac's would.
+        yield* Queue.offer(changes, { _tag: "Asked", thread: onRig, request: onRig.pendingRuntimeRequest! })
+        yield* made.until(() => made.questions().length > 0)
+        yield* made.answer("Red.")
+        const steps = yield* made.ledger.steps(0)
+        return {
+          spoken: made.spoken(),
+          rig: rig.map(({ type, threadId, requestId, answers, commandId }) => ({ type, threadId, requestId, answers, commandId })),
+          here: made.dispatched,
+          written,
+          steps: steps.map(({ commandId, machine, thread, state }) => ({ commandId, machine, thread, state })),
+        }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red it is, sir.",
+    ])
+    const [step] = result.steps
+    expect(result.steps).toEqual([{ commandId: step!.commandId, machine: "rig", thread: onRig.id, state: "sent" }])
+    expect(result.rig).toEqual([{ type: "runtime-request.respond", threadId: onRig.id, requestId: "q9", answers: { [colour.id]: "Red" }, commandId: step!.commandId }])
+    // Written down before it went, as the only step, under the id it went with.
+    expect(result.written).toEqual([{ sent: step!.commandId, rows: [`${step!.commandId} rig ${onRig.id} prepared`] }])
+    expect(result.here).toEqual([])
+  })
+
+  test("an answer to a rig thread's question that never left yapd goes again only on his saying it again, to rig, under the same ids", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const rig: Array<Record<string, unknown>> = []
+        let lost = true
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, onRig), text: "Red" }), undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], dispatched: rig, items: card("q9", [colour]) },
+          answer: () => (payload, bounded) => (lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." })) : takes(payload, bounded)),
+        })
+        yield* asked(made, onRig, "rig")
+        yield* made.answer("Red.")
+        const first = rig.length
+        const waited = (yield* made.ledger.steps(0)).map(({ machine, state }) => `${machine} ${state}`)
+        // It never left yapd, so rig's thread still waits on it; nothing goes again of its own accord, however long it waits.
+        yield* made.becomesOnRig(onRig)
+        yield* made.wait(120)
+        const meanwhile = rig.length
+        lost = false
+        yield* made.dictate("Red, for the fee table checks on rig.")
+        const steps = yield* made.ledger.steps(0)
+        return {
+          spoken: made.spoken(),
+          first,
+          waited,
+          meanwhile,
+          ids: rig.map(({ commandId }) => commandId),
+          steps: steps.map(({ machine, thread, state }) => `${machine} ${thread} ${state}`),
+          here: made.dispatched,
+        }
+      }),
+    )
+    expect(result.spoken.slice(1)).toEqual(["I couldn't get your answer to it, sir: no connection.", "Red it is, sir."])
+    expect(result.first).toBe(1)
+    expect(result.waited).toEqual(["rig failed"])
+    expect(result.meanwhile).toBe(1)
+    expect(result.ids).toHaveLength(2)
+    expect(result.ids[1]).toBe(result.ids[0])
+    expect(result.steps).toEqual([`rig ${onRig.id} sent`])
+    expect(result.here).toEqual([])
   })
 })

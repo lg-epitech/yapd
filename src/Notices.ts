@@ -214,6 +214,9 @@ export const lines = {
   waiting: (called: string, what: string, said: Lines) => `${capital(called)} ${what}${addressed(said)}: it's waiting for you in T3 Code.`,
 }
 
+/** A thread as what's said of it names it: with its machine, as "who needs me" has it, when it isn't on this one. */
+export const named = (listed: Pick<Threads.Listed, "called" | "here" | "ref">) => (listed.here ? listed.called : `${listed.called} on ${listed.ref.machine}`)
+
 /** What a request is said to want when it can't be read, or the model can't say. */
 const unworded = (kind: string) => (kind === "user_input" ? "has a question for you" : "wants your go-ahead on something")
 
@@ -343,7 +346,8 @@ export const composer = (threads: Threads.Threads["Type"]) =>
         const thread = yield* threads.find(ref)
         const shown = Option.fromNullable((yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref)))
         if (Option.isNone(thread) || Option.isNone(shown) || !(yield* threads.waiting(ref, requestId))) return Option.none<Assistant.Worded>()
-        const { called, project } = shown.value
+        const { project } = shown.value
+        const called = named(shown.value)
         // What kind it is, when it's the one the thread shows, for when it can't be read.
         const kind = thread.value.pendingRuntimeRequest?.id === requestId ? thread.value.pendingRuntimeRequest.kind : ""
         const said = yield* persona.lines
@@ -564,7 +568,8 @@ export const make = (options: {
         const thread = yield* threads.find(ref)
         const shown = yield* listed(ref)
         if (Option.isNone(thread) || Option.isNone(shown)) return
-        const { called, project } = shown.value
+        const { project } = shown.value
+        const called = named(shown.value)
         if (status === "failed") return yield* failed(ref, run.value, thread.value, called, project, turns, at)
         // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes, even when
         // that was while what's read of it here was on its way.

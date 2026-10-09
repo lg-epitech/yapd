@@ -79,6 +79,8 @@ const notices = (
     readonly store?: Store.Store["Type"]
     /** Reading the journal, as reading the desk does, waits for `resume` once it's begun, which `reading` says. */
     readonly slow?: { readonly reading: Deferred.Deferred<void>; readonly resume: Deferred.Deferred<void> }
+    /** Rig, followed too, through a T3 Code of its own with these threads and reads, which can be seen once it's `up`. */
+    readonly rig?: { readonly view: ReadonlyArray<T3Live.Thread>; readonly bounded: Readonly<Record<string, Bounded>> }
   },
 ) =>
   Effect.gen(function* () {
@@ -97,21 +99,34 @@ const notices = (
       sequence: 1,
       synced: true,
     }
-    const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
-      api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
-        const read = given.bounded[decodeURIComponent(path.split("/").at(-2) ?? "")] ?? {}
-        const providerThreads = (read.sessions ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
-        return Schema.decodeUnknown(schema)({
-          projection: { runs: read.runs ?? [], messages: read.messages ?? [], turnItems: read.turnItems ?? [], providerThreads, runtimeRequests: read.runtimeRequests ?? [] },
-        }).pipe(Effect.orDie)
-      }) as Server.Transport["api"],
-      call: (() => Effect.die("not expected")) as Server.Transport["call"],
-    })
+    /** Each machine's T3 Code, reading what `bounded` says, and noting which thread each read was of, by machine. */
+    const reads: Array<string> = []
+    const reaching = (machine: string, bounded: Readonly<Record<string, Bounded>>): Effect.Effect<Server.Transport, Server.Trouble> =>
+      Effect.succeed({
+        api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
+          const id = decodeURIComponent(path.split("/").at(-2) ?? "")
+          reads.push(`${machine} ${id}`)
+          const read = bounded[id] ?? {}
+          const providerThreads = (read.sessions ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
+          return Schema.decodeUnknown(schema)({
+            projection: { runs: read.runs ?? [], messages: read.messages ?? [], turnItems: read.turnItems ?? [], providerThreads, runtimeRequests: read.runtimeRequests ?? [] },
+          }).pipe(Effect.orDie)
+        }) as Server.Transport["api"],
+        call: (() => Effect.die("not expected")) as Server.Transport["call"],
+      })
+    /** Whether rig's threads can be seen, and what its T3 Code tells of. */
+    let rigUp = false
+    const rigChanges = yield* Queue.unbounded<T3Live.Change>()
+    const rigView = (): T3Live.View => ({ ...view, threads: new Map((given.rig?.view ?? []).map((thread) => [thread.id, thread])) })
+    const rigLive: T3Live.T3Live["Type"] = { view: Effect.sync(() => (rigUp ? Option.some(rigView()) : Option.none())), changes: Stream.fromQueue(rigChanges) }
     const threads = yield* Threads.make({
       machine: "Rosie",
       live: { view: Effect.sync(() => Option.some(view)), changes: Stream.fromQueue(changes) },
-      actions: Option.some(T3Actions.make(reach)),
-      others: [],
+      actions: Option.some(T3Actions.make(reaching("Rosie", given.bounded))),
+      others:
+        given.rig === undefined
+          ? []
+          : [{ machine: "rig", live: rigLive, actions: T3Actions.make(reaching("rig", given.rig.bounded)), status: Effect.succeed({ _tag: "Up" as const }) }],
       journal,
       store,
     })
@@ -168,6 +183,18 @@ const notices = (
       overtaken,
       /** T3 Code tells of these. */
       hear: (...happened: ReadonlyArray<T3Live.Change>) => Queue.offerAll(changes, happened).pipe(Effect.zipRight(flush)),
+      /** Which machine's T3 Code each thread was read from. */
+      reads,
+      rig: {
+        live: rigLive,
+        /** Rig's T3 Code tells of these. */
+        hear: (...happened: ReadonlyArray<T3Live.Change>) => Queue.offerAll(rigChanges, happened).pipe(Effect.zipRight(flush)),
+        /** Rig can be reached, and its T3 Code has caught up, or it can't. */
+        reached: (up: boolean) =>
+          Effect.sync(() => {
+            rigUp = up
+          }),
+      },
       /** T3 Code has the thread as it is now, without telling of it. */
       becomes: (thread: T3Live.Thread) =>
         Effect.sync(() => {
@@ -852,5 +879,85 @@ describe("Notices", () => {
     expect(result).toHaveLength(2)
     expect(result[0]).toBe("Migrate Tezos Integration hit Claude's limit, sir.")
     expect(result[1]).toMatch(/^Open Mina SSV2 Bug Tickets hit Claude's limit, sir; it resets at \d/)
+  })
+
+  test("what a rig thread asks, and a run of one that fails, are heard from rig's T3 Code, read from rig's, named as rig's and kept under rig's keys", async () => {
+    const fees = thread("fees", "Fee table checks", { activeRunId: "run-1", pendingRuntimeRequest: { id: "q9", kind: "user_input", createdAt: minutes(1) } })
+    const loader = thread("loader", "Fix the loader", { status: "failed", latestRunId: "run-2", lastErrorClass: "provider_error" })
+    const rig = {
+      view: [fees, loader],
+      bounded: {
+        fees: { turnItems: asking("q9", "Which fee table?") },
+        loader: {
+          runs: [{ id: "run-2", status: "failed", ordinal: 1, startedAt: minutes(5) }],
+          turnItems: [failure("run-2", "provider_error", "API Error: 500 Internal server error")],
+          sessions: ["s-loader"],
+        },
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, rig })
+        yield* made.rig.reached(true)
+        yield* made.rig.hear({ _tag: "Asked", thread: fees, request: fees.pendingRuntimeRequest! }, ended(loader, "run-2"))
+        yield* made.wait(10)
+        const kept = yield* made.journal.since(0, { kinds: ["notice"] })
+        return { asked: made.asked, refs: made.worded.map(({ ref }) => ref), told: made.told, reads: [...new Set(made.reads)], kept: kept.map(({ key, machine }) => [key, machine]) }
+      }),
+    )
+    expect(result.asked).toEqual(["A question on Fee table checks on rig, sir: Which fee table?"])
+    expect(result.refs).toEqual([{ machine: "rig", id: "fees" }])
+    expect(result.told).toEqual(["Fix the loader on rig failed, sir: the model provider had an error."])
+    expect(result.reads.toSorted()).toEqual(["rig fees", "rig loader"])
+    expect(result.kept.toSorted()).toEqual([
+      ["ask:rig:q9", "rig"],
+      ["fail:rig:run-2", "rig"],
+    ])
+  })
+
+  test("a rig question still waiting after a restart, begun and never heard, is asked again once rig's T3 Code catches up, under the entry it was kept under, and only once", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", { activeRunId: "run-1", pendingRuntimeRequest: { id: "r1", kind: "user_input", createdAt: minutes(60) } })
+    const fees = thread("fees", "Fee table checks", { activeRunId: "run-9", pendingRuntimeRequest: { id: "q9", kind: "user_input", createdAt: minutes(60) } })
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* Store.make(":memory:")
+        // It was coming up to be asked, kept under its key, when yapd restarted.
+        yield* Journal.fromStore(store).claim({ at: now - 60_000, kind: "notice", machine: "rig", thread: "fees", key: "ask:rig:q9", said: "It asks which fee table." })
+        const made = yield* notices({
+          view: [tezos],
+          bounded: { tezos: { turnItems: asking("r1", "Which network?") } },
+          store,
+          rig: { view: [fees], bounded: { fees: { turnItems: asking("q9", "Which fee table?") } } },
+        })
+        // Each machine looks once its own T3 Code has caught up: this one's at once, rig's only once it can be reached.
+        yield* Effect.forkScoped(Notices.lookBack(made, Effect.succeed(Option.some(true)), "Rosie"))
+        yield* Effect.forkScoped(Notices.lookBack(made, made.rig.live.view, "rig"))
+        yield* made.wait(1)
+        const down = [...made.asked]
+        yield* made.rig.reached(true)
+        yield* made.wait(1)
+        const back = made.worded.map(({ ref, kept }) => ({ ref, kept: kept !== undefined }))
+        // Rig drops out and comes back, and yapd is turned on: heard by now, it isn't asked again.
+        yield* made.rig.reached(false)
+        yield* made.wait(1)
+        yield* made.rig.reached(true)
+        yield* made.wait(1)
+        yield* made.reconcile
+        yield* made.flush
+        const kept = yield* made.journal.since(0, { kinds: ["notice"] })
+        return { down, asked: made.asked, back, kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]).toSorted() }
+      }),
+    )
+    // Rig being down held up nothing here.
+    expect(result.down).toEqual(["A question on Migrate Tezos Integration, sir: Which network?"])
+    expect(result.asked).toEqual(["A question on Migrate Tezos Integration, sir: Which network?", "A question on Fee table checks on rig, sir: Which fee table?"])
+    expect(result.back).toEqual([
+      { ref: { machine: "Rosie", id: "tezos" }, kept: false },
+      { ref: { machine: "rig", id: "fees" }, kept: true },
+    ])
+    expect(result.kept).toEqual([
+      ["ask:Rosie:r1", true],
+      ["ask:rig:q9", true],
+    ])
   })
 })

@@ -750,10 +750,8 @@ export const make = (options: {
       sessions,
       waiting: (ref, requestId) =>
         Effect.gen(function* () {
-          const pending = Option.flatMap(
-            ref.machine === machine ? Option.flatMap(yield* options.live.view, (view) => Option.fromNullable(view.threads.get(ref.id))) : Option.none(),
-            (thread) => Option.fromNullable(thread.pendingRuntimeRequest),
-          )
+          // On whichever machine it's on, as that machine's T3 Code last showed it.
+          const pending = Option.flatMap(yield* find(ref), (thread) => Option.fromNullable(thread.pendingRuntimeRequest))
           if (Option.isNone(pending)) return false
           if (pending.value.id === requestId) return true
           const read = yield* Effect.either(Effect.flatMap(reach(ref), (actions) => actions.detail(ref.id, requestId)))
