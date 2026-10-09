@@ -60,15 +60,15 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, checks what it shows against it whenever it connects, has yapd take down only the card it means, and shows the last card again only if nothing newer came while it was fetched, keeping it to ask for again unless yapd says it no longer has it, and having yapd put it back up only at the revision it had followed last",
+    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, checks what it shows against it whenever it connects, has yapd take down only the card it means, as it went up the time it follows, and shows the last card again only if nothing newer came while it was fetched, keeping it to ask for again unless yapd says it no longer has it, and having yapd put it back up only at the revision it had followed last",
     async () => {
       expect(await run("following")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       // What the checks cover is what the app uses: the card it shows is the one it follows, at the revision it follows, and the one it has yapd take
-      // down is the one it names.
+      // down is the one it names, as it went up then.
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
       expect(yapd).toMatch(/following\.follow\(status\.showing, revision: status\.revision, connecting: connecting\)/)
       expect(yapd).not.toMatch(/panel\.show\(card, talking: (true|false)\)/)
-      expect(yapd.match(/send\("DELETE"[^\n]*/g)).toEqual(['send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },'])
+      expect(yapd.match(/send\("DELETE"[^\n]*/g)).toEqual(['send("DELETE", "cards/current", query: down.query, to: api) },'])
       // The last card is shown again, and put back up, only by Following, which checks nothing newer came while it was fetched.
       expect(yapd).toMatch(/func showLast\(\) \{\s*guard let last else \{ return \}\s*following\.showAgain\(last\) \{/)
       expect(yapd.match(/Yapd\.fetch\([^)]*\)/g)).toEqual(["Yapd.fetch(id, from: api)"])
