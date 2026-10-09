@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Fiber, Layer, Option, Queue, Schema, type Scope, TestClock, TestContext } from "effect"
+import { ConfigProvider, Context, Deferred, Effect, Fiber, Layer, Option, Queue, Random, Schema, type Scope, TestClock, TestContext } from "effect"
 import { Audio, AudioError } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
@@ -14,7 +14,9 @@ import { Vad } from "./Vad.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
-import { Voice } from "./Voice.ts"
+import * as Settings from "./Settings.ts"
+import * as Store from "./Store.ts"
+import { Voice, Warmth } from "./Voice.ts"
 
 const update: Conversation.Update = {
   session: "s",
@@ -34,7 +36,7 @@ const update: Conversation.Update = {
  * with `unplayable`, nothing but the update can be played, as when the audio helper goes down after it. With `afplay`,
  * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
  * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
- * lines are `lines`, or the plain ones.
+ * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines.
  */
 const conversation = (
   said: ReadonlyArray<string>,
@@ -47,6 +49,7 @@ const conversation = (
     readonly afplay?: "plays" | "fails"
     readonly lines?: Persona.Lines
     readonly model?: Layer.Layer<Model>
+    readonly persona?: Context.Tag.Service<Persona.Persona>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -61,7 +64,7 @@ const conversation = (
     let dispatches = 0
     let replies = 0
     const lines = given.lines ?? Persona.plain
-    const persona = Layer.succeed(Persona.Persona, {
+    const persona = Layer.succeed(Persona.Persona, given.persona ?? {
       lines: Effect.succeed(lines),
       onIt: () => Effect.succeed(lines.onIt),
       said: (line) => Effect.sync(() => void noted.push(line)),
@@ -410,6 +413,45 @@ describe("Follow-ups", () => {
     // Whatever says it later tells the persona, once it plays.
     expect(result.noted).toEqual([])
     expect(result.sending).toBe(false)
+  })
+
+  test("two replies passed on before either is said, like two said later, get different lines of his own, said without a repeat", async () => {
+    const mine = ["Right away, sir.", "Very good, sir.", "Consider it done, sir."]
+    const result = await scoped(
+      Effect.gen(function* () {
+        const persona = Context.get(
+          yield* Layer.build(
+            Persona.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.succeed(Warmth, { warm: () => Effect.void }),
+                  Layer.scoped(Settings.Settings, Effect.map(Store.make(":memory:"), Settings.fromStore)),
+                  Layer.succeed(Model, { ask: () => Effect.die("There's no style to write lines in") }),
+                ),
+              ),
+              Layer.provide(Layer.setConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_ON_IT", mine.join("|")]])))),
+            ),
+          ),
+          Persona.Persona,
+        )
+        const { fiber, converse, speak, wait, late } = yield* conversation(["Just merge it.", "Just deploy it."], 3, [], "sent", { persona })
+        // Each sent, then cut off by a dictation before it's said, so it's said later.
+        yield* speak
+        yield* wait(6)
+        yield* Fiber.interrupt(fiber)
+        yield* wait(3)
+        const again = yield* Effect.fork(converse(update))
+        yield* speak
+        yield* wait(6)
+        yield* Fiber.interrupt(again)
+        yield* wait(3)
+        // Then each plays in turn.
+        yield* Effect.forEach(late, persona.said)
+        return { late, next: yield* persona.onIt() }
+      }).pipe(Effect.withRandom(Random.fixed([0]))),
+    )
+    // Each picks the first it may, as both would without knowing of the other.
+    expect(result).toEqual({ late: ["Right away, sir.", "Very good, sir."], next: "Right away, sir." })
   })
 
   test("tracks pending deliveries by update", async () => {

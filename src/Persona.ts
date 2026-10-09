@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Random, Ref, Schema, SubscriptionRef } from "effect"
+import { Clock, Context, Effect, Layer, Option, Random, Ref, Schema, SubscriptionRef } from "effect"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 import * as Settings from "./Settings.ts"
@@ -92,15 +92,16 @@ export class Persona extends Context.Tag("yapd/Persona")<
     readonly lines: Effect.Effect<Lines>
     /**
      * The line to say once he's asked for something: one of his own, never
-     * the one he heard last, nor `besides`, one said in the same breath, or
-     * the written one. Picking it changes nothing, since a reply that has one
-     * may yet be dropped or say something else.
+     * the one he heard last, nor one picked lately that's yet to play, nor
+     * `besides`, one said in the same breath, or the written one. A line
+     * picked never counts as heard, since a reply that has one may yet be
+     * dropped or say something else.
      */
     readonly onIt: (besides?: string) => Effect.Effect<string>
     /**
      * Notes what's being said, so the next line for going ahead is a
      * different one from his own it starts with, said on its own or with more
-     * after it. Only his own count.
+     * after it, and that one no longer waits to play. Only his own count.
      */
     readonly said: (spoken: string) => Effect.Effect<void>
   }
@@ -126,31 +127,55 @@ const ownLines = Effect.gen(function* () {
 const owning = (own: ReadonlyArray<string>) => (lines: Lines): Lines => (own.length === 0 ? lines : { ...lines, onIt: own[0]! })
 
 /**
- * One of his own lines, never the one said last, nor one said alongside, so
- * they vary, and how to note one as said. Only noting changes which comes
- * next: a line picked for a reply that's then dropped, or queued, or that
- * fails, was never heard. Without his own, it's the line as it is now, even
- * twice in one breath.
+ * How long a line picked but not yet played is kept from being picked again.
+ * Two replies can each pick one before either plays, and they'd often pick
+ * the same; one never played, since its reply was dropped, is let go by then.
+ */
+const playing = 2 * 60_000
+
+/**
+ * One of his own lines, never the one said last, nor one picked lately that's
+ * yet to play, nor one said alongside, so they vary, and how to note one as
+ * said. Only noting makes one the last he heard: a line picked for a reply
+ * that's then dropped, or queued, or that fails, was never heard, and is only
+ * kept from coming up again for a while. Without his own, it's the line as it
+ * is now, even twice in one breath.
  */
 const alternating = (own: ReadonlyArray<string>, lines: Effect.Effect<Lines>) =>
   Effect.gen(function* () {
-    const last = yield* Ref.make<string | undefined>(undefined)
+    // The one he heard last and those picked lately, oldest first.
+    const recent = yield* Ref.make<ReadonlyArray<{ readonly line: string; readonly at: number; readonly heard: boolean }>>([])
     return {
       onIt: (besides?: string) =>
         own.length === 0
           ? Effect.map(lines, ({ onIt }) => onIt)
-          : Effect.flatMap(Ref.get(last), (said) => {
-              // The same line twice in one breath stands out more than one heard a while ago, so with too few to avoid both, it's `besides` that's avoided.
-              const others = [own.filter((line) => line !== said && line !== besides), own.filter((line) => line !== besides), own].find((lines) => lines.length > 0)!
-              return Effect.map(Random.nextIntBetween(0, others.length), (index) => others[index]!)
+          : Effect.gen(function* () {
+              const now = yield* Clock.currentTimeMillis
+              const roll = yield* Random.next
+              // All at once, so two replies picking together can't both miss what the other picked.
+              return yield* Ref.modify(recent, (recent) => {
+                const kept = recent.filter(({ heard, at }) => heard || now - at < playing)
+                // The same line twice in one breath stands out more than one heard a while ago, so with too few to avoid them all, it's `besides` that's avoided first, then the latest.
+                const avoided = [besides, ...kept.map(({ line }) => line).toReversed()]
+                const others = avoided
+                  .map((_, index) => own.filter((line) => !avoided.slice(0, avoided.length - index).includes(line)))
+                  .find((lines) => lines.length > 0) ?? own
+                const line = others[Math.floor(roll * others.length)]!
+                return [line, [...kept, { line, at: now, heard: false }]]
+              })
             }),
       said: (spoken: string) => {
         const said = spoken.trim()
         // The longest that fits, in case one of his lines starts another.
-        const [heard] = own
+        const [played] = own
           .filter((line) => said.startsWith(line) && !/^[\p{L}\p{N}]/u.test(said.slice(line.length)))
           .toSorted((one, other) => other.length - one.length)
-        return heard === undefined ? Effect.void : Ref.set(last, heard)
+        // Now the last he heard, in place of the one before and of its pick, which has played.
+        return played === undefined
+          ? Effect.void
+          : Effect.flatMap(Clock.currentTimeMillis, (at) =>
+              Ref.update(recent, (recent) => [...recent.filter(({ line, heard }) => !heard && line !== played), { line: played, at, heard: true }]),
+            )
       },
     }
   })

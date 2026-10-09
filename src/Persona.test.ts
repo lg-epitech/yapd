@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Deferred, Effect, Exit, Layer, Logger, LogLevel, Option, Random, Schema } from "effect"
+import { ConfigProvider, Context, Deferred, Effect, Exit, Layer, Logger, LogLevel, Option, Random, Schema, TestClock, TestContext } from "effect"
 import { Model, ModelError } from "./Model.ts"
 import * as Persona from "./Persona.ts"
 import * as Settings from "./Settings.ts"
@@ -94,6 +94,25 @@ const persona = (
 const goingAhead = (persona: Context.Tag.Service<Persona.Persona>, times: number) =>
   Effect.runSync(Effect.replicateEffect(Effect.tap(persona.onIt(), persona.said), times).pipe(Effect.withRandom(Random.make("yapd"))))
 
+/** Where the clock of `next` was left, so it never goes back to before lines it picked. */
+let later = 0
+
+/**
+ * What may be said for going ahead next, picked `times` times over, each once
+ * those picked before have been let go, since they never played, and picked
+ * the same way every run.
+ */
+const next = (persona: Context.Tag.Service<Persona.Persona>, times: number) =>
+  Effect.runPromise(
+    TestClock.setTime(Math.max(later, Date.now())).pipe(
+      Effect.zipRight(Effect.replicateEffect(Effect.zipRight(TestClock.adjust("2 minutes"), persona.onIt()), times)),
+      Effect.tap(() => Effect.map(TestClock.currentTimeMillis, (at) => (later = at))),
+      Effect.map((lines) => new Set(lines)),
+      Effect.withRandom(Random.make("yapd")),
+      Effect.provide(TestContext.TestContext),
+    ),
+  )
+
 const own = ["Right away, sir.", "Very good, sir.", "Consider it done, sir.", "Very well, sir."]
 
 describe("Persona", () => {
@@ -161,7 +180,58 @@ describe("Persona", () => {
     heard.forEach(([last, next]) => expect(next).not.toBe(last))
     // Lines that aren't his own, like the one for being queued, leave the last one he heard as it was.
     Effect.runSync(said.said(own[0]!).pipe(Effect.zipRight(said.said(jarvis.queued))))
-    expect(new Set(Effect.runSync(Effect.replicateEffect(said.onIt(), 40)))).toEqual(new Set(own.slice(1)))
+    expect(await next(said, 40)).toEqual(new Set(own.slice(1)))
+  })
+
+  test("two replies that each pick a line before either plays get different ones, and play without the same one twice in a row", async () => {
+    const { persona: said } = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") })
+    // Each picks the first it may, as both would by chance a third of the time if neither knew of the other.
+    const [first, second] = Effect.runSync(Effect.all([said.onIt(), said.onIt()]).pipe(Effect.withRandom(Random.fixed([0]))))
+    expect([first, second]).toEqual([own[0]!, own[1]!])
+    Effect.runSync(Effect.forEach([first, second], said.said))
+    const heard = Effect.runSync(
+      Effect.replicateEffect(
+        Effect.gen(function* () {
+          const replies = yield* Effect.all([said.onIt(), said.onIt()])
+          yield* Effect.forEach(replies, said.said)
+          return replies
+        }),
+        200,
+      ).pipe(Effect.withRandom(Random.make("yapd"))),
+    ).flat()
+    heard.forEach((line, index) => expect(line).not.toBe([second, ...heard][index]))
+    expect(new Set(heard)).toEqual(new Set(own))
+  })
+
+  test("a line picked but never played is let go after two minutes, and only then may be picked again", async () => {
+    const { persona: said } = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") })
+    const picked = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Math.max(later, Date.now()))
+        const first = yield* said.onIt()
+        yield* TestClock.adjust("1 minute")
+        const meanwhile = yield* said.onIt()
+        yield* TestClock.adjust("1 minute")
+        return [first, meanwhile, yield* said.onIt()]
+      }).pipe(Effect.withRandom(Random.fixed([0])), Effect.provide(TestContext.TestContext)),
+    )
+    // The second is still kept from coming up when the first is let go.
+    expect(picked).toEqual([own[0]!, own[1]!, own[0]!])
+  })
+
+  test("with too few lines to keep clear of all those picked and heard, it's the line said in the same breath, then the latest, that's kept clear of", async () => {
+    const two = await persona(undefined, jarvis, { YAPD_ON_IT: own.slice(0, 2).join("|") })
+    const picked = Effect.runSync(
+      Effect.gen(function* () {
+        yield* two.persona.said(own[0]!)
+        const first = yield* two.persona.onIt()
+        return [first, yield* two.persona.onIt(), yield* two.persona.onIt(own[0])]
+      }).pipe(Effect.withRandom(Random.fixed([0]))),
+    )
+    expect(picked).toEqual([own[1]!, own[0]!, own[1]!])
+    // With one of his own, it's said by every reply, however many pick it before it plays.
+    const one = await persona(undefined, jarvis, { YAPD_ON_IT: own[0]! })
+    expect(Effect.runSync(Effect.all([one.persona.onIt(), one.persona.onIt(), one.persona.onIt(own[0])]))).toEqual([own[0]!, own[0]!, own[0]!])
   })
 
   test("a second line for going ahead in the same breath is never the first, nor the one he heard last while there are lines enough", async () => {
@@ -198,14 +268,14 @@ describe("Persona", () => {
     /** What may be said for going ahead once `spoken` has been. */
     const after = (spoken: string) => {
       Effect.runSync(said.said(spoken))
-      return new Set(Effect.runSync(Effect.replicateEffect(said.onIt(), 40).pipe(Effect.withRandom(Random.make("yapd")))))
+      return next(said, 40)
     }
-    expect(after("Very good, sir. In yapd, on Fable, in a worktree.")).toEqual(new Set(["Right away, sir.", "Very good"]))
-    expect(after("Very good. I took that to mean the staging branch.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
+    expect(await after("Very good, sir. In yapd, on Fable, in a worktree.")).toEqual(new Set(["Right away, sir.", "Very good"]))
+    expect(await after("Very good. I took that to mean the staging branch.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
     // Not one of his, or not at the start: the last one he heard stays as it was.
-    expect(after("Very goodness, that was quick.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
-    expect(after("I took that to mean staging. Right away, sir.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
-    expect(after(" Right away, sir. ")).toEqual(new Set(["Very good", "Very good, sir."]))
+    expect(await after("Very goodness, that was quick.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
+    expect(await after("I took that to mean staging. Right away, sir.")).toEqual(new Set(["Right away, sir.", "Very good, sir."]))
+    expect(await after(" Right away, sir. ")).toEqual(new Set(["Very good", "Very good, sir."]))
   })
 
   test("what's said past an \"On it\" a model wrote anyway, addressing him or not, is all that's left of it", () => {
