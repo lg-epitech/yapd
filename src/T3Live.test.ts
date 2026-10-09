@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Chunk, Effect, Fiber, Option, Redacted, Stream, TestClock, TestContext } from "effect"
+import { Chunk, Effect, Fiber, Layer, Logger, Option, Redacted, Stream, TestClock, TestContext } from "effect"
 import * as T3Live from "./T3Live.ts"
 
 const thread = (overrides: Record<string, unknown> = {}) => ({
@@ -293,6 +293,63 @@ describe("T3Live.follow", () => {
         return dials
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ).then((dials) => expect(dials).toBeGreaterThan(1)))
+
+  test("logs why rig's T3 Code won't be followed, once each reason, by its machine and never with the token", async () => {
+    const secret = "t3-secret-token"
+    const lines: Array<string> = []
+    const logger = Logger.map(Logger.logfmtLogger, (line) => void lines.push(line))
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const { sockets, dial } = fake()
+        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:50001" }, token: Redacted.make(secret) }), dial).pipe(
+          Effect.annotateLogs({ machine: "rig" }),
+        )
+        yield* flush
+        // The tunnel is up, but T3 Code there turns the socket down twice, saying the same, which here even has the token in it.
+        for (const [index, wait] of [[0, "2 seconds"], [1, "4 seconds"]] as const) {
+          sockets[index]!.emit({ _tag: "Closed", reason: `Expected 101 status code for Bearer ${secret}, closed with 1002` })
+          yield* flush
+          yield* TestClock.adjust(wait)
+          yield* flush
+        }
+        // Then it takes the socket, and ends the subscription: it speaks another protocol.
+        sockets[2]!.emit({ _tag: "Open" })
+        sockets[2]!.emit({
+          _tag: "Message",
+          data: JSON.stringify({
+            _tag: "Exit",
+            requestId: "shell",
+            exit: { _tag: "Failure", cause: [{ _tag: "Fail", error: { _tag: "OrchestrationProtocolMismatch", message: "This server speaks protocol 3." } }] },
+          }),
+        })
+        yield* flush
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(TestContext.TestContext, Logger.replace(Logger.defaultLogger, logger)))),
+    )
+    const following = lines.filter((line) => line.includes("follow T3 Code"))
+    expect(following).toHaveLength(2)
+    expect(following[0]).toContain(`message="Can't follow T3 Code right now, I'll keep trying: Expected 101 status code for Bearer [token], closed with 1002"`)
+    expect(following[1]).toContain("I'll keep trying: it ended the subscription: OrchestrationProtocolMismatch: This server speaks protocol 3.")
+    expect(following.every((line) => line.includes("machine=rig"))).toBe(true)
+    expect(lines.some((line) => line.includes(secret))).toBe(false)
+  })
+
+  test("says in the log why it lost T3 Code after following it", async () => {
+    const lines: Array<string> = []
+    const logger = Logger.map(Logger.logfmtLogger, (line) => void lines.push(line))
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const { sockets, dial } = fake()
+        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
+        yield* flush
+        sockets[0]!.emit({ _tag: "Open" })
+        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
+        yield* flush
+        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Defect", defect: "boom" }) })
+        yield* flush
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(TestContext.TestContext, Logger.replace(Logger.defaultLogger, logger)))),
+    )
+    expect(lines.some((line) => line.includes(`message="Lost T3 Code, connecting again: it broke: boom"`))).toBe(true)
+  })
 
   test("connects again where T3 Code answers now, with the token it's asked for then, like another machine's after it restarted", () =>
     Effect.runPromise(

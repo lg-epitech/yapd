@@ -221,6 +221,7 @@ const Message = Schema.parseJson(
     requestId: Schema.optional(Schema.Unknown),
     values: Schema.optional(Schema.Array(Schema.Unknown)),
     exit: Schema.optional(Schema.Unknown),
+    defect: Schema.optional(Schema.Unknown),
   }),
 )
 const decodeMessage = Schema.decodeUnknownEither(Message)
@@ -251,13 +252,33 @@ const dial: Dial = (url, token) => {
     send: (data) => socket.send(data),
     close: () => socket.close(),
     events: (listener) => {
+      // Bun says what went wrong only here, like the status T3 Code answered with instead of taking the socket, and closing says the rest.
+      let failed: string | undefined
       socket.onopen = () => listener({ _tag: "Open" })
       socket.onmessage = (event) => listener({ _tag: "Message", data: String(event.data) })
-      socket.onerror = () => {}
-      socket.onclose = (event) => listener({ _tag: "Closed", reason: event.reason || `closed with ${event.code}` })
+      socket.onerror = (event) => {
+        failed = "message" in event && String(event.message) !== "" ? String(event.message) : "the socket failed"
+      }
+      socket.onclose = (event) => {
+        const closed = event.reason || `closed with ${event.code}`
+        listener({ _tag: "Closed", reason: failed === undefined ? closed : `${failed}, ${closed}` })
+      }
     },
   }
 }
+
+/** What T3 Code sent, short enough for a line of the log. */
+const brief = (value: unknown) => {
+  const text = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value))
+  return text.length > 300 ? `${text.slice(0, 300)}...` : text
+}
+
+/** Why a subscription T3 Code ended came to an end, in its own words when it gave any. */
+const ended = (exit: unknown) =>
+  Either.match(Server.outcome(exit), {
+    onLeft: (error) => (error._tag === "Refusal" ? `it ended the subscription: ${error.tag}: ${error.message}` : `it ended the subscription: ${brief(exit)}`),
+    onRight: () => "it ended the subscription",
+  })
 
 export class T3Live extends Context.Tag("yapd/T3Live")<
   T3Live,
@@ -274,7 +295,10 @@ export class T3Live extends Context.Tag("yapd/T3Live")<
  * whenever the connection drops, like when T3 Code restarts, and picking up
  * from where it left off. Where it answers, and the token for it, are found
  * again for each connection: another machine's T3 Code is reached through a
- * forward that can move, with a token asked for there.
+ * forward that can move, with a token asked for there. Why it can't follow,
+ * like T3 Code turning the token down or speaking another protocol, is logged
+ * once each reason, as T3 Code or the socket said it, without the token: the
+ * tunnel being up says nothing of that, and the log is the only place it shows.
  */
 export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, connect: Dial = dial) =>
   Effect.gen(function* () {
@@ -282,7 +306,10 @@ export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, co
     let live = false
     const changes = yield* PubSub.unbounded<Change>()
 
-    /** One connection, until it drops. Returns whether it got as far as catching up. */
+    /**
+     * One connection, until it drops. Returns whether it got as far as
+     * catching up, and why it ended, as T3 Code or the socket said, to log.
+     */
     const session = ({ server, token }: Server.Located) =>
       Effect.gen(function* () {
         const events = yield* Queue.unbounded<Event>()
@@ -308,12 +335,14 @@ export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, co
         const subscription = "shell"
         /** Whether this connection has caught up, which only its own marker says: after a drop, what's known is from before. */
         let caughtUp = false
+        /** How it ended, with the token taken out of whatever T3 Code or the socket said, should either ever repeat it. */
+        const over = (why: string) => ({ caughtUp, why: Server.withheld(why, token) })
         while (true) {
           const event = yield* Queue.take(events).pipe(Effect.timeout(ping), Effect.option)
           if (Option.isNone(event)) {
-            if (unanswered >= missed) return caughtUp
+            if (unanswered >= missed) return over("it stopped answering")
             unanswered++
-            if (!(yield* send({ _tag: "Ping" }))) return caughtUp
+            if (!(yield* send({ _tag: "Ping" }))) return over("the socket wouldn't take a ping")
             continue
           }
           switch (event.value._tag) {
@@ -327,18 +356,19 @@ export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, co
                   headers: [],
                 }))
               ) {
-                return caughtUp
+                return over("the socket wouldn't take the subscription")
               }
               break
             case "Closed":
-              return caughtUp
+              return over(event.value.reason)
             case "Message": {
               unanswered = 0
               const message = decodeMessage(event.value.data)
               if (Either.isLeft(message)) break
-              const { _tag, requestId, values } = message.right
+              const { _tag, requestId, values, exit, defect } = message.right
               // The subscription ended, or the connection's own calls broke, whatever the socket still answers.
-              if ((_tag === "Exit" && requestId === subscription) || _tag === "Defect") return caughtUp
+              if (_tag === "Exit" && requestId === subscription) return over(ended(exit))
+              if (_tag === "Defect") return over(`it broke: ${brief(defect)}`)
               if (_tag !== "Chunk" || requestId !== subscription) break
               for (const value of values ?? []) {
                 const item = decodeItem(value)
@@ -353,7 +383,7 @@ export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, co
                 yield* PubSub.publishAll(changes, applied.changes)
               }
               // It sends nothing more until this one is taken in.
-              if (!(yield* send({ _tag: "Ack", requestId: subscription }))) return caughtUp
+              if (!(yield* send({ _tag: "Ack", requestId: subscription }))) return over("the socket wouldn't take an ack")
             }
           }
         }
@@ -368,24 +398,27 @@ export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, co
 
     const loop = Effect.gen(function* () {
       let failures = 0
-      let said = false
+      /** Why it last couldn't follow, as the log was told, so the same reason isn't said again on every try. */
+      let said: string | undefined
       while (true) {
         const located = yield* Effect.either(locate)
         // Whatever goes wrong with one connection, like a socket that can't be made, the next is tried.
-        const caughtUp = Either.isRight(located)
+        const { caughtUp, why } = Either.isRight(located)
           ? yield* session(located.right).pipe(
-              Effect.catchAllDefect((defect) => Effect.as(Effect.logWarning("Lost T3 Code", defect), false)),
+              Effect.catchAllDefect((defect) =>
+                Effect.as(Effect.logWarning("Lost T3 Code", Server.harmless(defect, located.right.token)), { caughtUp: false, why: "something went wrong in yapd" }),
+              ),
             )
-          : false
+          : { caughtUp: false, why: located.left.reason }
         if (caughtUp) {
           failures = 0
-          said = false
-          yield* Effect.logInfo("Lost T3 Code, connecting again")
+          said = undefined
+          yield* Effect.logInfo(`Lost T3 Code, connecting again: ${why}`)
         } else {
           failures++
-          // Once, rather than every time while T3 Code is closed.
-          if (!said) yield* Effect.logInfo("Can't follow T3 Code right now, I'll keep trying")
-          said = true
+          // Once each reason, rather than every time while T3 Code is closed, or won't let itself be followed.
+          if (said !== why) yield* Effect.logInfo(`Can't follow T3 Code right now, I'll keep trying: ${why}`)
+          said = why
         }
         yield* Effect.sleep(backoff(failures))
       }
