@@ -411,7 +411,7 @@ const flagsAfter = (command: string, name: RegExp) => {
 }
 
 /** The names below, so a command with none of them, like most, is passed over at once. */
-const flaggable = /rm|push|reset|clean|branch|restore|gcloud|az|rsync/i
+const flaggable = /rm|rimraf|push|reset|clean|branch|restore|gcloud|az|rsync/i
 
 /**
  * A long flag as git and GNU tools take it: whole, or cut short to any of its
@@ -450,6 +450,8 @@ const riskyFlags = {
     const removing = flagged(command, /(?:^|[^\w-]|\bgit-)rm$/i, recursive)
     return removing !== -1 && !/--cached/i.test(command.slice(removing))
   },
+  // rimraf, which deletes all of a tree as `rm -rf` does, given something to delete, run as it is or by npx and the like.
+  rimraf: (command: string) => /(?:^|[\s/])rimraf\s+(?:-\S*\s+)*[^-\s]/i.test(command),
   // A push that forces, deletes or mirrors, wherever the flag goes.
   push: (command: string) => after(command, /\bpush\b/i, pushing),
   // A reset that throws away what isn't committed, wherever "--hard" goes, like `git reset HEAD~1 --hard`.

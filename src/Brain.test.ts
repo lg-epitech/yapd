@@ -400,6 +400,9 @@ describe("Brain", () => {
       "git push --pru origin",
       "git reset --ha",
       "git reset --h HEAD~1",
+      "rimraf ~/work",
+      "npx rimraf ~/work",
+      "bunx rimraf --glob 'dist/**'",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -468,6 +471,9 @@ describe("Brain", () => {
       "git reset --soft HEAD~1",
       'git commit -m "git reset --hard was wrong"',
       "grep -rn 'reset --hard' docs",
+      "npm i -D rimraf",
+      "npm uninstall rimraf",
+      "grep rimraf package.json",
       "git push --dry-run origin main",
       "git push --porcelain origin main",
       "git branch --format='%(refname)' --delete old",
