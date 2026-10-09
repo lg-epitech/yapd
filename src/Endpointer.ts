@@ -106,6 +106,11 @@ export class Endpointer {
     return this.phase === "speech" && this.quiet > 0
   }
 
+  /** How many frames the user has been quiet for partway through: none while they talk. */
+  get silent(): number {
+    return this.phase === "speech" ? this.quiet : 0
+  }
+
   private reset() {
     this.phase = "quiet"
     this.frames = []

@@ -77,6 +77,16 @@ describe("Endpointer", () => {
     expect(endpointer.pausing).toBe(false)
   })
 
+  test("counts the frames the user has gone quiet for partway through, none while they talk", () => {
+    const endpointer = new Endpointer()
+    feed([...quiet(3), ...voiced(defaults.confirm)], endpointer)
+    expect(endpointer.silent).toBe(0)
+    feed(quiet(5), endpointer)
+    expect(endpointer.silent).toBe(5)
+    feed(voiced(1), endpointer)
+    expect(endpointer.silent).toBe(0)
+  })
+
   test("listens again after an utterance", () => {
     const endpointer = new Endpointer()
     feed([...voiced(10), ...quiet(defaults.silence)], endpointer)
