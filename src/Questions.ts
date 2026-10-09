@@ -11,9 +11,12 @@ import type * as Threads from "./Threads.ts"
 // asking it takes no model call: only a part that can't be is put otherwise,
 // by the model, before it comes here. Each part is asked on its own, with its
 // options in the agent's order, and the one the agent recommends said as
-// yapd's own pick. His answer is matched to an option by its name, how it
-// sounds, its place or a word only it has; anything else is his own words,
-// which go to the agent as he said them, since it asked him, not a form.
+// yapd's own pick. His answer is taken as an option without the model only
+// when it's that option's whole name, as written, as compared or by how it
+// sounds, its place, or a plain yes to yapd's pick; anything else, like part
+// of a name or its words in another order, is the model's to make out, and
+// what isn't an option's whole name then is his own words, which go to the
+// agent as he said them, since it asked him, not a form.
 
 /** A part of a thread's question, as T3 Code shows it. */
 export type Question = Extract<T3Actions.Request, { readonly _tag: "Question" }>["questions"][number]
@@ -408,8 +411,18 @@ const figures = (said: string) => {
     .join(" ")
 }
 
-/** How it sounds, spaces and marks aside: "ghost net" is Ghostnet, "day js" is Day.js, "four workers" is 4 workers. */
-const sound = (text: string) => figures(gist(text)).replace(/[^\p{L}\p{N}]+/gu, "")
+/** How words as compared sound, spaces and marks aside: "ghost net" is Ghostnet, "day js" is Day.js, "four workers" is 4 workers. */
+const sound = (said: string) => figures(said).replace(/[^\p{L}\p{N}]+/gu, "")
+
+/**
+ * A name as compared, every word of it kept, even one `gist` leaves out of
+ * what he says, like "please" in "Please hold" or yapd's own name in
+ * "Restart yapd": only his words may go without those.
+ */
+const kept = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").replace(/\s+/g, " ").trim()
+
+/** Without a "the" before it, which says nothing of which. */
+const unled = (said: string) => said.replace(/^the (?=\S)/, "")
 
 /** The places of the options that fit, which settle it only when there's one. */
 const fitting = (part: Said, fits: (choice: Choice) => boolean) => part.options.flatMap((choice, index) => (fits(choice) ? [index] : []))
@@ -429,71 +442,47 @@ const exactly = (part: Said, text: string) => {
 }
 
 /**
- * Words that say no, however they're written: "not", "never", "without",
- * or "don't" as Whisper may write it, "dont". The "n't" of "don't" is one
- * too, and so is the "t" left of "don’t" once `gist` takes its curly
- * apostrophe for a space.
+ * The options his words are the whole name of, nothing of it left out and
+ * nothing added: as written, marks and all, which tells "C#" from "C++";
+ * else as compared, in any case and with any punctuation, its
+ * "(Recommended)", a "the" before it and a "please" or "sir" after it
+ * aside; else by how it sounds, as Whisper may write it, like "ghost net"
+ * for Ghostnet or "four workers" for 4 workers. More than one when they're
+ * named alike, which only the model can tell apart. Part of a name, a word
+ * of it, or its words in another order are never one: "merge now" is never
+ * "Do not merge now", "just lint" never "Tests and lint", and "the code,
+ * not the test" never "Fix the test, not the code".
  */
-const denying = /^(?:not|no|nope|nah|never|none|nor|neither|nothing|without|cannot|non|\w+n't|(?:do|does|did|ca|wo|is|are|was|were|should|would|could|have|has|had|must|need)nt|aint)$/
-
-/**
- * Words that turn what an option does around, or put it off: "skip" in
- * "Skip tests" beside "Run tests", "keep" in "Keep it" beside "Drop it",
- * "wait" in "Wait for CI" beside "Merge now", or "instead" and "rather" in
- * "Squash instead of rebasing".
- */
-const turning =
-  /^(?:skip(?:s|ped|ping)?|stop(?:s|ped|ping)?|cancel(?:s|led|ling|ed|ing)?|abort(?:s|ed|ing)?|hold(?:s|ing)?|held|wait(?:s|ed|ing)?|paus(?:e|es|ed|ing)|keep(?:s|ing)?|kept|leav(?:e|es|ing)|revert(?:s|ed|ing)?|undo(?:es|ing|ne)?|drop(?:s|ped|ping)?|disabl(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|discard(?:s|ed|ing)?|ignor(?:e|es|ed|ing)|avoid(?:s|ed|ing)?|exclud(?:e|es|ed|ing)|omit(?:s|ted|ting)?|reject(?:s|ed|ing)?|declin(?:e|es|ed|ing)|postpon(?:e|es|ed|ing)|defer(?:s|red|ring)?|later|off|instead|rather|except|unless)$/
-
-/** What turns words, as compared, around: each word that does, with every one that says no as "not". */
-const turns = (said: string) => {
-  const words = said.split(" ")
-  return new Set(
-    words.flatMap((word, index) => (denying.test(word) || (word === "t" && /n$/.test(words[index - 1] ?? "")) ? ["not"] : turning.test(word) ? [word] : [])),
-  )
+const wholly = (part: Said, heard: string): ReadonlyArray<number> => {
+  const exact = exactly(part, heard)
+  if (exact !== undefined) return [exact]
+  // His words without "uh", "please", "sir" or yapd's name, or with every word kept, for a name that has them.
+  const his = [...new Set([gist(heard), kept(heard)].map(unled))].filter((said) => said !== "")
+  if (his.length === 0) return []
+  const names = ({ label, said }: Choice) => [label, unmarked(label), said].map((name) => unled(kept(name)))
+  const compared = fitting(part, (choice) => names(choice).some((name) => his.includes(name)))
+  if (compared.length > 0) return compared
+  const sounds = his.map(sound).filter((said) => said !== "")
+  return fitting(part, (choice) => names(choice).some((name) => sounds.includes(sound(name))))
 }
 
+/** The one option his words are the whole name of, when only one is. */
+const whole = (part: Said, heard: string) => one(wholly(part, heard))
+
+/** Whether what he said is one option's whole name, as `wholly` has it, like "Cancel the run". */
+export const names = (part: Said, heard: string) => whole(part, heard) !== undefined
+
 /**
- * Whether words, as compared, turn the same way as an option's name, as
- * written and as said: say no to it, skip it, keep it or wait, both or
- * neither. Words that only name part of an option, like "merge now" to "Do
- * not merge now", or "tests" to "Skip tests", say the opposite of it as
- * often as not; so do words that add what turns it, like "don't merge" to
- * "Merge now". Only its name in full, or the model, takes it then.
+ * Whether an option's name starts with these words, as written or as said,
+ * like "Cancel the deploy" with "cancel". It never takes an option: it only
+ * leaves what he said to the model.
  */
-const sameWay = (part: Said, index: number, said: string) => {
-  const choice = part.options[index]
-  if (choice === undefined) return false
-  const theirs = turns([unmarked(choice.label), choice.said].map(gist).join(" "))
-  const his = turns(said)
-  return theirs.size === his.size && [...his].every((word) => theirs.has(word))
+export const opens = (part: Said, heard: string) => {
+  const said = gist(heard)
+  if (said === "") return false
+  const words = `${figures(said)} `
+  return part.options.some(({ label, said: name }) => [unmarked(label), name].some((written) => `${figures(gist(written))} `.startsWith(words)))
 }
-
-/**
- * The options a name fits, as written or as said, or failing that by how it
- * sounds, turned the same way: more than one when they're named alike. How
- * it sounds runs words together, so "not able" sounds like "Notable".
- */
-const named = (part: Said, said: string) => {
-  const found = fitting(part, ({ label, said: name }) => [label, unmarked(label), name].some((written) => gist(written) === said))
-  if (found.length > 0 || sound(said) === "") return found
-  return fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => sound(written) === sound(said))).filter((index) => sameWay(part, index, said))
-}
-
-/** An option by its name, as written or as said, or failing that by how it sounds, when only one fits. */
-const byName = (part: Said, said: string) => one(named(part, said))
-
-/** Whether what he said is one option's name in full, marks and all, as compared, or by how it sounds, like "Cancel the run". */
-export const names = (part: Said, heard: string) => exactly(part, heard) !== undefined || byName(part, gist(heard)) !== undefined
-
-/** Whether an option's name starts with these words, as written or as said, like "Cancel the deploy" with "cancel". */
-export const opens = (part: Said, heard: string) => gist(heard) !== "" && opening(part, gist(heard)).length > 0
-
-/**
- * Whether the options are named with numbers, like "2 workers" or "Node 20":
- * then a number he says is the one in a name, never a place.
- */
-const numbered = (part: Said) => part.options.some(({ label, by }) => by === "label" && /\d/.test(figures(gist(unmarked(label)))))
 
 /** An option by its place: "the second one", "number two", "option B", "last". */
 const place = /^(the )?(?:(option|number|choice) )?(first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th|one|two|three|four|[1-4]|[a-d])(?: one| option)?$/
@@ -505,19 +494,8 @@ const places: Readonly<Record<string, number>> = {
   fourth: 3, "4th": 3, four: 3, "4": 3, d: 3,
 }
 
-/** The words the options' names have, as written and as compared, but "a" before another word, which only points. */
-const ownWords = (part: Said) =>
-  new Set(
-    part.options.flatMap(({ label, said }) =>
-      [unmarked(label), said].flatMap((name) => {
-        const kept = gist(name)
-          .split(" ")
-          .filter((word, index, all) => word !== "a" || index === all.length - 1)
-          .join(" ")
-        return [...kept.split(" "), ...figures(kept).split(" ")]
-      }),
-    ),
-  )
+/** Words a place is said with, besides numbers and letters. */
+const ordinals: ReadonlySet<string> = new Set(["first", "second", "third", "fourth", "last", "latter", "former"])
 
 /** The options as he heard them offered last, by their place in the part: all of them, or the others once he turned down yapd's pick. */
 const offeredLast = (part: Said) => part.among ?? part.options.map((_, index) => index)
@@ -530,131 +508,70 @@ const offeredLast = (part: Said) => part.among ?? part.options.map((_, index) =>
  */
 const ordered = (part: Said) => part.read || part.among !== undefined
 
-/** A place said as one, by its order, like "the first one" or "last one", rather than "first" on its own, which may be a name's word. */
-const ordinally = (said: string) => /^(?:the (?:first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th)(?: one| option)?|(?:first|second|third|fourth|last|1st|2nd|3rd|4th) one)$/.test(said)
+/**
+ * Whether a place he says can only be a place: he heard the options in an
+ * order a place counts by, and no option's name has a word a place is said
+ * with, like "first" or "last", a number or a letter, as "Last write wins",
+ * "4 workers" or "Option B" do, which he may have meant instead. An "a"
+ * before another word only points. An option known by its number goes by
+ * its name as the agent wrote it, since its number is its place.
+ */
+const placeable = (part: Said) =>
+  ordered(part) &&
+  !part.options.some(({ label, said, by }) =>
+    (by === "label" ? [unmarked(label), said] : [unmarked(label)]).some((name) => {
+      const words = kept(name).split(" ")
+      return words.some(
+        (word, index) =>
+          (word !== "a" || index === words.length - 1) &&
+          (ordinals.has(word) || /\d/.test(word) || units[word] !== undefined || tens[word] !== undefined || /^\p{L}$/u.test(word)),
+      )
+    }),
+  )
 
+/** An option by its place among what he was offered last, when a place can only be one: after a no to yapd's pick, "the first one" is the first of the others. */
 const byPlace = (part: Said, said: string) => {
   const found = place.exec(said)
-  if (found === null || !ordered(part)) return undefined
+  if (found === null || !placeable(part)) return undefined
   const [, the, kind, which = ""] = found
-  // A letter on its own only when no option goes by one, and "the one" is no place at all.
-  if (kind === undefined && /^[a-d]$/.test(which) && part.options.some(({ said }) => /^\p{L}$/u.test(said.trim()))) return undefined
+  // "The one" is no place at all.
   if (kind === undefined && the !== undefined && which === "one") return undefined
-  // A letter, a number or a word like "first" that an option's name has is that name's, never a place, as "A" to "Option B" and "Option A",
-  // or "first" to "First write wins": the name decides, or the model does. Only "option four" to options that count, like 4 workers, is.
-  const counting = (kind === "option" || kind === "choice") && /^(?:one|two|three|four|[1-4])$/.test(which) && !part.opaque
-  const own = ownWords(part)
-  if (!counting && (own.has(which) || own.has(figures(which)))) return undefined
-  // "Four" to 2, 4, 8 or 16 workers is 4 workers, not the fourth: only "the fourth" or "option four" is a place then.
-  if (kind !== "option" && kind !== "choice" && /^(?:one|two|three|four|[1-4])$/.test(which) && numbered(part)) return undefined
-  // Counted among what he was offered last: after a no to yapd's pick, "the first one" is the first of the others.
   const offered = offeredLast(part)
   const at = which === "last" || which === "latter" ? offered.length - 1 : places[which]
   return at === undefined ? undefined : offered[at]
 }
 
-/** Words in an answer that only point, around the ones that name. */
-const pointing: ReadonlySet<string> = new Set([
-  "the", "one", "ones", "that", "this", "with", "about", "on", "option", "choice", "go", "use", "pick", "take", "let's", "i'll", "i'd",
-  "we'll", "want", "choose", "a", "an", "just", "only",
-])
-
-/** The options whose names have every word he named them with: "the blue one", "full history", "the four one" for 4 workers. */
-const having = (part: Said, said: string) => {
-  const named = figures(said)
-    .split(" ")
-    .filter((word) => !pointing.has(word))
-  if (named.length === 0) return []
-  return fitting(part, (choice) => {
-    const own = new Set([unmarked(choice.label), choice.said].flatMap((name) => figures(gist(name)).split(" ")))
-    return named.every((word) => own.has(word))
-  })
-}
-
 /**
- * An option by the words he named it with, all of them its own and no
- * other's, turned the same way: "merge now" is never "Do not merge now",
- * nor "tests" "Skip tests", which the model tells.
+ * Words that say no, however they're written: "not", "never", "without",
+ * or "don't" as Whisper may write it, "dont". The "n't" of "don't" is one
+ * too, and so is the "t" left of "don’t" once `gist` takes its curly
+ * apostrophe for a space.
  */
-const byWords = (part: Said, said: string) => {
-  const found = one(having(part, said))
-  return found !== undefined && sameWay(part, found, said) ? found : undefined
-}
+const denying = /^(?:not|no|nope|nah|never|none|nor|neither|nothing|without|cannot|non|\w+n't|(?:do|does|did|ca|wo|is|are|was|were|should|would|could|have|has|had|must|need)nt|aint)$/
 
 /**
- * The options whose names start with these words, as written or as said:
- * "ship it" starts "Ship it now". It only ever leaves what he said to the
- * model, never takes an option, so it has every one that starts so,
- * whichever way the rest of its name turns it.
- */
-const opening = (part: Said, said: string) => {
-  const words = `${figures(said)} `
-  return fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => `${figures(gist(written))} `.startsWith(words)))
-}
-
-/** A yes at the start of words that agree, like "yes" in "yes, ship it" or "sounds good" in "sounds good, go ahead". */
-const yesFirst = /^(?:(?:yes|yeah|yep|yup|sure|ok|okay|sounds good) )+/
-
-/** Words an option's name has that say nothing of which it is. */
-const glue: ReadonlySet<string> = new Set(["and", "or", "of", "to", "for", "in", "it", "is", "with", "as"])
-
-/** Words in an answer that only agree, saying nothing of which option: "yes", "sure", "sounds good", "your pick". */
-const nodding: ReadonlySet<string> = new Set([
-  "yes", "yeah", "yep", "yup", "sure", "absolutely", "course", "ok", "okay", "sounds", "good", "fine", "that's", "it's", "agreed", "your",
-  "what", "whatever", "you", "recommend", "recommended", "recommendation",
-])
-
-/** A pick that holds back, like "Pause", "Wait for CI" or "Not yet", but never "Keep going", which goes on. */
-const holding = /^(?:pause|wait|hold|not|no|don['’]t|stop|keep(?! going| on\b| running)|skip|leave|cancel|abort|postpone|defer|later)\b/i
-
-/** Words to go ahead, like "proceed", "go on" or "yes, ship it". */
-const going = /\b(?:proceed|go on|go ahead|do it|go for it|carry on|continue|ship it|merge it)\b/
-
-/**
- * Whether words that agree may be to another option than yapd's pick: they,
- * or the word they start with, start its name, or its name has them all,
- * like "ship it" to "Ship it now", "okay, do it" to "OK, but only on
- * staging", or "fine" to "Fine as it is"; and so with what follows a yes,
- * like "yes, ship it" to "Ship it now" or "sure, go ahead" to "Go ahead
- * with the rename"; or its name has any word of his that says more than
- * yes, wherever it is in it, like "merge" in "yes, merge it" to "Squash and
- * merge"; or they go ahead, to a pick that holds back, like "proceed" to
- * Pause and "Continue the migration".
- */
-const elsewhere = (part: Said, said: string, pick: number | undefined) => {
-  const [first = ""] = said.split(" ")
-  const starts = first === said || pointing.has(first) ? [said] : [said, first]
-  const rest = said.replace(yesFirst, "")
-  const after = rest === said || rest === "" ? [] : [rest]
-  const opens = [...starts, ...after].flatMap((words) => opening(part, words))
-  const has = [said, ...after].flatMap((words) => having(part, words))
-  const own = figures(said)
-    .split(" ")
-    .filter((word) => !pointing.has(word) && !glue.has(word) && !nodding.has(word))
-  const shares = fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => figures(gist(written)).split(" ").some((word) => own.includes(word))))
-  const ahead = going.test(said) && holding.test(part.options[pick ?? -1]?.said ?? "")
-  return ahead || [...opens, ...has, ...shares].some((index) => index !== pick)
-}
-
-/**
- * Whether his words name this option, by a word of its name or by its
- * place, rather than only agree with what yapd would pick: "Blue, I think"
- * and "the second, please" do, "yeah, that works" doesn't. Nor do words
- * turned another way than its name, like "don't merge" to "Merge now" or
- * "CI" to "Wait for CI", nor a place with a no, like "not the first one".
+ * Whether his words name this option, rather than only agree with what yapd
+ * would pick: its whole name among them, as in "Blue, I think", or its
+ * place, as in "the second, please", when a place can only be one. Never
+ * with a no anywhere in them, like "don't merge now" to "Merge now" or "not
+ * the first one", which only the question heard in full settles.
  */
 export const mentions = (part: Said, index: number, heard: string) => {
   const choice = part.options[index]
   if (choice === undefined) return false
-  const said = gist(heard)
-  const words = new Set(figures(said).split(" "))
-  const own = [unmarked(choice.label), choice.said].flatMap((name) => figures(gist(name)).split(" ")).filter((word) => word !== "" && !pointing.has(word) && !glue.has(word))
-  // Not by a letter, nor "one", which say other things too; and by its place among what he was offered last, when he heard them in order.
+  const said = figures(gist(heard))
+  const words = said.split(" ")
+  if (words.some((word, at) => denying.test(word) || (word === "t" && /n$/.test(words[at - 1] ?? "")))) return false
+  const named = [unmarked(choice.label), choice.said].some((name) => {
+    const whole = figures(unled(kept(name)))
+    return whole !== "" && ` ${said} `.includes(` ${whole} `)
+  })
+  // Not by a letter, nor "one", which say other things too; and by its place among what he was offered last.
   const offered = offeredLast(part)
-  const place = ordered(part) ? offered.indexOf(index) : -1
-  const placed = Object.entries(places).flatMap(([word, at]) => (place >= 0 && at === place && !/^(?:[a-d]|one)$/.test(word) ? [word] : []))
-  const last = place >= 0 && place === offered.length - 1 ? ["last", "latter"] : []
-  return (own.some((word) => words.has(word)) && sameWay(part, index, said)) || ([...placed, ...last].some((word) => words.has(word)) && turns(said).size === 0)
+  const at = placeable(part) ? offered.indexOf(index) : -1
+  const placed = Object.entries(places).flatMap(([word, place]) => (at >= 0 && place === at && !/^(?:[a-d]|one)$/.test(word) ? [word] : []))
+  const last = at >= 0 && at === offered.length - 1 ? ["last", "latter"] : []
+  return named || [...placed, ...last].some((word) => words.includes(word))
 }
 
 /** Going ahead, like "ship it", "go ahead" or "yes, proceed", which may as well name an option as take yapd's pick: the model tells. */
@@ -740,41 +657,16 @@ const steers = (said: string) =>
 const hushing = (said: string) => [repeating, later, skipping, leaving].some((phrases) => phrases.has(said))
 
 /**
- * The one option words mean, by its name or its sound, or, unless they're
- * about how it's asked, by its place or words only it has. Never when they
- * name several alike, like "c" for "C++" and "C#": that's no letter's place
- * either, and which he meant is the model's to tell; nor by its sound or
- * its words turned another way than its name, as `sameWay` has it.
- */
-const meant = (part: Said, said: string) => {
-  const names = named(part, said)
-  if (names.length > 1) return undefined
-  if (names[0] !== undefined) return names[0]
-  if (steers(said)) return undefined
-  // "The last one" to "Last write wins", listed first, may be either, which the model tells: only a bare "last" is that name's.
-  return byPlace(part, said) ?? (ordinally(said) ? undefined : byWords(part, said))
-}
-
-/**
- * The options a list names, each by its name, place or words: "Alpha and
- * Gamma", "A, B plus C", "just A". Undefined unless every piece names one,
- * turned the same way, so "lint and docs" never names Skip docs.
+ * The options a list names, each piece of it the whole name of one, as
+ * `wholly` has it: "Alpha and Gamma", "Gamma plus Alpha". Undefined unless
+ * every piece is, so "lint and docs" never names Skip docs, nor "just Beta"
+ * Beta, nor "the first and the second" any place, nor "and lint", with
+ * what came before it lost, Lint.
  */
 const listed = (part: Said, heard: string): ReadonlyArray<number> | undefined => {
-  const pieces = heard
-    .split(/[,;&+]|\b(?:and|plus)\b/i)
-    .map((piece) => gist(piece).replace(/^(?:and|just|only|also) /, ""))
-    .filter((piece) => piece !== "" && piece !== "and")
-  if (pieces.length === 0) return undefined
-  const found = pieces.flatMap((piece) => {
-    const single = meant(part, piece)
-    // "Alpha Gamma", with what came between them lost, is each by its name, but "no docs" is never No and Docs.
-    if (single !== undefined) return [single]
-    return piece.split(" ").map((word) => {
-      const index = byName(part, word)
-      return index !== undefined && sameWay(part, index, piece) ? index : undefined
-    })
-  })
+  const pieces = heard.replace(/([,;])\s*(?:and|plus)\b/gi, "$1").split(/[,;&+]|\b(?:and|plus)\b/i)
+  if (pieces.some((piece) => gist(piece) === "")) return undefined
+  const found = pieces.map((piece) => whole(part, piece))
   return found.every((index) => index !== undefined) ? [...new Set(found)].toSorted((a, b) => a - b) : undefined
 }
 
@@ -790,25 +682,24 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
 }
 
 /**
- * What he said to a part comes to, without the model, when that's plain:
- * an option by its name, marks and all, then as compared, how it sounds,
- * its place, or words only it has, though never by a name several share,
- * nor by part of one turned another way, like "merge now" to "Do not
- * merge now"; several, for a part that takes several; yapd's pick, on a
- * yes once he's heard it in full, unless the yes may be to another, like
- * "ship it" to "Ship it now", or to the question, as when the pick is a
- * no; the option that starts with yes or no, on a plain yes or no, which
- * is otherwise the model's when the question asks whether; his own words
- * for "you decide" or "none of those"; or what he wants done with the
- * question itself.
+ * What he said to a part comes to, without the model, only when that's
+ * plain: an option's whole name, as `wholly` has it; its place, when he
+ * heard them in order and no name has a word a place is said with; for a
+ * part that takes several, every option, all but some, or a list of whole
+ * names; a plain yes or no to the option named Yes or No, or "Yes, …" or
+ * "No, …"; yapd's pick, on a plain yes once he's heard it in full, unless
+ * the question asks whether or an option starts with a yes or a no, or on
+ * "your pick"; his own words for "you decide" or "none of those"; or what
+ * he wants done with the question itself.
  * `inFull` is whether he heard the part through to yapd's pick, and
  * `parts` how many it has. Undefined for anything else, which is the
- * model's to judge. Words like "stop", "skip" or "later" are never taken
- * for an option they're only a word of, nor for one named just so before
- * he's heard it in full, and words that let it go but
- * start an option, like "leave it" to "Leave the changelog", are the
- * model's too once he has, while "skip it" or "next" to a part with more
- * after it and "Skip the slow tests" or "Next release" asks which of them.
+ * model's to judge: part of a name, a word of it, words in another order,
+ * a no or "just" or "instead" with a name. Words like "stop", "skip" or
+ * "later" are never taken for an option named just so before he's heard
+ * it in full, and words that let it go but start an option, like "leave
+ * it" to "Leave the changelog", are the model's too once he has, while
+ * "skip it" or "next" to a part with more after it and "Skip the slow
+ * tests" or "Next release" asks which of them.
  */
 export const pick = (part: Said, heard: string, asked: { readonly inFull: boolean; readonly parts: number }): Reply | undefined => {
   const said = gist(heard)
@@ -816,42 +707,34 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   const picked = (options: ReadonlyArray<number>): Reply => ({ _tag: "Picked", options })
   // "Stop" or "Later" said before he'd heard the options can't be to one he didn't know of, called that: it's to stop yapd, or put it off.
   const unheard = !asked.inFull && hushing(said)
-  const exact = unheard ? undefined : exactly(part, heard)
-  if (exact !== undefined) return picked([exact])
+  const named = unheard ? [] : wholly(part, heard)
+  // Named alike, like "c" for "C++" and "C#", which he meant is the model's to tell: never a letter's place either.
+  if (named.length > 0) return named.length === 1 ? picked(named) : undefined
   // A form that takes only its options asks which of them instead.
   const words = (text: string): Reply => (part.ownWords ? { _tag: "Words", text } : { _tag: "Which" })
   if (!steers(said)) {
-    const single = meant(part, said)
-    if (single !== undefined) return picked([single])
+    const placed = byPlace(part, said)
+    if (placed !== undefined) return picked([placed])
     const several = part.several ? (wholes(part, said) ?? listed(part, heard)) : undefined
     return several === undefined ? undefined : picked(several)
   }
-  const named = unheard ? undefined : byName(part, said)
-  if (named !== undefined) return picked([named])
-  const starting = (word: string) => one(fitting(part, ({ said }) => new RegExp(`^${word}\\b`, "i").test(said)))
   const recommended = Option.getOrUndefined(part.recommended)
-  // A plain yes or no is to the option that is one, whatever yapd would pick.
-  const yes = yeses.has(said) ? starting("yes") : undefined
-  if (yes !== undefined) return picked([yes])
-  const no = noes.has(said) ? starting("no") : undefined
-  if (no !== undefined) return picked([no])
-  // Anything else that agrees, like "OK", "fine", "ship it" or "go with that", may be to another option, or to what the question asks
-  // rather than to yapd's pick, which only the model can tell.
-  const assents = yeses.has(said)
-  const agreeing = assents || taking.has(said)
-  // "Ship it" to "Ship it now", heard in full or not, may well be that option rather than a yes to yapd's pick: which is the model's to tell.
-  if (agreeing && elsewhere(part, said, recommended)) return undefined
-  // A plain yes or an okay may be to the question, not to yapd's pick, when that's a no, like "No, skip tests" to "Should I add tests?",
-  // and so may a plain no to one a yes or no answers, like "OK to merge now?", with no option that's either: the model tells, seeing both.
-  const pickedNo = recommended !== undefined && /^no\b/i.test(part.options[recommended]?.said ?? "")
-  const neither = part.options.length > 0 && fitting(part, ({ said }) => /^(?:yes|no)\b/i.test(said)).length === 0
-  if ((assents && pickedNo) || ((assents || noes.has(said)) && neither && whether(part))) return undefined
-  if (agreeing && recommended !== undefined) return asked.inFull ? picked([recommended]) : { _tag: "Again" }
+  const yes = yeses.has(said)
+  const no = noes.has(said)
+  // A plain yes or no is to the option that is one, named just so or with a comma after it, like "No, skip tests", whatever yapd would pick.
+  const answer = yes || no ? one(fitting(part, ({ said: name }) => (yes ? /^yes(?:,|$)/i : /^no(?:,|$)/i).test(name))) : undefined
+  if (answer !== undefined) return picked([answer])
+  // Otherwise, to options, it may be to what the question asks, or to one that starts like it, like "No cache" or "Sure, after the
+  // release", rather than to yapd's pick: the model tells, seeing both.
+  const starting = part.options.some(({ said: name }) => /^(?:yes|no)\b/i.test(name) || `${kept(name)} `.startsWith(`${said} `))
+  if ((yes || no) && part.options.length > 0 && (starting || whether(part))) return undefined
+  // A plain yes, or what only points at yapd's pick, takes it once he's heard it in full; before then, he's to hear it in full.
+  if ((yes || taking.has(said)) && recommended !== undefined) return asked.inFull ? picked([recommended]) : { _tag: "Again" }
   if (deciding.has(said)) return recommended !== undefined ? picked([recommended]) : words("You decide.")
   if (nones.has(said)) return words("None of those.")
-  if (noes.has(said) && recommended !== undefined) return asked.inFull ? { _tag: "Instead" } : undefined
-  if (part.options.length === 0 && yeses.has(said)) return words("Yes")
-  if (part.options.length === 0 && noes.has(said)) return words("No")
+  if (no && recommended !== undefined) return asked.inFull ? { _tag: "Instead" } : undefined
+  if (part.options.length === 0 && yes) return words("Yes")
+  if (part.options.length === 0 && no) return words("No")
   if (repeating.has(said)) return { _tag: "Again" }
   if (explaining.has(said)) return { _tag: "More" }
   if (later.has(said)) return { _tag: "Later" }
@@ -870,7 +753,7 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
 
 /**
  * What the model's answer to a part comes to: the options, when every line
- * of it names one, by its name as written first, as yapd's own pick is, as
+ * of it is one's whole name, as `wholly` has it, as yapd's own pick is, as
  * a list only for a part that takes several; otherwise his own words, as
  * he'd type them, or, for a form that takes only its options, which of them
  * instead. Nothing at all is to hear it again.
@@ -882,14 +765,7 @@ export const resolve = (part: Said, text: string): Reply => {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
-    .flatMap((line): ReadonlyArray<number | undefined> => {
-      const exact = exactly(part, line)
-      if (exact !== undefined) return [exact]
-      const said = gist(line)
-      const single = meant(part, said)
-      if (single !== undefined || !part.several) return [single]
-      return wholes(part, said) ?? listed(part, line) ?? [undefined]
-    })
+    .map((line) => whole(part, line))
   const options = [...new Set(found.flatMap((index) => (index === undefined ? [] : [index])))].toSorted((a, b) => a - b)
   const every = found.length > 0 && !found.includes(undefined)
   if (every && (part.several || options.length === 1)) return { _tag: "Picked", options }

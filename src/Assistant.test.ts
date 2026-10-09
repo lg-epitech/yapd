@@ -713,6 +713,58 @@ const onRig = thread("rig-fees", "Fee table checks", "connectors", {
   updatedAt: "2026-10-01T02:17:00.000Z",
 })
 
+/**
+ * Every answer review found sent another option than the one he meant
+ * without the model, by the question, its options and what he said: the
+ * same words in other roles, what an option leaves out or puts in another's
+ * place, "just" or "only", a plain yes or no to options that start with no,
+ * a verb of his own or none, and a no to one with "not" in another's name.
+ * Several when he could pick several.
+ */
+const misread: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<string>, heard: ReadonlyArray<string>, several?: boolean]> = [
+  ["What should I fix?", ["Fix the test, not the code (Recommended)", "Fix the code"], ["The code, not the test."]],
+  ["What should I do with the data?", ["Copy the prod database to staging", "Leave staging as is"], ["Copy staging to prod."]],
+  ["What should I keep?", ["Keep the tests, drop the docs (Recommended)", "Keep both"], ["Keep the docs, drop the tests."]],
+  ["How should I land it?", ["Squash, don't rebase", "Rebase"], ["Rebase, don't squash."]],
+  ["Which database?", ["Use Postgres instead of SQLite (Recommended)", "Keep SQLite"], ["SQLite instead of Postgres."]],
+  ["How should I update the branch?", ["Merge main into the feature branch (Recommended)", "Rebase instead"], ["Merge the feature branch into main."]],
+  ["When should I merge?", ["Merge now (Recommended)", "Not now, maybe later"], ["Now, not later."]],
+  ["What should I rename?", ["Rename foo to bar", "Keep the name"], ["Rename bar to foo."]],
+  ["What next?", ["Merge, then deploy", "Wait"], ["Deploy, then merge."]],
+  ["Which checks should run?", ["Lint the code, not the docs", "Tests", "Docs"], ["Docs, not the code."], true],
+  ["Which backups should I delete?", ["Delete all but the latest backup (Recommended)", "Delete all backups"], ["Delete the latest backup."]],
+  ["What should I delete?", ["Delete everything but the logs", "Delete nothing"], ["Delete the logs."]],
+  ["What should I deploy?", ["Deploy all services other than billing", "Hold off"], ["Deploy billing."]],
+  ["What should I update?", ["Update every package apart from React", "Leave them"], ["Update React."]],
+  ["What should I restart?", ["Restart all workers besides the scheduler", "Leave them running"], ["Restart the scheduler."]],
+  ["What should I migrate?", ["Migrate all tables but users (Recommended)", "Wait"], ["Migrate users."]],
+  ["Which cache?", ["Use Redis in place of Memcached (Recommended)", "Leave the cache alone"], ["Use Memcached.", "Memcached."]],
+  ["Which date library?", ["Replace Moment with Day.js (Recommended)", "Leave it as is"], ["Use Moment."]],
+  ["Which package manager?", ["Switch from npm to Bun", "Leave it"], ["npm."]],
+  ["What matters more?", ["Speed over accuracy (Recommended)", "Balance both"], ["Accuracy over speed."]],
+  ["What should I run before pushing?", ["Tests and lint (Recommended)", "Nothing"], ["Just lint.", "Only lint.", "Lint only.", "Only the tests."]],
+  ["Where should I deploy?", ["Deploy to staging and production (Recommended)", "Hold off"], ["Just staging.", "Staging only."]],
+  ["Which tests?", ["Run unit and integration tests", "Skip tests"], ["Only the unit tests."]],
+  ["What should I update?", ["Update the lockfile and package.json", "Leave them"], ["Just the lockfile."]],
+  ["Which checks should run?", ["Lint and tests", "Docs"], ["Only tests."], true],
+  ["Should I drop the cache layer?", ["Keep it (Recommended)", "No cache"], ["No.", "Yes."]],
+  ["Should I skip the tests to save time?", ["Run the full suite (Recommended)", "No tests"], ["No."]],
+  ["Do you want me to keep the old endpoints?", ["Remove them", "No change"], ["No."]],
+  ["Should I skip CI?", ["No CI", "Run CI"], ["No."]],
+  ["Should I delete the old branch?", ["Keep it (Recommended)", "Delete it", "No preference"], ["No.", "Yes."]],
+  ["What about the cache?", ["Bypass the cache (Recommended)", "Rebuild it"], ["Use the cache.", "Go with the cache."]],
+  ["What about the feature branch?", ["Abandon the feature branch", "Rebase it"], ["Take the feature branch."]],
+  ["What about the deploy?", ["Roll back the deploy (Recommended)", "Keep it running"], ["Deploy."]],
+  ["What about the migration?", ["Dry run the migration (Recommended)", "Skip it"], ["Run the migration."]],
+  ["How should I push?", ["Force push", "Open a new branch"], ["Push."]],
+  ["What about the migration?", ["Abandon the migration", "Keep going"], ["The migration."]],
+  ["What about the PR?", ["Close the PR (Recommended)", "Merge it"], ["The PR."]],
+  ["What about the old SDK?", ["Uninstall the old SDK", "Leave it"], ["The old SDK."]],
+  ["What about the old flag?", ["Disallow the old flag", "Keep it"], ["The old flag."]],
+  ["How many retries?", ["Up to 3 retries", "No retries"], ["Three retries."]],
+  ["What should I do with the branch?", ["Merge now (Recommended)", "Do not merge yet", "Close the PR"], ["Not that one.", "Not this one.", "Not."]],
+]
+
 describe("Assistant", () => {
   test("status on MiNAS SV2 is answered about the Mina tickets first time, with no question", async () => {
     const result = await run(
@@ -1675,7 +1727,7 @@ describe("Assistant", () => {
     expect((await answering("All but Beta.")).asked).toBe(0)
   })
 
-  test("a number said to options named with numbers sends the option with that number, never the one in that place", async () => {
+  test("a number alone to options named with numbers is the model's to tell, which sends the option with that number, never the one in that place, and its whole name needs no model", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const workers = {
       id: "How many parallel workers should the test run use?",
@@ -1686,18 +1738,25 @@ describe("Assistant", () => {
     const answering = (heard: string) =>
       run(
         Effect.gen(function* () {
-          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [workers]) })
+          // The model, only for what isn't plain, names the option as it's written.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "4 workers (Recommended)", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [workers]),
+          })
           yield* asked(made, cloud)
           yield* made.answer(heard)
           return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), asked: made.seen.length }
         }),
       )
     for (const heard of ["Four.", "4."]) {
+      expect(await answering(heard)).toEqual({ spoken: ["4 workers it is, sir."], answers: [{ [workers.id]: "4 workers (Recommended)" }], asked: 1 })
+    }
+    for (const heard of ["Four workers.", "4 workers."]) {
       expect(await answering(heard)).toEqual({ spoken: ["4 workers it is, sir."], answers: [{ [workers.id]: "4 workers (Recommended)" }], asked: 0 })
     }
   })
 
-  test("a letter or place word an option's name has, with the options out of order, sends the option of that name, never the one in that place", async () => {
+  test("a letter or place word an option's name has, with the options out of order, is the model's to tell, which sends the option of that name, never the one in that place", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (labels: ReadonlyArray<string>, heard: string, text: string, multiSelect = false) =>
       run(
@@ -1716,8 +1775,9 @@ describe("Assistant", () => {
     expect(await answering(["Option B (Recommended)", "Option A"], "A.", "Option A")).toEqual({ asked: 1, spoken: ["Option A it is, sir."], answers: [{ way: "Option A" }] })
     expect(await answering(["Option 2 (Recommended)", "Option 1"], "Option one.", "")).toEqual({ asked: 0, spoken: ["Option 1 it is, sir."], answers: [{ way: "Option 1" }] })
     const merging = ["Last write wins (Recommended)", "First write wins", "Manual merge"]
-    expect(await answering(merging, "First.", "")).toEqual({ asked: 0, spoken: ["First write wins it is, sir."], answers: [{ way: "First write wins" }] })
-    expect(await answering(merging, "Last.", "")).toEqual({ asked: 0, spoken: ["Last write wins it is, sir."], answers: [{ way: "Last write wins (Recommended)" }] })
+    expect(await answering(merging, "First.", "First write wins")).toEqual({ asked: 1, spoken: ["First write wins it is, sir."], answers: [{ way: "First write wins" }] })
+    expect(await answering(merging, "Last.", "Last write wins (Recommended)")).toEqual({ asked: 1, spoken: ["Last write wins it is, sir."], answers: [{ way: "Last write wins (Recommended)" }] })
+    expect(await answering(merging, "First write wins.", "")).toEqual({ asked: 0, spoken: ["First write wins it is, sir."], answers: [{ way: "First write wins" }] })
     expect(await answering(["Option C", "Option A", "Option B"], "A and B.", "Option A\nOption B", true)).toEqual({
       asked: 1,
       spoken: ["Option A and Option B it is, sir."],
@@ -1725,7 +1785,7 @@ describe("Assistant", () => {
     })
   })
 
-  test("an option named like another but for its marks, like C# beside C++, is sent as the one he picked, by its place or by the model", async () => {
+  test("an option named like another but for its marks, like C# beside C++, is sent as the one he picked, by its name as written or by the model", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const language = (...labels: ReadonlyArray<string>) => ({
       id: "Which language should the bindings use?",
@@ -1748,14 +1808,17 @@ describe("Assistant", () => {
       )
     const sharp = language("C++", "C#", "Rust")
     const id = sharp.id
-    expect(await answering(sharp, "The first one.")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
-    expect(await answering(sharp, "The second one.")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
+    expect(await answering(sharp, "C++.")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    // A letter in their names keeps places off: the model tells which.
+    expect(await answering(sharp, "The first one.", "C++")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    expect(await answering(sharp, "The second one.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
     expect(await answering(sharp, "The sharp one.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
     // "C", which both are without their marks, is no letter's place either: which he meant is the model's.
     expect(await answering(sharp, "C.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
     const plain = language("C", "C++", "Rust")
-    expect(await answering(plain, "The first one.")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
-    expect(await answering(plain, "The second one.")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    expect(await answering(plain, "C.")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
+    expect(await answering(plain, "The first one.", "C")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
+    expect(await answering(plain, "The second one.", "C++")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
     expect(await answering(plain, "The plus plus one.", "C++")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
   })
 
@@ -1886,13 +1949,14 @@ describe("Assistant", () => {
           return { between, spoken: made.spoken().slice(2), answers, open: Option.isSome(yield* made.open) }
         }),
       )
+    // "Use red." is more than Red's name, so it goes in his words.
     for (const leaving of ["Never mind.", "Later."]) {
       expect([leaving, await telling(leaving)]).toEqual([
         leaving,
         {
           between: [],
-          spoken: ["Red, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Alpha it is, sir."],
-          answers: [{ [colour.id]: "Red", [extras.id]: ["Alpha"] }],
+          spoken: ["Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Alpha it is, sir."],
+          answers: [{ [colour.id]: "Use red.", [extras.id]: ["Alpha"] }],
           open: false,
         },
       ])
@@ -2022,7 +2086,7 @@ describe("Assistant", () => {
         yield* made.heard({ heard: "And tell it to keep the old fixtures.", via: "shortcut", at: before + 1000, voiced: 3, turns: 1 })
         yield* made.flush
         const between = answered(made.dispatched)
-        yield* made.answer("Just Alpha.")
+        yield* made.answer("Alpha.")
         return { between, answers: answered(made.dispatched) }
       }),
     )
@@ -2090,7 +2154,7 @@ describe("Assistant", () => {
       answers: [{ [extras.id]: ["Alpha", "Gamma"], [colour.id]: "Red" }],
     })
     // Two lines to a part that takes one are his words for it, and the next part is still asked.
-    expect(await dictating([colour, extras], "Red\nGamma", "Just Beta.")).toEqual({
+    expect(await dictating([colour, extras], "Red\nGamma", "Beta.")).toEqual({
       between: [],
       spoken: ["Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Beta it is, sir."],
       answers: [{ [colour.id]: "Red\nGamma", [extras.id]: ["Beta"] }],
@@ -2406,7 +2470,7 @@ describe("Assistant", () => {
         const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
         yield* asked(made, cloud)
         yield* made.answer("What are the options?")
-        yield* made.answer("The red one.")
+        yield* made.answer("Red.")
         return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), asked: made.seen.length }
       }),
     )
@@ -2454,7 +2518,7 @@ describe("Assistant", () => {
         yield* made.wait(599)
         const soon = made.spoken().length
         yield* made.wait(1)
-        yield* made.answer("Just Beta.")
+        yield* made.answer("Beta.")
         return { off, soon, spoken: made.spoken().slice(2), answers: answered(made.dispatched) }
       }),
     )
@@ -3032,6 +3096,39 @@ describe("Assistant", () => {
       [["Add tests", "No tests"], "No tests.", "No tests"],
     ] as const) {
       expect([heard, await answering(labels, heard)]).toEqual([heard, { asked: 0, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
+    }
+  })
+
+  test("every answer review found sent another option than his without the model goes to the model, and the plain ones still need none", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: string, labels: ReadonlyArray<string>, heard: string, multiSelect: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const part = { id: "next", question, options: labels.map((label) => ({ label })), multiSelect }
+          // The model, only for what isn't plain, takes his words as he said them, which are no option.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: heard, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [part]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    for (const [question, labels, said, several = false] of misread) {
+      for (const heard of said) {
+        expect([labels, heard, await answering(question, labels, heard, several)]).toEqual([labels, heard, { asked: 1, spoken: ["On it, sir."], answers: [{ next: heard }] }])
+      }
+    }
+    // An option's whole name, its place, a plain yes to yapd's pick and a plain no to an option called No need no model.
+    for (const [question, labels, heard, named, sent] of [
+      ["Which colour?", ["Red", "Blue"], "Blue.", "Blue", "Blue"],
+      ["Which database?", ["Use Postgres", "Keep SQLite"], "Use Postgres.", "Use Postgres", "Use Postgres"],
+      ["Which colour?", ["Red", "Blue", "Green"], "The second one.", "Blue", "Blue"],
+      ["Which colour?", ["Red", "Blue (Recommended)"], "Yes.", "Blue", "Blue (Recommended)"],
+      ["Should I also migrate the invoices table?", ["Yes", "No"], "No.", "No", "No"],
+    ] as const) {
+      expect([heard, await answering(question, labels, heard, false)]).toEqual([heard, { asked: 0, spoken: [`${named} it is, sir.`], answers: [{ next: sent }] }])
     }
   })
 
