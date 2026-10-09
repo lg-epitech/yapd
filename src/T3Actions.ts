@@ -206,13 +206,24 @@ const json = Schema.decodeUnknownOption(Schema.parseJson())
  * run into the next word, which hides a command on a line of its own. Text
  * that's JSON itself, like an input sent as one string, is read as what it
  * holds, the same way, and a list of words, like a command and what it's
- * given, is one line, as it runs, so a flag isn't cut off from its command.
+ * given, is one line, as it runs, so a flag isn't cut off from its command;
+ * so is a command given apart from its words, after the rest.
  */
 const given = (value: unknown): ReadonlyArray<string> => {
   if (typeof value === "string") return Option.match(/^\s*[[{]/.test(value) ? json(value) : Option.none(), { onNone: () => [value], onSome: given })
   if (Array.isArray(value)) return value.every((item) => typeof item === "string") ? [value.join(" ")] : value.flatMap(given)
-  if (typeof value === "object" && value !== null) return Object.entries(value).flatMap(([name, inner]) => [name, ...given(inner)])
+  if (typeof value === "object" && value !== null) return [...Object.entries(value).flatMap(([name, inner]) => [name, ...given(inner)]), ...commandLine(value)]
   return value === undefined || value === null ? [] : [String(value)]
+}
+
+/** A command given apart from its words, like `{"command": "rm", "args": ["-rf", "x"]}`, as the one line it runs as. */
+const commandLine = (value: object): ReadonlyArray<string> => {
+  const fields = value as Readonly<Record<string, unknown>>
+  const command = fields.command ?? fields.cmd
+  const words = fields.args ?? fields.argv ?? fields.arguments
+  if (typeof command !== "string") return []
+  if (typeof words === "string") return [`${command} ${words}`]
+  return Array.isArray(words) && words.every((word) => typeof word === "string") ? [[command, ...words].join(" ")] : []
 }
 
 /**
