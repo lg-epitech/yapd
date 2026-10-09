@@ -814,7 +814,7 @@ describe("Telling yapd's own voice from the user's", () => {
     }
     expect(whose("Tell it to stop the migration.", "Claude is still running the migration, sir.")).toBe("his")
     // Its longer word starts the same, but with more after it, it wasn't cut off there.
-    expect(whose("Stop it.", "Codex stopped the server")).toBe("his")
+    expect(whose("Stop now.", "Codex stopped the server")).toBe("his")
     expect(whose("Wait, merge it.", "Codex is waiting on your approval")).toBe("his")
   })
 
@@ -829,6 +829,9 @@ describe("Telling yapd's own voice from the user's", () => {
     }
     expect(whose("Over in t3code, wait a second.", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("mixed")
     expect(whose("yapd's tests, hold on.", "yapd's tests are failing on the main branch")).toBe("mixed")
+    // His stop, and all of it in line with its words, as its "skipped", or "stopped" as Whisper may write it.
+    expect(whose("Skip the tests.", "Codex skipped the tests and pushed")).toBe("mixed")
+    expect(whose("Stop it.", "Codex stopped the server")).toBe("mixed")
   })
 
   test("takes what Whisper makes up of everyday words over yapd's for its own voice, unless it's said just so", () => {

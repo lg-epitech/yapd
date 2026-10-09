@@ -231,14 +231,15 @@ const sound = (word: string) =>
  * apart, like "codecs" for "Codex" or "yap" for "yapd", the start of it, like
  * "stop" for "stopped" cut off partway, or a word that sounds like it, as
  * Whisper writes a name it doesn't know, like "yapped" for "yapd", but never
- * "on" for "in".
+ * "on" for "in", "not" for "now", or a word nearly anything has for another,
+ * like "was" for "pass" or "them" for "the migration", which would make a
+ * word of his look like its.
  */
 const alike = (heard: string, spoken: string) => {
   if (heard !== spoken && (negations.has(heard) || negations.has(spoken))) return false
   const [first, second] = [stem(heard), stem(spoken)]
   const shorter = Math.min(first.length, second.length)
   if (first === second) return true
-  // Otherwise never one of the words in nearly anything said, like "was" for "pass" or "them" for "the migration", which would make a word of his look like its.
   if (common.has(heard)) return false
   if (first.length >= 4 && second.startsWith(first)) return true
   if (shorter < 3) return false
@@ -272,7 +273,7 @@ const shared = (one: string, other: string) => {
 }
 
 /**
- * Whether `heard`, one word or two run together, may be how Whisper wrote a
+ * Whether `heard`, one word or a few run together, may be how Whisper wrote a
  * name of yapd's it doesn't know: like it, or starting the same, with all but
  * one of its consonants, like "Japan" or "your app" for "yapd", "Rick" for
  * "rig", but never "fix" for "green".
@@ -404,7 +405,10 @@ const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   // All that's heard before its words, a word or two, sounding like its word before them.
   const leading = first.first > 0 && first.first <= 2 && named(previous) && near(words.slice(0, first.first).join(""), previous)
   // How many heard after its words, two or one, sound like its next word.
-  const trailing = next === undefined ? undefined : [Math.min(after, 2), 1].find((count) => count > 0 && count <= after && near(words.slice(last.last + 1, last.last + 1 + count).join(""), next))
+  const trailing =
+    next === undefined
+      ? undefined
+      : [Math.min(after, 2), 1].find((count) => count > 0 && count <= after && near(words.slice(last.last + 1, last.last + 1 + count).join(""), next))
   if (telling) {
     if (leading) for (let at = 0; at < first.first; at++) its.add(at)
     if (trailing !== undefined) for (let at = last.last + 1; at <= last.last + trailing; at++) its.add(at)
@@ -507,6 +511,8 @@ export const whose = (heard: string, saying: string): Whose => {
       const telling = part.filter((word) => !common.has(word)).length
       return telling > 0 && (part.length >= least || telling >= least - 1)
     }
+    // All in line with its words, his stop among them, like "skip" for its "skipped", it could be either.
+    if (!own.includes(true)) return "mixed"
     return told(words.slice(0, own.indexOf(true)), 3) || told(words.slice(own.lastIndexOf(true) + 1), 4) ? "mixed" : "his"
   }
   if (inTurn(words, yapd)) return "echo"
@@ -517,8 +523,13 @@ export const whose = (heard: string, saying: string): Whose => {
   return telling ? "mixed" : "his"
 }
 
-/** Whose voice talk was, going by Whisper's `words` for it, when it went on `past` the last of yapd's coming in: never all its, when there were words. */
-const beyond = (heard: Whose, words: string, past: boolean): Whose => (heard === "echo" && past && wordsOf(words, []).length > 0 ? "mixed" : heard)
+/**
+ * Whose voice talk was, as `heard`, going by Whisper's `words` for it, when
+ * it went on `past` the last of yapd's coming in: never all its, when there
+ * were words, so then some of each.
+ */
+const beyond = (heard: Whose, words: string, past: boolean): Whose =>
+  heard === "echo" && past && wordsOf(words, []).length > 0 ? "mixed" : heard
 
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
 export interface Question {
