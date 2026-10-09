@@ -1,16 +1,35 @@
 import Foundation
 
-/// A card on the panel, keeping each wait before it fades, and how many times it faded.
+/// A card on the panel, keeping each wait before it fades, how many times it faded or was put away after, and whether it shows.
 @MainActor
 private final class Faded {
   var waits: [Duration] = []
   var fades = 0
+  var closes = 0
+  /// Whether the card shows: a fade leaves it unseen, even stopped part way, until it's kept.
+  var seen = true
+  /// Whether a fade holds, as one under way does, until it's let go.
+  var holding = false
+  private var held: CheckedContinuation<Void, Never>?
 
   var doing: Fading.Doing {
     Fading.Doing(
       wait: { delay in self.waits.append(delay) },
-      fade: { self.fades += 1 }
+      fade: {
+        self.fades += 1
+        self.seen = false
+        if self.holding { await withCheckedContinuation { self.held = $0 } }
+        // As the panel does, it puts the card away only when the fade wasn't stopped.
+        if !Task.isCancelled { self.closes += 1 }
+      },
+      keep: { self.seen = true }
     )
+  }
+
+  /// Lets a fade under way end.
+  func letGo() {
+    held?.resume()
+    held = nil
   }
 }
 
@@ -97,6 +116,25 @@ private final class Faded {
     fading.heard(speaking: false)
     await fading.settled()
     check(faded.fades == 1 && faded.waits.last == .seconds(20), "fades a card a while after yapd stops talking about it, not after \(faded.waits)")
+  }
+
+  // Back still talking once the card lingered and started fading: it's shown in full again, and stays up until yapd stops.
+  do {
+    let faded = Faded()
+    faded.holding = true
+    let fading = Fading(faded.doing)
+    fading.shown(talking: true)
+    fading.heard(speaking: true)
+    fading.away()
+    while faded.fades == 0 { await Task.yield() }
+    fading.heard(speaking: true)
+    faded.letGo()
+    await fading.settled()
+    check(faded.fades == 1 && faded.closes == 0 && faded.seen, "shows a card yapd is still talking about once its state comes back as it fades, not leaving it unseen")
+    faded.holding = false
+    fading.heard(speaking: false)
+    await fading.settled()
+    check(faded.fades == 2 && !faded.seen && faded.waits.last == .seconds(20), "fades a card a while after yapd stops talking about it, not after \(faded.waits)")
   }
 
   // Gone while yapd talks about the card, and not back, or back with nothing said: it lingers once, from when the state stopped.

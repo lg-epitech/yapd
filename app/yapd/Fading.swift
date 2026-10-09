@@ -13,8 +13,10 @@ final class Fading {
   struct Doing {
     /// Waits before the card fades.
     let wait: @MainActor (Duration) async -> Void
-    /// Fades the card away, and puts it away, unless another went up meanwhile.
+    /// Fades the card away, and puts it away, unless another went up or it was kept meanwhile.
     let fade: @MainActor () async -> Void
+    /// Keeps the card up after all: stops it fading, if it was, and shows it fully again.
+    let keep: @MainActor () -> Void
   }
 
   /// How long a card stays up once yapd stops talking about it, or after it's shown with nothing said.
@@ -57,6 +59,8 @@ final class Fading {
     case .coming where speaking, .away where speaking:
       talk = .talking
       fading?.cancel()
+      // Back while the card lingered, it may be fading already: cancelling that only stops it being put away, so it's shown in full again.
+      doing.keep()
     case .talking where !speaking:
       talk = .done
       fade(after: Self.linger)
