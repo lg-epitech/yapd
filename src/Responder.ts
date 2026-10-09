@@ -101,7 +101,7 @@ export const enough: ReadonlySet<string> = new Set([
 ])
 
 /** Taking an update in. Said to one that asked something, they could be the answer, so the model judges those. */
-const noted = new Set([
+export const noted: ReadonlySet<string> = new Set([
   "thanks", "thank you", "thanks a lot", "cheers", "got it", "ok", "okay", "ok thanks", "okay thanks", "cool", "great", "good",
   "very good", "perfect", "nice", "sounds good", "alright", "all right", "noted", "understood", "awesome", "fine", "good job",
   "well done", "excellent", "brilliant", "lovely", "good to know", "ok cool", "okay cool", "great thanks", "perfect thanks",

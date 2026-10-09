@@ -1149,4 +1149,40 @@ describe("Brain", () => {
     expect(Brain.speakable("It's on laurent/issue-412 now.", desk())).toBe("It's on a branch now.")
     expect(Brain.speakable("It's on laurent/jarvis-companion-assistant now.", desk())).toBe("It's on a branch now.")
   })
+
+  test("thanks said back to what asks him nothing is taken in without the model, while said to what asks him something, it's the model's", () => {
+    const reply = (subject: Assistant.Subject, heard = "Thanks.") =>
+      Brain.fast(situation(heard, { subject, utterance: { id: "u1", heard, via: "reply", at: now, voiced: 2, turns: 1 } }), lines)
+    const update: Conversation.Update = {
+      session: "claude:s1",
+      project: "yapd",
+      turn: { prompt: Option.none(), message: "The review came back clean." },
+      needsYou: false,
+      spoken: "Yapd's review came back clean, two small fixes left.",
+      audio: "/tmp/update.wav",
+      thread: { agent: "claude", session: "s1", cwd: "/code/yapd", message: "The review came back clean.", origin: {} },
+      at: now - 20_000,
+    }
+    const asks: Assistant.Asks = { _tag: "Approval", requestId: "r1", dangerous: false, decisions: ["accept", "decline"], inFull: true }
+    const told: Array<Assistant.Subject> = [
+      { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) },
+      { _tag: "Answer", said: "Nothing needs you right now, sir.", about: Option.none() },
+      { _tag: "Session", update, said: update.spoken },
+      { _tag: "Thread", ref: ref(tezos), said: "It's comparing fee tables.", more: "", asks: Option.none(), row: 1 },
+    ]
+    for (const subject of told) {
+      expect(reply(subject)?.act).toBe("dismiss")
+      expect(reply(subject, "Okay, cool.")?.act).toBe("dismiss")
+    }
+    const asking: Array<Assistant.Subject> = [
+      // About a thread waiting on his approval, "okay" may be it.
+      { _tag: "Answer", said: "It wants to run a command, sir.", about: Option.some(ref(std)) },
+      { _tag: "Answer", said: "Stop Migrate Tezos Integration, sir?", about: Option.some(ref(tezos)), question: which([ref(tezos)]) },
+      { _tag: "Session", update: { ...update, needsYou: true }, said: update.spoken },
+      { _tag: "Thread", ref: ref(std), said: "It wants to run a command.", more: "", asks: Option.some(asks), row: 1 },
+    ]
+    for (const subject of asking) expect(reply(subject)).toBeUndefined()
+    // Dictated rather than said back, it's the model's too, which may take it for something else.
+    expect(Brain.fast(situation("Thanks.", { subject: told[0]! }), lines)).toBeUndefined()
+  })
 })

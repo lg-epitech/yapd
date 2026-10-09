@@ -150,6 +150,19 @@ const conversation = (
       question((heard) =>
         Effect.succeed(heard.startsWith("Yes") ? Option.some(Effect.sync(() => void answers.push(heard))) : Option.none()),
       )
+    /** Says an answer instead, once the update has been given up on, which takes anything but talk with Sam for a follow-up, noting in `through` each time it's said to the end. */
+    const say = (followUps: Array<string>, through: Array<string> = []) =>
+      Fiber.interrupt(fiber).pipe(
+        Effect.zipRight(
+          Effect.fork(
+            made.answer({
+              audio: "/tmp/answer.wav",
+              followUp: (heard) => Effect.succeed(heard.startsWith("Sam,") ? Option.none() : Option.some(Effect.sync(() => void followUps.push(heard)))),
+              through: Effect.sync(() => void through.push("through")),
+            }),
+          ),
+        ),
+      )
     return {
       ...made,
       fiber,
@@ -162,6 +175,7 @@ const conversation = (
       wait,
       question,
       ask,
+      say,
       frames,
       disconnect: Queue.shutdown(microphone),
       replies: () => replies,
@@ -600,6 +614,77 @@ describe("Questions", () => {
       }),
     )
     expect(unrelated).toEqual({ answered: false, answers: [] })
+  })
+})
+
+describe("Answers", () => {
+  test("takes what the user says right after an answer for a follow-up, once it's been heard to the end", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const followUps: Array<string> = []
+        const through: Array<string> = []
+        const { say, speak, wait } = yield* conversation(["Tell it to fix the tests."])
+        const answering = yield* say(followUps, through)
+        yield* wait(10)
+        // Heard as soon as it's said to the end, with the microphone still open.
+        const heard = [...through]
+        yield* wait(2)
+        yield* speak
+        return { followed: yield* Fiber.join(answering), followUps, heard, through }
+      }),
+    )
+    expect(result).toEqual({ followed: true, followUps: ["Tell it to fix the tests."], heard: ["through"], through: ["through"] })
+  })
+
+  test("stops listening after an answer as soon as after an update, sooner than after a question", async () => {
+    /** Whether it's still listening once it's been quiet for three seconds after it was said, or else whether something came of it. */
+    const quiet = (question: boolean) =>
+      scoped(
+        Effect.gen(function* () {
+          const { say, ask, wait } = yield* conversation([])
+          const saying = yield* (question ? ask([]) : say([]))
+          yield* wait(10)
+          yield* wait(3)
+          return Option.isNone(yield* Fiber.poll(saying)) ? "listening" : yield* Fiber.join(saying)
+        }),
+      )
+    expect(await quiet(false)).toBe(false)
+    expect(await quiet(true)).toBe("listening")
+  })
+
+  test("stops an answer the user talks over and takes what they said for a follow-up, though it wasn't heard to the end", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const followUps: Array<string> = []
+        const through: Array<string> = []
+        const { say, speak, wait } = yield* conversation(["Stop."])
+        const answering = yield* say(followUps, through)
+        yield* wait(3)
+        yield* speak
+        return { followed: yield* Fiber.join(answering), followUps, through }
+      }),
+    )
+    expect(result).toEqual({ followed: true, followUps: ["Stop."], through: [] })
+  })
+
+  test("picks an answer up where it was cut off when what's said over it isn't for yapd, then listens again once it's heard to the end", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const followUps: Array<string> = []
+        const through: Array<string> = []
+        const { say, speak, wait } = yield* conversation(["Sam, dinner's in five.", "And tell it to open a PR."])
+        const answering = yield* say(followUps, through)
+        yield* wait(3)
+        yield* speak
+        // Picked up a little before where it was stopped, and played to the end.
+        yield* wait(10)
+        const heard = [...through]
+        yield* wait(1)
+        yield* speak
+        return { followed: yield* Fiber.join(answering), followUps, heard }
+      }),
+    )
+    expect(result).toEqual({ followed: true, followUps: ["And tell it to open a PR."], heard: ["through"] })
   })
 })
 

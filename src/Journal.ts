@@ -12,7 +12,7 @@ import * as Store from "./Store.ts"
 export type Kind =
   /** An agent finished a turn, and yapd summed it up. */
   | "update"
-  /** The user said something back to an update or a question, and yapd answered. */
+  /** The user said something back to an update, a question or an answer, and yapd answered. */
   | "reply"
   /** A message went to an agent on the user's behalf, or failed to. */
   | "sent"

@@ -585,6 +585,14 @@ const assistant = (
         }),
       /** Nothing was said in the time the question leaves for an answer. */
       unanswered: (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush)),
+      /** Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on, unless it isn't taken. */
+      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer")) =>
+        Effect.gen(function* () {
+          const taken = yield* to!.followUp!(heard, voiced)
+          if (Option.isSome(taken)) yield* taken.value
+          yield* flush
+          return Option.isSome(taken)
+        }),
     }
   })
 
@@ -8645,5 +8653,350 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.none())
     // What the model is shown it said is the same.
     expect(result.shown).toBe(told)
+  })
+
+  test("an answer can be followed up as anything dictated is, with \"it\" the thread it was about, so a message goes there", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, notices, spoken, dispatched, seen, journal } = yield* assistant((situation) =>
+          Option.isSome(situation.second)
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "It's comparing fee tables: three of eight networks done, sir." })
+            : situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "look", target: handle(situation, tezos) })
+              : // What "it" is, as the model is shown it.
+                Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Use the Mina fee table.", how: "now" }),
+        )
+        yield* dictate("Get me the status of the Tezos one.")
+        const followed = yield* followUp("Tell it to use the Mina fee table.")
+        const asked = seen.at(-1)!
+        return {
+          followed,
+          spoken: spoken(),
+          // Only the answer is listened to after: not the line said while it's looked up, nor what came of the message.
+          listened: notices().filter(({ followUp }) => followUp !== undefined).map(({ spoken }) => spoken),
+          sent: dispatched.map(({ type, threadId, text }) => [type, threadId, text]),
+          via: asked.utterance.via,
+          lines: asked.lines,
+          replies: (yield* journal.since(0, { kinds: ["reply"] })).map(({ text }) => text),
+        }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    // The thread goes unnamed, since it's the one he was just told about.
+    expect(result.spoken).toEqual(["One moment.", "It's comparing fee tables: three of eight networks done, sir.", "On it, sir."])
+    expect(result.listened).toEqual(["It's comparing fee tables: three of eight networks done, sir."])
+    expect(result.sent).toEqual([["message.dispatch", tezos.id, "Use the Mina fee table."]])
+    expect(result.via).toBe("reply")
+    expect(result.lines).toEqual([{ speaker: "yapd", text: "It's comparing fee tables: three of eight networks done, sir." }])
+    expect(result.replies).toEqual(["Tell it to use the Mina fee table."])
+  })
+
+  test("thanks or stop said back to an answer ends it without the model, and noise or a change too faint to be his isn't taken", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, seen, dispatched, journal } = yield* assistant((situation) =>
+          situation.utterance.via === "shortcut" ? minaStatus(situation) : Brain.decision({ act: "send", target: handle(situation, mina), text: "Fix the rounding.", how: "now" }),
+        )
+        yield* dictate("What's the status on the Mina tickets?")
+        const before = seen.length
+        const taken: Array<boolean> = []
+        for (const heard of ["Thanks.", "Thank you, sir.", "Stop."]) taken.push(yield* followUp(heard))
+        const thanked = seen.length - before
+        // Whisper's words for a cough, and a message said under the breath.
+        const noise = [yield* followUp("Thank you.", 0.1), yield* followUp("Fix the rounding.", 0.2)]
+        const replies = yield* journal.since(0, { kinds: ["reply"] })
+        return {
+          taken,
+          thanked,
+          noise,
+          spoken: spoken(),
+          sent: dispatched.length,
+          replies: replies.map(({ text, detail }) => [text, (detail as { source: string; decision: Brain.Decision }).source, (detail as { decision: Brain.Decision }).decision.act]),
+        }
+      }),
+    )
+    expect(result.taken).toEqual([true, true, true])
+    expect(result.thanked).toBe(0)
+    expect(result.noise).toEqual([false, false])
+    expect(result.spoken).toEqual(["The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."])
+    expect(result.sent).toBe(0)
+    expect(result.replies).toEqual([
+      ["Thanks.", "fast", "dismiss"],
+      ["Thank you, sir.", "fast", "dismiss"],
+      ["Stop.", "fast", "dismiss"],
+    ])
+  })
+
+  test("a follow-up to an answer holds what's waiting to be read until what came of it is said", async () => {
+    let slow = false
+    let reads = 0
+    let spokenSoFar: () => ReadonlyArray<string> = () => []
+    /** What had been said each time what's waiting to be read was let go, in order. */
+    const letGo: Array<ReadonlyArray<string>> = []
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, until, wait } = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.second)
+              ? Brain.decision({ act: "look", target: handle(situation, tezos) })
+              : Brain.decision({
+                  act: "answer",
+                  target: handle(situation, tezos),
+                  spoken: situation.utterance.via === "reply" ? "It's waiting on the Mina fee table, sir." : "It's comparing fee tables: three of eight networks done, sir.",
+                }),
+          undefined,
+          {
+            // Reading the thread again for the follow-up is slow once the test says.
+            reading: Effect.suspend(() => (slow ? Effect.zipRight(Effect.sync(() => reads++), Effect.sleep("5 seconds")) : Effect.void)),
+            awaiting: Effect.succeed(Effect.sync(() => void letGo.push(spokenSoFar()))),
+          },
+        )
+        spokenSoFar = spoken
+        yield* dictate("Get me the status of the Tezos one.")
+        const before = letGo.length
+        slow = true
+        const following = yield* Effect.fork(followUp("What's it waiting on?"))
+        yield* until(() => reads > 0)
+        // Still reading the thread, so nothing waiting has been let go.
+        const reading = letGo.length - before
+        yield* wait(5)
+        const followed = yield* Fiber.join(following)
+        return { followed, reading, letGo: letGo.slice(before) }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    expect(result.reading).toBe(0)
+    expect(result.letGo).toHaveLength(1)
+    expect(result.letGo[0]!.at(-1)).toBe("It's waiting on the Mina fee table, sir.")
+  })
+
+  test("a follow-up to an answer about one of rig's threads goes to rig's T3 Code for that thread, never this Mac's", async () => {
+    const fees = thread("rig-std", "Add the std fee test", "std", { activeRunId: "run-4", activityRunStatus: "running", updatedAt: "2026-10-01T02:15:00.000Z" })
+    const result = await run(
+      Effect.gen(function* () {
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(
+          (situation) =>
+            Option.isSome(situation.second)
+              ? Brain.decision({ act: "answer", target: handle(situation, fees), spoken: "It's writing the zero-fee case, sir." })
+              : situation.utterance.via === "shortcut"
+                ? Brain.decision({ act: "look", target: handle(situation, fees) })
+                : // What "it" is, as the model is shown it.
+                  Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Cover negative fees too.", how: "now" }),
+          undefined,
+          { rig: { status: Effect.succeed({ _tag: "Up" }), threads: [fees], dispatched: rig } },
+        )
+        yield* made.dictate("What's the std fee test on rig doing?")
+        const followed = yield* made.followUp("Tell it to cover negative fees too.")
+        yield* made.until(() => rig.some(({ type }) => type === "message.dispatch"))
+        const steps = yield* made.ledger.steps(0)
+        return {
+          followed,
+          spoken: made.spoken(),
+          it: Option.map(Brain.focused(made.seen.at(-1)!), ({ ref }) => `${ref.machine} ${ref.id}`),
+          rig: rig.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => [threadId, text]),
+          here: made.dispatched.length,
+          steps: steps.map(({ machine, thread, state }) => `${machine} ${thread} ${state}`),
+        }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    expect(result.spoken).toEqual(["One moment.", "It's writing the zero-fee case, sir.", "On it, sir."])
+    expect(result.it).toEqual(Option.some("rig rig-std"))
+    expect(result.rig).toEqual([["rig-std", "Cover negative fees too."]])
+    expect(result.here).toBe(0)
+    expect(result.steps).toEqual(["rig rig-std sent"])
+  })
+
+  test("an agent's question that comes while he can still follow up an answer is held while what he says back is acted on, never taken as its answer, and asked after", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    let slow = false
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.via === "shortcut"
+              ? minaStatus(situation)
+              : // Shown the question as his to answer, the model would take "the red one" for its option.
+                Option.isSome(situation.open)
+                ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Red", pending: "answers" })
+                : Brain.decision({ act: "send", target: handle(situation, mina), text: "Do the red one first.", how: "now" }),
+          undefined,
+          {
+            others: [cloud],
+            items: card("q1", [colour]),
+            waiting: true,
+            // What he says back takes a while to be taken in once the test says, so the question can come up meanwhile.
+            awaiting: Effect.suspend(() => (slow ? Effect.as(Effect.sleep("2 seconds"), Effect.void) : Effect.succeed(Effect.void))),
+          },
+        )
+        yield* made.dictate("What's the status on the Mina tickets?")
+        const status = made.notices().at(-1)!
+        // Said to the end, so he can follow it up, when the agent asks.
+        yield* made.play(status)
+        yield* asked(made, cloud)
+        const asking = made.questions().at(-1)!
+        slow = true
+        const following = yield* Effect.fork(made.followUp("Do the red one first.", 2, status))
+        yield* made.flush
+        // Its turn comes while what he said back is still being taken in: it isn't said.
+        const held = yield* asking.stale
+        yield* made.wait(2)
+        const followed = yield* Fiber.join(following)
+        slow = false
+        const replied = made.seen.at(-1)!
+        const after = made.spoken().slice(2)
+        yield* made.play()
+        yield* made.answer("Red.")
+        return {
+          followed,
+          held,
+          replied: replied.utterance.heard,
+          shown: Option.isSome(replied.open),
+          after,
+          spoken: made.spoken().slice(-1),
+          sent: made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => [threadId, text]),
+          answers: answered(made.dispatched),
+        }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.followed).toBe(true)
+    expect(result.held).toBe(true)
+    // He hadn't heard it, so it was never his to answer.
+    expect(result.replied).toBe("Do the red one first.")
+    expect(result.shown).toBe(false)
+    expect(result.after).toEqual(["On it, sir.", `A question on Cloud deployment discovery, sir: ${line}`])
+    expect(result.spoken).toEqual(["Red it is, sir."])
+    expect(result.sent).toEqual([[mina.id, "Do the red one first."]])
+    // Only what he said to the question, once he'd heard it, answers it.
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("a yes said back to an answer that came after a question he'd heard is never taken as the question's answer, which is asked again when it was due", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    /** What the model was asked about, in order. */
+    const decided: Array<string> = []
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            decided.push(situation.utterance.heard)
+            if (situation.utterance.heard === "How are the Mina tickets?") return minaStatus(situation)
+            if (situation.utterance.via === "shortcut") return Brain.decision({ act: "answer", spoken: "It's a quarter past two, sir.", rest: "How are the Mina tickets?" })
+            // Shown the question as his to answer, the model would take the yes for yapd's pick.
+            return Option.isSome(situation.open) ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue", pending: "answers" }) : Brain.decision({ act: "dismiss" })
+          },
+          undefined,
+          {
+            others: [cloud],
+            items: card("q1", [colour]),
+            // The rest of what he asked takes a while to work out, so what it comes to is said after he's heard the question.
+            deciding: Effect.suspend(() => (decided.at(-1) === "How are the Mina tickets?" ? Effect.sleep("5 seconds") : Effect.void)),
+          },
+        )
+        const dictated = yield* Effect.fork(made.dictate("What time is it, and how are the Mina tickets?"))
+        yield* made.wait(1)
+        yield* Fiber.join(dictated)
+        // Asked and heard to the end, but not answered, so it waits its minute.
+        yield* asked(made, cloud)
+        yield* made.unanswered()
+        yield* made.wait(4)
+        const answer = made.notices().at(-1)!
+        const followed = yield* made.followUp("Yes.", 2, answer)
+        const replied = made.seen.at(-1)!
+        const meanwhile = answered(made.dispatched).length
+        yield* made.wait(60)
+        yield* made.answer("Red.")
+        return {
+          answer: answer.spoken,
+          followed,
+          replied: replied.utterance.heard,
+          shown: Option.isSome(replied.open),
+          meanwhile,
+          spoken: made.spoken(),
+          answers: answered(made.dispatched),
+        }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(result.answer).toBe(status)
+    expect(result.followed).toBe(true)
+    // Said back to the answer, it's worked out as that, with no question shown as his to answer.
+    expect(result.replied).toBe("Yes.")
+    expect(result.shown).toBe(false)
+    expect(result.meanwhile).toBe(0)
+    expect(result.spoken).toEqual([
+      "It's a quarter past two, sir.",
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      status,
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("what he missed, told in the same breath as a thread's question, counts as heard once he's heard it", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("What did I miss")
+              ? Brain.decision({ act: "answer", how: "missed", spoken: "The loader fix is ready, sir.", rest: "What's the Cloud one asking?" })
+              : Brain.decision({ act: "reply", target: handle(situation, cloud) }),
+          undefined,
+          { others: [cloud], items: card("q1", [colour]), waiting: true },
+        )
+        const unheard = Effect.map(made.journal.unheard(0, 12), (missed) => missed.flatMap(({ kind, said }) => (kind === "update" ? [said] : [])))
+        yield* made.journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* made.dictate("What did I miss, and what's the Cloud one asking?")
+        const waiting = yield* unheard
+        yield* made.play()
+        return { spoken: made.spoken(), kind: made.notices().at(-1)!.kind, waiting, after: yield* unheard }
+      }),
+    )
+    expect(result.spoken).toEqual(["The loader fix is ready, sir. Here's the question on Cloud deployment discovery: Which colour should the test use? Red or Blue? I'd go with Blue."])
+    expect(result.kind).toBe("question")
+    expect(result.waiting).toEqual(["yapd. The loader fix is ready."])
+    expect(result.after).toEqual([])
+  })
+
+  test("a thread's question read out for a follow-up to a catch-up isn't catching up, so what he answers it with hides what he missed as anything else does", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "answer", how: "missed", spoken: "The loader fix is ready, sir." })
+              : Brain.decision({ act: "reply", target: handle(situation, cloud) }),
+          undefined,
+          { others: [cloud], items: card("q1", [colour]) },
+        )
+        yield* made.journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* made.dictate("What did I miss?")
+        yield* made.followUp("What's the Cloud one asking?")
+        const question = made.notices().at(-1)!
+        yield* made.answer("Red.")
+        const replies = yield* made.journal.since(0, { kinds: ["reply"] })
+        return {
+          kind: question.kind,
+          followed: question.followUp !== undefined,
+          replies: replies.map(({ text, detail }) => [text, (detail as { readonly over?: string }).over ?? ""]),
+          answers: answered(made.dispatched),
+        }
+      }),
+    )
+    // Listened to as a question, never for a follow-up.
+    expect(result.kind).toBe("question")
+    expect(result.followed).toBe(false)
+    // Said back to the catch-up, the follow-up is catching up; said back to the question, the answer isn't.
+    expect(result.replies).toEqual([
+      ["What's the Cloud one asking?", "catch-up"],
+      ["Red.", ""],
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
   })
 })

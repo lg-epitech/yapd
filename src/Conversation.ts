@@ -128,6 +128,14 @@ export interface Question {
   readonly answer: (heard: string, voiced: number) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
 
+/** An answer to what the user asked yapd, rendered and ready to be said, which they can follow up as they can an update. */
+export interface Answer extends Omit<Question, "answer"> {
+  /** Works out what they meant by what they said over it or right after, as a question's `answer` does: none means it wasn't meant for yapd. */
+  readonly followUp: Question["answer"]
+  /** Run once it's been said to the end, before the wait for a follow-up, since the user has heard it by then. */
+  readonly through?: Effect.Effect<void>
+}
+
 /**
  * Reads updates out while listening. Talking over yapd ducks it at once and
  * stops it once it's clearly speech; what the user said then decides whether it
@@ -614,46 +622,67 @@ export const make = (options: {
       })
 
     /**
-     * Asks the user something and listens for what they say over it or right
-     * after, like with an update. Returns whether they answered, and fails
-     * when it can't be played or breaks off.
+     * Says something of yapd's own and listens for what the user says over it
+     * or `wait` after, like with an update: `respond` works out what they
+     * meant, and what it gives back is run once they've stopped. Talk it
+     * makes nothing of picks up where it cut in, unless it came once all of
+     * it was said. Its `through` runs each time it's said to the end, and
+     * what they say is heard listening for its `terms`. Returns whether
+     * something came of what they said, and fails when it can't be played or
+     * breaks off.
      */
-    const ask = (question: Question) =>
+    const exchange = (said: Omit<Question, "answer">, respond: Question["answer"], wait: Duration.DurationInput) =>
       Effect.gen(function* () {
         const ear = hearing(yield* Effect.scope)
-        // Listening for its options, all of what he says back, however long he goes on.
-        const hear = (audio: Float32Array) => transcribe(audio, question.terms)
+        // Listening for its options, if it has any, all of what he says back, however long he goes on.
+        const hear = (audio: Float32Array) => transcribe(audio, said.terms)
         let from = 0
         let missed = 0
-        let begun = question.saying ?? Effect.void
-        let confirmed = question.confirmed ?? Effect.void
+        let begun = said.saying ?? Effect.void
+        let confirmed = said.confirmed ?? Effect.void
         while (true) {
-          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), {
-            wait: pondering,
+          const outcome: Outcome = yield* speak(said.audio, from, missed < misses ? ear : Effect.succeed(undefined), {
+            wait,
             begun,
             confirmed,
-            through: question.through ?? Effect.void,
+            through: said.through ?? Effect.void,
           })
           begun = Effect.void
           confirmed = Effect.void
           if (outcome._tag === "Finished") return false
           const first = yield* hear(outcome.audio)
-          const answer = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, hear, question.answer)).reply
-          if (Option.isSome(answer)) {
-            // They've answered, so it's taken in even if a dictation starts right now.
-            yield* Effect.uninterruptible(answer.value)
+          const reply = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, hear, respond)).reply
+          if (Option.isSome(reply)) {
+            // They've answered or followed it up, so it's taken in even if a dictation starts right now.
+            yield* Effect.uninterruptible(reply.value)
             return true
           }
-          // Talk that wasn't an answer, after the question was asked in full, leaves it unanswered.
+          // Talk that wasn't meant for yapd, once all of it was said, ends it: a question is left unanswered.
           if (outcome.at >= outcome.duration) return false
           missed++
           from = Math.max(from, outcome.at - rewind)
         }
       }).pipe(Effect.scoped)
 
+    /**
+     * Asks the user something and listens for what they say over it or right
+     * after, like with an update. Returns whether they answered, and fails
+     * when it can't be played or breaks off.
+     */
+    const ask = (question: Question) => exchange(question, question.answer, pondering)
+
+    /**
+     * Says an answer to what the user asked and listens for a follow-up over
+     * it or right after, for as long as after an update, since it's what they
+     * asked to hear rather than something they're asked. Returns whether they
+     * followed it up, and fails when it can't be played or breaks off.
+     */
+    const answer = (said: Answer) => exchange(said, said.followUp, linger)
+
     return {
       converse,
       ask,
+      answer,
       /** Whether a follow-up to the session, or this particular update, is on its way. */
       sending: (session: string, update?: Update) => Effect.sync(() =>
         update === undefined ? [...sending.keys()].some((update) => update.session === session) : sending.has(update),
