@@ -1584,6 +1584,36 @@ describe("Assistant", () => {
     expect(await telling("Use the devnet instead.")).toEqual({ spoken: [expect.stringMatching(/^(On it|Right away|Very good)/)], sent: [{ text: "Use the devnet instead." }] })
   })
 
+  test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes, and the question is asked again after", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>
+      run(
+        Effect.gen(function* () {
+          // The model takes his words as answering the question, which a message to its thread may well be.
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text, how: "now", pending: "answers" }), undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer(`Tell it: ${text}`)
+          return {
+            spoken: made.spoken().slice(1),
+            sent: made.dispatched.map(({ type, answers, text }) => (type === "runtime-request.respond" ? { answers } : { text })),
+            open: Option.isSome(yield* made.open),
+          }
+        }),
+      )
+    const form = card("q1", [{ ...colour, allowCustomAnswer: false }])
+    const message = [{ type: "user_input_request", status: "waiting", requestId: "q1", responseMode: "message", questions: [{ ...colour, id: "0" }] }]
+    const back = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    for (const items of [form, message]) {
+      expect(await telling(items, "Use the devnet instead.")).toEqual({
+        spoken: [expect.stringMatching(/^(On it|Right away|Very good)/), back],
+        sent: [{ text: "Use the devnet instead." }],
+        open: true,
+      })
+    }
+    // One that can go as its answer does, and the question is done with.
+    expect(await telling(form, "Red.")).toEqual({ spoken: ["On it, sir. It was waiting on a question, so that's its answer."], sent: [{ answers: { [colour.id]: "Red" } }], open: false })
+  })
+
   test("a part of a thread's question is answered only by what he said once he'd heard it: what he dictated before it was asked, or once it was cut off, never goes as its answer", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const last = "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?"

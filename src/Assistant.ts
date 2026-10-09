@@ -1995,7 +1995,10 @@ export const make = (options: {
             return yield* answering(open, from, answer, decided, said)
           }
         }
-        yield* close(open, decision.act === "resume" ? "dropped: unclear" : answers ? "answered" : "replaced", utterance.id)
+        // A thread's question is settled here only by letting it go: anything else, like a message to its thread that can't go as its
+        // answer, leaves it waiting in T3 Code, so it's asked again after, unless that dealt with it.
+        const settles = answers && (open.kind !== "question" || decision.act === "dismiss")
+        yield* close(open, decision.act === "resume" ? "dropped: unclear" : settles ? "answered" : "replaced", utterance.id)
         if (!answers) return ahead(yield* follow(Brain.check(decision, decided.situation, said), decided, said), open.decision.rest, said)
         if (decision.act === "dismiss") {
           yield* forgo(open, "He said not to send it again.")
