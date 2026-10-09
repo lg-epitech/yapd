@@ -118,11 +118,12 @@ export const confirmation = (
   const title = catalog.models.find(({ name }) => same(name, started.model))?.title ?? started.model
   const where = started.worktree ? "in a worktree" : "without a worktree"
   const plain = `Started in ${project.name}${machine.here ? "" : ` on ${machine.name}`}, on ${title}, ${where}.`
-  const said = ahead(spoken, { request }, started, lines) ? withOnIt(lines.onIt, afterOnIt(spoken, lines)) : plain
+  // The writer's own words, or the plain facts: whether they say where it is goes by them alone, not by a line of his that may name a worktree.
+  const told = ahead(spoken, { request }, started, lines) ? afterOnIt(spoken, lines) : plain
   return [
-    said,
+    told === plain ? plain : withOnIt(lines.onIt, told),
     // It's how they catch a worktree that was misheard, so it's never left to the writer alone.
-    ...(/work\s?-?tree/i.test(said) ? [] : [`That's ${where}.`]),
+    ...(/work\s?-?tree/i.test(told) ? [] : [`That's ${where}.`]),
     ...(unsure ? [`I couldn't tell whether you wanted a worktree, so I went by your rules.`] : []),
     ...(started.warning === undefined ? [] : [started.warning]),
   ].join(" ")

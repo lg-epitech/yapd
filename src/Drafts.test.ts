@@ -403,6 +403,14 @@ describe("Drafts", () => {
     )
     // With nothing else, there are no words of its own, so it's the plain facts, which need no line in front.
     expect(Drafts.confirmation("On it, sir.", resolved, started, lines)).toBe("Started in trainer on rig, on Claude Fable 5.1, in a worktree.")
+    // Whether it says where it is goes by the writer's words alone, never by a line of his that names a worktree.
+    expect(Drafts.confirmation("In trainer, on Fable.", resolved, started, { onIt: "I'll get the worktree sorted.", address: "" })).toBe(
+      "I'll get the worktree sorted. In trainer, on Fable. That's in a worktree.",
+    )
+    // Nor are words after an "On it" taken for how it addressed him, while the lines don't say how yet.
+    expect(Drafts.confirmation("On it, staging only. In trainer, in a worktree.", resolved, started, { ...lines, address: "" })).toBe(
+      "Right away, sir. Staging only. In trainer, in a worktree.",
+    )
     // Without lines of his own, it's the written one, much as the writer used to put it.
     expect(Drafts.confirmation("In trainer on rig, on Fable, in a worktree.", resolved, started, Persona.plain)).toBe("On it. In trainer on rig, on Fable, in a worktree.")
   })
