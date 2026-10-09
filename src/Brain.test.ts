@@ -204,11 +204,18 @@ describe("Brain", () => {
     expect(shown).toContain("The question: «Which test extras should run?», headed «Extras».")
     expect(shown).toContain("Its options: «Alpha» («Runs the alpha suite.»), «Beta», «Gamma (Recommended)». Several can be picked.")
     expect(shown).toContain("You said you'd go with «Gamma (Recommended)».")
-    // Cut off before yapd's pick, the model is told he never heard it, so what only agrees isn't to it.
+    // Cut off before the end, the model is told he may not have heard every option nor yapd's pick, so what doesn't name one isn't to it.
     const unheard: Assistant.Open = { ...open, ...(open.asks?._tag === "Question" ? { asks: { ...open.asks, inFull: false } } : {}) }
     const cut = Brain.prompt(situation("Yeah, that works.", { open: Option.some(unheard), desk: desk([ref(tezos)]) }), Option.none())
     expect(cut).not.toContain("You said you'd go with")
-    expect(cut).toContain(`He didn't hear you say you'd go with «Gamma (Recommended)», so what only agrees, like "yeah, that works", isn't to it: that's "again" with "how" "same"`)
+    expect(cut).toContain(
+      `He stopped you before the end, so he may not have heard every option, nor that you'd go with «Gamma (Recommended)»: what doesn't name an option, like "the last one" or "yeah, that works", is "again" with "how" "same"`,
+    )
+    // So is it with no pick of yapd's.
+    const { wording: _, ...plain } = unheard
+    expect(Brain.prompt(situation("The last one.", { open: Option.some(plain), desk: desk([ref(tezos)]) }), Option.none())).toContain(
+      `He stopped you before the end, so he may not have heard every option: what doesn't name an option, like "the last one"`,
+    )
     expect(shown).toContain(`"how" "skip" with "reply" skips this part. "again" with "how" "more" is to hear what the options mean.`)
     // His words go as they are, and a no isn't taken for letting it go.
     expect(shown).toContain(`"text" is all of his words, as he'd type them.`)
@@ -887,9 +894,9 @@ describe("Brain", () => {
         "Yes, confirm with the team after.",
       ].filter(Brain.approving),
     ).toEqual([])
-    // Only when the approve is his answer itself, a plain yes or okay before it at most: never one in another clause, nor asked, nor put off.
+    // Only when the approve is his whole answer, a plain yes or okay before it at most: never one in another clause, nor asked, nor put off.
     expect(
-      ["Yes, approve it and let it go on.", "Okay, approve it for the session.", "Approve the Mina one.", "Jarvis, approve it, please.", "Yes, I approve.", "Allow that."].filter(
+      ["Okay, approve it for the session.", "Jarvis, approve it, please.", "Yes, I approve.", "Allow that.", "Approve, thanks.", "Approve that one."].filter(
         (heard) => !Brain.approving(heard),
       ),
     ).toEqual([])
@@ -905,6 +912,15 @@ describe("Brain", () => {
         "Approve it later.",
         "Approve it if the tests pass.",
         "Can you approve it?",
+        // Nor with anything more to it, which may not have been heard right, nor what more the model kept: it's his whole answer or nothing.
+        "Approve it unless the tests fail.",
+        "Approve it provided the tests pass.",
+        "Approve nothing.",
+        "Approve it except the deploy.",
+        "Yes, approve it and let it go on.",
+        "Approve the Mina one.",
+        "Approve that, I suppose.",
+        "Approve all of them.",
       ].filter(Brain.approving),
     ).toEqual([])
     // For the rest of its work only in so many words.

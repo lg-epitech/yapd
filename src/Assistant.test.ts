@@ -1609,6 +1609,28 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
+  test("'approve' with anything more to it, like a condition the model left out, never allows it: it's left waiting, needing an 'approve'", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const allow = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes it all for a yes, with nothing left over.
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: approval("r1", "npm install left-pad"),
+          })
+          yield* asked(made, cloud)
+          yield* made.play()
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    for (const heard of ["Approve it unless the tests fail.", "Approve it provided the tests pass.", "Approve nothing."]) {
+      expect([heard, await allow(heard)]).toEqual([heard, { spoken: ["It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] }])
+    }
+    expect(await allow("Approve it.")).toEqual({ spoken: ["Approved, sir."], dispatched: ["r1 accept"] })
+  })
+
   test("an approval is allowed for the rest of its work only when he says so, whatever the model took his 'approve' for", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
@@ -1619,7 +1641,7 @@ describe("Assistant", () => {
           items,
         })
         yield* asked(made, cloud)
-        yield* made.answer("Yes, approve it and let it go on.")
+        yield* made.answer("Yes, approve it.")
         const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(again)
         yield* asked(made, again)
@@ -1774,8 +1796,12 @@ describe("Assistant", () => {
           return { spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
         }),
       )
-    expect(await allow("npm install left-pad", ["Approve the cloud deployment one."])).toEqual({ spoken: ["Approved, sir: Cloud deployment discovery."], dispatched: ["r1 accept"] })
-    // A yes in other words has it read back to him, however harmless it looks.
+    expect(await allow("npm install left-pad", ["Approve it."])).toEqual({ spoken: ["Approved, sir: Cloud deployment discovery."], dispatched: ["r1 accept"] })
+    // A yes in other words has it read back to him, however harmless it looks, as has an approve with more to it, like the thread it's for.
+    expect(await allow("npm install left-pad", ["Approve the cloud deployment one.", "Approve."])).toEqual({
+      spoken: ["Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.", "Approved, sir."],
+      dispatched: ["r1 accept"],
+    })
     expect(await allow("npm install left-pad", ["Yes, let the cloud one go ahead.", "Approve."])).toEqual({
       spoken: ["Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.", "Approved, sir."],
       dispatched: ["r1 accept"],
@@ -2440,7 +2466,7 @@ describe("Assistant", () => {
     )
     expect(result.cut).toBe(0)
     expect(result.asked).toBe(2)
-    expect(result.told.map((prompt) => [prompt.includes("He didn't hear you say you'd go with «Blue (Recommended)»"), prompt.includes("You said you'd go with «Blue (Recommended)».")])).toEqual([
+    expect(result.told.map((prompt) => [prompt.includes("nor that you'd go with «Blue (Recommended)»"), prompt.includes("You said you'd go with «Blue (Recommended)».")])).toEqual([
       [true, false],
       [false, true],
     ])
@@ -2479,6 +2505,33 @@ describe("Assistant", () => {
     // Naming it exactly, he picked it himself; a place, which may be of the ones he'd heard so far, is asked again in full.
     expect(await answering("Blue works, yeah.", true)).toEqual({ asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
     expect(await answering("The second, I guess.", true)).toEqual({ asked: 1, spoken: [again], answers: [] })
+  })
+
+  test("an option picked by where it came, like the last one, said before he heard them all, is never sent, recommended or not: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const shade = { id: "shade", question: "Which shade should the badge use?", options: [{ label: "Red" }, { label: "Green" }, { label: "Blue" }] }
+    const answering = (heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes "the last one" for the last option there is, which he may not have heard.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [shade]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), told: told.map((prompt) => prompt.includes("He stopped you before the end, so he may not have heard every option:")) }
+        }),
+      )
+    const again = "Again, sir: Which shade should the badge use? Red, Green or Blue?"
+    expect(await answering("The last one.", true)).toEqual({ spoken: [again], answers: [], told: [true] })
+    // Heard to the end, it's the model's to tell; named, it's his, however much he heard.
+    const blue = { spoken: ["Blue it is, sir."], answers: [{ shade: "Blue" }] }
+    expect(await answering("The last one.", false)).toEqual({ ...blue, told: [false] })
+    expect(await answering("Blue, I think.", true)).toEqual({ ...blue, told: [true] })
   })
 
   test("yapd's pick among several the model takes him to want, said before he heard it and never named, sends nothing: it's asked again in full", async () => {
@@ -8514,7 +8567,7 @@ describe("Assistant", () => {
       await answering(onRig, card("q9", [colour]), "Let's do the red one I think.", (target) => Brain.decision({ act: "reply", target, text: "Red", pending: "answers" })),
     ).toEqual({ spoken: ["Red it is, sir."], sent: [{ requestId: "q9", answers: { [colour.id]: "Red" }, decision: undefined }], open: false })
     expect(
-      await answering(approving, approval("r9", "npm install left-pad"), "Approve that, I suppose.", (target) =>
+      await answering(approving, approval("r9", "npm install left-pad"), "Okay, approve this one.", (target) =>
         Brain.decision({ act: "decide", how: "accept", target, pending: "answers" }),
       ),
     ).toEqual({ spoken: ["Approved, sir."], sent: [{ requestId: "r9", answers: undefined, decision: "accept" }], open: false })
@@ -8596,7 +8649,7 @@ describe("Assistant", () => {
       await dictated(onRig, card("q9", [colour]), "Red.", "Red, for the fee table checks on rig.", (target) => Brain.decision({ act: "reply", target, text: "Red" })),
     ).toEqual({ spoken: ["Red it is, sir."], sent: 1, open: false })
     expect(
-      await dictated(approving, approval("r9", "npm install left-pad"), "Approve.", "Approve the fee table checks on rig.", (target) =>
+      await dictated(approving, approval("r9", "npm install left-pad"), "Approve.", "Approve it.", (target) =>
         Brain.decision({ act: "decide", how: "accept", target }),
       ),
     ).toEqual({ spoken: ["Approved, sir."], sent: 1, open: false })

@@ -2557,17 +2557,17 @@ export const make = (options: {
         // would run comes last: otherwise it's asked once more, in full, then it's let go. A no needs neither.
         const approval = open.asks?._tag === "Approval" ? open.asks : undefined
         const allowing = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline"
-        if (allowing && !Brain.approving(utterance.heard)) {
-          yield* close(open, "dropped: not approved", utterance.id)
-          return unfinished(reply(Brain.unapproved(said), decided.subject), decision.rest, said, decided.situation.desk)
-        }
-        // With more after it, like "approve it, and tell the Mina one to wait", his approve may as well be to what's in the rest, as the
+        // With more after it, like "approve it, and tell the Mina one to wait", his yes may as well be to what's in the rest, as the
         // model split it: it's asked again on its own, saying the rest was left, so only an approve to it alone allows it.
         if (allowing && decision.rest.trim() !== "") {
-          yield* Effect.logInfo("Asking it again on its own, since his approve came with more")
+          yield* Effect.logInfo("Asking it again on its own, since his yes came with more")
           if ((asking?.asks ?? asks) < asks) return ahead(yield* reask(said), decision.rest, said)
           yield* close(open, "dropped: not approved", utterance.id)
           return unfinished(reply(Brain.unapproved(said), decided.subject), decision.rest, said, decided.situation.desk)
+        }
+        if (allowing && !Brain.approving(utterance.heard)) {
+          yield* close(open, "dropped: not approved", utterance.id)
+          return reply(Brain.unapproved(said), decided.subject)
         }
         if (allowing && !heardBy(utterance, opened.whole)) {
           if ((asking?.asks ?? asks) < asks) return yield* reask(said)
@@ -2585,19 +2585,17 @@ export const make = (options: {
           const leaned = { ...open, ...leaning(open) }.wording?.part
           const part = leaned ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
-          // What only agrees, like a plain yes, said before he heard yapd's pick, isn't to it, however the model took it, alone or with others
-          // he named exactly: it's asked again in full. Asked which one then, the pick is the one option left, as `leaning` has it.
-          const pick = leaned === undefined ? undefined : Option.getOrUndefined(leaned.recommended)
+          // Said before he heard it all, what doesn't name an option, like "the last one" or a plain yes, may be to one he's yet to hear, or
+          // to yapd's pick he never heard, however the model took it, alone or with others he named: it's asked again in full. Asked which
+          // one then, the pick is the one option left, as `leaning` has it.
           if (
             decided.source === "model" &&
-            leaned !== undefined &&
-            pick !== undefined &&
+            part !== undefined &&
             !heardBy(utterance, opened.whole) &&
             answer?._tag === "Picked" &&
-            answer.options.includes(pick) &&
-            !Questions.mentions(leaned, pick, utterance.heard)
+            answer.options.some((index) => !Questions.mentions(part, index, utterance.heard))
           ) {
-            yield* Effect.logInfo("Asking it again in full, since he only agreed before he heard which one I'd go with")
+            yield* Effect.logInfo("Asking it again in full, since he picked before he'd heard it all, without naming what he picked")
             return yield* reask(said, "again")
           }
           switch (answer?._tag) {

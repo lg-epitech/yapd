@@ -920,26 +920,24 @@ const beforeApprove = /^(?:(?:yes|yeah|yep|ok|okay|sure|alright|all right) )+/
 /** What may come after it: thanks, which `gist` leaves in as it leaves out "please" and "sir". */
 const afterApprove = / (?:thanks|thank you|cheers)$/
 
+/** All his approve may be: "approve" or "allow", alone or with "it", "that" or "this", and "I approve" or "approved". */
+const approveForms = /^(?:i )?(?:approved?|allow)(?: (?:it|that|this)(?: one)?)?$/
+
 /**
  * Whether he allowed it in so many words, which is all that ever allows
- * what a thread waits on: his answer itself is "approve" or "allow", like
- * "approve", "yes, approve it", "I approve", "approve the Mina one",
- * "allow" or "allow it", with at most a plain yes or okay before it. Never
- * an approve in another clause, like "go ahead, I'll approve the other one
- * later", "yes, and tell the Mina one to approve its plan" or "allow me a
- * second", nor one asked, put off or held back, like "should I approve
- * it?", "approve it later" or "approve it if the tests pass", nor with
- * anything against it, like "wouldn't", "no" or "never", however the
- * apostrophe was written. A plain yes, "sure", "OK", "go ahead", "do it" or
- * "confirm" never does.
+ * what a thread waits on: his whole answer is "approve" or "allow", like
+ * "approve", "yes, approve it", "I approve", "allow" or "allow it", with at
+ * most a plain yes or okay before it, thanks after it, and "for the session"
+ * anywhere. Nothing else, so nothing he adds can be lost on the way, like
+ * "approve it unless the tests fail", "approve nothing", "approve the Mina
+ * one" or "approve it later", which are read back as needing an "approve"
+ * on its own; nor anything asked, like "approve it?". A plain yes, "sure",
+ * "OK", "go ahead", "do it" or "confirm" never does.
  */
 export const approving = (heard: string) => {
-  const written = heard.replace(/[’‘`]/g, "'")
-  if (written.includes("?")) return false
-  const said = gist(written).replace(sessionly, " ").replace(/\s+/g, " ").trim().replace(beforeApprove, "").replace(afterApprove, "")
-  if (/n't\b|\b(not|never|no|nope|dont|cant|wont|wouldnt|shouldnt|couldnt|didnt)\b/.test(said)) return false
-  if (/\b(later|should|shall|can|could|would|will|maybe|if|once|when|after|before|until)\b/.test(said)) return false
-  return /^(?:i )?approve[ds]?\b/.test(said) || /^(?:i )?allow(?: (?:it|that|this)\b.*)?$/.test(said)
+  if (heard.includes("?")) return false
+  const said = gist(heard).replace(sessionly, " ").replace(/\s+/g, " ").trim().replace(beforeApprove, "").replace(afterApprove, "")
+  return approveForms.test(said)
 }
 
 /** "Say that again", with nothing said lately. */
@@ -1987,14 +1985,12 @@ const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording">) => {
               `Its options: ${question.options.map(({ label, description }) => `${fenced(label, 80)}${description.trim() === "" ? "" : ` (${fenced(description, 80)})`}`).join(", ")}.`,
               ...(question.multiSelect ? ["Several can be picked."] : []),
             ]),
-        // Cut off before it, he can't be agreeing with yapd's pick, however his words sound.
-        ...Option.match(pick, {
-          onNone: () => [],
-          onSome: (label) =>
-            asks.inFull
-              ? [`You said you'd go with ${fenced(label, 80)}.`]
-              : [`He didn't hear you say you'd go with ${fenced(label, 80)}, so what only agrees, like "yeah, that works", isn't to it: that's "again" with "how" "same", to ask it in full.`],
-        }),
+        // Cut off before the end, he may not have heard every option, nor yapd's pick, however his words sound.
+        ...(asks.inFull
+          ? Option.match(pick, { onNone: () => [], onSome: (label) => [`You said you'd go with ${fenced(label, 80)}.`] })
+          : [
+              `He stopped you before the end, so he may not have heard every option${Option.match(pick, { onNone: () => "", onSome: (label) => `, nor that you'd go with ${fenced(label, 80)}` })}: what doesn't name an option, like "the last one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`,
+            ]),
         `An answer is "reply": "text" is the option he picked, as it's written; several, one a line.${
           question.allowCustomAnswer
             ? ` When he adds a condition, a reason or anything the work should know, like "Blue, but only for the tests", "none of those, use staging" or "hold off until I check the fees", "text" is all of his words, as he'd type them.`
