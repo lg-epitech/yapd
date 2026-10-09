@@ -169,6 +169,12 @@ const common: ReadonlySet<string> = new Set([
   "really", "way", "there's", "you're", "we're", "didn't", "doesn't", "isn't", "can't", "won't",
 ])
 
+/** Words that turn what's said around, so one is never taken for a word of yapd's it isn't, like "not" for "now". */
+const negations: ReadonlySet<string> = new Set([
+  "no", "not", "don't", "didn't", "doesn't", "isn't", "aren't", "wasn't", "weren't", "can't", "cannot", "won't", "wouldn't", "shouldn't",
+  "couldn't", "haven't", "hasn't", "hadn't", "never", "nothing", "none", "neither", "nor",
+])
+
 /**
  * What he says to yapd in nothing but common words, which it takes for him
  * only said just so, since Whisper makes up the like of "Let's go." and
@@ -227,10 +233,12 @@ const sound = (word: string) =>
  * "on" for "in".
  */
 const alike = (heard: string, spoken: string) => {
+  if (heard !== spoken && (negations.has(heard) || negations.has(spoken))) return false
   const [first, second] = [stem(heard), stem(spoken)]
   const shorter = Math.min(first.length, second.length)
   if (first === second || (first.length >= 4 && second.startsWith(first))) return true
-  if (shorter < 3) return false
+  // Never one of the words in nearly anything said, like "was" for "pass", which would make a word of his look like its.
+  if (shorter < 3 || common.has(heard)) return false
   const distance = apart(first, second)
   if (distance <= (shorter >= 6 ? 2 : 1)) return true
   return shorter >= 4 && distance * 2 <= Math.max(first.length, second.length) && sound(first).length >= 3 && sound(first) === sound(second)
@@ -318,15 +326,23 @@ const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   /** Its words they're in line with, or in place of. */
   const said = new Set<number>()
   matches.forEach((match, index) => {
+    for (let at = match.first; at <= match.last; at++) its.add(at)
+    for (let at = match.start; at <= match.end; at++) said.add(at)
     const next = matches[index + 1]
-    // Fewer heard between than it said, they stand for some of its words, rather than being put in among them.
-    const standing = next !== undefined && next.first - match.last <= next.start - match.end
-    for (let at = match.first; at < (standing ? next.first : match.last + 1); at++) its.add(at)
-    for (let at = match.start; at < (standing ? next.start : match.end + 1); at++) said.add(at)
+    if (next === undefined) return
+    // Heard in place of some of its words between, no more of them than it said, they're those misheard, rather than put in among them.
+    const between = words.slice(match.last + 1, next.first)
+    if (between.length === 0 || between.length > next.start - match.end - 1 || between.some((word) => negations.has(word))) return
+    for (let at = match.last + 1; at < next.first; at++) its.add(at)
+    for (let at = match.end + 1; at < next.start; at++) said.add(at)
   })
   const [first, last] = [matches[0], matches.at(-1)]
   const telling = [...said].some((at) => !common.has(yapd[at]!))
   if (first === undefined || last === undefined) return { its, telling }
+  // Among words that tell its voice, a common one more, like the "is" of "the test is passed", is Whisper's way with it, but never a "not".
+  if (telling) {
+    for (let at = first.last + 1; at < last.first; at++) if (common.has(words[at]!) && !negations.has(words[at]!)) its.add(at)
+  }
   const [previous, next] = [yapd[first.start - 1], yapd[last.end + 1]]
   const after = words.length - 1 - last.last
   if (telling) {
@@ -370,7 +386,7 @@ const madeUp: ReadonlySet<string> = new Set(
     "i'll see you in the next one", "see you guys", "see you guys next time", "bye bye", "goodbye", "good night", "i'll be right back",
     "have a nice day", "have a good day", "take care", "good luck", "welcome back", "let's get started", "i'm sorry", "oh my god",
     "you know what i mean", "bon appétit", "peace out", "of course", "excuse me", "good morning", "good afternoon", "good evening",
-    "what the hell", "jesus christ",
+    "what the hell", "jesus christ", "let's go", "here we go", "that's it", "that's all", "i'm going to go", "come on", "i don't know",
   ].map((phrase) => vocabulary(phrase).filter((word) => word.length > 1 && !fillers.has(word)).join(" ")),
 )
 
@@ -419,7 +435,7 @@ export const whose = (heard: string, saying: string): Whose => {
   if (inTurn(words, yapd)) return "echo"
   if (curt.has(words.join(" "))) return "his"
   const { its, telling } = ours(words, yapd)
-  if (words.every((word, index) => its.has(index) || common.has(word))) return "echo"
+  if (words.every((_, index) => its.has(index))) return "echo"
   return telling ? "mixed" : "his"
 }
 

@@ -735,6 +735,26 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("Thank you.", "")).toBe("echo")
   })
 
+  test("takes everyday words of his for his, unless they're what yapd is saying, in order, or what Whisper makes up", () => {
+    const line = "Codex on yapd finished the migration, and all the tests pass"
+    for (const heard of [
+      "How did that go?", "Who is it?", "Where is it?", "Can you do it now?", "What did it do?", "Is that all?", "Who did that?", "Don't.", "Got it.",
+      "Good.", "Why did it do that?", "What was that about?",
+    ]) {
+      expect([heard, whose(heard, line)]).toEqual([heard, "his"])
+    }
+    const question = "Shall I merge the pull request, sir?"
+    for (const heard of ["Don't do it.", "Go for it.", "Don't."]) {
+      expect([heard, whose(heard, question)]).toEqual([heard, "his"])
+    }
+    // A word of its, and words of his it isn't saying, "don't" above all, which turns what it says around.
+    expect(whose("Don't merge it.", question)).toBe("mixed")
+    expect(whose("The tests don't pass.", saying)).toBe("mixed")
+    // Its own, with a common word Whisper puts in among its words.
+    expect(whose("And all the", line)).toBe("echo")
+    expect(whose("Over in yapd and the tests pass.", saying)).toBe("echo")
+  })
+
   test("takes a sentence of his for his, though it has a word or a phrase of what Whisper makes up in it", () => {
     const line = "Codex finished the migration on yapd and all the tests pass now. Do you want me to open the pull request?"
     for (const heard of ["Post it in the release channel.", "Pause the video.", "Is it watching the files?", "Turn the music down.", "Excuse me, what did it do?"]) {
@@ -2027,6 +2047,69 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         said,
         { commands: ["play", "stop"], done: said === "Stop.", sent: said === "Stop." ? [] : [said], replies: [said] },
       ])
+    }
+  }, 30_000)
+
+  test("stops for everyday words of his over them, and passes them on as he said them, though they're only words nearly anything has", async () => {
+    for (const said of ["Why did it do that?", "Don't do it."]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, said]], { live: true })
+          yield* helper.wait(1)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([said, result]).toEqual([said, { commands: ["play", "stop"], sent: [said], replies: [said] }])
+    }
+  }, 30_000)
+
+  test("passes on what the user says over them on either side of a pause, as he said it, like \"Don't... merge it yet.\"", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Don't..."], [0.91, "merge it yet."]], {
+          live: true,
+          spoken: "Over in yapd, Codex opened the pull request and the checks are all green now, sir. Shall I merge it?",
+        })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.talk(0, 3)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(4)
+        return { transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ transcribed: ["Don't...", "merge it yet."], sent: ["Don't merge it yet."], replies: ["Don't merge it yet."] })
+  })
+
+  test("takes a short answer of everyday words over the end of a short question it asked over them, just as he said it", async () => {
+    for (const said of ["Go for it.", "Don't."]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const answers: Array<string> = []
+          const helper = yield* overHelper([[0.9, said]], { duration: 2.2 })
+          yield* Fiber.interrupt(helper.fiber)
+          const asking = yield* Effect.fork(
+            helper.ask({
+              audio: "/tmp/question.wav",
+              spoken: "Shall I merge the pull request, sir?",
+              answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+            }),
+          )
+          yield* helper.wait(1.8)
+          yield* helper.talk(0.9, 8)
+          yield* helper.finish
+          yield* helper.talk(0.9, 4)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { rendered: helper.rendered, answered: yield* Fiber.join(asking), answers }
+        }),
+      )
+      expect([said, result]).toEqual([said, { rendered: [], answered: true, answers: [said] }])
     }
   }, 30_000)
 
