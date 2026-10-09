@@ -345,7 +345,7 @@ const assistant = (
             ask: (request) =>
               Effect.succeed(
                 request._tag === "Approval"
-                  ? { spoken: `wants to ${request.what.replace(/^Bash: /, "run ")}`, risk: "low" as const }
+                  ? { spoken: `wants to ${request.what.replace(/^[\w.-]+: /, "run ")}`, risk: "low" as const }
                   : { spoken: "asks which network to start with", risk: "low" as const },
               ),
           }),
@@ -1013,6 +1013,12 @@ describe("Assistant", () => {
     for (const command of ["grep 'rm' -r src", "git log --grep 'clean' -f", 'git commit -m "push --force"', "bash -c 'grep rm -r src'"]) {
       expect(await allowing(approval("r1", command))).toEqual({ spoken: [`Cloud deployment discovery wants to run ${command}. Allow it, sir?`, "Approved, sir."], dispatched: ["r1 accept"] })
     }
+    // A tool given a command apart from its words, as "mcp__shell__run: git", runs them with it, never on their own.
+    const logging = [
+      { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "mcp__shell__run: git", nativeItemRef: { nativeId: "tool-r1" } },
+      { type: "dynamic_tool", status: "running", toolName: "mcp__shell__run", input: { command: "git", args: ["log", "--grep", "clean", "-f"] }, nativeItemRef: { nativeId: "tool-r1" } },
+    ]
+    expect(await allowing(logging)).toEqual({ spoken: ["Cloud deployment discovery wants to run git. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
   })
 
   test("'approve' allows a dangerous approval first time", async () => {

@@ -207,12 +207,16 @@ const json = Schema.decodeUnknownOption(Schema.parseJson())
  * that's JSON itself, like an input sent as one string, is read as what it
  * holds, the same way, and a list of words, like a command and what it's
  * given, is one line, as it runs, so a flag isn't cut off from its command;
- * so is a command given apart from its words, after the rest.
+ * so is a command given apart from its words, after the rest, whose words
+ * are then never a line of their own, as if they ran alone.
  */
 const given = (value: unknown): ReadonlyArray<string> => {
   if (typeof value === "string") return Option.match(/^\s*[[{]/.test(value) ? json(value) : Option.none(), { onNone: () => [value], onSome: given })
   if (Array.isArray(value)) return value.every((item) => typeof item === "string") ? [value.join(" ")] : value.flatMap(given)
-  if (typeof value === "object" && value !== null) return [...Object.entries(value).flatMap(([name, inner]) => [name, ...given(inner)]), ...commandLine(value)]
+  if (typeof value === "object" && value !== null) {
+    const run = commandLine(value)
+    return [...Object.entries(value).flatMap(([name, inner]) => [name, ...(name === run.words ? [] : given(inner))]), ...run.lines]
+  }
   return value === undefined || value === null ? [] : [String(value)]
 }
 
@@ -222,17 +226,21 @@ const whatRuns = ["command", "cmd", "program", "executable", "exe", "binary", "b
 /**
  * A command given apart from its words, like `{"command": "rm", "args":
  * ["-rf", "x"]}` or `{"program": "rm", …}`, as the one line it runs as,
- * under each name that could be what runs.
+ * under each name that could be what runs, and the name its words are
+ * under, which never run alone: `{"command": "git", "args": ["log",
+ * "--grep", "clean", "-f"]}` runs a log, never a `clean -f`.
  */
-const commandLine = (value: object): ReadonlyArray<string> => {
+const commandLine = (value: object): { readonly words?: string; readonly lines: ReadonlyArray<string> } => {
   const fields = value as Readonly<Record<string, unknown>>
-  const words = fields.args ?? fields.argv ?? fields.arguments
-  const line = typeof words === "string" ? words : Array.isArray(words) && words.every((word) => typeof word === "string") ? words.join(" ") : undefined
-  if (line === undefined) return []
-  return whatRuns.flatMap((name) => {
+  const words = ["args", "argv", "arguments"].find((name) => fields[name] !== undefined && fields[name] !== null)
+  const listed = words === undefined ? undefined : fields[words]
+  const line = typeof listed === "string" ? listed : Array.isArray(listed) && listed.every((word) => typeof word === "string") ? listed.join(" ") : undefined
+  if (words === undefined || line === undefined) return { lines: [] }
+  const lines = whatRuns.flatMap((name) => {
     const named = fields[name]
     return typeof named === "string" ? [`${named} ${line}`] : []
   })
+  return lines.length === 0 ? { lines } : { words, lines }
 }
 
 /**
