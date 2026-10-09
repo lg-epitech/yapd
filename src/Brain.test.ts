@@ -411,6 +411,15 @@ describe("Brain", () => {
       "deleteFile\npath\nx",
       "fsRemoveDirectory\npath\nx",
       'mcp__files__manage {"action":"deleteAll","path":"build"}',
+      "mcp__git__push\nremote\norigin\nflags\n--force",
+      "mcp__git__push\nremote\norigin\nflags\n-u -f",
+      "mcp__git__push\nremote\norigin\nrefspec\n+main",
+      "mcp__git__push\nremote\norigin\nbranch\nmain\ndelete\ntrue",
+      'mcp__git__git_push {"remote":"origin","branch":"old","delete":true}',
+      "mcp__git__reset\nmode\nhard\ntarget\nHEAD~3",
+      'mcp__git__git_reset {"mode":"hard"}',
+      "git_reset\nhard\ntrue",
+      "mcp__git__clean\nflags\n-fd",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -492,6 +501,11 @@ describe("Brain", () => {
       "readFile\npath\nsrc/deleteFile.ts",
       "github/search_code\nq\ndelete_repository",
       "undeleteFile\npath\nx",
+      "mcp__git__push\nremote\norigin\nflags\n--follow-tags",
+      "mcp__git__push\nremote\norigin\nbranch\nmain\ndelete\nfalse",
+      "mcp__git__reset\nmode\nsoft\ntarget\nHEAD~1",
+      "mcp__git__branch\nname\nold\nmode\ndelete",
+      "mcp__git__log\nflags\n-f",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
@@ -547,6 +561,7 @@ describe("Brain", () => {
       "many $'": "$'".repeat(10_000),
       "separators between quotes": "'a;'".repeat(5000),
       "separators after backslashes": "rm \\;".repeat(5000),
+      "a git tool told many flags": `mcp__git__push\n${"-a -b\nmode\na\n".repeat(1700)}`,
     }
     /** How long it takes to tell, the quickest of three, so a pause in between doesn't count. */
     const took = (text: string) =>

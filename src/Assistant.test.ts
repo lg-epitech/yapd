@@ -986,12 +986,16 @@ describe("Assistant", () => {
     // Named as a program instead, and a tool told to write over what's there.
     expect(await allowing(tool("mcp__shell__run", { program: "rm", args: ["-rf", "~/work"] }))).toEqual(risky)
     expect(await allowing(tool("mcp__fs__copy_file", { source: "a.txt", destination: "b.txt", overwrite: true }))).toEqual(risky)
+    // A tool named for git's push or reset, told to force or to reset hard as a list of flags or a mode.
+    expect(await allowing(tool("mcp__git__push", { remote: "origin", flags: ["-u", "--force"] }))).toEqual(risky)
+    expect(await allowing(tool("mcp__git__reset", { mode: "hard", target: "HEAD~3" }))).toEqual(risky)
     // Going on over lines with nothing risky in it, or told to take all of a tree it only lists or searches, whatever it looks for, a yes will do.
     for (const items of [
       approval("r1", "git push origin main \\\n  --follow-tags"),
       tool("mcp__fs__list_directory", { path: "src", recursive: true }),
       tool("mcp__search__search", { query: "how to remove a recursive function", recursive: true }),
       tool("mcp__search__grep", { pattern: "delete_user", path: "src", recursive: true }),
+      tool("mcp__git__reset", { mode: "soft", target: "HEAD~1" }),
     ]) {
       expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
     }

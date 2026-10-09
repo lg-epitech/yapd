@@ -668,8 +668,37 @@ const summarized = /^(?:[A-Z]\w*|mcp__[\w.:/-]*): /gm
 /** What a tool is told to do, under a name like "action" or "command", or the tool it's told to call, as its JSON writes it or a line each. */
 const toldTo = /(?:^|")(?:action|operation|op|method|command|mode|type|tool|tool[_-]?name)"?(?:\s*:\s*"|[ \t]*\r?\n)([^"\n]*)/gim
 
-/** What a tool does, by its name and what it's told to do, never by any other words it's given, like what a search looks for. */
-const whatItDoes = (text: string) => [...(toolName.exec(text) ?? []), ...[...text.matchAll(toldTo)].map(([, what]) => what ?? "")]
+/** What a tool is told to do, like the "delete" of `{"action": "delete"}`. */
+const toldWhat = (text: string) => [...text.matchAll(toldTo)].map(([, what]) => what ?? "")
+
+/** One of git's subcommands a tool is named for, like the push of mcp__git__push or the reset of git_reset. */
+const gitNamed = /(?:^|[\W_])(push|reset|clean|branch)(?:[\W_]|$)/i
+
+/** A line of what a tool is given that's flags or what's pushed only, like "--force", "-u -f" or "+main", as a list of them is written. */
+const flagsOnly = (line: string) => line.trim() !== "" && line.trim().split(/\s+/).every((word) => /^[-+:]/.test(word))
+
+/** Flags of git's a tool can be told by name, set to true, like `{"delete": true}` for a push; forcing is told apart above. */
+const toldFlags = ["delete", "hard", "mirror", "prune"].map((flag) => [flag, setTo(flag)] as const)
+
+/**
+ * Whether a tool named for one of git's subcommands, like mcp__git__push, is
+ * told what makes that risky other than as a command would be: by its flags
+ * on their own, like `{"flags": ["--force"]}`, by what it pushes, like
+ * `{"refspec": "+main"}`, by what it's told to do, like `{"mode": "hard"}`,
+ * or by a flag's name set to true, like `{"delete": true}`, all read as that
+ * subcommand's flags.
+ */
+const gitTold = (text: string, name: string, told: ReadonlyArray<string>) => {
+  const subcommand = gitNamed.exec(name)?.[1]?.toLowerCase() ?? ""
+  const risks = gitFlags.get(subcommand)
+  if (risks === undefined) return false
+  const flags = [
+    ...text.split("\n").filter(flagsOnly),
+    ...told.map((what) => `--${what.trim().replace(/^-+/, "")}`),
+    ...toldFlags.flatMap(([flag, set]) => (set.test(text) ? [`--${flag}`] : [])),
+  ]
+  return risks(`git ${subcommand} ${flags.join(" ")}`)
+}
 
 /** Whether what a command, or a few, would run is risky, by what it says or by a flag after its name, of those that count for what runs. */
 const riskyToRun = (run: string) => risky.test(run) || commands(run).some((command) => flaggable.test(command) && counting(command).some((risks) => risks(command)))
@@ -687,8 +716,15 @@ export const dangerous = (text: string) => {
   const whole = sealed(command)
   const read = new Set([command, unquoted(command), whole, unquoted(whole)])
   if ([...read].some(riskyToRun) || forcing.test(text) || overwriting.test(text)) return true
-  const does = whatItDoes(text)
-  return does.some((what) => deletesForGood.test(what) || deletesForGoodCamel.test(what)) || (recursing.test(text) && does.some((what) => deletes.test(what)))
+  // What a tool does, by its name and what it's told to do, never by any other words it's given, like what a search looks for.
+  const name = toolName.exec(text)?.[0]
+  const told = toldWhat(text)
+  const does = name === undefined ? told : [name, ...told]
+  return (
+    does.some((what) => deletesForGood.test(what) || deletesForGoodCamel.test(what)) ||
+    (recursing.test(text) && does.some((what) => deletes.test(what))) ||
+    (name !== undefined && gitTold(text, name, told))
+  )
 }
 
 /**
