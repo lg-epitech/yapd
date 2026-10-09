@@ -379,11 +379,12 @@ const after = (command: string, name: RegExp, then: RegExp) => {
 
 /**
  * Where a command's name that `name` says, like the "rm" of "/bin/rm", ends,
- * the last one with a flag after it, together with others or apart, that
- * starts as `flag` says, or -1. It's read a word at a time, once: the latest
- * name stands for any before it whose flags it's among, since what's after
- * it is after them too, where a pattern would read the flags after each name
- * all over again, even a name a flag ends with, like "-.rm".
+ * the last one with a flag anywhere after it in the command, together with
+ * others or apart, that starts as `flag` says, or -1: GNU's rm and git take
+ * a flag after what they're given too, as `rm ~/work -rf` is `rm -rf ~/work`.
+ * It's read a word at a time, once: the latest name stands for any before it,
+ * since what's after it is after them too, where a pattern would read what's
+ * after each name all over again, even a name a flag ends with, like "-.rm".
  */
 const flagged = (command: string, name: RegExp, flag: RegExp) => {
   const words = /\S+/g
@@ -392,8 +393,6 @@ const flagged = (command: string, name: RegExp, flag: RegExp) => {
   for (let word = words.exec(command); word !== null; word = words.exec(command)) {
     flag.lastIndex = word.index
     if (open !== -1 && flag.test(command)) found = open
-    // Its flags go on up to a word that isn't one, which may name another.
-    if (!/^-\S/.test(word[0])) open = -1
     if (name.test(word[0])) open = word.index + word[0].length
   }
   return found
@@ -416,8 +415,9 @@ const flaggable = /rm|push|clean|branch|restore|gcloud|az|rsync/i
 /** What a flag anywhere after a command's name makes risky, read a command at a time. */
 const riskyFlags: ReadonlyArray<(command: string) => boolean> = [
   // Deleting a tree, forced or not, its flags together or apart, but not only from git's index, with `--cached` after the last that does.
+  // The rm of git's own git-rm counts, never a flag that ends in it, like docker's `--rm`, which a flag of the command docker runs would follow.
   (command) => {
-    const removing = flagged(command, /(?:^|\W)rm$/i, /-[a-z]*r|--recursive/iy)
+    const removing = flagged(command, /(?:^|[^\w-]|\bgit-)rm$/i, /-[a-z]*r|--recursive/iy)
     return removing !== -1 && !/--cached/i.test(command.slice(removing))
   },
   // A push that forces, wherever the flag goes, or that deletes a branch, and a clean that forces, by "-f" or by name.

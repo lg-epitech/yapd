@@ -345,6 +345,10 @@ describe("Brain", () => {
       "git branch -df old",
       "git branch --delete -f old",
       "git branch -f --delete old",
+      "rm ~/work -rf",
+      "rm ~/work build -r -f",
+      "/bin/rm ~/work --recursive",
+      "git clean . -fdx",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -381,6 +385,9 @@ describe("Brain", () => {
       'mcp__fetch__fetch {"url":"https://example.com","forceRefresh":true}',
       "git clean --dry-run -d",
       "git branch --delete old -v",
+      "rm build.log -f",
+      "git rm node_modules -r --cached",
+      "docker run --rm -it node:20 ls -R",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
