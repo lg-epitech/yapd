@@ -2230,6 +2230,27 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     })
   })
 
+  test("ends a line that played to the end while what he said over it was made out, when he doesn't say it again, rather than say it twice", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes three seconds, by when the line has played to the end.
+        const helper = yield* overHelper([[0.9, "Codex is done. Merge it."]], { delays: [3], duration: 2, spoken: "Codex is done, sir." })
+        yield* helper.wait(1)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        yield* helper.finish
+        yield* helper.wait(4)
+        yield* helper.finish
+        yield* helper.wait(4)
+        const done = yield* Fiber.poll(helper.fiber)
+        return { done: Option.isSome(done), plays: helper.plays, rendered: helper.rendered, sent: helper.sent }
+      }),
+    )
+    // The line, then asking him to say it again, and nothing more.
+    expect(result).toEqual({ done: true, plays: [0, 0], rendered: [Persona.plain.misheard], sent: [] })
+  })
+
   test("picks up from before where the user began when he doesn't say it again, having taken in nothing", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

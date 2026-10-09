@@ -833,7 +833,8 @@ export const make = (options: {
         const interrupted = (said: ReadonlyArray<Piece>, mixed: boolean, began = Number.POSITIVE_INFINITY): Outcome => ({
           _tag: "Interrupted",
           // Stopped for him only once it made out it was him, it goes back to where he began, as it would have stopped there otherwise.
-          at: Math.min(stoppedAt ?? playback.duration, began),
+          // Played to the end meanwhile, there's nothing to go back to.
+          at: completed ? playback.duration : Math.min(stoppedAt ?? playback.duration, began),
           duration: playback.duration,
           audio: said.length === 1 ? said[0]!.audio : Endpointer.concat(said.map((piece) => piece.audio)),
           said,
