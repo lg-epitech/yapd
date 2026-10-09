@@ -110,6 +110,33 @@ const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["a
   now,
 })
 
+/** yapd's API serving `show`'s cards and nothing else, and how an app asks it what revision it's at and to put a card back up. */
+const serving = (show: Show.Show["Type"]) =>
+  Effect.map(
+    Server.serve(0, {
+      handle: () => Effect.succeed(undefined),
+      state: Show.stated(Stream.succeed({ on: true, activity: "idle" as const, updates: [] }), show),
+      turn: () => Effect.void,
+      replay: () => Effect.succeed("unknown" as const),
+      utter: () => Effect.succeed(Option.none()),
+      ...Show.served(show, Effect.succeed({ threads: [], away: [] }), () => Effect.succeed([])),
+    }),
+    (server) => {
+      const url = `http://127.0.0.1:${server.port}`
+      return {
+        url,
+        revision: Effect.map(
+          Effect.promise(() => fetch(`${url}/state`).then((response) => response.json() as Promise<Server.State>)),
+          ({ revision }) => revision,
+        ),
+        putBack: (id: string, revision?: number) =>
+          Effect.promise(() =>
+            fetch(`${url}/cards/current`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, revision }) }).then((response) => response.status),
+          ),
+      }
+    },
+  )
+
 describe("Show", () => {
   test("a card never carries a pending request's raw command as anything but text", () => {
     // A bare address in what it asks would be made a link by markdown, outside a code block.
@@ -300,14 +327,14 @@ describe("Show", () => {
           let left = yield* show.watched
           for (let tries = 0; tries < 100 && left; tries++) left = yield* Effect.zipRight(Effect.promise(() => Bun.sleep(10)), show.watched)
 
-          expect(before).toEqual({ on: true, activity: "idle", updates: [], showing: null })
-          expect(state).toEqual({ on: true, activity: "idle", updates: [], showing: { id: card.id, kind: "said", title: "What I said", at: new Date(card.at).toISOString() } })
+          expect(before).toEqual({ on: true, activity: "idle", updates: [], showing: null, revision: 0 })
+          expect(state).toEqual({ on: true, activity: "idle", updates: [], showing: { id: card.id, kind: "said", title: "What I said", at: new Date(card.at).toISOString() }, revision: 1 })
           expect(state.showing?.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/)
           expect(served).toEqual({ id: card.id, kind: "said", title: "What I said", markdown: card.markdown, caption: "Two running, sir.", at: new Date(card.at).toISOString() })
           expect(threads).toEqual(Show.listing(desk))
           expect(journal).toEqual([{ id: 7, at: "2026-10-08T22:00:00.000Z", kind: "update", project: "yapd", said: "yapd. The tests pass.", heard: "2026-10-08T22:00:09.000Z" }])
           expect(asked).toEqual([{ most: 5, kinds: [] }])
-          expect(after).toMatchObject({ showing: null })
+          expect(after).toMatchObject({ showing: null, revision: 2 })
           expect({ plain: plain.watched, app: app.watched, left }).toEqual({ plain: false, app: true, left: false })
         }),
       ),
@@ -319,15 +346,7 @@ describe("Show", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
-          const server = yield* Server.serve(0, {
-            handle: () => Effect.succeed(undefined),
-            state: Show.stated(Stream.succeed({ on: true, activity: "idle" as const, updates: [] }), show),
-            turn: () => Effect.void,
-            replay: () => Effect.succeed("unknown" as const),
-            utter: () => Effect.succeed(Option.none()),
-            ...Show.served(show, Effect.succeed({ threads: [], away: [] }), () => Effect.succeed([])),
-          })
-          const url = `http://127.0.0.1:${server.port}`
+          const { url } = yield* serving(show)
           const takeDown = (id: string) => Effect.promise(() => fetch(`${url}/cards/current?id=${id}`, { method: "DELETE" }).then((response) => response.status))
           const showing = Effect.map(Stream.runHead(show.showing), (card) => Option.map(Option.flatten(card), ({ id }) => id))
           // The app put the first away, and the second went up before its request came.
@@ -341,6 +360,56 @@ describe("Show", () => {
       ),
     )
     expect(result).toEqual({ late: 204, kept: true, own: 204, after: Option.none() })
+  })
+
+  test("an app's request to put a card back up, asked at the revision it had last, does nothing once that card was put away or another went up", async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const { url, revision, putBack } = yield* serving(show)
+          const takeDown = (id: string) => Effect.promise(() => fetch(`${url}/cards/current?id=${id}`, { method: "DELETE" }))
+          const showing = Effect.map(Stream.runHead(show.showing), (card) => Option.map(Option.flatten(card), ({ id }) => id))
+          const old = yield* show.put(Show.said("One running.", Option.none()))
+          yield* show.hide()
+          // The app showed it again, and he put it away before its request to put it back up came, with yapd having it down already:
+          // taking it down again is a revision all the same, and the request, turned away, isn't one.
+          const beforeClosing = yield* revision
+          yield* takeDown(old.id)
+          const closed = { asked: beforeClosing, status: yield* putBack(old.id, beforeClosing), up: yield* showing, after: yield* revision }
+          // yapd put another up before it came.
+          const beforeNewer = yield* revision
+          const newer = yield* show.put(Show.said("Two running.", Option.none()))
+          const passed = { asked: beforeNewer, status: yield* putBack(old.id, beforeNewer), kept: Option.contains(yield* showing, newer.id), after: yield* revision }
+          return { closed, passed }
+        }),
+      ),
+    )
+    expect(result).toEqual({
+      closed: { asked: 2, status: 409, up: Option.none(), after: 3 },
+      passed: { asked: 3, status: 409, kept: true, after: 4 },
+    })
+  })
+
+  test("a card asked to go back up at the revision the state is at goes back up, and one asked at none, like by an app from before revisions, whatever came since", async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const { revision, putBack } = yield* serving(show)
+          const showing = Effect.map(Stream.runHead(show.showing), (card) => Option.map(Option.flatten(card), ({ id }) => id))
+          const old = yield* show.put(Show.said("One running.", Option.none()))
+          const newer = yield* show.put(Show.said("Two running.", Option.none()))
+          yield* show.hide()
+          const asked = yield* revision
+          const fresh = { asked, status: yield* putBack(old.id, asked), back: Option.contains(yield* showing, old.id), after: yield* revision }
+          yield* show.put(Show.said("Three running.", Option.none()))
+          const none = { status: yield* putBack(newer.id), back: Option.contains(yield* showing, newer.id) }
+          return { fresh, none }
+        }),
+      ),
+    )
+    expect(result).toEqual({ fresh: { asked: 3, status: 204, back: true, after: 4 }, none: { status: 204, back: true } })
   })
 
   test("a card put up while no app watched isn't taken to be on his screen once one does", async () => {
@@ -391,7 +460,7 @@ describe("Show", () => {
         }
       }),
     )
-    expect(result).toEqual({ first: Option.none(), latest: Option.some(true), gone: false, back: Option.some(true) })
+    expect(result).toEqual({ first: Option.none(), latest: Option.some(true), gone: "unknown", back: Option.some(true) })
   })
 
   test("gives every card an id of its own, however many go up in the same millisecond", async () => {

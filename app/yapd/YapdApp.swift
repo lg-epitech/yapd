@@ -27,7 +27,7 @@ final class Yapd {
         show: { card, talking in panel.show(card, talking: talking) },
         hide: { panel.hide() },
         takeDown: { id in Yapd.send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },
-        putBack: { id in Yapd.send("PUT", "cards/current", body: try? JSONEncoder().encode(["id": id]), to: api) },
+        putBack: { back in await Yapd.sent("PUT", "cards/current", body: try? JSONEncoder().encode(back), to: api) },
         wait: { delay in try? await Task.sleep(for: delay) }
       )
     )
@@ -78,7 +78,7 @@ final class Yapd {
   /// Follows a state as it comes in: the panel, the card yapd points at, and whether yapd is talking about it.
   private func follow(_ status: Status, connecting: Bool) {
     if let showing = status.showing { last = showing.id }
-    following.follow(status.showing, connecting: connecting)
+    following.follow(status.showing, revision: status.revision, connecting: connecting)
     // Kept by the panel even before the card it points at is fetched and up, so one yapd is talking about by then stays up until it's done.
     panel.heard(speaking: status.activity == "speaking")
   }
@@ -98,7 +98,7 @@ final class Yapd {
   }
 
   /// Shows the last card again, for a while, with nothing said of it, and has yapd put it back up too, so "hide that" takes it
-  /// down, unless yapd shows or hides a card, or one is put away, before it's fetched.
+  /// down, unless yapd shows or hides a card, or one is put away, before it's fetched, or, for yapd, before its request gets there.
   func showLast() {
     guard let last else { return }
     following.showAgain(last) {
@@ -115,6 +115,11 @@ final class Yapd {
 
   /// As `send`, to the API at `api`, for what's wired up before there's a Yapd to send it, with a `query` when there's one.
   private static func send(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil, to api: URL) {
+    Task { await sent(method, path, query: query, body: body, to: api) }
+  }
+
+  /// As `send`, done once yapd answers, so that the task it's sent in, stopped first, stops it too, unless it's gone already.
+  private static func sent(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil, to api: URL) async {
     let url = api.appending(path: path)
     var request = URLRequest(url: query.isEmpty ? url : url.appending(queryItems: query))
     request.httpMethod = method
@@ -122,7 +127,7 @@ final class Yapd {
       request.setValue("application/json", forHTTPHeaderField: "Content-Type")
       request.httpBody = body
     }
-    Task { _ = try? await URLSession.shared.data(for: request) }
+    _ = try? await URLSession.shared.data(for: request)
   }
 }
 

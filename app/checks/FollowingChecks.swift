@@ -10,10 +10,12 @@ private final class Watched {
   var missing: Bool
   /// A card whose fetch waits until it's let go, as one that's slow to come back.
   var holding: String?
+  /// Whether having yapd put a card back up waits until it's let go, as a request that's slow to get there.
+  var holdingBack = false
   var fetches: [String] = []
   var done: [String] = []
   var waits: [Duration] = []
-  /// The fetch of the card held, once it's started.
+  /// The fetch of the card held, or having it put back up, once it's started.
   private var held: CheckedContinuation<Void, Never>?
 
   init(failing: Int = 0, missing: Bool = false, holding: String? = nil) {
@@ -27,7 +29,12 @@ private final class Watched {
     while held == nil { await Task.yield() }
   }
 
-  /// Lets the fetch of the card held come back.
+  /// Once yapd is being asked to put a card back up, while that's held.
+  func puttingBack() async {
+    while held == nil { await Task.yield() }
+  }
+
+  /// Lets the fetch of the card held come back, or having it put back up.
   func letGo() {
     held?.resume()
     held = nil
@@ -48,7 +55,12 @@ private final class Watched {
       show: { card, talking in self.done.append(talking ? "show \(card.id)" : "show \(card.id) quietly") },
       hide: { self.done.append("hide") },
       takeDown: { id in self.done.append("take down \(id)") },
-      putBack: { id in self.done.append("put back \(id)") },
+      putBack: { back in
+        self.done.append(back.revision.map { "put back \(back.id) at \($0)" } ?? "put back \(back.id)")
+        guard self.holdingBack else { return }
+        await withCheckedContinuation { self.held = $0 }
+        if Task.isCancelled { self.done.append("stopped putting back \(back.id)") }
+      },
       wait: { delay in self.waits.append(delay) }
     )
   }
@@ -68,9 +80,9 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched(failing: 1)
     let following = Following(watched.doing)
-    following.follow(pointing("c2", fresh: true), connecting: false)
+    following.follow(pointing("c2", fresh: true), revision: nil, connecting: false)
     await following.settled()
-    following.follow(pointing("c2", fresh: true), connecting: false)
+    following.follow(pointing("c2", fresh: true), revision: nil, connecting: false)
     await following.settled()
     check(
       watched.fetches == ["c2", "c2"] && watched.waits == [.seconds(1)] && watched.done == ["show c2"] && following.shown == "c2",
@@ -82,7 +94,7 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched(failing: 10)
     let following = Following(watched.doing)
-    following.follow(pointing("c3", fresh: true), connecting: false)
+    following.follow(pointing("c3", fresh: true), revision: nil, connecting: false)
     await following.settled()
     check(
       watched.fetches.count == 4 && watched.waits == [.seconds(1), .seconds(2), .seconds(4)] && watched.done == ["take down c3"] && following.shown == nil,
@@ -94,8 +106,8 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched()
     let following = Following(watched.doing)
-    following.follow(pointing("c4", fresh: true), connecting: false)
-    following.follow(pointing("c5", fresh: true), connecting: false)
+    following.follow(pointing("c4", fresh: true), revision: nil, connecting: false)
+    following.follow(pointing("c5", fresh: true), revision: nil, connecting: false)
     await following.settled()
     check(watched.done == ["show c5"], "puts up only the card yapd points at last, not \(watched.done)")
   }
@@ -104,11 +116,11 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   for fresh in [false, true] {
     let watched = Watched()
     let following = Following(watched.doing)
-    following.follow(pointing("c1", fresh: fresh), connecting: false)
+    following.follow(pointing("c1", fresh: fresh), revision: nil, connecting: false)
     await following.settled()
     following.away()
     following.closed("c1")
-    following.follow(pointing("c1", fresh: fresh), connecting: true)
+    following.follow(pointing("c1", fresh: fresh), revision: nil, connecting: true)
     await following.settled()
     check(
       watched.done == ["show c1", "hide", "take down c1"] && following.shown == nil && watched.fetches == ["c1"],
@@ -120,10 +132,10 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched()
     let following = Following(watched.doing)
-    following.follow(pointing("c6", fresh: true), connecting: true)
+    following.follow(pointing("c6", fresh: true), revision: nil, connecting: true)
     await following.settled()
     following.away()
-    following.follow(pointing("c6", fresh: false), connecting: true)
+    following.follow(pointing("c6", fresh: false), revision: nil, connecting: true)
     await following.settled()
     check(watched.done == ["show c6"] && watched.fetches == ["c6"] && following.shown == "c6", "keeps up a card still up when yapd comes back, not \(watched.done)")
   }
@@ -132,10 +144,10 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched()
     let following = Following(watched.doing)
-    following.follow(pointing("c7", fresh: true), connecting: true)
+    following.follow(pointing("c7", fresh: true), revision: nil, connecting: true)
     await following.settled()
     following.closed("c7")
-    following.follow(pointing("c8", fresh: true), connecting: false)
+    following.follow(pointing("c8", fresh: true), revision: nil, connecting: false)
     await following.settled()
     following.closed("c7")
     check(watched.done == ["show c7", "take down c7", "show c8"], "has yapd take down only the card it points at once it's closed, not \(watched.done)")
@@ -154,14 +166,14 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
       putBack: { _ in },
       wait: { _ in }
     ))
-    following.follow(pointing("c9", fresh: true), connecting: true)
+    following.follow(pointing("c9", fresh: true), revision: nil, connecting: true)
     await following.settled()
     following.closed("c9")
     up = "c10"
-    following.follow(pointing("c10", fresh: true), connecting: false)
+    following.follow(pointing("c10", fresh: true), revision: nil, connecting: false)
     await following.settled()
     for id in requests where up == id { up = nil }
-    following.follow(up.map { pointing($0, fresh: true) }, connecting: false)
+    following.follow(up.map { pointing($0, fresh: true) }, revision: nil, connecting: false)
     check(
       requests == ["c9"] && up == "c10" && shown == "c10",
       "has yapd take down only the card it closed, not \(requests), leaving \(up ?? "none") up and \(shown ?? "none") shown"
@@ -173,15 +185,15 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched()
     let following = Following(watched.doing)
-    following.follow(pointing("c11", fresh: true), connecting: true)
+    following.follow(pointing("c11", fresh: true), revision: nil, connecting: true)
     await following.settled()
     following.closed("c11")
-    following.follow(nil, connecting: false)
+    following.follow(nil, revision: nil, connecting: false)
     watched.holding = "c11"
     watched.done = []
     following.showAgain("c11") { watched.done.append("gone") }
     await watched.fetching()
-    following.follow(nil, connecting: false)
+    following.follow(nil, revision: nil, connecting: false)
     watched.letGo()
     await following.settled()
     check(
@@ -236,7 +248,7 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
     let following = Following(watched.doing)
     following.showAgain("c13") { watched.done.append("gone") }
     await watched.fetching()
-    following.follow(pointing("c14", fresh: true), connecting: true)
+    following.follow(pointing("c14", fresh: true), revision: nil, connecting: true)
     watched.letGo()
     await following.settled()
     check(
@@ -249,11 +261,11 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched(holding: "c15")
     let following = Following(watched.doing)
-    following.follow(pointing("c16", fresh: true), connecting: true)
+    following.follow(pointing("c16", fresh: true), revision: nil, connecting: true)
     await following.settled()
     following.showAgain("c15") { watched.done.append("gone") }
     await watched.fetching()
-    following.follow(nil, connecting: false)
+    following.follow(nil, revision: nil, connecting: false)
     watched.letGo()
     await following.settled()
     check(
@@ -267,7 +279,7 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   do {
     let watched = Watched(holding: "c17")
     let following = Following(watched.doing)
-    following.follow(pointing("c18", fresh: true), connecting: true)
+    following.follow(pointing("c18", fresh: true), revision: nil, connecting: true)
     await following.settled()
     watched.failing = 1
     following.showAgain("c17") { watched.done.append("gone") }
@@ -276,5 +288,73 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
     watched.letGo()
     await following.settled()
     check(watched.done == ["show c18", "take down c18"] && following.shown == nil, "keeps away a card put away while another was fetched to show again, not \(watched.done)")
+  }
+
+  // Shown again from the menu, yapd is asked to put it back up at the revision of the state followed last as it was asked for,
+  // even with states coming in meanwhile at the same revision, like one that only says yapd started speaking.
+  do {
+    let watched = Watched(holding: "c21")
+    let following = Following(watched.doing)
+    following.follow(nil, revision: 7, connecting: true)
+    following.showAgain("c21") { watched.done.append("gone") }
+    await watched.fetching()
+    following.follow(nil, revision: 7, connecting: false)
+    watched.letGo()
+    await following.settled()
+    check(
+      watched.done == ["hide", "show c21 quietly", "put back c21 at 7"] && following.shown == "c21" && following.wanted == "c21",
+      "has yapd put a card shown again back up at the revision it was at as it was asked for, not \(watched.done)"
+    )
+  }
+
+  // yapd puts a card up and takes it down, or is asked to take one down, while the card shown again is fetched, with none up
+  // before or after: that came later, so it isn't shown, nor put back up, which yapd would turn away anyway.
+  do {
+    let watched = Watched(holding: "c22")
+    let following = Following(watched.doing)
+    following.follow(nil, revision: 7, connecting: true)
+    following.showAgain("c22") { watched.done.append("gone") }
+    await watched.fetching()
+    following.follow(nil, revision: 8, connecting: false)
+    watched.letGo()
+    await following.settled()
+    check(
+      watched.done == ["hide"] && following.shown == nil && following.wanted == nil,
+      "keeps away a card shown again once yapd's revision moved on while it was fetched, not \(watched.done)"
+    )
+  }
+
+  // Put away while yapd is still being asked to put it back up, that request is stopped, unless it's gone already, which yapd,
+  // asked to take it down since, turns away.
+  do {
+    let watched = Watched()
+    watched.holdingBack = true
+    let following = Following(watched.doing)
+    following.follow(nil, revision: 3, connecting: true)
+    following.showAgain("c23") { watched.done.append("gone") }
+    await watched.puttingBack()
+    following.closed("c23")
+    watched.letGo()
+    await following.settled()
+    check(
+      watched.done == ["hide", "show c23 quietly", "put back c23 at 3", "take down c23", "stopped putting back c23"] && following.shown == nil,
+      "stops having yapd put back up a card put away meanwhile, not \(watched.done)"
+    )
+  }
+
+  // yapd's revision is read from its state, and sent with a card to put back up; a yapd too old to count them sends none, and
+  // gets none back, as before.
+  do {
+    let read = [
+      #"{"on": true, "activity": "idle", "updates": [], "showing": null, "revision": 7}"#,
+      #"{"on": true, "activity": "idle", "updates": []}"#,
+    ].map { try! JSONDecoder().decode(Status.self, from: Data($0.utf8)).revision }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = .sortedKeys
+    let sent = [PutBack(id: "c24", revision: 7), PutBack(id: "c24", revision: nil)].map { String(decoding: try! encoder.encode($0), as: UTF8.self) }
+    check(
+      read == [7, nil] && sent == [#"{"id":"c24","revision":7}"#, #"{"id":"c24"}"#],
+      "reads yapd's revision and sends it back with a card to put back up, not \(read) and \(sent)"
+    )
   }
 }

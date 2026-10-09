@@ -60,12 +60,13 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, checks what it shows against it whenever it connects, has yapd take down only the card it means, and shows the last card again only if nothing newer came while it was fetched, keeping it to ask for again unless yapd says it no longer has it",
+    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, checks what it shows against it whenever it connects, has yapd take down only the card it means, and shows the last card again only if nothing newer came while it was fetched, keeping it to ask for again unless yapd says it no longer has it, and having yapd put it back up only at the revision it had followed last",
     async () => {
       expect(await run("following")).toEqual({ code: 0, out: "The app's checks pass.\n" })
-      // What the checks cover is what the app uses: the card it shows is the one it follows, and the one it has yapd take down is the one it names.
+      // What the checks cover is what the app uses: the card it shows is the one it follows, at the revision it follows, and the one it has yapd take
+      // down is the one it names.
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
-      expect(yapd).toMatch(/following\.follow\(status\.showing, connecting: connecting\)/)
+      expect(yapd).toMatch(/following\.follow\(status\.showing, revision: status\.revision, connecting: connecting\)/)
       expect(yapd).not.toMatch(/panel\.show\(card, talking: (true|false)\)/)
       expect(yapd.match(/send\("DELETE"[^\n]*/g)).toEqual(['send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },'])
       // The last card is shown again, and put back up, only by Following, which checks nothing newer came while it was fetched.
@@ -75,7 +76,11 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(yapd).toMatch(
         /async -> Fetched \{\s*guard let \(body, response\) = try\? await URLSession\.shared\.data\(from: api\.appending\(path: "cards\/\\\(id\)"\)\) else \{ return \.failed \}\s*return Fetched\(body, response\)\s*\}/,
       )
-      expect(yapd.match(/send\("PUT", "cards[^\n]*/g)).toEqual(['send("PUT", "cards/current", body: try? JSONEncoder().encode(["id": id]), to: api) },'])
+      // Put back up with the revision Following asked at, and in the task it shows the card again in, so a card superseded first stops the request
+      // unless it's gone already, which yapd then turns away.
+      expect(yapd.match(/(send|sent)\("PUT", "cards[^\n]*/g)).toEqual(['sent("PUT", "cards/current", body: try? JSONEncoder().encode(back), to: api) },'])
+      expect(yapd).toMatch(/putBack: \{ back in await Yapd\.sent\("PUT"/)
+      expect(yapd).toMatch(/func sent\([^)]*\) async \{(?:(?!Task \{)[\s\S])*?_ = try\? await URLSession\.shared\.data\(for: request\)\s*\}/)
     },
     120_000,
   )

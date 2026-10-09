@@ -32,6 +32,12 @@ export interface State {
   }>
   /** The card yapd is showing, or null. */
   readonly showing?: Showing | null
+  /**
+   * How many times yapd put a card up or took one down since it started, or
+   * was asked to take one down: a card asked to go back up at it goes back
+   * up only if nothing came since.
+   */
+  readonly revision?: number
 }
 
 /** A card as `/state` points at it. */
@@ -112,8 +118,8 @@ export interface Api {
   readonly card: (id: string) => Effect.Effect<Option.Option<Card>>
   /** Takes the card down, or `id` only while it's the one up. */
   readonly hide: (id?: string) => Effect.Effect<void>
-  /** Puts one of the cards shown lately back up, and says whether there was one. */
-  readonly back: (id: string) => Effect.Effect<boolean>
+  /** Puts one of the cards shown lately back up, or, asked at a `revision`, only while what's up is still at it, and says whether it did, or why not. */
+  readonly back: (id: string, revision?: number) => Effect.Effect<"back" | "changed" | "unknown">
   readonly threads: Effect.Effect<ReadonlyArray<Machine>>
   readonly journal: (page: Page) => Effect.Effect<ReadonlyArray<Entry>>
   /** Counts a UI that follows the state and shows cards as watching for as long as the scope lasts, so yapd knows what it shows is seen. */
@@ -122,7 +128,7 @@ export interface Api {
 
 const decodeTurn = Schema.decodeUnknown(Schema.Struct({ on: Schema.Boolean }))
 const decodeUtterance = Schema.decodeUnknown(Schema.Struct({ text: Schema.String }))
-const decodeCard = Schema.decodeUnknown(Schema.Struct({ id: Schema.String }))
+const decodeCard = Schema.decodeUnknown(Schema.Struct({ id: Schema.String, revision: Schema.optional(Schema.NonNegativeInt) }))
 
 /** How many journal entries a page has unless asked for fewer, and at most. */
 const pages = { usual: 50, most: 200 }
@@ -230,8 +236,14 @@ export const serve = (port: number, api: Api) =>
         }
         if (route === "PUT /cards/current") {
           const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.flatMap(decodeCard), Effect.option)
-          if (Option.isNone(body)) return new Response('Send {"id": "the card\'s id"}.', { status: 400 })
-          return (yield* api.back(body.value.id)) ? new Response(null, { status: 204 }) : new Response("No such card.", { status: 404 })
+          if (Option.isNone(body)) return new Response('Send {"id": "the card\'s id", "revision": the state\'s revision}, or the id alone.', { status: 400 })
+          // At the revision it names, when it names one, so a request that comes late, like the app's for a card it showed again, never undoes a card put up or taken down since.
+          const back = yield* api.back(body.value.id, body.value.revision)
+          return back === "back"
+            ? new Response(null, { status: 204 })
+            : back === "changed"
+              ? new Response("A card was put up or taken down since.", { status: 409 })
+              : new Response("No such card.", { status: 404 })
         }
         const card = request.method === "GET" ? /^\/cards\/([^/]+)$/.exec(url.pathname) : null
         if (card !== null) {

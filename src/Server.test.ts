@@ -32,16 +32,20 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   utter: () => Effect.succeed(Option.none()),
   card: () => Effect.succeed(Option.none()),
   hide: () => Effect.void,
-  back: () => Effect.succeed(false),
+  back: () => Effect.succeed("unknown"),
   threads: Effect.succeed([]),
   journal: () => Effect.succeed([]),
   watch: Effect.void,
 })
 
-/** An API whose state is turned on and off for real, with one update to hear again and one card up, which counts who watches. */
+/**
+ * An API whose state is turned on and off for real, with one update to hear
+ * again and one card up, at a revision that each card put up or taken down
+ * moves on, and which counts who watches.
+ */
 const stateful = Effect.gen(function* () {
   const { id, kind, title, at } = card
-  const ref = yield* SubscriptionRef.make<Server.State>({ on: true, activity: "idle", updates: [update], showing: { id, kind, title, at } })
+  const ref = yield* SubscriptionRef.make<Server.State>({ on: true, activity: "idle", updates: [update], showing: { id, kind, title, at }, revision: 0 })
   const pages: Array<Server.Page> = []
   let watching = 0
   return {
@@ -56,9 +60,20 @@ const stateful = Effect.gen(function* () {
         Effect.map(SubscriptionRef.get(ref), (state) => (id !== update.id ? "unknown" : state.on ? "queued" : "off")),
       utter: (text) => Effect.map(SubscriptionRef.get(ref), (state) => (state.on ? Option.some(`u-${text.length}`) : Option.none())),
       card: (id) => Effect.succeed(id === card.id ? Option.some(card) : Option.none()),
-      hide: (id) => SubscriptionRef.update(ref, (state) => (id === undefined || state.showing?.id === id ? { ...state, showing: null } : state)),
-      back: (id) =>
-        id === card.id ? Effect.as(SubscriptionRef.update(ref, (state) => ({ ...state, showing: { id, kind, title, at } })), true) : Effect.succeed(false),
+      hide: (id) =>
+        SubscriptionRef.update(ref, (state) => ({
+          ...state,
+          showing: id === undefined || state.showing?.id === id ? null : (state.showing ?? null),
+          revision: (state.revision ?? 0) + 1,
+        })),
+      back: (id, revision) =>
+        id !== card.id
+          ? Effect.succeed("unknown" as const)
+          : SubscriptionRef.modify(ref, (state): readonly ["back" | "changed", Server.State] =>
+              revision === undefined || state.revision === revision
+                ? ["back", { ...state, showing: { id, kind, title, at }, revision: (state.revision ?? 0) + 1 }]
+                : ["changed", state],
+            ),
       threads: Effect.succeed(machines),
       journal: (page) =>
         Effect.sync(() => {
@@ -126,7 +141,7 @@ describe("Server", () => {
       const utter = (body: string) => call("/utterances", { method: "POST", headers: { "content-type": "application/json" }, body })
 
       expect(yield* Effect.promise(() => fetch(`${url}/state`).then((response) => response.json()))).toEqual({
-        on: true, activity: "idle", updates: [update], showing: { id: "c1", kind: "pr", title: card.title, at: card.at },
+        on: true, activity: "idle", updates: [update], showing: { id: "c1", kind: "pr", title: card.title, at: card.at }, revision: 0,
       })
       expect((yield* call("/updates/a1/replay", { method: "POST" })).status).toBe(202)
       expect((yield* call("/updates/zz/replay", { method: "POST" })).status).toBe(404)
@@ -198,6 +213,16 @@ describe("Server", () => {
       expect(yield* json("/state")).toMatchObject({ showing: { id: "c1" } })
       expect((yield* back('{"id": "c2"}')).status).toBe(404)
       expect((yield* back("{}")).status).toBe(400)
+      // At the revision the state gave, only while it's still at it, so a request that comes late never undoes a card taken down since.
+      const revision = Effect.map(json("/state"), (state) => (state as Server.State).revision)
+      const asked = yield* revision
+      yield* call("/cards/current", { method: "DELETE" })
+      const late = yield* back(`{"id": "c1", "revision": ${asked}}`)
+      expect(late.status).toBe(409)
+      expect(yield* json("/state")).toMatchObject({ showing: null })
+      expect((yield* back(`{"id": "c1", "revision": ${yield* revision}}`)).status).toBe(204)
+      expect(yield* json("/state")).toMatchObject({ showing: { id: "c1" } })
+      for (const revision of ['"3"', "-1", "1.5", "null"]) expect((yield* back(`{"id": "c1", "revision": ${revision}}`)).status).toBe(400)
       // Named, only that card goes, and only while it's the one up: a request for one taken down since leaves the one up since.
       const named = (id: string) => call(`/cards/current?id=${id}`, { method: "DELETE" })
       expect((yield* named("c2")).status).toBe(204)
@@ -270,7 +295,7 @@ describe("Server", () => {
         ...api,
         card: (id) => noting("card", api.card(id)),
         hide: (id) => noting("hide", api.hide(id)),
-        back: (id) => noting("back", api.back(id)),
+        back: (id, revision) => noting("back", api.back(id, revision)),
         threads: noting("threads", api.threads),
         journal: (page) => noting("journal", api.journal(page)),
       })
