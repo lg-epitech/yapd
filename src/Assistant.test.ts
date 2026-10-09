@@ -1022,6 +1022,7 @@ describe("Assistant", () => {
       "rg -n 'rm -rf' src",
       // And a commit's message as Claude Code writes one, which is only words.
       "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF\n)\"",
+      "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF)\"",
     ]) {
       expect(await allowing(approval("r1", command))).toEqual({ spoken: [`Cloud deployment discovery wants to run ${command}. Allow it, sir?`, "Approved, sir."], dispatched: ["r1 accept"] })
     }
@@ -1031,8 +1032,15 @@ describe("Assistant", () => {
       { type: "dynamic_tool", status: "running", toolName: "mcp__shell__run", input: { command: "git", args: ["log", "--grep", "clean", "-f"] }, nativeItemRef: { nativeId: "tool-r1" } },
     ]
     expect(await allowing(logging)).toEqual({ spoken: ["Cloud deployment discovery wants to run git. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
-    // A push forced by a flag among others, and a hard reset with its flag after the rest, need "approve".
-    for (const command of ["git push -uf origin main", "git reset -q HEAD~1 --hard"]) {
+    // A push forced by a flag among others, a hard reset with its flag after the rest, and what's run after a commit's message,
+    // however its heredoc is closed, need "approve".
+    for (const command of [
+      "git push -uf origin main",
+      "git reset -q HEAD~1 --hard",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF\n)\" && git push --force",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF)\" && git push --force",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF)\"; rm -rf x",
+    ]) {
       expect(await allowing(approval("r1", command))).toEqual({
         spoken: [
           `Cloud deployment discovery wants to run ${command}, which can't be undone, so say 'approve' if you want it, sir.`,

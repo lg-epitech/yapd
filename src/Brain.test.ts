@@ -433,6 +433,13 @@ describe("Brain", () => {
       "sh -c \"$(cat <<'EOF'\nrm -rf ~/work\nEOF\n)\"",
       "eval \"x; git commit -m \"$(cat <<'EOF'\nfoo; rm -rf ~/work\nEOF\n)\"",
       "echo 'a\ngit commit -m \"$(cat <<'EOF'\n'; rm -rf ~/work; echo '\nEOF",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF\n)\" && git push --force",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF)\" && git push --force",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF\n)\"; rm -rf x",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF)\"; rm -rf x",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF)\"\nrm -rf x",
+      "git commit -m \"$(cat <<'EOF'\nwip\n  EOF\n)\" && git push --force",
+      "echo hi # ; git commit -m \"$(cat <<'EOF'\nrm -rf x",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -533,6 +540,9 @@ describe("Brain", () => {
       "gh pr create --title \"Fix\" --body \"$(cat <<'EOF'\n- drops git reset --hard before the deploy to production\nEOF\n)\"",
       "git tag -a v1 -m \"$(cat <<'EOF'\nrm -rf\nEOF\n)\"",
       "cd ~/work && git commit -am \"$(cat <<'EOF'\nDrop git push -f from the docs\nEOF\n)\"",
+      "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF)\"",
+      "git commit -m \"$(cat <<'EOF'\nfix: rm -rf\nEOF)\" && git push",
+      "git commit -m \"$(cat <<'EOF'\nFixes #12 # rm -rf; git push --force\nEOF\n)\"",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])

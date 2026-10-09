@@ -632,28 +632,45 @@ const sealed = (text: string) => {
  * Where a message starts as Claude Code writes one for a commit, a tag, or a
  * pull request or an issue: a heredoc quoted so that nothing in it runs,
  * which `cat` passes on as it is, like `git commit -m "$(cat <<'EOF'`. It's
- * looked for where `sealed` reads what it would run, so only in a command of
- * its own, never between quotes, and only at the end of its line as written.
+ * looked for where `sealed` reads what it would run, without its comments,
+ * so only in a command of its own, never between quotes or after a "#", and
+ * only at the end of its line as written.
  */
 const messageStarts =
-  /(?:^|[;&|\n])[ \t]*(?:git[ \t]+(?:-C[ \t]+\S+[ \t]+)?(?:commit|tag)|gh[ \t]+(?:pr|issue)[ \t]+(?:create|edit|comment))\b[^;&|\n]*?[ \t](?:-[a-zA-Z]*m|--message|--body|--title)[ \t=]+"\$\(cat[ \t]+<<(-?)'(\w+)'/g
+  /(?:^|[;&|\n])[ \t]*(?:git[ \t]+(?:-C[ \t]+\S+[ \t]+)?(?:commit|tag)|gh[ \t]+(?:pr|issue)[ \t]+(?:create|edit|comment))\b[^;&|\n]*?[ \t](?:-[a-zA-Z]*m|--message|--body|--title)[ \t=]+"\$\(cat[ \t]+<<-?'(\w+)'/g
 
 /** The end of a line, after any spaces. */
 const lineEnd = /[ \t]*\n/y
+
+/** What's between quotes, or after a backslash, as `sealed` reads them, or a comment: a "#" that starts a word, to its line's end. */
+const quotedOrComment = /\$'(?:[^'\\]|\\[\s\S])*'|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S]|(?<=^|[\s;&|()<>])#[^\n]*/g
+
+/**
+ * What `sealed` reads with each comment as spaces, as the shell skips it,
+ * so a message that only seems to start in one, like `echo hi # ; git
+ * commit -m "$(cat <<'EOF'`, never does, and the lines after it are read as
+ * what it runs. A quote never closed is read as closing where it opens, so a
+ * "#" after it counts too, which only reads more as commands.
+ */
+const uncommented = (read: string) => read.replace(quotedOrComment, (found) => (found.startsWith("#") ? " ".repeat(found.length) : found))
 
 /**
  * What it would run without the lines of a message, above, which are only
  * words, never commands, whatever they say, like "rm -rf" in a commit's
  * message: from the line after it starts to the line that ends it, as the
- * shell reads a heredoc, all of its line and nothing else, but tabs before
- * it after "<<-", or to the end when no line does. It looks for a few, each
- * after the last one's taken away, which could have hidden a quote.
+ * shell reads a heredoc in `$(…)`, its name alone on its line, or followed
+ * by the ")" that closes the `$(`, like `EOF)" && git push`, with the rest of
+ * that line read as what it runs, or to the end when no line does. Spaces or
+ * tabs around its name end it as well, which zsh and bash 5 wouldn't, but
+ * bash 3.2, ending the `$(` at its ")", runs what's after, and ending early
+ * only reads more as commands. It looks for a few, each after the last one's
+ * taken away, which could have hidden a quote.
  */
 const unmessaged = (text: string) => {
   let left = text
   let from = 0
   for (let taken = 0; taken < 4; taken += 1) {
-    const read = sealed(left)
+    const read = uncommented(sealed(left))
     messageStarts.lastIndex = from
     let found = messageStarts.exec(read)
     for (; found !== null; found = messageStarts.exec(read)) {
@@ -661,17 +678,20 @@ const unmessaged = (text: string) => {
       if (lineEnd.test(left)) break
     }
     if (found === null) return left
-    const [, tabs, end] = found
+    const ends = new RegExp(String.raw`^[ \t]*${found[1]}[ \t]*(?=\)|$)`)
     const body = lineEnd.lastIndex
     let line = body
+    let rest = left.length
     while (line < left.length) {
       const next = left.indexOf("\n", line)
-      const written = left.slice(line, next === -1 ? left.length : next)
-      if ((tabs === "-" ? written.replace(/^\t+/, "") : written) === end) break
+      const end = ends.exec(left.slice(line, next === -1 ? left.length : next))
+      if (end !== null) {
+        rest = line + end[0].length
+        break
+      }
       line = next === -1 ? left.length : next + 1
     }
-    const after = left.indexOf("\n", line)
-    left = `${left.slice(0, body)}${after === -1 || line >= left.length ? "" : left.slice(after + 1)}`
+    left = `${left.slice(0, body)}${left.slice(left.charAt(rest) === ")" ? rest : rest + 1)}`
     from = body - 1
   }
   return left
