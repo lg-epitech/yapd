@@ -32,6 +32,7 @@ Live on `dev` now: everything below. Cards for "show me" appear once the menu ba
 - Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message goes by voice or new work starts, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
+- You can interrupt from an update's first word, not only after its first three seconds. Over those, while some of yapd's own voice still gets into the microphone, it keeps talking until Whisper makes out it's you (about a second after you stop; a second in if you keep talking) and quietly ignores its own words.
 - "Who needs me?" and usage need no model call; a status question takes one, against a minute or more in the reverted attempt.
 
 ## Under the hood
