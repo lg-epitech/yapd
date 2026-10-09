@@ -371,11 +371,14 @@ const forced = /\bbranch\s+(?:-\S+\s+)*(?:-[a-zA-Z]*D\b|--delete\s+--force|--for
  * A command as the shell runs it: a line ended by a backslash goes on into
  * the next, as one, where the patterns above stop at a line's end, as a
  * command does, so a flag put on a line of its own would hide, and one that
- * makes it harmless, like `--cached`, wouldn't count. A line break of its own
- * still ends a command, as ";" does: run together, a `git rm --cached` on the
- * next line would read as excusing an `rm -rf` before it.
+ * makes it harmless, like `--cached`, wouldn't count. The shell takes the
+ * backslash and the line break away and nothing else, so a word can go on
+ * over them, like `--for` and `ce`, and what the next line starts with,
+ * spaces and all, stays as it is. A line break of its own still ends a
+ * command, as ";" does: run together, a `git rm --cached` on the next line
+ * would read as excusing an `rm -rf` before it.
  */
-const continued = (text: string) => text.replace(/\\\r?\n[ \t]*/g, " ")
+const continued = (text: string) => text.replace(/\\\r?\n/g, "")
 
 /**
  * A name set to true among what a tool is given, as its JSON writes it, or
