@@ -409,9 +409,9 @@ const riskyFlags: ReadonlyArray<(command: string) => boolean> = [
     const removing = flagged(command, /(?:^|\W)rm$/i, /-[a-z]*r|--recursive/iy)
     return removing !== -1 && !/--cached/i.test(command.slice(removing))
   },
-  // A push that forces, wherever the flag goes, or that deletes a branch, and a clean that forces.
+  // A push that forces, wherever the flag goes, or that deletes a branch, and a clean that forces, by "-f" or by name.
   (command) => after(command, /\bpush\b/i, /\s(?:-f\b|--force\b|\+\S|--delete\b|-d\b|:\S)/i),
-  (command) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f/iy) !== -1,
+  (command) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f|--force\b/iy) !== -1,
   // Deleting a branch whatever it holds, as "-d" never does, which only a capital tells apart.
   (command) => flagged(command, /(?:^|\W)branch$/, /-[a-zA-Z]*D\b|--delete\s+--force|--force\s+--delete/y) !== -1,
   // Restoring over changes: not only what's staged, after the last restore, or the working tree too, after the first.
