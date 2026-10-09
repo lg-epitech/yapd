@@ -980,6 +980,8 @@ describe("Assistant", () => {
     // A tool told to force, and one that deletes told to take all that's under what it's given, in so many words.
     expect(await allowing(tool("mcp__git__git_push", { remote: "origin", branch: "main", force: true }))).toEqual(risky)
     expect(await allowing(tool("mcp__fs__rm", { path: "~/work", recursive: true }))).toEqual(risky)
+    // Told to force with a lease, which still overwrites.
+    expect(await allowing(tool("mcp__git__git_push", { remote: "origin", branch: "main", force_with_lease: true }))).toEqual(risky)
     // Going on over lines with nothing risky in it, or told to take all of a tree it only lists, a yes will do.
     for (const items of [approval("r1", "git push origin main \\\n  --follow-tags"), tool("mcp__fs__list_directory", { path: "src", recursive: true })]) {
       expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })

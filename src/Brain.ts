@@ -395,8 +395,8 @@ const unquoted = (command: string) => command.replace(/["']/g, "")
  */
 const setTo = (names: string) => new RegExp(String.raw`(?:^|[\n"])(?:${names})"?\s*(?::|\n)\s*"?(?:true|yes|1)\b`, "i")
 
-/** A tool told to force, as `git push --force` does. */
-const forcing = setTo(String.raw`force|forced|force[_-]?(?:push|delete)`)
+/** A tool told to force, as `git push --force` does, or `--force-with-lease`, which still overwrites what it finds as it expected. */
+const forcing = setTo(String.raw`force|forced|force[_-]?(?:push|delete|with[_-]?lease)`)
 
 /** A tool told to take all that's under what it's given, which only matters to one that deletes. */
 const recursing = setTo("recursive|recursively|recurse")

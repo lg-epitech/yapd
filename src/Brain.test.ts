@@ -332,6 +332,8 @@ describe("Brain", () => {
       'mcp__git__git_push {"remote":"origin","force":true}',
       "mcp__git__git_push\nremote\norigin\nforce\ntrue",
       'mcp__github__update_ref {"ref":"heads/main","forcePush":"true"}',
+      'mcp__git__git_push {"remote":"origin","force_with_lease":true}',
+      "mcp__git__git_push\nremote\norigin\nforceWithLease\ntrue",
       'mcp__fs__rm {"path":"~/work","recursive":true}',
       "mcp__fs__rm\npath\n~/work\nrecursive\ntrue",
       'mcp__files__manage {"action":"delete","path":"build","recursive":true}',
@@ -365,6 +367,7 @@ describe("Brain", () => {
       'mcp__fs__list_directory {"path":"src","recursive":true}',
       "mcp__fs__list_directory\npath\nsrc\nrecursive\ntrue",
       'mcp__git__git_push {"remote":"origin","force":false}',
+      'mcp__git__git_push {"remote":"origin","force_with_lease":false}',
       'mcp__fetch__fetch {"url":"https://example.com","forceRefresh":true}',
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
