@@ -499,6 +499,9 @@ const setTo = (names: string) => new RegExp(String.raw`(?:^|[\n"])(?:${names})"?
 /** A tool told to force, as `git push --force` does, or `--force-with-lease`, which still overwrites what it finds as it expected. */
 const forcing = setTo(String.raw`force|forced|force[_-]?(?:push|delete|with[_-]?lease)`)
 
+/** A tool told to write over what's there, like a copy or a move onto a file that exists, which leaves nothing of it to go back to. */
+const overwriting = setTo(String.raw`overwrite|overwrite[_-]?existing|allow[_-]?overwrite|clobber`)
+
 /** A tool told to take all that's under what it's given, which only matters to one that deletes. */
 const recursing = setTo("recursive|recursively|recurse")
 
@@ -530,7 +533,13 @@ const riskyToRun = (run: string) => risky.test(run) || commands(run).some((comma
 export const dangerous = (text: string) => {
   const command = continued(text)
   const quoteless = unquoted(command)
-  return riskyToRun(command) || (quoteless !== command && riskyToRun(quoteless)) || forcing.test(text) || (recursing.test(text) && deleting(text))
+  return (
+    riskyToRun(command) ||
+    (quoteless !== command && riskyToRun(quoteless)) ||
+    forcing.test(text) ||
+    overwriting.test(text) ||
+    (recursing.test(text) && deleting(text))
+  )
 }
 
 /**

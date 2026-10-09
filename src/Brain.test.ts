@@ -356,6 +356,8 @@ describe("Brain", () => {
       "rm $'\\x2drf' ~/work",
       "rm $'\\055r\\146' ~/work",
       'git push origin main $"--force"',
+      'mcp__fs__copy_file {"source":"a.txt","destination":"b.txt","overwrite":true}',
+      "mcp__fs__move_file\nsource\na.txt\ndestination\nb.txt\noverwriteExisting\ntrue",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -399,6 +401,8 @@ describe("Brain", () => {
       "git push origin main --\\follow-tags",
       "rm $'-f' build.log",
       "rm $'\\x2df' build.log",
+      'mcp__fs__copy_file {"source":"a.txt","destination":"b.txt","overwrite":false}',
+      'mcp__fs__write_file {"path":"b.txt","no_overwrite":true}',
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
@@ -443,6 +447,7 @@ describe("Brain", () => {
       "a long word of parts": "a_".repeat(10_000),
       "force with line breaks after it": `"force${"\n ".repeat(9990)}`,
       "recursive with line breaks after it": `"recursive${"\n ".repeat(9990)}rm`,
+      "overwrite with line breaks after it": `"overwrite${"\n ".repeat(9990)}`,
       "many short commands": "rm;".repeat(6666),
       "a $' left open": `$'${"\\'".repeat(9999)}`,
       "many $'": "$'".repeat(10_000),
