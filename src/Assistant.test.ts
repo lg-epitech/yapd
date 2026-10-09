@@ -1930,6 +1930,25 @@ describe("Assistant", () => {
     expect(result.answers).toEqual([{ bump: "No" }])
   })
 
+  test("a plain no to a thread's question with options and no pick of yapd's is the model's to judge, never letting it go unanswered", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const changelog = { id: "log", question: "Should I also update the changelog?", options: [{ label: "Update the changelog" }, { label: "Leave the changelog" }] }
+    for (const no of ["No.", "Nope.", "No thanks."]) {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Leave the changelog", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [changelog]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(no)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+      expect([no, result]).toEqual([no, { asked: 1, spoken: ["Leave the changelog it is, sir."], answers: [{ log: "Leave the changelog" }] }])
+    }
+  })
+
   test("a secret request is never answered by voice", async () => {
     const secret = "turn-item:secret-request:cloud:stripe"
     const cloud = waitingOn({ id: secret, kind: "user_input" })

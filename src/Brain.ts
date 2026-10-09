@@ -1163,8 +1163,9 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
     // What a thread waits on him for, answered in so many words, or by its option, which may well be "No".
     const settled = settling(question, meant ? said : utterance.heard, said, candidates[0]?.handle ?? "")
     if (settled !== undefined) return settled
-    // A no to a thread's question before he'd heard yapd's pick may be to the pick or to the question, which is the model's to judge.
-    if (question.asks?._tag === "Question" && !question.asks.inFull && Option.isSome(question.wording?.part.recommended ?? Option.none()) && refused.has(said)) return undefined
+    // A no to a thread's question that its options and yapd's pick don't settle, like one with no pick, or before he'd heard it, may be
+    // to the question itself, which is the model's to judge, as are its other answers: only words to stop talking let it go here.
+    if (question.asks?._tag === "Question" && refused.has(said) && !enough.has(said)) return undefined
     // Said over a question, "stop" or "enough" is to stop talking, which lets it go: never a yes to what it asks, like stopping a thread.
     if (refused.has(said) || enough.has(said)) return decision({ act: "dismiss", pending: "answers" })
     const pick = (listed: Threads.Listed | undefined) =>
