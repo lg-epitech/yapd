@@ -246,6 +246,20 @@ describe("Questions", () => {
     expect(pick("The blue one.", part("Which colour?", ["Red", "Blue", "One more"]))).toEqual(picked(1))
   })
 
+  test("options named alike but for their marks, like C++ and C#, go by their names as written, never by a letter's place", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const sharp = part("Which language should the bindings use?", ["C++", "C#", "Rust"])
+    const plain = part("Which language should the bindings use?", ["C", "C++", "Rust"])
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    expect(["The first one.", "The second one.", "C#", "C++.", "Rust."].map((heard) => pick(sharp, heard))).toEqual([picked(0), picked(1), picked(1), picked(0), picked(2)])
+    expect(["The first one.", "C.", "C++", "The second one."].map((heard) => pick(plain, heard))).toEqual([picked(0), picked(0), picked(1), picked(1)])
+    // "C" that's both "C++" and "C#" is no one's own, nor the third option's letter: the model's to tell.
+    expect(pick(sharp, "C.")).toBeUndefined()
+    // What yapd sends back of his pick, or the model's answer, is the option it names as written.
+    expect(["C++", "C#", "Rust"].map((text) => Questions.resolve(sharp, text))).toEqual([picked(0), picked(1), picked(2)])
+    expect(["C", "C++"].map((text) => Questions.resolve(plain, text))).toEqual([picked(0), picked(1)])
+  })
+
   test("a multi-select answer takes lists, 'all', 'both', 'all but X' and 'none'", () => {
     const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
     const pick = (heard: string) => Questions.pick(extras, heard, { inFull: true, parts: 2 })

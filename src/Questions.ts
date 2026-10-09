@@ -406,10 +406,28 @@ const sound = (text: string) => figures(gist(text)).replace(/[^\p{L}\p{N}]+/gu, 
 const fitting = (part: Said, fits: (choice: Choice) => boolean) => part.options.flatMap((choice, index) => (fits(choice) ? [index] : []))
 const one = (indices: ReadonlyArray<number>) => (indices.length === 1 ? indices[0] : undefined)
 
+/** As it's compared word for word, marks and all: single spaces, any case, and no full stop after it. */
+const written = (text: string) => text.replace(/\s+/g, " ").trim().replace(/[.!?,;:]+$/, "").toLowerCase()
+
+/**
+ * The option whose name is just what he or the model wrote, marks and all,
+ * like "C#" or "C++", which `gist` makes both "c": what yapd itself sends
+ * back as an option is always its name as written.
+ */
+const exactly = (part: Said, text: string) => {
+  const wanted = written(text)
+  return wanted === "" ? undefined : one(fitting(part, ({ label, said }) => [label, unmarked(label), said].some((name) => written(name) === wanted)))
+}
+
+/** The options a name fits, as written or as said, or failing that by how it sounds: more than one when they're named alike. */
+const named = (part: Said, said: string) => {
+  const found = fitting(part, ({ label, said: name }) => [label, unmarked(label), name].some((written) => gist(written) === said))
+  if (found.length > 0 || sound(said) === "") return found
+  return fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => sound(written) === sound(said)))
+}
+
 /** An option by its name, as written or as said, or failing that by how it sounds, when only one fits. */
-const byName = (part: Said, said: string) =>
-  one(fitting(part, ({ label, said: name }) => [label, unmarked(label), name].some((written) => gist(written) === said))) ??
-  (sound(said) === "" ? undefined : one(fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => sound(written) === sound(said)))))
+const byName = (part: Said, said: string) => one(named(part, said))
 
 /**
  * Whether the options are named with numbers, like "2 workers" or "Node 20":
@@ -513,8 +531,17 @@ const leaving: ReadonlySet<string> = new Set([
 /** Whether it answers how it's asked rather than which option, which then only an option's name in full picks. */
 const steers = (said: string) => [yeses, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
 
-/** The one option words mean, by its name or its sound, or, unless they're about how it's asked, by its place or words only it has. */
-const meant = (part: Said, said: string) => byName(part, said) ?? (steers(said) ? undefined : (byPlace(part, said) ?? byWords(part, said)))
+/**
+ * The one option words mean, by its name or its sound, or, unless they're
+ * about how it's asked, by its place or words only it has. Never when they
+ * name several alike, like "c" for "C++" and "C#": that's no letter's place
+ * either, and which he meant is the model's to tell.
+ */
+const meant = (part: Said, said: string) => {
+  const names = named(part, said)
+  if (names.length > 1) return undefined
+  return names[0] ?? (steers(said) ? undefined : (byPlace(part, said) ?? byWords(part, said)))
+}
 
 /**
  * The options a list names, each by its name, place or words: "Alpha and
@@ -547,7 +574,8 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
 
 /**
  * What he said to a part comes to, without the model, when that's plain:
- * an option by its name, how it sounds, its place, or words only it has;
+ * an option by its name, marks and all, then as compared, how it sounds,
+ * its place, or words only it has, though never by a name several share;
  * several, for a part that takes several; yapd's pick, on a yes once he's
  * heard it in full; the option that starts with yes or no, on a plain yes
  * or no; his own words for "you decide" or "none of those"; or what he
@@ -560,6 +588,8 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   const said = gist(heard)
   if (said === "") return undefined
   const picked = (options: ReadonlyArray<number>): Reply => ({ _tag: "Picked", options })
+  const exact = exactly(part, heard)
+  if (exact !== undefined) return picked([exact])
   // A form that takes only its options asks which of them instead.
   const words = (text: string): Reply => (part.ownWords ? { _tag: "Words", text } : { _tag: "Which" })
   if (!steers(said)) {
@@ -593,9 +623,10 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
 
 /**
  * What the model's answer to a part comes to: the options, when every line
- * of it names one, as a list only for a part that takes several; otherwise
- * his own words, as he'd type them, or, for a form that takes only its
- * options, which of them instead. Nothing at all is to hear it again.
+ * of it names one, by its name as written first, as yapd's own pick is, as
+ * a list only for a part that takes several; otherwise his own words, as
+ * he'd type them, or, for a form that takes only its options, which of them
+ * instead. Nothing at all is to hear it again.
  */
 export const resolve = (part: Said, text: string): Reply => {
   const trimmed = text.trim()
@@ -605,6 +636,8 @@ export const resolve = (part: Said, text: string): Reply => {
     .map((line) => line.trim())
     .filter((line) => line !== "")
     .flatMap((line): ReadonlyArray<number | undefined> => {
+      const exact = exactly(part, line)
+      if (exact !== undefined) return [exact]
       const said = gist(line)
       const single = meant(part, said)
       if (single !== undefined || !part.several) return [single]

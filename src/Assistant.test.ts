@@ -1484,6 +1484,35 @@ describe("Assistant", () => {
     }
   })
 
+  test("an option named like another but for its marks, like C# beside C++, is sent as the one he picked, by its place or by the model", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const language = (...labels: ReadonlyArray<string>) => ({
+      id: "Which language should the bindings use?",
+      header: "Language",
+      question: "Which language should the bindings use?",
+      options: labels.map((label) => ({ label })),
+    })
+    const answering = (question: ReturnType<typeof language>, heard: string, text = "") =>
+      run(
+        Effect.gen(function* () {
+          // The model, only for what isn't plain, names the option as it's written.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const sharp = language("C++", "C#", "Rust")
+    const id = sharp.id
+    expect(await answering(sharp, "The first one.")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    expect(await answering(sharp, "The second one.")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
+    expect(await answering(sharp, "The sharp one.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
+    expect(await answering(language("C", "C++", "Rust"), "The first one.")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
+  })
+
   test("words that aren't an option go as the answer in his words, and a message to a thread waiting on a question he heard is sent as its answer", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
