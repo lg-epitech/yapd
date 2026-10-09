@@ -686,9 +686,12 @@ describe("Telling yapd's own voice from the user's", () => {
       expect([heard, theirs(heard, saying)]).toEqual([heard, false])
     }
     const question = "Which one, sir: yapd or the docs site?"
-    for (const heard of ["Which one, sir? Yapped.", "Which one? Yapped.", "Which one, sir? Yap, or the dock site?"]) {
+    for (const heard of ["Which one, sir? Yapped.", "Which one? Yapped.", "Which one, sir? Yap, or the dock site?", "One, sir? Yapped."]) {
       expect([heard, theirs(heard, question)]).toEqual([heard, false])
     }
+    expect(theirs("In yapped.", saying)).toBe(false)
+    // Taken out of what he says too, though it's no word of its as written.
+    expect(unechoed("Over in yapped, hold on.", saying)).toBe("hold on.")
     // His own words still are, said over it.
     expect(theirs("Hold on, which PR was that?", saying)).toBe(true)
     expect(theirs("Neither, start a new project.", question)).toBe(true)
@@ -767,6 +770,9 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(unechoed("Hold on in yap D the tests", saying)).toBe("Hold on")
     expect(unechoed("Over in Japan the tests hold on which PR", saying)).toBe("hold on which PR")
     expect(unechoed("Thank you. Over in yapd. Stop.", saying)).toBe("Stop.")
+    // A sentence of its with its name misheard, too few of its words in a row to be taken out a word at a time.
+    expect(unechoed("Over in Japan. Hold on, which PR was that?", saying)).toBe("Hold on, which PR was that?")
+    expect(unechoed("Hold on, which PR was that? Over in Japan.", saying)).toBe("Hold on, which PR was that?")
     // A few words of his run on from it in the same sentence, or into it.
     expect(unechoed("Over in yapd, the tests pass now open a PR", saying)).toBe("open a PR")
     expect(unechoed("Open a PR over in yapd, the tests pass now", saying)).toBe("Open a PR")
