@@ -28,7 +28,8 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 ## Faster
 
 - "Yes" or "go ahead" to an update that asked something, and "thanks" or "skip it", are handled without the model: about two seconds saved on the most common replies.
-- Short lines like "On it, sir." are rendered once and kept; your usual lines are written in your `YAPD_STYLE` once and rendered at startup.
+- Short lines like "Right away, sir." are rendered once and kept; your usual lines are written in your `YAPD_STYLE` once and rendered at startup.
+- Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
 - "Who needs me?" and usage need no model call; a status question takes one, against a minute or more in the reverted attempt.

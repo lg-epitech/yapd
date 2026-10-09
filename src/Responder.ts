@@ -143,15 +143,18 @@ const typed = (heard: string) => {
  * anything said to an update that asked something that isn't a plain yes, is
  * left to the model.
  */
-export const quick = (interruption: Interruption, onIt: string): Reply | undefined => {
+export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): Effect.Effect<Reply | undefined> => {
   const said = gist(interruption.heard)
-  if (said === "") return undefined
-  if (enough.has(said)) return { intent: "dismiss", spoken: "", message: "" }
+  if (said === "") return Effect.succeed(undefined)
+  if (enough.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
   if (asked(interruption)) {
-    return agreed.has(said) ? { intent: "send", spoken: onIt, message: typed(interruption.heard) } : undefined
+    // Only picked: it's noted as said once it's passed on, since he may yet carry on talking and this reply be dropped.
+    return agreed.has(said)
+      ? Effect.map(onIt, (spoken) => ({ intent: "send", spoken, message: typed(interruption.heard) }))
+      : Effect.succeed(undefined)
   }
-  if (noted.has(said) && !interruption.needsYou) return { intent: "dismiss", spoken: "", message: "" }
-  return undefined
+  if (noted.has(said) && !interruption.needsYou) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
+  return Effect.succeed(undefined)
 }
 
 export const ProviderResponder = Layer.effect(
@@ -163,7 +166,7 @@ export const ProviderResponder = Layer.effect(
     return {
       respond: (interruption) =>
         Effect.gen(function* () {
-          const fast = quick(interruption, (yield* persona.lines).onIt)
+          const fast = yield* quick(interruption, persona.onIt)
           if (fast !== undefined) return fast
           return yield* model.ask(Reply, prompt(interruption, style)).pipe(
             Effect.mapError((cause) => new RespondError({ cause })),

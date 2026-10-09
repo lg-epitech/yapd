@@ -60,7 +60,7 @@ const device = (delayPlaying = false, delayStopping = false) =>
     const context = yield* native(launch, () =>
       Effect.sync(() => {
         order.push("fallback")
-        return { duration: 10, finished: Effect.void, stop: Effect.succeed(10), volume: () => Effect.void }
+        return { duration: 10, confirmed: false, finished: Effect.void, stop: Effect.succeed(10), volume: () => Effect.void }
       }),
     )
     const audio = Context.get(context, Audio)

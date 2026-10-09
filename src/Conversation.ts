@@ -110,6 +110,8 @@ export interface Question {
   readonly audio: string
   /** Run once it starts playing the first time, which is when the user hears of it: never when it can't be played. */
   readonly saying?: Effect.Effect<void>
+  /** Like `saying`, but once it's known to be playing, which with afplay is only once it has played to the end. */
+  readonly confirmed?: Effect.Effect<void>
   /**
    * Works out what the user meant by what they said, and how many seconds of
    * it were speech, which may be called again with all of it if they carry
@@ -130,7 +132,7 @@ export const make = (options: {
   readonly moved: (update: Update) => Effect.Effect<boolean>
   /** Delivers the follow-up, or queues it until the session can receive it, using its latest thread. */
   readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued", RelayError>
-  /** Says how a follow-up went when the update it answers was cut off before yapd could. */
+  /** Says how a follow-up went when the update it answers was cut off before yapd could, noting it with the persona once it plays. */
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
   /** Something was said over an update and taken in, which takes the place of whatever yapd asked before. */
   readonly replied: Effect.Effect<void>
@@ -193,26 +195,35 @@ export const make = (options: {
     /**
      * Plays a line from `from` seconds, listening if there's an ear, then
      * `wait` longer for a reply. `begun` runs once it's playing, never when it
-     * can't be played, and `through` once it has played to the end, before
+     * can't be played, `confirmed` once it's known to be, which with afplay is
+     * only once it has played to the end, and `through` once it has, before
      * that wait: the user has heard it, whatever they say after.
      */
     const speak = (
       path: string,
       from: number,
       ear: Effect.Effect<Ear | undefined>,
-      given: { readonly wait?: Duration.DurationInput; readonly begun?: Effect.Effect<void>; readonly through?: Effect.Effect<void> } = {},
+      given: {
+        readonly wait?: Duration.DurationInput
+        readonly begun?: Effect.Effect<void>
+        readonly confirmed?: Effect.Effect<void>
+        readonly through?: Effect.Effect<void>
+      } = {},
     ) =>
       Effect.gen(function* () {
-        const { wait = linger, begun = Effect.void, through = Effect.void } = given
+        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void } = given
         const playback = yield* audio.play(path, from)
         yield* begun
+        if (playback.confirmed) yield* confirmed
+        // Otherwise it's known only as it plays to the end, so it goes with what runs then, holding nothing up meanwhile.
+        const played = playback.confirmed ? through : Effect.zipRight(confirmed, through)
         const listening = yield* ear
         if (listening === undefined || listening.deaf) {
           yield* playback.finished
-          yield* through
+          yield* played
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* listen(playback, listening, wait, through)
+        return yield* listen(playback, listening, wait, played)
       }).pipe(Effect.scoped)
 
     const listen = (playback: Playback, ear: Ear, wait: Duration.DurationInput, through: Effect.Effect<void>) =>
@@ -433,7 +444,9 @@ export const make = (options: {
         sending.set(update, mark)
         const lines = yield* persona.lines
         const fiber = yield* follow(update, reply.message).pipe(
-          Effect.map((result) => (result === "queued" ? lines.queued : reply.spoken || lines.onIt)),
+          Effect.flatMap((result) =>
+            result === "queued" ? Effect.succeed(lines.queued) : reply.spoken === "" ? persona.onIt : Effect.succeed(reply.spoken),
+          ),
           Effect.catchAll((error) =>
             Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
               Effect.tap(() => {
@@ -494,6 +507,8 @@ export const make = (options: {
 
           while (true) {
             const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined), {
+              // Noted only once it's known to play, so a line for going ahead that fails to render or play, or that a dictation cuts in before, never counts as the last one he heard.
+              confirmed: path === update.audio ? Effect.void : persona.said(text),
               through: path === update.audio ? through : Effect.void,
             })
             if (outcome._tag === "Finished") return
@@ -585,9 +600,11 @@ export const make = (options: {
         let from = 0
         let missed = 0
         let begun = question.saying ?? Effect.void
+        let confirmed = question.confirmed ?? Effect.void
         while (true) {
-          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), { wait: pondering, begun })
+          const outcome: Outcome = yield* speak(question.audio, from, missed < misses ? ear : Effect.succeed(undefined), { wait: pondering, begun, confirmed })
           begun = Effect.void
+          confirmed = Effect.void
           if (outcome._tag === "Finished") return false
           const first = yield* transcribe(outcome.audio)
           const answer = first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, transcribe, question.answer)).reply

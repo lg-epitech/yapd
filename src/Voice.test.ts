@@ -379,6 +379,43 @@ describe("remembering", () => {
       }),
     ))
 
+  test("keeps lines rendered ahead for good, without counting them among the newest", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const rendered: Array<string> = []
+        const voice = yield* remembering(
+          { render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid) },
+          dir,
+          2,
+        )
+        yield* voice.warm(["Right away, sir."])
+        for (const text of ["one", "two", "one", "Right away, sir.", "three", "one", "Right away, sir."]) {
+          yield* voice.render(text, `${dir}/out.wav`)
+        }
+        expect(rendered).toEqual(["Right away, sir.", "one", "two", "three"])
+      }),
+    ))
+
+  test("keeps a line rendered ahead however long, so it's never rendered again", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const rendered: Array<string> = []
+        const render = (text: string, path: string) =>
+          Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid)
+        const voice = yield* remembering(
+          { render, renderFirst: (text, path) => Effect.as(render(text, path), { first: Effect.succeed(`${path}.first.wav`), whole: Effect.void }) },
+          dir,
+        )
+        const text = "Consider it done, sir. I'll see to every last detail of it with all the care you'd expect, and let you know the very moment it's all finished, so you can get on with your day."
+        expect(text.length).toBeGreaterThan(160)
+        yield* voice.warm([text])
+        yield* voice.render(text, `${dir}/one.wav`)
+        expect(yield* (yield* voice.renderFirst(text, `${dir}/two.wav`)).first).toBe(`${dir}/two.wav`)
+        expect(rendered).toEqual([text])
+        expect(yield* Effect.promise(() => Bun.file(`${dir}/two.wav`).text())).toBe(text)
+      }),
+    ))
+
   test("forgets a render that failed at once, even when it made room for it", () =>
     run((dir) =>
       Effect.gen(function* () {

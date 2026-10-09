@@ -1112,6 +1112,43 @@ describe("Hands", () => {
     }
   })
 
+  test("his own lines for going ahead read before a thread's name as the written one does, and are said just where it would be", () => {
+    const message: Hands.Act = { _tag: "Message", to: tezos, text: "Use the fee table.", how: "now" }
+    const own = ["Right away, sir.", "Very good, sir.", "Consider it done, sir.", "Very well, sir."]
+    expect(own.map((onIt) => Hands.done(message, "steered", { ...lines, onIt }, Option.some("the Tezos migration")))).toEqual([
+      "Right away, sir: the Tezos migration.",
+      "Very good, sir: the Tezos migration.",
+      "Consider it done, sir: the Tezos migration.",
+      "Very well, sir: the Tezos migration.",
+    ])
+    const acts: ReadonlyArray<Hands.Act> = [
+      message,
+      { _tag: "Stop", to: tezos },
+      { _tag: "Undo", to: Option.some(tezos), carry: true },
+      { _tag: "Undo", to: Option.some(tezos), carry: false },
+    ]
+    const hows: ReadonlyArray<Ledger.How> = ["now", "steered", "queued"]
+    const ways: ReadonlyArray<Parameters<typeof Hands.done>[4]> = [
+      {},
+      { waiting: "asked" },
+      { waiting: "finishing" },
+      { waiting: "held" },
+      { stopped: true },
+      { stopped: "ended" },
+      { stopped: false },
+      { ended: "finished" },
+      { ended: "rolled" },
+    ]
+    for (const act of acts) {
+      for (const how of hows) {
+        for (const as of ways) {
+          const said = Hands.done(act, how, { ...lines, onIt: own[0]! }, Option.some("the Tezos migration"), as)
+          expect([act._tag, how, as, said.startsWith("Right away")]).toEqual([act._tag, how, as, Hands.goesAhead(act, how, as)])
+        }
+      }
+    }
+  })
+
   test("a restart checks open rows and never dispatches", async () => {
     const result = await run(
       Effect.gen(function* () {
