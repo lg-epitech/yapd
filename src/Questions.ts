@@ -49,6 +49,12 @@ export interface Said {
   readonly several: boolean
   /** Whether it takes his own words, not only an option. */
   readonly ownWords: boolean
+  /**
+   * The options he was offered last, by their place in the part, when that
+   * isn't all of them: the others, once he's turned down yapd's pick. A
+   * place, a letter or "all" counts among these, as he heard them.
+   */
+  readonly among?: ReadonlyArray<number> | undefined
 }
 
 /** How one part is put to him, each time it comes up. */
@@ -465,6 +471,9 @@ const ownWords = (part: Said) =>
     ),
   )
 
+/** The options as he heard them offered last, by their place in the part: all of them, or the others once he turned down yapd's pick. */
+const offeredLast = (part: Said) => part.among ?? part.options.map((_, index) => index)
+
 /** A place said as one, by its order, like "the first one" or "last one", rather than "first" on its own, which may be a name's word. */
 const ordinally = (said: string) => /^(?:the (?:first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th)(?: one| option)?|(?:first|second|third|fourth|last|1st|2nd|3rd|4th) one)$/.test(said)
 
@@ -482,8 +491,10 @@ const byPlace = (part: Said, said: string) => {
   if (!counting && (own.has(which) || own.has(figures(which)))) return undefined
   // "Four" to 2, 4, 8 or 16 workers is 4 workers, not the fourth: only "the fourth" or "option four" is a place then.
   if (kind !== "option" && kind !== "choice" && /^(?:one|two|three|four|[1-4])$/.test(which) && numbered(part)) return undefined
-  const index = which === "last" || which === "latter" ? part.options.length - 1 : places[which]
-  return index !== undefined && index >= 0 && index < part.options.length ? index : undefined
+  // Counted among what he was offered last: after a no to yapd's pick, "the first one" is the first of the others.
+  const offered = offeredLast(part)
+  const at = which === "last" || which === "latter" ? offered.length - 1 : places[which]
+  return at === undefined ? undefined : offered[at]
 }
 
 /** Words in an answer that only point, around the ones that name. */
@@ -547,9 +558,11 @@ export const mentions = (part: Said, index: number, heard: string) => {
   if (choice === undefined) return false
   const words = new Set(figures(gist(heard)).split(" "))
   const own = [unmarked(choice.label), choice.said].flatMap((name) => figures(gist(name)).split(" ")).filter((word) => word !== "" && !pointing.has(word) && !glue.has(word))
-  // Not by a letter, nor "one", which say other things too.
-  const placed = Object.entries(places).flatMap(([word, at]) => (at === index && !/^(?:[a-d]|one)$/.test(word) ? [word] : []))
-  const last = index === part.options.length - 1 ? ["last", "latter"] : []
+  // Not by a letter, nor "one", which say other things too; and by its place among what he was offered last.
+  const offered = offeredLast(part)
+  const place = offered.indexOf(index)
+  const placed = Object.entries(places).flatMap(([word, at]) => (place >= 0 && at === place && !/^(?:[a-d]|one)$/.test(word) ? [word] : []))
+  const last = place >= 0 && place === offered.length - 1 ? ["last", "latter"] : []
   return [...own, ...placed, ...last].some((word) => words.has(word))
 }
 
@@ -654,9 +667,9 @@ const listed = (part: Said, heard: string): ReadonlyArray<number> | undefined =>
   return found.every((index) => index !== undefined) ? [...new Set(found)].toSorted((a, b) => a - b) : undefined
 }
 
-/** All of them, both of two, or all but some: "all", "everything", "both", "all but Beta". */
+/** All of them, both of two, or all but some: "all", "everything", "both", "all but Beta", of what he was offered last. */
 const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => {
-  const every = part.options.map((_, index) => index)
+  const every = offeredLast(part)
   if (["all", "all of them", "everything", "every one", "all of those"].includes(said)) return every
   if (["both", "both of them"].includes(said) && every.length === 2) return every
   const but = /^(?:all|everything)(?: of them)? (?:but|except|except for|apart from|other than|bar) (.+)$/.exec(said)

@@ -361,6 +361,30 @@ describe("Questions", () => {
     expect(Questions.pick(part("Which suites?", ["Unit", "Lint", "Types"], { multiSelect: true }), "A and C.", { inFull: true, parts: 1 })).toEqual(picked(0, 2))
   })
 
+  test("after a no to yapd's pick, a place, a letter or 'all' counts among the others he was offered, never the pick he turned down", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    // As the assistant leans it once it's asked "Which one then, sir: Red or Green?".
+    const colour = { ...part("Which colour?", ["Blue (Recommended)", "Red", "Green"]), recommended: Option.none<number>(), among: [1, 2] }
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    expect(["The first one.", "Option one.", "First.", "A.", "The second one.", "B.", "Last.", "Blue."].map((heard) => pick(colour, heard))).toEqual([
+      picked(1),
+      picked(1),
+      picked(1),
+      picked(1),
+      picked(2),
+      picked(2),
+      picked(2),
+      picked(0),
+    ])
+    // A third place, or a letter past what he was offered, is no place at all.
+    expect([pick(colour, "The third one."), pick(colour, "C.")]).toEqual([undefined, undefined])
+    expect(Questions.resolve(colour, "The first one.")).toEqual(picked(1))
+    expect(Questions.mentions(colour, 1, "The first one, I think.")).toBe(true)
+    expect(Questions.mentions(colour, 0, "The first one, I think.")).toBe(false)
+    const extras = { ...part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)"], { multiSelect: true }), recommended: Option.none<number>(), among: [0, 1] }
+    expect(["All of them.", "Both.", "The first and the second."].map((heard) => pick(extras, heard))).toEqual([picked(0, 1), picked(0, 1), picked(0, 1)])
+  })
+
   test("options named alike but for their marks, like C++ and C#, go by their names as written, never by a letter's place", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const sharp = part("Which language should the bindings use?", ["C++", "C#", "Rust"])

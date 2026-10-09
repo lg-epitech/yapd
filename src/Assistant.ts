@@ -389,14 +389,16 @@ const partway = (asks: Asks): asks is QuestionAsks => asks._tag === "Question" &
 /**
  * A thread's question as a yes to it is taken. Asked which one then, without
  * yapd's pick, a yes is to the one option left, when only one is, and to none
- * otherwise. Asked any other way, its words name yapd's pick again, which a
+ * otherwise, and a place, like "the first one", is among the others he was
+ * offered. Asked any other way, its words name yapd's pick again, which a
  * yes is to: it's always to what he heard last.
  */
 const leaning = (open: Open): Pick<Open, "wording"> | Record<never, never> => {
   const { wording } = open
   if (wording === undefined || open.asked !== wording.instead) return {}
   const others = wording.part.options.flatMap((_, index) => (Option.contains(wording.part.recommended, index) ? [] : [index]))
-  return { wording: { ...wording, part: { ...wording.part, recommended: others.length === 1 ? Option.fromNullable(others[0]) : Option.none<number>() } } }
+  const recommended = others.length === 1 ? Option.fromNullable(others[0]) : Option.none<number>()
+  return { wording: { ...wording, part: { ...wording.part, recommended, among: others } } }
 }
 
 /** A thread's question as it was asked, the part he'd got to and what he'd answered of it, to be queued to come back. */
@@ -2356,11 +2358,12 @@ export const make = (options: {
         if (question !== undefined && decision.act === "dismiss" && decision.how === "later") return yield* putOff(open, opened.from, decided, said)
         if (question !== undefined && decision.act === "reply") {
           const asked = question.questions[question.part]
-          const part = open.wording?.part ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
+          // Asked which one then, a place counts among the others he was offered, as `leaning` has it, with the model or without.
+          const leaned = { ...open, ...leaning(open) }.wording?.part
+          const part = leaned ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
           // What only agrees, said before he heard yapd's pick, isn't to it, however the model took it, alone or with others he named: it's
           // asked again in full, as a plain yes is then. Asked which one then, the pick is the one option left, as `leaning` has it.
-          const leaned = { ...open, ...leaning(open) }.wording?.part
           const pick = leaned === undefined ? undefined : Option.getOrUndefined(leaned.recommended)
           if (
             decided.source === "model" &&

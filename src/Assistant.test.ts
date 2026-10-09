@@ -2140,6 +2140,22 @@ describe("Assistant", () => {
     })
     // With one left, a yes is to that one.
     expect(await answering(["Red", "Blue (Recommended)"], "Yes.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
+    // A place or a letter counts among the ones he was offered, never the pick he turned down, which Claude lists first.
+    for (const [then, label] of [
+      ["The first one.", "Red"],
+      ["Option one.", "Red"],
+      ["First.", "Red"],
+      ["A.", "Red"],
+      ["The second one.", "Green"],
+      ["B.", "Green"],
+      ["The last one.", "Green"],
+    ] as const) {
+      expect([then, await answering(["Blue (Recommended)", "Red", "Green"], then)]).toEqual([
+        then,
+        { spoken: ["Which one then, sir: Red or Green?", `${label} it is, sir.`], answers: [{ colour: label }] },
+      ])
+    }
+    expect(await answering(["Blue (Recommended)", "Red"], "The first one.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
   })
 
   test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes, uses up an ask, and is never asked twice in the same words", async () => {
