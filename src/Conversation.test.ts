@@ -809,6 +809,9 @@ describe("Telling yapd's own voice from the user's", () => {
       expect([heard, whose(heard, long)]).toEqual([heard, "his"])
     }
     expect(whose("Tell it to stop the migration.", "Claude is still running the migration, sir.")).toBe("his")
+    // Its longer word starts the same, but with more after it, it wasn't cut off there.
+    expect(whose("Stop it.", "Codex stopped the server")).toBe("his")
+    expect(whose("Wait, merge it.", "Codex is waiting on your approval")).toBe("his")
   })
 
   test("takes a stop or a wait yapd isn't saying, with nothing but its own voice before it or after, for some of each", () => {

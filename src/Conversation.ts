@@ -427,14 +427,22 @@ const halting: ReadonlyArray<ReadonlyArray<string>> = [
   ...enough, "not now", "wait", "hold on", "hang on", "pause", "one second", "one sec", "just a second", "wait a second", "wait a minute",
 ].map((phrase) => vocabulary(phrase).filter((word) => word.length > 1))
 
-/** Whether yapd is saying `word` itself, or a word it's the start of, cut off partway, like "stop" of "stopped": never one only like it, like "not" for "now". */
-const says = (word: string, yapd: ReadonlyArray<string>) =>
-  yapd.some((spoken) => stem(spoken) === stem(word) || (word.length >= 4 && spoken.startsWith(word)))
+/**
+ * Whether yapd is saying `word` itself, or, when it's the `last` heard, which
+ * the end of what got in may cut through, a word it's the start of, like
+ * "stop" of "stopped": never one only like it, like "not" for "now".
+ */
+const says = (word: string, yapd: ReadonlyArray<string>, last: boolean) =>
+  yapd.some((spoken) => stem(spoken) === stem(word) || (last && word.length >= 4 && spoken.startsWith(word)))
 
 /** Whether he said a stop or a wait anywhere in `words`, with a word of it yapd isn't saying. */
 const halted = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) =>
   halting.some((phrase) =>
-    words.some((_, start) => phrase.every((word, index) => words[start + index] === word) && phrase.some((word) => !says(word, yapd))),
+    words.some(
+      (_, start) =>
+        phrase.every((word, index) => words[start + index] === word) &&
+        phrase.some((word, index) => !says(word, yapd, start + index === words.length - 1)),
+    ),
   )
 
 /** What Whisper makes up of near-silence, or of a voice it can't make out, which nobody said, as a sentence of its own and without the fillers. */
