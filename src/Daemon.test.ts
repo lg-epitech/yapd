@@ -82,6 +82,8 @@ const make = (says?: string, options: {
   const microphone = yield* Queue.unbounded<Float32Array>()
   const listening = says !== undefined || options.microphone === true
   const transcripts = [...options.transcripts ?? []]
+  /** What each thing heard was listened for, as the transcriber was told: a question's options, or nothing. */
+  const listened: Array<ReadonlyArray<string> | undefined> = []
   const waiting = options.waitingHooks ? yield* Waiting.pipe(Effect.provide(WaitingLive)) : undefined
   let handle: Handle
   let rests = 0
@@ -141,7 +143,13 @@ const make = (says?: string, options: {
       // Each frame holds the probability that it's speech.
       make: listening ? Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) : Effect.fail(new VadError({ cause: "no microphone" })),
     }),
-    Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? says ?? "") }),
+    Layer.succeed(Transcriber, {
+      transcribe: (_, terms) =>
+        Effect.sync(() => {
+          listened.push(terms)
+          return transcripts.shift() ?? says ?? ""
+        }),
+    }),
     Layer.succeed(Responder, {
       respond: ({ heard }) =>
         says === undefined
@@ -225,6 +233,8 @@ const make = (says?: string, options: {
       readonly done?: boolean
       readonly saying?: Array<string>
       readonly heard?: Array<string>
+      /** What the question's options are called, to listen for. */
+      readonly terms?: ReadonlyArray<string>
     } = {},
   ) =>
     tell({
@@ -242,6 +252,7 @@ const make = (says?: string, options: {
         : {
             question: {
               answer: () => Effect.succeed(Option.none()),
+              ...(options.terms === undefined ? {} : { terms: options.terms }),
               unanswered: Effect.sync(() => void options.question?.push(`${id} unanswered`)),
               unsaid: Effect.sync(() => {
                 const at = options.saying?.indexOf(id) ?? -1
@@ -268,7 +279,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { responded, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { responded, listened, microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, logged, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -1458,6 +1469,20 @@ describe("Daemon", () => {
     )
     expect(result.played).toEqual(["Nothing needs you right now, sir.", "The loader fix is ready, sir.", "The Tezos migration is comparing request formats, sir."])
     expect(result.heard).toEqual(["whole"])
+  })
+
+  test("what he says over a question is heard listening for its options", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, speak, wait, listened } = yield* make("Ghostnet.")
+        yield* notice("question", "Which network first? Mainnet or Ghostnet?", { question: [], terms: ["Mainnet", "Ghostnet"] })
+        yield* wait(1)
+        yield* speak
+        yield* wait(11)
+        return listened
+      }),
+    )
+    expect(result).toEqual([["Mainnet", "Ghostnet"]])
   })
 
   test("a clarification cut off by a dictation is not put back", async () => {

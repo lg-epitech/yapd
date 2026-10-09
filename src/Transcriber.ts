@@ -177,7 +177,7 @@ const load = (repo: string, without: string) =>
   })
 
 /** `patience` includes waiting for the model to load. `expected` is the vocabulary to listen for, if any, unless what's heard is given its own `terms`. */
-const transcribe =
+export const transcribe =
   (
     model: Effect.Effect<AutomaticSpeechRecognitionPipeline, Hub.LoadError>,
     language: string,
