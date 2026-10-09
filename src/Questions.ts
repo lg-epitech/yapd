@@ -534,7 +534,9 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (found !== undefined) return others.length === 0 ? { _tag: "Picked", options: found } : undefined
   // A form that takes only its options asks which of them instead.
   const words = (text: string): Reply => (part.ownWords ? { _tag: "Words", text } : { _tag: "Which" })
-  if (nones.has(said)) return words("None of those.")
+  // "None" to an option that says none, like "None of those" or "Neither", may be that option, which the model tells.
+  const noneNamed = fitting(part, ({ label, said: name }) => [label, name].some((written) => /^\s*(?:none|neither|nothing)\b/i.test(written))).length > 0
+  if (nones.has(said)) return noneNamed ? undefined : words("None of those.")
   if (repeating.has(said)) return { _tag: "Again" }
   if (explaining.has(said)) return { _tag: "More" }
   // "Leave it" to "Leave the changelog", "cancel" to "Cancel the deploy", "later, please" to "Later", or "next one" to "Next release", may

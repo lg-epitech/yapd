@@ -399,6 +399,19 @@ describe("Questions", () => {
     expect(pick(part("Which test extras should run?", ["Alpha", "Beta", "Gamma"], { multiSelect: true }), "Alpha and Gamma.")).toEqual(picked(0, 2))
   })
 
+  test("none of those, said to an option that says none, is the model's to tell, never that option taken without it", () => {
+    const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("Which colour?", labels), heard, { inFull: true, parts: 1 })
+    for (const labels of [["Red", "None of those"], ["Red", "Nothing for now"]]) {
+      expect(["None.", "Neither.", "None of the above.", "None of them, please."].map((heard) => [labels, heard, pick(labels, heard)])).toEqual(
+        ["None.", "Neither.", "None of the above.", "None of them, please."].map((heard) => [labels, heard, undefined]),
+      )
+    }
+    // Its exact name still takes it, and anything else said of none is the model's.
+    expect(["Neither.", "None."].map((heard) => pick(["Red", "Neither (Recommended)"], heard))).toEqual([{ _tag: "Picked", options: [1] }, undefined])
+    // With no such option, it's still none of them, as he said it.
+    expect(pick(["Red", "Blue"], "Neither.")).toEqual({ _tag: "Words", text: "None of those." })
+  })
+
   test("every mark in a name counts as it's written, so a symbol, a digit, a comma, a hyphen or an apostrophe of his own, or one he leaves out, is the model's to tell", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("What should I do?", labels), heard, { inFull: true, parts: 1 })
