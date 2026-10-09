@@ -118,8 +118,9 @@ export interface Outcome {
   /** What was decided on a second look, at a thread or at what was found, which the answer is. */
   readonly second?: Brain.Decision
   /**
-   * The line for going ahead it says last, if it says one, which one picked
-   * for a step said after it in the same breath is kept from being.
+   * The line for going ahead said last in its breath, by it or by a step before
+   * it that one without its own, like a stop, follows, which one picked for a
+   * step said after it is kept from being.
    */
   readonly onIt?: string
   /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
@@ -1079,7 +1080,8 @@ export const make = (options: {
               subject: { ...subject, said: line },
               kind: "done",
               // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that couldn't be played, never counts as the last one he heard.
-              ...(onIt === undefined ? {} : { onIt, confirmed: persona.said(onIt) }),
+              // With none of its own, like a stop, the one said before it in the same breath is still the one the next is kept from being.
+              ...(onIt === undefined ? (at.besides === undefined ? {} : { onIt: at.besides }) : { onIt, confirmed: persona.said(onIt) }),
             }
             // Taking a stop back is two steps, letting go of the queue, then the message to carry on, as is a restart done as a stop, then the message.
             return yield* free(onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" || outcome.stopped !== undefined ? 2 : 1), said))

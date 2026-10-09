@@ -1951,6 +1951,53 @@ describe("Assistant", () => {
     expect(result.noted).toEqual(said)
   })
 
+  test("with two lines of his own for going ahead, a request with a stop between two messages says a different one for each, even once another reply picked between them, and notes both in turn once played", async () => {
+    const own = ["Right away, sir.", "Very good, sir."]
+    const result = await run(
+      Effect.gen(function* () {
+        const noted: Array<string> = []
+        const persona = yield* owning(own, noted)
+        /** The lines picked for the request's steps, and what another reply going ahead, like one passed on over an update, picked just after the first. */
+        const picked: Array<string> = []
+        const others: Array<string> = []
+        const { dictate, told, play } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Tell the Tezos")
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now", rest: "stop the Tezos one, then tell the Mina one to use its fee table" })
+              : situation.utterance.heard.startsWith("stop")
+                ? Brain.decision({ act: "stop", target: handle(situation, tezos), rest: "tell the Mina one to use its fee table" })
+                : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
+          undefined,
+          {
+            waiting: true,
+            persona: {
+              ...persona,
+              onIt: (besides) =>
+                Effect.tap(persona.onIt(besides), (line) =>
+                  Effect.zipRight(
+                    Effect.sync(() => void picked.push(line)),
+                    others.length === 0 ? Effect.flatMap(persona.onIt(), (other) => Effect.sync(() => void others.push(other))) : Effect.void,
+                  ),
+                ),
+            },
+          },
+        )
+        yield* dictate("Tell the Tezos migration to use the fee table, then stop the Tezos one, and tell the Mina one to use its fee table.")
+        const unplayed = [...noted]
+        yield* play()
+        return { spoken: told.map(({ spoken }) => spoken), picked, others, unplayed, noted }
+      }),
+    )
+    const [first, second] = result.picked
+    // A different one for each step, though the other reply took the one the first step didn't, which the second would otherwise take for being the latest picked.
+    expect(result.picked).toEqual([first!, own.find((line) => line !== first)!])
+    expect(result.others).toEqual([second!])
+    // Each before its thread's name, "sir" said once.
+    expect(result.spoken).toEqual([`${first!.slice(0, -1)}: Migrate Tezos Integration. Stopped. ${second!.replace(/, sir\.$/, "")}: Open Mina SSV2 Bug Tickets.`])
+    expect(result.unplayed).toEqual([])
+    expect(result.noted).toEqual([first!, second!])
+  })
+
   test("with two lines of his own for going ahead, a request with two messages says a different one for each, even once another reply picked between them, and notes both in turn once played", async () => {
     const own = ["Right away, sir.", "Very good, sir."]
     const result = await run(
