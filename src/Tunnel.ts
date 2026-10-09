@@ -43,10 +43,7 @@ export const serve = (token: Option.Option<Redacted.Redacted>, locate: Effect.Ef
   }).pipe(Effect.map((answer) => JSON.stringify(answer)))
 
 /** Where a machine's T3 Code answers from here, and the token for it. */
-export interface Located {
-  readonly server: Server.Server
-  readonly token: Redacted.Redacted
-}
+export type Located = Server.Located
 
 /** What T3 Code is reached through, from wherever `locate` finds it, as T3Actions takes it. */
 export const transport = (locate: Effect.Effect<Located, Server.Trouble>): Effect.Effect<Server.Transport, Server.Trouble> =>

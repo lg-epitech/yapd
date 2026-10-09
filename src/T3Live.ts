@@ -272,20 +272,18 @@ export class T3Live extends Context.Tag("yapd/T3Live")<
 /**
  * Follows T3 Code's threads for as long as the scope lasts, connecting again
  * whenever the connection drops, like when T3 Code restarts, and picking up
- * from where it left off.
+ * from where it left off. Where it answers, and the token for it, are found
+ * again for each connection: another machine's T3 Code is reached through a
+ * forward that can move, with a token asked for there.
  */
-export const follow = (
-  token: Redacted.Redacted,
-  locate: Effect.Effect<Server.Server, Server.Trouble> = Server.locate,
-  connect: Dial = dial,
-) =>
+export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, connect: Dial = dial) =>
   Effect.gen(function* () {
     let view = empty
     let live = false
     const changes = yield* PubSub.unbounded<Change>()
 
     /** One connection, until it drops. Returns whether it got as far as catching up. */
-    const session = (server: Server.Server) =>
+    const session = ({ server, token }: Server.Located) =>
       Effect.gen(function* () {
         const events = yield* Queue.unbounded<Event>()
         const socket = yield* Effect.acquireRelease(
@@ -405,5 +403,8 @@ export const none: T3Live["Type"] = { view: Effect.succeed(Option.none()), chang
 
 export const layer = Layer.scoped(
   T3Live,
-  Effect.flatMap(Config.t3codeToken, Option.match({ onNone: () => Effect.succeed(none), onSome: (token) => follow(token) })),
+  Effect.flatMap(
+    Config.t3codeToken,
+    Option.match({ onNone: () => Effect.succeed(none), onSome: (token) => follow(Effect.map(Server.locate, (server) => ({ server, token }))) }),
+  ),
 )

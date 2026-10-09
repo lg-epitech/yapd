@@ -205,6 +205,12 @@ const asked = <A, I>(
     Effect.flatMap((value) => Effect.mapError(Schema.decodeUnknown(schema)(value), misunderstood)),
   )
 
+/** Where a machine's T3 Code answers from here, and the token for it. */
+export interface Located {
+  readonly server: Server
+  readonly token: Redacted.Redacted
+}
+
 /** How T3 Code is reached, so tests can stand in for it. */
 export interface Transport {
   readonly api: ReturnType<typeof api>

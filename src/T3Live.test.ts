@@ -163,7 +163,7 @@ describe("T3Live.follow", () => {
     Effect.runPromise(
       Effect.gen(function* () {
         const { sockets, dial } = fake()
-        const live = yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        const live = yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
         const changes = yield* live.changes.pipe(Stream.take(1), Stream.runCollect, Effect.fork)
         yield* flush
         const first = sockets[0]!
@@ -204,7 +204,7 @@ describe("T3Live.follow", () => {
     Effect.runPromise(
       Effect.gen(function* () {
         const { sockets, dial } = fake()
-        yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
         yield* flush
         sockets[0]!.emit({ _tag: "Open" })
         yield* flush
@@ -223,7 +223,7 @@ describe("T3Live.follow", () => {
     Effect.runPromise(
       Effect.gen(function* () {
         const { sockets, dial } = fake()
-        const live = yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        const live = yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
         yield* flush
         sockets[0]!.emit({ _tag: "Open" })
         sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
@@ -253,7 +253,7 @@ describe("T3Live.follow", () => {
     Effect.runPromise(
       Effect.gen(function* () {
         const { sockets, dial } = fake()
-        const live = yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        const live = yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
         yield* flush
         sockets[0]!.emit({ _tag: "Open" })
         sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Chunk", requestId: "shell", values: [snapshot(7, [thread()]), { kind: "synchronized" }] }) })
@@ -286,11 +286,39 @@ describe("T3Live.follow", () => {
             events: (listener) => listener({ _tag: "Open" }),
           }
         }
-        yield* T3Live.follow(Redacted.make("token"), Effect.succeed({ origin: "http://127.0.0.1:3774" }), dial)
+        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:3774" }, token: Redacted.make("token") }), dial)
         yield* flush
         yield* TestClock.adjust("5 seconds")
         yield* flush
         return dials
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ).then((dials) => expect(dials).toBeGreaterThan(1)))
+
+  test("connects again where T3 Code answers now, with the token it's asked for then, like another machine's after it restarted", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const dialed: Array<{ readonly url: string; readonly token: string }> = []
+        const dial: T3Live.Dial = (url, token) => {
+          dialed.push({ url, token: Redacted.value(token) })
+          return { send: () => {}, close: () => {}, events: (listener) => listener({ _tag: "Closed", reason: "gone" }) }
+        }
+        // Rig's T3 Code restarted on another port, with yapd's token read out again there.
+        const answers = [
+          { server: { origin: "http://127.0.0.1:50001" }, token: Redacted.make("first") },
+          { server: { origin: "http://127.0.0.1:50002" }, token: Redacted.make("second") },
+        ]
+        let asked = 0
+        const locate = Effect.sync(() => answers[Math.min(asked++, answers.length - 1)]!)
+        yield* T3Live.follow(locate, dial)
+        yield* flush
+        yield* TestClock.adjust("2 seconds")
+        yield* flush
+        return dialed
+      }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
+    ).then((dialed) =>
+      expect(dialed.slice(0, 2)).toEqual([
+        { url: `ws://127.0.0.1:50001/ws?orchestrationProtocol=2`, token: "first" },
+        { url: `ws://127.0.0.1:50002/ws?orchestrationProtocol=2`, token: "second" },
+      ]),
+    ))
 })
