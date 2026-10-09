@@ -547,6 +547,12 @@ const nodding: ReadonlySet<string> = new Set([
   "what", "whatever", "you", "recommend", "recommended", "recommendation",
 ])
 
+/** A pick that holds back, like "Pause", "Wait for CI" or "Not yet", but never "Keep going", which goes on. */
+const holding = /^(?:pause|wait|hold|not|no|don['’]t|stop|keep(?! going| on\b| running)|skip|leave|cancel|abort|postpone|defer|later)\b/i
+
+/** Words to go ahead, like "proceed", "go on" or "yes, ship it". */
+const going = /\b(?:proceed|go on|go ahead|do it|go for it|carry on|continue|ship it|merge it)\b/
+
 /**
  * Whether words that agree may be to another option than yapd's pick: they,
  * or the word they start with, start its name, or its name has them all,
@@ -555,7 +561,8 @@ const nodding: ReadonlySet<string> = new Set([
  * like "yes, ship it" to "Ship it now" or "sure, go ahead" to "Go ahead
  * with the rename"; or its name has any word of his that says more than
  * yes, wherever it is in it, like "merge" in "yes, merge it" to "Squash and
- * merge".
+ * merge"; or they go ahead, to a pick that holds back, like "proceed" to
+ * Pause and "Continue the migration".
  */
 const elsewhere = (part: Said, said: string, pick: number | undefined) => {
   const [first = ""] = said.split(" ")
@@ -568,7 +575,8 @@ const elsewhere = (part: Said, said: string, pick: number | undefined) => {
     .split(" ")
     .filter((word) => !pointing.has(word) && !glue.has(word) && !nodding.has(word))
   const shares = fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => figures(gist(written)).split(" ").some((word) => own.includes(word))))
-  return [...opens, ...has, ...shares].some((index) => index !== pick)
+  const ahead = going.test(said) && holding.test(part.options[pick ?? -1]?.said ?? "")
+  return ahead || [...opens, ...has, ...shares].some((index) => index !== pick)
 }
 
 /**

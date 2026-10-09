@@ -274,6 +274,14 @@ describe("Questions", () => {
       [["Wait for CI (Recommended)", "Squash and merge"], "Yes, merge it."],
       [["Hold for QA (Recommended)", "Tag and ship"], "Ship it."],
       [["Hold for QA (Recommended)", "Tag and ship"], "Yes, ship it."],
+      // Words to go ahead, to a pick that holds back, may be to going ahead after all.
+      [["Pause (Recommended)", "Continue the migration"], "Proceed."],
+      [["Pause (Recommended)", "Continue the migration"], "Go on."],
+      [["Wait for CI (Recommended)", "Merge now"], "Yes, ship it."],
+      [["Wait for CI (Recommended)", "Merge now"], "Yes, do it."],
+      [["Not yet (Recommended)", "Deploy"], "Go ahead."],
+      [["Keep it for now (Recommended)", "Drop the table"], "Go for it."],
+      [["Abort the migration (Recommended)", "Continue anyway"], "Proceed."],
     ] as const) {
       expect([heard, pick(options, heard)]).toEqual([heard, undefined])
       // Cut off before yapd's pick, it may be that option all the same.
@@ -288,6 +296,9 @@ describe("Questions", () => {
     expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "The recommended one.")).toEqual(picked(1))
     expect(pick(["Go with the old name", "Rename it (Recommended)"], "Yes, go ahead.")).toEqual(picked(1))
     expect(pick(["Merge now (Recommended)", "Wait for CI"], "Yes, merge it.")).toEqual(picked(0))
+    // A plain yes to a pick that holds back takes it, as do words to go ahead to one that goes on.
+    expect(["Yes.", "Sounds good.", "Your pick."].map((heard) => pick(["Pause (Recommended)", "Continue the migration"], heard))).toEqual([picked(0), picked(0), picked(0)])
+    expect(["Go on.", "Proceed."].map((heard) => pick(["Keep going (Recommended)", "Stop the run"], heard))).toEqual([picked(0), picked(0)])
   })
 
   test("a plain yes when yapd's pick is a no, or a yes or no to a question it answers when no option is either, is the model's to tell", () => {

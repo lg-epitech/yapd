@@ -2922,6 +2922,10 @@ describe("Assistant", () => {
       [["Squash and merge", "Wait for CI (Recommended)"], "Merge it."],
       [["Squash and merge", "Wait for CI (Recommended)"], "Yes, merge it."],
       [["Tag and ship", "Hold for QA (Recommended)"], "Ship it."],
+      // Or words to go ahead, to a pick that holds back.
+      [["Continue the migration", "Pause (Recommended)"], "Proceed."],
+      [["Continue the migration", "Pause (Recommended)"], "Go on."],
+      [["Merge now", "Wait for CI (Recommended)"], "Yes, ship it."],
     ] as const) {
       const [named] = labels
       expect([heard, await answering(labels, heard, named)]).toEqual([heard, { asked: 1, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
