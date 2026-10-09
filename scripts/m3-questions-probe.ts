@@ -18,14 +18,19 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //
 // Turn yapd off first. On, it would read each of the probe's questions aloud,
 // and what he said or dictated meanwhile could answer one itself, spoiling
-// the step. With --send, it asks yapd's API whether it's on, and stops if it
-// is, or if yapd doesn't say.
+// the step. Run it on the Mac where yapd speaks, or turn off the yapd that
+// follows this machine's T3 Code: yapd follows other machines' T3 Code
+// through its tunnel, so one on Rosie reads and answers Rig's threads. With
+// --send, it asks yapd's API here whether it's on, and goes on only when
+// yapd says it's off. Nothing answering here isn't taken for off, since the
+// yapd following this T3 Code may be on another Mac, unless it's told so
+// with --yapd-not-running; nor is an answer that isn't yapd's state.
 //
 //   bun scripts/m3-questions-probe.ts
 //     Prints every command it would send, in order, with what it can only
 //     know once it's sending standing in, and sends nothing. It doesn't even
 //     read T3 Code.
-//   bun scripts/m3-questions-probe.ts --send --project <a T3 Code project's name or path> [--claude <model>] [--codex <model>]
+//   bun scripts/m3-questions-probe.ts --send --project <a T3 Code project's name or path> [--claude <model>] [--codex <model>] [--yapd-not-running]
 //     First starts two threads of its own in that project, without a
 //     worktree, as yapd starts work: one Claude, one Codex, each the first
 //     ready model of its provider unless named. Each opens with "This is a
@@ -262,10 +267,19 @@ const note = (line: string) =>
     Effect.sync(() => appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`)),
   )
 
+/** Whether nothing listens on the port, as Bun or Node say when a connection is refused. */
+const refused = (cause: unknown) => {
+  const { code, cause: under } = (typeof cause === "object" && cause !== null ? cause : {}) as { readonly code?: unknown; readonly cause?: { readonly code?: unknown } }
+  return [code, under?.code].some((said) => said === "ConnectionRefused" || said === "ECONNREFUSED")
+}
+
 /**
- * Whether yapd is on, as its API says, which would read the probe's questions
- * aloud and could answer them: not running, it's off; there but not saying
- * in time, it's not known.
+ * Whether yapd is on, as its API here says, which would read the probe's
+ * questions aloud and could answer them. Off only when it says so. "absent"
+ * when nothing listens here, which isn't off: a yapd on another Mac may follow
+ * this machine's T3 Code through its tunnel, its hooks' tunnel here being
+ * down. Anything else, like no answer in time, or one that isn't its state,
+ * as when it's closing, isn't known.
  */
 const yapd = Effect.gen(function* () {
   const port = yield* Config.port
@@ -273,8 +287,10 @@ const yapd = Effect.gen(function* () {
     try: () => fetch(`http://127.0.0.1:${port}/state`, { signal: AbortSignal.timeout(3000) }).then((response) => response.json() as Promise<unknown>),
     catch: (cause) => cause,
   }).pipe(
-    Effect.map((state): "on" | "off" | "unknown" => (typeof state === "object" && state !== null && "on" in state && state.on === false ? "off" : "on")),
-    Effect.catchAll((cause) => Effect.succeed(cause instanceof DOMException && cause.name === "TimeoutError" ? ("unknown" as const) : ("off" as const))),
+    Effect.map((state): "on" | "off" | "absent" | "unknown" =>
+      typeof state === "object" && state !== null && "on" in state && typeof state.on === "boolean" ? (state.on ? "on" : "off") : "unknown",
+    ),
+    Effect.catchAll((cause) => Effect.succeed(refused(cause) ? ("absent" as const) : ("unknown" as const))),
   )
 })
 
@@ -472,13 +488,15 @@ const step = (
 
 const probe = (project: string) =>
   Effect.gen(function* () {
-    // Nothing starts while yapd may be on, so it never reads these questions aloud, nor answers one.
+    // Nothing starts while yapd may be on, here or on a Mac that follows this T3 Code, so it never reads these questions aloud, nor answers one.
     const state = yield* yapd
-    if (state !== "off") {
+    if (state !== "off" && !(state === "absent" && process.argv.includes("--yapd-not-running"))) {
       return yield* Effect.dieMessage(
         state === "on"
           ? 'yapd is on, so it would read these questions aloud and could answer them: turn it off first, from the menu bar or with PUT /state {"on": false}, then run this again.'
-          : "yapd didn't say whether it's on, so nothing was started: make sure it's off or not running, then run this again.",
+          : state === "absent"
+            ? "Nothing answers for yapd here, but a yapd on another Mac may follow this machine's T3 Code and would read these questions aloud: run this on the Mac where yapd speaks, or turn that yapd off. If no yapd follows this T3 Code at all, run this again with --yapd-not-running."
+            : "yapd didn't say whether it's on, so nothing was started: make sure it's off, then run this again.",
       )
     }
     appendFileSync(logFile, `\n${new Date().toISOString()} m3-questions-probe --send --project ${project}\n`)
@@ -580,7 +598,7 @@ const probe = (project: string) =>
     yield* note(`The threads it started are left as they are: ${[claude, codex].filter((id) => id !== undefined).join(", ")}`)
   })
 
-const usage = "usage: bun scripts/m3-questions-probe.ts [--send --project <a T3 Code project's name or path> [--claude <model>] [--codex <model>]]"
+const usage = "usage: bun scripts/m3-questions-probe.ts [--send --project <a T3 Code project's name or path> [--claude <model>] [--codex <model>] [--yapd-not-running]]"
 const project = option("project")
 if (project !== undefined && project.startsWith("--")) {
   console.error(usage)
@@ -589,7 +607,9 @@ if (project !== undefined && project.startsWith("--")) {
 if (!process.argv.includes("--send")) {
   // What it would send, with what it can only know once it's sending standing in.
   const planned = commands({ claude: "<the probe's own Claude thread>", codex: "<the probe's own Codex thread>" }, "probe<time>", unknown)
-  console.log("Nothing is sent without --send. Turn yapd off first: with --send, it stops if yapd is on, since yapd would read its questions aloud and could answer them.")
+  console.log(
+    "Nothing is sent without --send. Turn yapd off first, and run this on the Mac where yapd speaks, since a yapd on another Mac may follow this machine's T3 Code: with --send, it goes on only once yapd here says it's off, since yapd would read its questions aloud and could answer them. With nothing answering for yapd here, it stops unless given --yapd-not-running.",
+  )
   console.log("With --send --project <name or path>, it first starts two threads of its own there, as yapd starts work:")
   for (const [provider, model] of [["Claude", "<--claude, or the first Claude model ready>"], ["Codex", "<--codex, or the first Codex model ready>"]]) {
     console.log(`a ${provider} thread, as yapd's launcher starts one: ${JSON.stringify({ project: project ?? "<the project>", prompt: opening, model, worktree: false })}`)
