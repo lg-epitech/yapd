@@ -352,6 +352,10 @@ describe("Brain", () => {
       "rm -\\rf ~/work",
       "r\\m -rf ~/work",
       "git push origin main --\\force",
+      "rm $'-rf' ~/work",
+      "rm $'\\x2drf' ~/work",
+      "rm $'\\055r\\146' ~/work",
+      'git push origin main $"--force"',
     ]
     const ordinary = [
       "npm install left-pad",
@@ -393,6 +397,8 @@ describe("Brain", () => {
       "docker run --rm -it node:20 ls -R",
       "rm -\\f build.log",
       "git push origin main --\\follow-tags",
+      "rm $'-f' build.log",
+      "rm $'\\x2df' build.log",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
@@ -421,7 +427,7 @@ describe("Brain", () => {
   test("what's risky is told in moments, however what it would run is written, up to as much of it as is looked through", () => {
     // As much as an approval is looked through for what's risky, written so that patterns take time growing with the square of its
     // length: a command going on over many lines, many names a flag could follow in one command, or among its flags, a long word, a
-    // name set to true with a long run of spaces and line breaks after it, and many short commands.
+    // name set to true with a long run of spaces and line breaks after it, many short commands, and a $' never closed or many of them.
     const long = {
       "a push going on over lines": "push \\\n".repeat(3000),
       "an rm going on over lines": "rm \\\n".repeat(5000),
@@ -438,6 +444,8 @@ describe("Brain", () => {
       "force with line breaks after it": `"force${"\n ".repeat(9990)}`,
       "recursive with line breaks after it": `"recursive${"\n ".repeat(9990)}rm`,
       "many short commands": "rm;".repeat(6666),
+      "a $' left open": `$'${"\\'".repeat(9999)}`,
+      "many $'": "$'".repeat(10_000),
     }
     /** How long it takes to tell, the quickest of three, so a pause in between doesn't count. */
     const took = (text: string) =>

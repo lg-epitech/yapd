@@ -451,15 +451,39 @@ const riskyFlags: ReadonlyArray<(command: string) => boolean> = [
  */
 const continued = (text: string) => text.replace(/\\\r?\n/g, "")
 
+/** What a backslash and a letter stand for between `$'` and `'`, like `\n` for a line break. */
+const escaped: Readonly<Record<string, string>> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" }
+
+/** A character spelled out between `$'` and `'`: by its number, like `\x2d` or `\055` for "-", or by a letter, like `\n`, or as it is. */
+const character = (_: string, hex?: string, short?: string, long?: string, octal?: string, other?: string) => {
+  const code = hex ?? short ?? long
+  if (code !== undefined) return String.fromCodePoint(Math.min(Number.parseInt(code, 16), 0x10ffff))
+  if (octal !== undefined) return String.fromCharCode(Number.parseInt(octal, 8) & 0xff)
+  return escaped[other ?? ""] ?? other ?? ""
+}
+
+/**
+ * What's between `$'` and `'` as the shell reads it, with each character it
+ * spells out as that character. It's all one word, so a line break or ";" in
+ * it, which would end a command below, is read as a space.
+ */
+const spelled = (inside: string) =>
+  inside.replace(/\\(?:x([\da-fA-F]{1,2})|u([\da-fA-F]{1,4})|U([\da-fA-F]{1,8})|([0-7]{1,3})|([\s\S]))/g, character).replace(/[\n;|&]/g, " ")
+
 /**
  * A command as the shell runs it once it takes away its quoting: the quotes
- * around what it's given, so `rm '-rf'` is `rm -rf`, and a backslash before
- * any other character, which it keeps as it is, so `r\m -\rf` is `rm -rf`
- * too, which the patterns above, looking for a name or a flag where a word
- * starts, would miss as written. It's looked through as well as the command
- * as written, whose quotes JSON needs.
+ * around what it's given, so `rm '-rf'` is `rm -rf`, `$'…'` with what it
+ * spells out, so `rm $'\x2drf'` is too, and a backslash before any other
+ * character, which it keeps as it is, so `r\m -\rf` is `rm -rf` as well, which
+ * the patterns above, looking for a name or a flag where a word starts, would
+ * miss as written. It's looked through as well as the command as written,
+ * whose quotes JSON needs.
  */
-const unquoted = (command: string) => command.replace(/\\([\s\S])/g, "$1").replace(/["']/g, "")
+const unquoted = (command: string) =>
+  command
+    .replace(/\$'((?:[^'\\]|\\[\s\S])*)'/g, (_, inside: string) => spelled(inside))
+    .replace(/\\([\s\S])/g, "$1")
+    .replace(/\$?["']/g, "")
 
 /**
  * A name set to true among what a tool is given, as its JSON writes it, or
