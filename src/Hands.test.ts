@@ -35,7 +35,7 @@ type Answer = (payload: Record<string, unknown>, bounded: Bounded) => Effect.Eff
 
 interface Bounded {
   runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string; queueHeld?: boolean }>
-  messages: Array<{ id: string; role: string; text: string; createdAt: string }>
+  messages: Array<{ id: string; role: string; text: string; createdAt: string; runId?: string | null }>
   turnItems: Array<Record<string, unknown>>
 }
 
@@ -96,11 +96,18 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
     let answer: Answer = takes()
     let current = given.thread ?? thread(tezos.id)
     let readable = true
+    // The thread as a whole, once a test has pushed some of it out of its last turns, or too slow to read; otherwise just as they are.
+    let whole: Bounded | "fails" | undefined
+    let wholeReads = 0
     const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
-      api: (<A, I>(_: string, schema: Schema.Schema<A, I>) =>
-        readable
-          ? Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)
-          : Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." }))) as Server.Transport["api"],
+      api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
+        if (!readable) return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long." }))
+        if (path.endsWith("/bounded")) return Schema.decodeUnknown(schema)({ projection: bounded }).pipe(Effect.orDie)
+        wholeReads++
+        return whole === "fails"
+          ? Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." }))
+          : Schema.decodeUnknown(schema)({ snapshotSequence: 1, projection: whole ?? bounded }).pipe(Effect.orDie)
+      }) as Server.Transport["api"],
       call: (<A, I>(method: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
         method === "orchestration.dispatchCommand"
           ? Effect.suspend(() => {
@@ -135,6 +142,12 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
       reads: (ok: boolean) => {
         readable = ok
       },
+      /** The thread as its whole read has it, once some of it is pushed out of its last turns, or that read too slow to answer. */
+      whole: (next: Bounded | "fails") => {
+        whole = next
+      },
+      /** How many times the whole thread was read. */
+      wholeReads: () => wholeReads,
       /** The ids each dispatch went under. */
       ids: () => dispatched.map(({ commandId, messageId }) => [commandId, messageId]),
       /** Hands as yapd has them once it's restarted at `at`, over the same ledger and T3 Code. */
@@ -265,6 +278,90 @@ const lookedLate = (
         undelivered: undelivered.length,
         unconfirmed: unconfirmed.length,
         offered: Option.isSome(yield* back.still(commandId)),
+      }
+    }),
+  )
+
+/**
+ * Ten turns begun since, one after the other, as T3 Code's bounded read
+ * reaches back only ten: it keeps every run, but only those ten turns' items,
+ * and the messages they have, or that the newest run, or one going or queued,
+ * has. Gives back the thread as its whole read still has it.
+ */
+const tenTurnsOn = (bounded: Bounded): Bounded => {
+  const first = bounded.runs.length + 1
+  for (let ordinal = first; ordinal < first + 10; ordinal++) {
+    const runId = `run-${ordinal}`
+    const messageId = `later-${ordinal}`
+    bounded.runs.push({ id: runId, status: "completed", ordinal, userMessageId: messageId })
+    bounded.messages.push({ id: messageId, role: "user", text: "And the next thing.", createdAt: "2026-10-08T22:10:00.000Z", runId })
+    bounded.turnItems.push({ type: "user_message", messageId, inputIntent: "turn_start", runId })
+  }
+  const whole = structuredClone(bounded)
+  bounded.turnItems.splice(0, bounded.turnItems.length - 10)
+  const items = new Set(bounded.turnItems.map(({ messageId }) => messageId))
+  const live = bounded.runs.filter(({ status }, at) => at === bounded.runs.length - 1 || [...T3Actions.going, "queued"].includes(status))
+  const kept = bounded.messages.filter(
+    ({ id, runId }) => items.has(id) || live.some(({ userMessageId }) => userMessageId === id) || live.some(({ id }) => id === runId),
+  )
+  bounded.messages.splice(0, bounded.messages.length, ...kept)
+  return whole
+}
+
+/**
+ * He moves a message from the queue into the turn under way, as T3 Code does
+ * it, and that turn ends as `status`: the run it waited in is cancelled, and
+ * the message is the turn's, as is its item, unless the turn was rolled back,
+ * which hides it.
+ */
+const moved = (status: string) => (bounded: Bounded) => {
+  bounded.runs[0]!.status = status
+  bounded.runs[1]!.status = "cancelled"
+  Object.assign(bounded.messages[0]!, { runId: "run-1", createdAt: "2026-10-08T22:01:00.000Z" })
+  if (status !== "rolled_back") bounded.turnItems.push({ type: "user_message", messageId: "yapd:u1:0:m", inputIntent: "promoted_queued_to_steer", runId: "run-1" })
+}
+
+/** He takes a message out of the queue, which T3 Code shows cancelled, or drops from the thread, and the turn ahead of it finishes. */
+const takenOut = (dropped: boolean) => (bounded: Bounded) => {
+  bounded.runs[0]!.status = "completed"
+  bounded.runs[1]!.status = "cancelled"
+  if (dropped) bounded.messages.splice(0)
+}
+
+/**
+ * A message for now behind a turn getting going, its answer lost and the
+ * thread unread, sent again once `meanwhile` has done to the thread what it
+ * does, with T3 Code's answer `kept` this time, or lost again. `meanwhile`
+ * gives back the thread as its whole read has it, when that isn't just its
+ * last turns, or that read failing. What's said, how its step is noted, and
+ * how many times the whole thread was read.
+ */
+const resentLater = (again: "kept" | "lost", meanwhile: (bounded: Bounded) => Bounded | "fails" | void) =>
+  run(
+    Effect.gen(function* () {
+      const { send, again: resend, answering, reads, bounded, becomes, ledger, whole, wholeReads } = yield* hands({
+        thread: thread(tezos.id, preparing),
+        runs: [{ id: "run-1", status: "preparing", ordinal: 1 }],
+      })
+      answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+      reads(false)
+      yield* send("u1", "Open a PR.")
+      const shown = meanwhile(bounded)
+      if (shown) whole(shown)
+      becomes(thread(tezos.id, { latestRunCompletedAt: "2026-10-08T22:12:00.000Z" }))
+      reads(true)
+      answering(() => (again === "kept" ? Effect.succeed({ sequence: 7 }) : Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me again.", sent: true }))))
+      const outcome = yield* resend("yapd:u1:0")
+      const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+      return {
+        said:
+          outcome._tag === "Done"
+            ? Hands.done(message, outcome.how, lines, Option.none(), outcome)
+            : outcome._tag === "Twin" || outcome._tag === "Read"
+              ? outcome._tag
+              : Hands.failed(message, outcome, lines, Option.none()),
+        noted: Option.getOrNull(Option.map(yield* ledger.get("yapd:u1:0"), ({ state, how, reason }) => ({ state, how, reason }))),
+        wholeReads: wholeReads(),
       }
     }),
   )
@@ -924,6 +1021,86 @@ describe("Hands", () => {
       ],
       state: Option.some("sent"),
     })
+  })
+
+  test("a yes to sending again a message he moved from the queue into the turn under way, which ten turns since have pushed out of the thread's last turns, is found in the whole thread, and said as gone in and how that turn ended, never as taken out of the queue", async () => {
+    const steered = (said: string) => ({ said, noted: { state: "sent" as const, how: "steered" as const, reason: null }, wholeReads: 1 })
+    for (const again of ["kept", "lost"] as const) {
+      /** Moved into the turn under way, which ended as `status`, then ten turns on: the run it waited in, cancelled, is all its last turns show of it. */
+      const later = (status: string) =>
+        resentLater(again, (bounded) => {
+          moved(status)(bounded)
+          return tenTurnsOn(bounded)
+        })
+      expect(await later("completed")).toEqual(steered("That went in, sir, and it's been dealt with."))
+      expect(await later("interrupted")).toEqual(steered("That went in, sir, but the turn it went into was cut short."))
+      // Rolled back, that turn's item is hidden, so only the message names the turn it went into.
+      expect(await later("rolled_back")).toEqual(steered("That went in, sir, but it's been rolled back since."))
+    }
+  })
+
+  test("a yes to sending again a message taken out of the queue, which ten turns since have pushed out of the thread's last turns, is found withdrawn in the whole thread, whether T3 Code shows it cancelled or dropped it", async () => {
+    for (const again of ["kept", "lost"] as const) {
+      for (const dropped of [false, true]) {
+        expect(
+          await resentLater(again, (bounded) => {
+            takenOut(dropped)(bounded)
+            return tenTurnsOn(bounded)
+          }),
+        ).toEqual({
+          said: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
+          noted: { state: "abandoned", how: null, reason: Ledger.withdrawn },
+          wholeReads: 1,
+        })
+      }
+    }
+  })
+
+  test("a yes to sending again a message the thread's last turns show only by the run it waited in, cancelled, with the whole thread too slow to read, is never taken as withdrawn, and he's told it couldn't be confirmed", async () => {
+    /** Moved into the turn under way, then ten turns on, with the whole thread too slow to read. */
+    const later = (again: "kept" | "lost") =>
+      resentLater(again, (bounded) => {
+        moved("completed")(bounded)
+        tenTurnsOn(bounded)
+        return "fails"
+      })
+    // T3 Code answers for it, so it went, but whether it's still to be read can't be told.
+    expect(await later("kept")).toEqual({
+      said: "That got there, sir, but I couldn't check it's still in the thread: T3 Code isn't answering.",
+      noted: { state: "sent", how: null, reason: "I couldn't check it's still in the thread: T3 Code isn't answering." },
+      wholeReads: 1,
+    })
+    // Its answer lost again, it can't be confirmed, and, sent once more already, it's never offered again.
+    expect(await later("lost")).toEqual({
+      said: "I couldn't confirm it got there, sir.",
+      noted: { state: "abandoned", how: null, reason: "T3 Code hung up on me again." },
+      wholeReads: 1,
+    })
+  })
+
+  test("a yes to sending again reads the whole thread only when its last turns show nothing of the message but the run it waited in, cancelled, and then once", async () => {
+    for (const again of ["kept", "lost"] as const) {
+      // Moved into the turn under way, its item is still among the thread's last turns.
+      expect(await resentLater(again, moved("completed"))).toMatchObject({ said: "That went in, sir, and it's been dealt with.", wholeReads: 0 })
+      // Taken out of the queue, the message itself is still there, naming the run it waited in.
+      expect(await resentLater(again, takenOut(false))).toMatchObject({
+        said: "That got there the first time, sir, but it was taken out of the queue since, so it won't run.",
+        wholeReads: 0,
+      })
+      // A turn of its own, done with, then ten turns on: its run says how it went, cancelled or not.
+      const own = await resentLater(again, (bounded) => {
+        bounded.runs[0]!.status = "completed"
+        bounded.runs[1]!.status = "completed"
+        return tenTurnsOn(bounded)
+      })
+      expect(own).toMatchObject({ said: "That went in, sir, and it's been dealt with.", wholeReads: 0 })
+      // Only the run it waited in left to show it, cancelled, the whole thread is read, once.
+      const pushedOut = await resentLater(again, (bounded) => {
+        moved("completed")(bounded)
+        return tenTurnsOn(bounded)
+      })
+      expect(pushedOut).toMatchObject({ wholeReads: 1 })
+    }
   })
 
   test("asking to send again says sir once, however the line to ask it was written", () => {

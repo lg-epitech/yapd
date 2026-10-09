@@ -474,9 +474,12 @@ export const make = (options: {
    * still in a queue a stop has put on hold since, it waits there however
    * idle the thread is. The turn it started or went into ended since, it's
    * said to have gone in, and how that turn ended, when that can be told,
-   * never as being worked on now, since nothing is. Shown cancelled, it was
-   * withdrawn, so the same words said again are new. `why` is how it came to
-   * be looked for, for the log.
+   * never as being worked on now, since nothing is. Shown cancelled, with
+   * nothing to say he moved it into the turn under way, which cancels the
+   * run it waited in too, it was withdrawn, so the same words said again are
+   * new: it's found as `traced` finds it, in the whole thread once enough
+   * turns since have pushed all else of it out of the thread's last turns.
+   * `why` is how it came to be looked for, for the log.
    */
   const placed = (row: Ledger.Row, found: T3Actions.Found, thread: T3Live.Thread, why: string): Effect.Effect<Went> =>
     Effect.gen(function* () {
@@ -500,14 +503,16 @@ export const make = (options: {
    * already from what it kept, without doing it again, so it's looked for in
    * the thread, and found, it's as `placed` has it. Otherwise T3 Code has it,
    * as its answer says, so it went, but not found, or with the thread
-   * unread, whether it's still to be read can't be told, since one that went
-   * in is also dropped from the thread's read once enough happens after it:
-   * the same words said again are asked about. None for what isn't a message.
+   * unread, as when its last turns can't tell and the whole of it is too
+   * slow to read, whether it's still to be read can't be told, since one
+   * that went in is also dropped from the thread's read once enough happens
+   * after it: the same words said again are asked about. None for what isn't
+   * a message.
    */
   const kept = (row: Ledger.Row, { actions, thread }: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread }) =>
     Effect.gen(function* () {
       if (row.kind !== "message" || row.messageId === null) return Option.none<Went>()
-      const look = yield* Effect.either(actions.message(row.thread, row.messageId))
+      const look = yield* Effect.either(actions.traced(row.thread, row.messageId))
       const found = Either.getOrElse(look, () => Option.none<T3Actions.Found>())
       if (Option.isSome(found)) return Option.some(yield* placed(row, found.value, thread, "as T3 Code had it already"))
       const reason = Either.isLeft(look) ? `${unchecked}: ${after(plainly(look.left.reason))}` : notThere
@@ -601,7 +606,7 @@ export const make = (options: {
       // It went, and may have been done: looked for once, never sent again on its own.
       if (earlier && row.kind === "message" && row.messageId !== null) {
         // Sent once more, what's found may be there from the first time, so it's made of as it is when T3 Code answers for it.
-        const look = yield* Effect.either(actions.message(row.thread, row.messageId))
+        const look = yield* Effect.either(actions.traced(row.thread, row.messageId))
         if (Either.isRight(look) && Option.isSome(look.right)) return yield* placed(row, look.right.value, reached.thread, `found after: ${reason}`)
       } else {
         const found = yield* Effect.either(landed(row, actions))
