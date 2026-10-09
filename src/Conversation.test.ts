@@ -712,6 +712,29 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("Rick, it.", "the migration on rig, it wants")).toBe("echo")
   })
 
+  test("takes its own voice for its own with its name written as two words or misheard, or a word of its put another way", () => {
+    for (const [heard, line] of [
+      ["Over in your app, the tests pass now.", "Over in yapd, the tests pass now and the"],
+      ["Over in your app, the tests", "Over in yapd, the tests pass now and the"],
+      ["Over in Rennie app, the tests pass.", "Over in yapd, the tests pass now and the"],
+      ["Codex failed on your app, the build broke.", "Codex failed on yapd, the build broke on the main branch"],
+      ["Over in home lab, Claude finished the migration.", "Over in homelab, Claude finished the migration and the tests"],
+      ["Over in back end, the tests pass.", "Over in backend, the tests pass now and the pull request"],
+      ["Over in note book, the tests pass.", "Over in notebook, the tests pass now and the pull request"],
+      ["Over in tea three code, Codex fixed the flaky login test.", "Over in t3code, Codex fixed the flaky login test and pushed"],
+      ["Rick, the migration finished.", "Over in rig, the migration finished and the build is green"],
+      ["Kodak's fixed the failing login test.", "Codex fixed the failing login test and pushed the branch, sir"],
+      ["So the test is passed now.", "Over in yapd, the tests pass now and the"],
+      ["The tests are passing now.", "Over in yapd, the tests pass now and the"],
+    ] as const) {
+      expect([heard, whose(heard, line)]).toEqual([heard, "echo"])
+    }
+    // Words of his in its name's place, which don't sound like it.
+    expect(whose("Fix the tests.", "Over in yapd, the tests pass now and the")).toBe("mixed")
+    expect(whose("Over in production, merge it.", "Over in yapd, the tests pass now and the")).toBe("his")
+    expect(whose("The tests are not passing now.", "Over in yapd, the tests pass now and the")).toBe("mixed")
+  })
+
   test("takes what yapd was saying for its own voice, misheard or not, even with a word misheard as its voice stops getting in", () => {
     expect(whose("Over in yapd, the tests pass.", saying)).toBe("echo")
     expect(whose("Over in yap D, the test pass.", saying)).toBe("echo")
@@ -2093,6 +2116,26 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     )
     expect(result).toEqual({ commands: ["play", "stop"], sent: ["Deploy it."], replies: ["Deploy it."] })
   })
+
+  test("doesn't stop for its own voice with its name written as two words, as a look at it about a second in sees it, nor ask him anything", async () => {
+    for (const [spoken, soFar, rest] of [
+      [long.spoken, "Over in your app, the tests", "pass now."],
+      ["Over in homelab, Claude finished the migration and the tests pass, sir. Shall I open the pull request?", "Over in home lab, Claude finished", "the migration."],
+    ] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.8, soFar], [0.81, rest]], { live: true, spoken, whole: [[0.8, 0.81], `${soFar} ${rest}`] })
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 36)
+          yield* helper.talk(0.81, 15)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { commands: helper.commands, looks: helper.transcribed.length, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([soFar, result]).toEqual([soFar, { commands: ["play"], looks: 2, rendered: [], sent: [], replies: [] }])
+    }
+  }, 30_000)
 
   test("passes on what the user says over them on either side of a pause, as he said it, like \"Don't... merge it yet.\"", async () => {
     const result = await overHelperScoped(

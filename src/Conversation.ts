@@ -236,9 +236,11 @@ const alike = (heard: string, spoken: string) => {
   if (heard !== spoken && (negations.has(heard) || negations.has(spoken))) return false
   const [first, second] = [stem(heard), stem(spoken)]
   const shorter = Math.min(first.length, second.length)
-  if (first === second || (first.length >= 4 && second.startsWith(first))) return true
-  // Never one of the words in nearly anything said, like "was" for "pass", which would make a word of his look like its.
-  if (shorter < 3 || common.has(heard)) return false
+  if (first === second) return true
+  // Otherwise never one of the words in nearly anything said, like "was" for "pass" or "them" for "the migration", which would make a word of his look like its.
+  if (common.has(heard)) return false
+  if (first.length >= 4 && second.startsWith(first)) return true
+  if (shorter < 3) return false
   const distance = apart(first, second)
   if (distance <= (shorter >= 6 ? 2 : 1)) return true
   return shorter >= 4 && distance * 2 <= Math.max(first.length, second.length) && sound(first).length >= 3 && sound(first) === sound(second)
@@ -310,7 +312,8 @@ interface Match {
  * hears it, as many of them as can: each a word of its, two of its run
  * together, like "overin" for "over in", or split in two, like "of her" for
  * "over", skipping up to two of its words between, which Whisper drops, and
- * two of those heard, which it makes up, like "stop rage" for "storage".
+ * three of those heard, which it makes up, like "stop rage" for "storage", or
+ * writes for one of its, like "tea three code" for "t3code".
  */
 const lined = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   // The most that line up with a match ending at each word heard and at each of yapd's, and the match that got there.
@@ -322,16 +325,23 @@ const lined = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
       for (const first of [last, last - 1]) {
         for (const start of [end, end - 1]) {
           if (first < 0 || start < 0 || !alike(words.slice(first, last + 1).join(""), yapd.slice(start, end + 1).join(""))) continue
-          // Two heard for its only when neither is one of them already, so a word run on from one of its, like "yes" in "again, yes", isn't.
-          if (first < last && [first, last].some((at) => yapd.slice(start, end + 1).some((spoken) => alike(words[at]!, spoken)))) continue
+          // Two heard for its only when it takes both, as for a name Whisper writes in two, like "home lab" for "homelab": not when
+          // each is one of its already, nor one is its very word, so a word run on from one of its, like "yes" in "again, yes", isn't.
+          if (first < last) {
+            const spoken = yapd.slice(start, end + 1)
+            const alone = [first, last].map((at) => spoken.some((word) => alike(words[at]!, word)))
+            if (alone.every(Boolean) || [first, last].some((at) => spoken.some((word) => stem(word) === stem(words[at]!)))) continue
+          }
           let before = 0
           let from: readonly [number, number] | undefined
-          for (let earlier = Math.max(0, first - 3); earlier < first; earlier++) {
+          for (let earlier = Math.max(0, first - 4); earlier < first; earlier++) {
             for (let previous = Math.max(0, start - 3); previous < start; previous++) {
               if (most[earlier]![previous]! > before) [before, from] = [most[earlier]![previous]!, [earlier, previous]]
             }
           }
-          const count = before + last - first + 1
+          // A word heard as its very word lines up a little better than one only like it, so "code codex" for "t3code Codex" is "codex" for "Codex".
+          const exact = first === last && start === end && stem(words[first]!) === stem(yapd[start]!)
+          const count = before + last - first + 1 - (exact ? 0 : 0.001)
           if (count <= most[last]![end]!) continue
           most[last]![end] = count
           how[last]![end] = { match: { first, last, start, end }, ...(from === undefined ? {} : { from }) }
@@ -348,29 +358,36 @@ const lined = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
 /**
  * Which of `words` are yapd's, and whether any is, or is in place of, a word
  * of its that not just anything has, which tells its voice: those in line
- * with what it was saying, any in place of one of its words between two that
- * are, which is that word misheard, like "Japan" for "yapd" in "Over in
- * Japan, the tests", and a last one in place of its next word, misheard as
- * its voice stopped getting in, like "pool" for "pull". In line with only
- * common words of its, those in place of one that isn't are that misheard,
- * like its name: when what was heard starts with its words, a word or two
- * left after them, like "In Japan." or "Over in your app.", or the first word
- * after two or more of them, like "Over in Japan, tell it to…", and when it
- * ends with them, one word before, like "Japan now.".
+ * with what it was saying, and those in place of its words between two that
+ * are, which are those misheard, like "Japan" for "yapd" in "Over in Japan,
+ * the tests", or, for one of its words not just anything has, one more, as
+ * Whisper writes a name in two, like "your app". A word or two just before
+ * them or just after, in place of its word there, are that misheard when
+ * they sound like it, like "Rick" for "rig" or "pool" for "pull". In line with
+ * only common words of its, the same goes for its name beside them: a word or
+ * two after them when what was heard starts with them, like "In Japan." or
+ * "Over in your app.", and the word before when it ends with them, like
+ * "Japan, the.".
  */
 const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   const matches = lined(words, yapd)
   const its = new Set<number>()
   /** Its words they're in line with, or in place of. */
   const said = new Set<number>()
+  const named = (word: string | undefined): word is string => word !== undefined && !common.has(word)
+  const anchored = matches.some((match) => yapd.slice(match.start, match.end + 1).some(named))
   matches.forEach((match, index) => {
     for (let at = match.first; at <= match.last; at++) its.add(at)
     for (let at = match.start; at <= match.end; at++) said.add(at)
     const next = matches[index + 1]
     if (next === undefined) return
-    // Heard in place of some of its words between, no more of them than it said, they're those misheard, rather than put in among them.
-    const between = words.slice(match.last + 1, next.first)
-    if (between.length === 0 || between.length > next.start - match.end - 1 || between.some((word) => negations.has(word))) return
+    // Heard in place of some of its words between, no more of them than it said, they're those misheard, rather than put in among
+    // them. For a word of its that not just anything has, its name, one more among words of its that tell its voice, and two when
+    // they sound like it, like "your app" for "yapd" or "tea three code" for "t3code". Never a "not".
+    const [between, skipped] = [words.slice(match.last + 1, next.first), yapd.slice(match.end + 1, next.start)]
+    const name = skipped.some(named)
+    const room = skipped.length + (name && near(between.join(""), skipped.join("")) ? 2 : name && anchored ? 1 : 0)
+    if (between.length === 0 || between.length > room || between.some((word) => negations.has(word))) return
     for (let at = match.last + 1; at < next.first; at++) its.add(at)
     for (let at = match.end + 1; at < next.start; at++) said.add(at)
   })
@@ -383,19 +400,22 @@ const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   }
   const [previous, next] = [yapd[first.start - 1], yapd[last.end + 1]]
   const after = words.length - 1 - last.last
+  // All that's heard before its words, a word or two, sounding like its word before them.
+  const leading = first.first > 0 && first.first <= 2 && named(previous) && near(words.slice(0, first.first).join(""), previous)
+  // How many heard after its words, two or one, sound like its next word.
+  const trailing = next === undefined ? undefined : [Math.min(after, 2), 1].find((count) => count > 0 && count <= after && near(words.slice(last.last + 1, last.last + 1 + count).join(""), next))
   if (telling) {
-    if (next !== undefined && after === 1 && near(words.at(-1)!, next)) its.add(words.length - 1)
+    if (leading) for (let at = 0; at < first.first; at++) its.add(at)
+    if (trailing !== undefined) for (let at = last.last + 1; at <= last.last + trailing; at++) its.add(at)
     return { its, telling }
   }
-  const named = (word: string | undefined): word is string => word !== undefined && !common.has(word)
   // All that's left, or, after two or more of its, the word or two in place of its next: more than that may be his own.
-  const misheard = after <= 2 || matches.reduce((count, match) => count + match.last - match.first + 1, 0) >= 2 ? Math.min(after, 2) : 0
-  const name = [misheard, 1].find((count) => count > 0 && count <= misheard && near(words.slice(last.last + 1, last.last + 1 + count).join(""), next ?? ""))
-  if (named(next) && first.first === 0 && name !== undefined) {
-    for (let at = last.last + 1; at <= last.last + name; at++) its.add(at)
+  const matched = matches.reduce((count, match) => count + match.last - match.first + 1, 0)
+  if (named(next) && first.first === 0 && trailing !== undefined && (after <= 2 || matched >= 2)) {
+    for (let at = last.last + 1; at <= last.last + trailing; at++) its.add(at)
     return { its, telling: true }
   }
-  if (named(previous) && first.first === 1 && after === 0 && near(words[0]!, previous)) {
+  if (first.first === 1 && after === 0 && leading) {
     its.add(0)
     return { its, telling: true }
   }
