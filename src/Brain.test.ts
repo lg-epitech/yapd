@@ -253,7 +253,9 @@ describe("Brain", () => {
     expect(decided("What's the question?", 0)).toEqual({ act: "again", how: "same", text: "", pending: "answers" })
     expect(decided("Later.", 0)).toEqual({ act: "dismiss", how: "later", text: "", pending: "answers" })
     expect(decided("Skip that one.", 0)).toEqual({ act: "reply", how: "skip", text: "", pending: "answers" })
-    expect(decided("Red, please.", 0)).toEqual({ act: "reply", how: "", text: "Red", pending: "answers" })
+    expect(decided("Red.", 0)).toEqual({ act: "reply", how: "", text: "Red", pending: "answers" })
+    // Only an option's exact name: anything more, like a "please", is the model's.
+    expect(decided("Red, please.", 0)).toBeUndefined()
     expect(decided("Alpha and Gamma.", 1)).toEqual({ act: "reply", how: "", text: "Alpha\nGamma (Recommended)", pending: "answers" })
     // All but some is the model's, since it takes what he may not have heard.
     expect(decided("All but Beta.", 1)).toBeUndefined()

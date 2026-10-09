@@ -765,6 +765,73 @@ const misread: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<stri
   ["What should I do with the branch?", ["Merge now (Recommended)", "Do not merge yet", "Close the PR"], ["Not that one.", "Not this one.", "Not."]],
 ]
 
+/**
+ * Every answer the reviews of the rules before found still sent another
+ * option than his without the model: a bare number or letter taken for a
+ * place, or a place counted in the order the options were read rather than
+ * named; a plain yes to a question that asks whether, however it's put; a
+ * no with a stop or a mark after it; a name with what goes without saying
+ * left out; "all" before he'd heard them all, and "I don't mind"; a name
+ * by how it sounds, hiding a no or joining numbers; a letter for a name
+ * with a symbol; and more than a yes or a no to options named Yes and No.
+ * Several when he could pick several.
+ */
+const reviewed: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<string>, heard: ReadonlyArray<string>, several?: boolean]> = [
+  ["How many retries?", ["Once", "Twice", "Never"], ["Three."]],
+  ["How many retries?", ["None", "A few", "A lot"], ["One."]],
+  ["Which language should the bindings use?", ["Python", "Rust", "Go"], ["C."]],
+  ["How many days of logs should I keep?", ["A week", "A month", "Forever"], ["Three.", "A."]],
+  ["Should I drop the table, yes or no?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Drop the table? Yes or no?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I force push or not?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["Should I run the migration now, which locks the table for an hour or so?", ["Run it now", "Wait until tonight (Recommended)"], ["Yes."]],
+  ["Confirm: drop the users table.", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I drop the cache layer", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I run the tests?", ["Tests", "No tests (Recommended)"], ["No, tests.", "Nope, tests.", "No? Tests."]],
+  ["Should I merge?", ["Merge", "No merge (Recommended)"], ["No, merge."]],
+  ["Should I merge?", ["Merge", "Don't merge"], ["Don't. Merge.", "Don’t, merge."]],
+  ["Should I retry?", ["Retry", "Never retry"], ["Never, retry."]],
+  ["What should I do?", ["Restart", "Restart yapd"], ["Restart yapd, please.", "Um, restart yapd.", "Restart yapd, sir."]],
+  ["What should I do?", ["Voice", "Jarvis voice"], ["Jarvis voice, please."]],
+  ["What should I do?", ["Restart", "Restart Jarvis"], ["Restart Jarvis please."]],
+  ["What should I do?", ["Hold", "Please hold"], ["Please hold, sir."]],
+  ["What should I run?", ["Run tests", "Lint", "Drop the staging database"], ["All.", "All but lint."], true],
+  ["What should I do with the branch?", ["Rebase", "Merge", "Squash", "Delete the branch"], ["The last one.", "The latter."]],
+  ["Do you mind if I force push?", ["Force push", "Open a new branch (Recommended)"], ["I don't mind."]],
+  ["Which changes should go in?", ["Notable changes only", "Everything"], ["Not able changes only."]],
+  ["Who should review it?", ["Nobody", "Everyone"], ["No body."]],
+  ["What do you think — should I merge now?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["What do you think; should I merge now?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["How does merging now sound?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["What do you say we drop the table?", ["Drop it", "Keep it (Recommended)"], ["Sure."]],
+  ["Which is safer — should I drop the users table now?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Who should do it — can I go ahead and force push?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["When I'm done — delete the branch?", ["Delete it", "Keep it (Recommended)"], ["Yes."]],
+  ["How would you feel about dropping the table?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Which do you prefer, me force pushing?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["Should I run the tests?", ["Tests", "No tests"], ["No - tests.", "No -- tests.", "No / tests.", "No . . . tests.", `No "tests".`, "No (tests).", "No | tests.", "No um tests."]],
+  ["Should I merge?", ["Merge", "Don't merge"], ["Don't - merge."]],
+  ["Should I merge?", ["Merge", "Do not merge"], ["Do not - merge."]],
+  ["Should I retry?", ["Retry", "Never retry"], ["Never - retry."]],
+  ["Should I keep backups?", ["Backups", "No backups"], ["No- backups."]],
+  ["Which language should the bindings use?", ["C++", "Rust", "Go"], ["C."]],
+  ["Which languages should the bindings use?", ["C++", "Rust", "Go"], ["C, Rust."], true],
+  ["Which grade?", ["A+", "B"], ["A."]],
+  ["Which language?", ["C#", "Java"], ["C."]],
+  ["Which language?", ["F#", "OCaml"], ["F."]],
+  ["How long should I keep the preview up?", ["1 hour", "2 hours", "12 hours"], ["One, two hours."]],
+  ["How many replicas?", ["1 replica", "3 replicas", "13 replicas"], ["One, three replicas."]],
+  ["Which version should I pin?", ["Version 1.0", "Version 2.0"], ["Version ten."]],
+  ["Which version should I pin?", ["1.0", "2.0"], ["Ten."]],
+  ["How many workers?", ["2 workers", "4 workers", "24 workers"], ["Two, four workers."]],
+  ["Where should I deploy?", ["Deploy nowhere", "Deploy here"], ["Deploy now, here."]],
+  ["Do you mind if I force push?", ["Yes", "No"], ["Don't.", "Sure."]],
+  ["Mind if I force push?", ["Yes, go ahead", "No, don't"], ["Nope."]],
+  ["Deploy or roll back?", ["Roll back the release", "Deploy anyway"], ["The first one."]],
+  ["Should I deploy or roll back?", ["Roll back the release (Recommended)", "Deploy anyway"], ["The first one."]],
+  ["What should I do?", ["Cancel deploy", "Deploy"], ["Cancel, deploy."]],
+]
+
 describe("Assistant", () => {
   test("status on MiNAS SV2 is answered about the Mina tickets first time, with no question", async () => {
     const result = await run(
@@ -1850,12 +1917,12 @@ describe("Assistant", () => {
       expect(result.spoken).toEqual(["Alpha and Gamma it is, sir."])
       expect(result.answers).toEqual([{ [extras.id]: ["Alpha", "Gamma"] }])
     }
-    // A list of whole names needs no model; all but some is the model's, since it takes what he may not have heard.
+    // A list of exact names needs no model; all but some is the model's, since it takes what he may not have heard.
     expect((await answering("Alpha and Gamma.")).asked).toBe(0)
     expect((await answering("All but Beta.")).asked).toBe(1)
   })
 
-  test("a number alone to options named with numbers is the model's to tell, which sends the option with that number, never the one in that place, and its whole name needs no model", async () => {
+  test("a number alone to options named with numbers is the model's to tell, which sends the option with that number, never the one in that place, and only its exact name needs no model", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const workers = {
       id: "How many parallel workers should the test run use?",
@@ -1876,10 +1943,10 @@ describe("Assistant", () => {
           return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), asked: made.seen.length }
         }),
       )
-    for (const heard of ["Four.", "4."]) {
+    for (const heard of ["Four.", "4.", "Four workers."]) {
       expect(await answering(heard)).toEqual({ spoken: ["4 workers it is, sir."], answers: [{ [workers.id]: "4 workers (Recommended)" }], asked: 1 })
     }
-    for (const heard of ["Four workers.", "4 workers."]) {
+    for (const heard of ["4 workers.", "4 workers"]) {
       expect(await answering(heard)).toEqual({ spoken: ["4 workers it is, sir."], answers: [{ [workers.id]: "4 workers (Recommended)" }], asked: 0 })
     }
   })
@@ -1901,7 +1968,8 @@ describe("Assistant", () => {
         }),
       )
     expect(await answering(["Option B (Recommended)", "Option A"], "A.", "Option A")).toEqual({ asked: 1, spoken: ["Option A it is, sir."], answers: [{ way: "Option A" }] })
-    expect(await answering(["Option 2 (Recommended)", "Option 1"], "Option one.", "")).toEqual({ asked: 0, spoken: ["Option 1 it is, sir."], answers: [{ way: "Option 1" }] })
+    expect(await answering(["Option 2 (Recommended)", "Option 1"], "Option one.", "Option 1")).toEqual({ asked: 1, spoken: ["Option 1 it is, sir."], answers: [{ way: "Option 1" }] })
+    expect(await answering(["Option 2 (Recommended)", "Option 1"], "Option 1.", "")).toEqual({ asked: 0, spoken: ["Option 1 it is, sir."], answers: [{ way: "Option 1" }] })
     const merging = ["Last write wins (Recommended)", "First write wins", "Manual merge"]
     expect(await answering(merging, "First.", "First write wins")).toEqual({ asked: 1, spoken: ["First write wins it is, sir."], answers: [{ way: "First write wins" }] })
     expect(await answering(merging, "Last.", "Last write wins (Recommended)")).toEqual({ asked: 1, spoken: ["Last write wins it is, sir."], answers: [{ way: "Last write wins (Recommended)" }] })
@@ -2345,21 +2413,32 @@ describe("Assistant", () => {
     })
   })
 
-  test("a plain yes takes the option yapd said it would go with, but only once he heard that far; cut off, it's asked again in full", async () => {
+  test("a plain yes goes to the model, told yapd's pick and whether he heard it, and is taken as that pick only once he heard that far; cut off, it's asked again in full", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
       Effect.gen(function* () {
-        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        // A model that takes a plain yes for yapd's pick, however much of it he heard.
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue (Recommended)", pending: "answers" }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour]),
+          waiting: true,
+        })
         yield* asked(made, cloud)
         yield* made.cut()
         yield* made.answer("Yes.")
         const cut = made.dispatched.length
         yield* made.play()
         yield* made.answer("Yes.")
-        return { cut, spoken: made.spoken(), answers: answered(made.dispatched) }
+        const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+        return { cut, asked: made.seen.length, told, spoken: made.spoken(), answers: answered(made.dispatched) }
       }),
     )
     expect(result.cut).toBe(0)
+    expect(result.asked).toBe(2)
+    expect(result.told.map((prompt) => [prompt.includes("He didn't hear you say you'd go with «Blue (Recommended)»"), prompt.includes("You said you'd go with «Blue (Recommended)».")])).toEqual([
+      [true, false],
+      [false, true],
+    ])
     expect(result.spoken).toEqual([
       "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
       "Again, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
@@ -2392,9 +2471,9 @@ describe("Assistant", () => {
       expect([heard, await answering(heard, true)]).toEqual([heard, { asked: 1, spoken: [again], answers: [] }])
       expect([heard, await answering(heard, false)]).toEqual([heard, { asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] }])
     }
-    // Naming it, he picked it himself.
+    // Naming it exactly, he picked it himself; a place, which may be of the ones he'd heard so far, is asked again in full.
     expect(await answering("Blue works, yeah.", true)).toEqual({ asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
-    expect(await answering("The second, I guess.", true)).toEqual({ asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
+    expect(await answering("The second, I guess.", true)).toEqual({ asked: 1, spoken: [again], answers: [] })
   })
 
   test("yapd's pick among several the model takes him to want, said before he heard it and never named, sends nothing: it's asked again in full", async () => {
@@ -2423,40 +2502,47 @@ describe("Assistant", () => {
     expect(await answering("Testnet, and devnet too I guess.", true)).toEqual(both)
   })
 
-  test("a plain no after yapd's pick asks which one then, without it", async () => {
+  test("a plain no after yapd's pick is the model's, which may ask which one then, without it, and what he says then is the model's too unless it's an option's exact name", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
-    const answering = (options: ReadonlyArray<string>, then: string) =>
+    const answering = (options: ReadonlyArray<string>, then: string, text = "") =>
       run(
         Effect.gen(function* () {
-          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [{ id: "colour", question: "Which colour?", options: options.map((label) => ({ label })) }]) })
+          // A model that asks which one then on a no, and otherwise names the option he meant as it's written.
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard === "No."
+                ? Brain.decision({ act: "again", how: "instead", target: handle(situation, cloud), pending: "answers" })
+                : Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }),
+            undefined,
+            { others: [cloud], items: card("q1", [{ id: "colour", question: "Which colour?", options: options.map((label) => ({ label })) }]) },
+          )
           yield* asked(made, cloud)
           yield* made.answer("No.")
           yield* made.answer(then)
-          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched), told: told.map((prompt) => prompt.includes("You said you'd go with «Red».")) }
         }),
       )
     expect(await answering(["Red", "Blue (Recommended)", "Green"], "Green.")).toEqual({
+      asked: 1,
       spoken: ["Which one then, sir: Red or Green?", "Green it is, sir."],
       answers: [{ colour: "Green" }],
+      told: [false],
     })
-    // With one left, a yes is to that one.
-    expect(await answering(["Red", "Blue (Recommended)"], "Yes.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
-    // A place counts among the ones he was offered, never the pick he turned down, which Claude lists first.
-    for (const [then, label] of [
-      ["The first one.", "Red"],
-      ["Option one.", "Red"],
-      ["First.", "Red"],
-      ["Option A.", "Red"],
-      ["The second one.", "Green"],
-      ["Number two.", "Green"],
-      ["The last one.", "Green"],
-    ] as const) {
-      expect([then, await answering(["Blue (Recommended)", "Red", "Green"], then)]).toEqual([
-        then,
-        { spoken: ["Which one then, sir: Red or Green?", `${label} it is, sir.`], answers: [{ colour: label }] },
-      ])
-    }
-    expect(await answering(["Blue (Recommended)", "Red"], "The first one.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
+    // With one left, the model's told it's yapd's pick now, which a yes is to.
+    expect(await answering(["Red", "Blue (Recommended)"], "Yes.", "Red")).toEqual({
+      asked: 2,
+      spoken: ["Red then, sir?", "Red it is, sir."],
+      answers: [{ colour: "Red" }],
+      told: [false, true],
+    })
+    // A place is the model's to tell, which sends the option it takes it for.
+    expect(await answering(["Blue (Recommended)", "Red", "Green"], "The first one.", "Red")).toEqual({
+      asked: 2,
+      spoken: ["Which one then, sir: Red or Green?", "Red it is, sir."],
+      answers: [{ colour: "Red" }],
+      told: [false, false],
+    })
   })
 
   test("a place said to a question that names its options, so they aren't read, is the model's to tell, never counted in the agent's order", async () => {
@@ -2485,11 +2571,13 @@ describe("Assistant", () => {
     const answering = (heard: ReadonlyArray<string>, unanswered = false) =>
       run(
         Effect.gen(function* () {
-          // The model, for what isn't plain, has his words as they are.
-          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: situation.utterance.heard, pending: "answers" }), undefined, {
-            others: [cloud],
-            items: card("q1", [{ ...colour, allowCustomAnswer: false }]),
-          })
+          // The model, for what isn't plain, has his words as they are, and a plain yes as yapd's pick.
+          const made = yield* assistant(
+            (situation) =>
+              Brain.decision({ act: "reply", target: handle(situation, cloud), text: situation.utterance.heard === "Yes." ? "Blue (Recommended)" : situation.utterance.heard, pending: "answers" }),
+            undefined,
+            { others: [cloud], items: card("q1", [{ ...colour, allowCustomAnswer: false }]) },
+          )
           yield* asked(made, cloud)
           for (const words of heard) yield* made.answer(words)
           if (unanswered) yield* made.unanswered()
@@ -2497,6 +2585,7 @@ describe("Assistant", () => {
         }),
       )
     const which = "Which one, sir: Red or Blue? I'd go with Blue."
+    // A yes then is the model's, which takes it for yapd's pick.
     expect(await answering(["Purple, please.", "Yes."])).toEqual({ spoken: [which, "Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }], open: false })
     expect(await answering(["None of those.", "Red."])).toEqual({ spoken: [which, "Red it is, sir."], answers: [{ [colour.id]: "Red" }], open: false })
     // Off them again, it isn't asked in the same words twice: it's let go with its line, and waits in T3 Code.
@@ -2515,26 +2604,38 @@ describe("Assistant", () => {
     const answering = (...heard: ReadonlyArray<string>) =>
       run(
         Effect.gen(function* () {
-          const made = yield* assistant((situation) => Brain.decision({ act: "dismiss", target: handle(situation, cloud), pending: "answers" }), undefined, {
-            others: [cloud],
-            items: card("q1", [{ id: "colour", question: "Which colour?", options: [{ label: "Red" }, { label: "Blue (Recommended)" }] }]),
-          })
+          // A model that asks which one then on a first no, lets it go on a second, and takes a yes for the pick it's told yapd made.
+          const made = yield* assistant(
+            (situation) => {
+              const target = handle(situation, cloud)
+              const asked = Option.getOrUndefined(situation.open)
+              if (situation.utterance.heard === "Yes.") {
+                const pick = Option.getOrUndefined(Option.flatMap(Option.fromNullable(asked?.wording?.part), ({ recommended, options }) => Option.flatMap(recommended, (index) => Option.fromNullable(options[index]))))
+                return Brain.decision({ act: "reply", target, text: pick?.label ?? "", pending: "answers" })
+              }
+              return asked !== undefined && asked.asked === asked.wording?.instead
+                ? Brain.decision({ act: "dismiss", target, pending: "answers" })
+                : Brain.decision({ act: "again", how: "instead", target, pending: "answers" })
+            },
+            undefined,
+            { others: [cloud], items: card("q1", [{ id: "colour", question: "Which colour?", options: [{ label: "Red" }, { label: "Blue (Recommended)" }] }]) },
+          )
           yield* asked(made, cloud)
           for (const words of heard) yield* made.answer(words)
           return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
         }),
       )
     expect(await answering("No.", "Say that again.", "Yes.")).toEqual({
-      asked: 0,
+      asked: 2,
       spoken: ["Red then, sir?", "Again, sir: Which colour? Red or Blue? I'd go with Blue.", "Blue it is, sir."],
       answers: [{ colour: "Blue (Recommended)" }],
     })
     expect(await answering("No.", "What are the options?", "Yes.")).toEqual({
-      asked: 0,
+      asked: 2,
       spoken: ["Red then, sir?", "Red. Blue. I'd go with Blue. Which one, sir?", "Blue it is, sir."],
       answers: [{ colour: "Blue (Recommended)" }],
     })
-    expect(await answering("No.", "No.")).toEqual({ asked: 1, spoken: ["Red then, sir?", "I'll leave that one, sir."], answers: [] })
+    expect(await answering("No.", "No.")).toEqual({ asked: 2, spoken: ["Red then, sir?", "I'll leave that one, sir."], answers: [] })
   })
 
   test("a question he heard, closed by talk over an update, 'who needs me' or a failed model call, is asked again after, and let go with a word the third time", async () => {
@@ -3187,8 +3288,9 @@ describe("Assistant", () => {
       const [named] = labels
       expect([heard, await answering(labels, heard, named)]).toEqual([heard, { asked: 1, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
     }
-    // "Okay" to an option called OK is that option, by its name, with no model.
-    expect(await answering(["OK", "Wait (Recommended)"], "Okay.", "Wait (Recommended)")).toEqual({ asked: 0, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
+    // "OK" to an option called OK is that option, by its name, with no model; "Okay", as Whisper may write it, is the model's.
+    expect(await answering(["OK", "Wait (Recommended)"], "OK.", "Wait (Recommended)")).toEqual({ asked: 0, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
+    expect(await answering(["OK", "Wait (Recommended)"], "Okay.", "OK")).toEqual({ asked: 1, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
   })
 
   test("words that are only part of an option's name, and leave out or add what turns it around, like 'not' or 'skip', are the model's to tell, never sending that option", async () => {
@@ -3248,19 +3350,48 @@ describe("Assistant", () => {
         expect([labels, heard, await answering(question, labels, heard, several)]).toEqual([labels, heard, { asked: 1, spoken: ["On it, sir."], answers: [{ next: heard }] }])
       }
     }
-    // An option's whole name, its place, a plain yes to yapd's pick and a plain no to an option called No need no model.
+    // An option's exact name needs no model: "C++." and "C." to C and C++ each, and "No tests." but never "No, tests.".
     for (const [question, labels, heard, named, sent] of [
       ["Which colour?", ["Red", "Blue"], "Blue.", "Blue", "Blue"],
       ["Which database?", ["Use Postgres", "Keep SQLite"], "Use Postgres.", "Use Postgres", "Use Postgres"],
-      ["Which colour?", ["Red", "Blue", "Green"], "The second one.", "Blue", "Blue"],
-      ["Which colour?", ["Red", "Blue (Recommended)"], "Yes.", "Blue", "Blue (Recommended)"],
+      ["Which language should the bindings use?", ["C", "C++", "Rust"], "C++.", "C++", "C++"],
+      ["Which language should the bindings use?", ["C", "C++", "Rust"], "C.", "C", "C"],
+      ["Should I run the tests?", ["Tests", "No tests (Recommended)"], "No tests.", "No tests", "No tests (Recommended)"],
       ["Should I also migrate the invoices table?", ["Yes", "No"], "No.", "No", "No"],
     ] as const) {
       expect([heard, await answering(question, labels, heard, false)]).toEqual([heard, { asked: 0, spoken: [`${named} it is, sir.`], answers: [{ next: sent }] }])
     }
+    expect(await answering("Which test extras should run?", ["Alpha", "Beta", "Gamma"], "Alpha and Gamma.", true)).toEqual({
+      asked: 0,
+      spoken: ["Alpha and Gamma it is, sir."],
+      answers: [{ next: ["Alpha", "Gamma"] }],
+    })
   })
 
-  test("a plain yes to a question whose pick is a no, or a yes or no to one it answers with no option either, is the model's to tell, so yes and no never send the same", async () => {
+  test("every answer the reviews of the rules before found still sent another option than his without the model goes to the model, which has his words", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: string, labels: ReadonlyArray<string>, heard: string, multiSelect: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const part = { id: "next", question, options: labels.map((label) => ({ label })), multiSelect }
+          // The model takes his words as he said them, which are no option.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: heard, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [part]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    for (const [question, labels, said, several = false] of reviewed) {
+      for (const heard of said) {
+        expect([labels, heard, await answering(question, labels, heard, several)]).toEqual([labels, heard, { asked: 1, spoken: ["On it, sir."], answers: [{ next: heard }] }])
+      }
+    }
+  }, 30_000)
+
+  test("a plain yes or no, whatever the question and yapd's pick, is the model's to tell, so yes and no never send the same", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (question: string, labels: ReadonlyArray<string>, heard: string, text: string) =>
       run(
@@ -3278,8 +3409,8 @@ describe("Assistant", () => {
       spoken: ["A question on Cloud deployment discovery, sir: Should I add tests? No, skip tests or Add unit tests? I'd go with No, skip tests.", "Add unit tests it is, sir."],
       answers: [{ part: "Add unit tests" }],
     })
-    expect(await answering("Should I add tests?", tests, "No.", "Add unit tests")).toEqual({
-      asked: 0,
+    expect(await answering("Should I add tests?", tests, "No.", "No, skip tests (Recommended)")).toEqual({
+      asked: 1,
       spoken: [expect.stringMatching(/^A question/), "No, skip tests it is, sir."],
       answers: [{ part: "No, skip tests (Recommended)" }],
     })
@@ -3350,22 +3481,23 @@ describe("Assistant", () => {
     expect(await answering([release], "Next.")).toEqual({ spoken: ["I'll leave that one, sir."], answers: [] })
   })
 
-  test("a plain no to a thread's question that takes any answer is sent as the answer, while 'stop' still lets it go", async () => {
+  test("a plain no to a thread's question that takes any answer is the model's, sent as it takes it, while 'stop' still lets it go without it", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "bump", question: "Should I also bump the version?" }] }]
     const result = await run(
       Effect.gen(function* () {
-        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "No", pending: "answers" }), undefined, { others: [cloud], items })
         yield* asked(made, cloud)
         yield* made.answer("Stop.")
-        const stopped = { dispatched: made.dispatched.length, open: Option.isSome(yield* made.open) }
+        const stopped = { dispatched: made.dispatched.length, open: Option.isSome(yield* made.open), asked: made.seen.length }
         yield* asked(made, cloud)
         yield* made.answer("No.")
-        return { stopped, spoken: made.spoken(), answers: made.dispatched.map(({ answers }) => answers) }
+        return { stopped, asked: made.seen.length, spoken: made.spoken(), answers: made.dispatched.map(({ answers }) => answers) }
       }),
     )
     const asking = "A question on Cloud deployment discovery, sir: Should I also bump the version?"
-    expect(result.stopped).toEqual({ dispatched: 0, open: false })
+    expect(result.stopped).toEqual({ dispatched: 0, open: false, asked: 0 })
+    expect(result.asked).toBe(1)
     expect(result.spoken).toEqual([asking, "I'll leave that one, sir.", asking, "On it, sir."])
     expect(result.answers).toEqual([{ bump: "No" }])
   })

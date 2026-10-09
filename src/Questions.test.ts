@@ -86,6 +86,73 @@ const misread: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<stri
   ["What should I do with the branch?", ["Merge now (Recommended)", "Do not merge yet", "Close the PR"], ["Not that one.", "Not this one.", "Not."]],
 ]
 
+/**
+ * Every answer the reviews of the rules before found still sent another
+ * option than his without the model: a bare number or letter taken for a
+ * place, or a place counted in the order the options were read rather than
+ * named; a plain yes to a question that asks whether, however it's put; a
+ * no with a stop or a mark after it; a name with what goes without saying
+ * left out; "all" before he'd heard them all, and "I don't mind"; a name
+ * by how it sounds, hiding a no or joining numbers; a letter for a name
+ * with a symbol; and more than a yes or a no to options named Yes and No.
+ * Several when he could pick several.
+ */
+const reviewed: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<string>, heard: ReadonlyArray<string>, several?: boolean]> = [
+  ["How many retries?", ["Once", "Twice", "Never"], ["Three."]],
+  ["How many retries?", ["None", "A few", "A lot"], ["One."]],
+  ["Which language should the bindings use?", ["Python", "Rust", "Go"], ["C."]],
+  ["How many days of logs should I keep?", ["A week", "A month", "Forever"], ["Three.", "A."]],
+  ["Should I drop the table, yes or no?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Drop the table? Yes or no?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I force push or not?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["Should I run the migration now, which locks the table for an hour or so?", ["Run it now", "Wait until tonight (Recommended)"], ["Yes."]],
+  ["Confirm: drop the users table.", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I drop the cache layer", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I run the tests?", ["Tests", "No tests (Recommended)"], ["No, tests.", "Nope, tests.", "No? Tests."]],
+  ["Should I merge?", ["Merge", "No merge (Recommended)"], ["No, merge."]],
+  ["Should I merge?", ["Merge", "Don't merge"], ["Don't. Merge.", "Don’t, merge."]],
+  ["Should I retry?", ["Retry", "Never retry"], ["Never, retry."]],
+  ["What should I do?", ["Restart", "Restart yapd"], ["Restart yapd, please.", "Um, restart yapd.", "Restart yapd, sir."]],
+  ["What should I do?", ["Voice", "Jarvis voice"], ["Jarvis voice, please."]],
+  ["What should I do?", ["Restart", "Restart Jarvis"], ["Restart Jarvis please."]],
+  ["What should I do?", ["Hold", "Please hold"], ["Please hold, sir."]],
+  ["What should I run?", ["Run tests", "Lint", "Drop the staging database"], ["All.", "All but lint."], true],
+  ["What should I do with the branch?", ["Rebase", "Merge", "Squash", "Delete the branch"], ["The last one.", "The latter."]],
+  ["Do you mind if I force push?", ["Force push", "Open a new branch (Recommended)"], ["I don't mind."]],
+  ["Which changes should go in?", ["Notable changes only", "Everything"], ["Not able changes only."]],
+  ["Who should review it?", ["Nobody", "Everyone"], ["No body."]],
+  ["What do you think — should I merge now?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["What do you think; should I merge now?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["How does merging now sound?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["What do you say we drop the table?", ["Drop it", "Keep it (Recommended)"], ["Sure."]],
+  ["Which is safer — should I drop the users table now?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Who should do it — can I go ahead and force push?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["When I'm done — delete the branch?", ["Delete it", "Keep it (Recommended)"], ["Yes."]],
+  ["How would you feel about dropping the table?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Which do you prefer, me force pushing?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["Should I run the tests?", ["Tests", "No tests"], ["No - tests.", "No -- tests.", "No / tests.", "No . . . tests.", `No "tests".`, "No (tests).", "No | tests.", "No um tests."]],
+  ["Should I merge?", ["Merge", "Don't merge"], ["Don't - merge."]],
+  ["Should I merge?", ["Merge", "Do not merge"], ["Do not - merge."]],
+  ["Should I retry?", ["Retry", "Never retry"], ["Never - retry."]],
+  ["Should I keep backups?", ["Backups", "No backups"], ["No- backups."]],
+  ["Which language should the bindings use?", ["C++", "Rust", "Go"], ["C."]],
+  ["Which languages should the bindings use?", ["C++", "Rust", "Go"], ["C, Rust."], true],
+  ["Which grade?", ["A+", "B"], ["A."]],
+  ["Which language?", ["C#", "Java"], ["C."]],
+  ["Which language?", ["F#", "OCaml"], ["F."]],
+  ["How long should I keep the preview up?", ["1 hour", "2 hours", "12 hours"], ["One, two hours."]],
+  ["How many replicas?", ["1 replica", "3 replicas", "13 replicas"], ["One, three replicas."]],
+  ["Which version should I pin?", ["Version 1.0", "Version 2.0"], ["Version ten."]],
+  ["Which version should I pin?", ["1.0", "2.0"], ["Ten."]],
+  ["How many workers?", ["2 workers", "4 workers", "24 workers"], ["Two, four workers."]],
+  ["Where should I deploy?", ["Deploy nowhere", "Deploy here"], ["Deploy now, here."]],
+  ["Do you mind if I force push?", ["Yes", "No"], ["Don't.", "Sure."]],
+  ["Mind if I force push?", ["Yes, go ahead", "No, don't"], ["Nope."]],
+  ["Deploy or roll back?", ["Roll back the release", "Deploy anyway"], ["The first one."]],
+  ["Should I deploy or roll back?", ["Roll back the release (Recommended)", "Deploy anyway"], ["The first one."]],
+  ["What should I do?", ["Cancel deploy", "Deploy"], ["Cancel, deploy."]],
+]
+
 describe("Questions", () => {
   test("a question is read in its own words when they can be said, and left to the model when they can't", () => {
     expect(Questions.sayQuestion("  Which library should we use   for `date` formatting?")).toEqual(Option.some("Which library should we use for date formatting?"))
@@ -211,58 +278,63 @@ describe("Questions", () => {
     )
   })
 
-  test("answers are taken without the model only by an option's whole name, as written, as compared or by how it sounds, its place, a plain yes to the pick once heard in full, and a plain yes or no to the option named so", () => {
+  test("an answer is taken without the model only when it's exactly an option's name, in any case and without a full stop after it: anything else is the model's", () => {
     const networks = part("Which network should we start with?", ["Mainnet", "Ghostnet (Recommended)", "Full history", "Shadow testnet"])
     const pick = (heard: string, inFull = true) => Questions.pick(networks, heard, { inFull, parts: 1 })
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     for (const [heard, index] of [
       ["Mainnet.", 0],
+      ["mainnet", 0],
+      ["MAINNET!", 0],
+      ["  Full   history? ", 2],
+      // Its "(Recommended)" only marks yapd's pick: the name is the same with it or without.
+      ["Ghostnet.", 1],
       ["Ghostnet (Recommended)", 1],
-      ["ghost net", 1],
-      ["Uh, Main net, please.", 0],
-      ["The third one.", 2],
-      ["Second.", 1],
-      ["Number two.", 1],
-      ["Option 4.", 3],
-      ["Option D.", 3],
-      ["Last.", 3],
-      // A bare number or letter may be what he means itself, which the model tells.
+      // Nothing else goes without saying: no "the", "please", "sir" or "uh", no second stop, nor any other mark.
+      ["The full history.", undefined],
+      ["Full history, please.", undefined],
+      ["Shadow testnet, sir.", undefined],
+      ["Uh, Mainnet.", undefined],
+      ["Mainnet..", undefined],
+      ["Mainnet,", undefined],
+      // Nor how it sounds, part of it, or more than it.
+      ["ghost net", undefined],
+      ["Main net.", undefined],
+      ["Shadow.", undefined],
+      ["The full history one.", undefined],
+      ["Ghostnet, but only for the tests.", undefined],
+      ["Mainnet and Ghostnet.", undefined],
+      // Nor a place, a number or a letter.
+      ["The third one.", undefined],
+      ["Second.", undefined],
+      ["Option 4.", undefined],
+      ["Option D.", undefined],
+      ["Last.", undefined],
       ["Four.", undefined],
       ["C.", undefined],
-      ["Full history.", 2],
-      // A "the" before it, or a "please" or "sir" after it, says nothing of which.
-      ["The full history.", 2],
-      ["Shadow testnet, sir.", 3],
-      // Part of a name, or more than it, is the model's to tell.
-      ["The full history one.", undefined],
-      ["Shadow.", undefined],
-      ["Full.", undefined],
-      ["Yes.", 1],
-      // Agreeing past a plain yes is the model's to tell.
+      // Nor a plain yes or no, what points at yapd's pick, or leaving it to yapd: the model's told the pick, and whether he heard it.
+      ["Yes.", undefined],
+      ["No.", undefined],
       ["Sounds good.", undefined],
-      ["Go with what you recommend.", 1],
-      ["Your pick.", 1],
-      ["You decide.", 1],
+      ["Your pick.", undefined],
+      ["The recommended one.", undefined],
+      ["Go with what you recommend.", undefined],
+      ["You decide.", undefined],
+      ["Up to you.", undefined],
     ] as const) {
       expect([heard, pick(heard)]).toEqual([heard, index === undefined ? undefined : picked(index)])
     }
-    // Cut off before yapd said its pick, a yes is asked again in full, and a no may be to the question, which is the model's.
-    expect(pick("Yes.", false)).toEqual({ _tag: "Again" })
-    expect(pick("No.", false)).toBeUndefined()
-    // A plain no to the pick: which one then.
-    expect(pick("No.")).toEqual({ _tag: "Instead" })
-    // A letter is a letter's own option when one is called by one, and no option's place when one is.
+    // Cut off before yapd said its pick, a yes or a no is the model's too, and an option's name is still that option.
+    expect([pick("Yes.", false), pick("No.", false), pick("Mainnet.", false)]).toEqual([undefined, undefined, picked(0)])
+    // A letter is an option only when it's that option's name.
     expect(Questions.pick(part("Which plan?", ["A", "B", "Neither"]), "B.", { inFull: true, parts: 1 })).toEqual(picked(1))
-    expect(Questions.pick(part("Which grade?", ["B", "A"]), "A.", { inFull: true, parts: 1 })).toEqual(picked(1))
+    expect(Questions.pick(part("Which grade?", ["B", "A"]), "a", { inFull: true, parts: 1 })).toEqual(picked(1))
     expect(Questions.pick(part("Which plan?", ["A", "Keep going", "Stop"]), "C.", { inFull: true, parts: 1 })).toBeUndefined()
-    // Yes or no to the option that is one, named so or with a comma after it, whatever yapd would pick.
-    const migrate = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
-    expect(Questions.pick(migrate, "Yeah.", { inFull: true, parts: 1 })).toEqual(picked(0))
-    expect(Questions.pick(migrate, "Nope.", { inFull: true, parts: 1 })).toEqual(picked(1))
-    // With nothing to pick from, a yes or a no is his answer, and so are "you decide" and "none of those".
-    const bump = part("Should I also bump the version?", [])
-    expect(Questions.pick(bump, "No.", { inFull: true, parts: 1 })).toEqual({ _tag: "Words", text: "No" })
-    expect(Questions.pick(part("Which colour?", ["Red", "Blue"]), "Up to you.", { inFull: true, parts: 1 })).toEqual({ _tag: "Words", text: "You decide." })
+    // Two options named alike are the model's to tell apart.
+    expect(Questions.pick(part("Which plan?", ["Plan A", "plan  a"]), "Plan A.", { inFull: true, parts: 1 })).toBeUndefined()
+    // With nothing to pick from, a yes or a no is the model's, as is "you decide"; "none of those" is his own words.
+    expect(Questions.pick(part("Should I also bump the version?", []), "No.", { inFull: true, parts: 1 })).toBeUndefined()
+    expect(Questions.pick(part("Which colour?", ["Red", "Blue"]), "Up to you.", { inFull: true, parts: 1 })).toBeUndefined()
     expect(pick("None of those.")).toEqual({ _tag: "Words", text: "None of those." })
     // What he wants done with the question itself.
     expect(["Say that again.", "What are the options?", "Later.", "Skip.", "Never mind."].map((heard) => pick(heard)?._tag)).toEqual(["Again", "More", "Later", "Leave", "Leave"])
@@ -304,63 +376,61 @@ describe("Questions", () => {
     expect(["Next.", "Next one."].map((heard) => Questions.pick(release, heard, { inFull: true, parts: 1 })?._tag)).toEqual(["Leave", undefined])
     const releases = part("Which release should this go in?", ["Next release (Recommended)", "Next sprint", "This release"])
     expect(Questions.pick(releases, "Next.", { inFull: true, parts: 2 })).toEqual({ _tag: "Which" })
-    expect(pick("Ghostnet, but only for the tests.")).toBeUndefined()
-    expect(pick("Mainnet and Ghostnet.")).toBeUndefined()
     // A form that takes only its options asks which of them, rather than send words it can't take.
     expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Which" })
   })
 
-  test("only a 'the' before a name, a 'please' or 'sir' after it and fillers like 'uh' go without saying, never yapd's name or a 'please' within, so a longer name never comes to a shorter one", () => {
+  test("an option's exact name stays without the model: 'Blue.', 'Use Postgres.', 'C++.' and 'C.' to C and C++, 'No tests.' but never 'No, tests.', and 'Alpha and Gamma.' of several", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    expect(pick(part("Which colour?", ["Red", "Blue"]), "Blue.")).toEqual(picked(1))
+    expect(pick(part("Which database?", ["Use Postgres", "Keep SQLite"]), "Use Postgres.")).toEqual(picked(0))
+    const languages = part("Which language should the bindings use?", ["C", "C++", "Rust"])
+    expect([pick(languages, "C++."), pick(languages, "C.")]).toEqual([picked(1), picked(0)])
+    const tests = part("Should I run the tests?", ["Tests", "No tests (Recommended)"])
+    expect([pick(tests, "No tests."), pick(tests, "No, tests.")]).toEqual([picked(1), undefined])
+    expect(pick(part("Which test extras should run?", ["Alpha", "Beta", "Gamma"], { multiSelect: true }), "Alpha and Gamma.")).toEqual(picked(0, 2))
+  })
+
+  test("every mark in a name counts as it's written, so a symbol, a digit, a comma, a hyphen or an apostrophe of his own, or one he leaves out, is the model's to tell", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("What should I do?", labels), heard, { inFull: true, parts: 1 })
+    expect(["C++.", "C.", "c++", "Rust."].map((heard) => pick(["C", "C++", "Rust"], heard))).toEqual([picked(1), picked(0), picked(1), picked(2)])
+    expect(["C#", "C++.", "C.", "C sharp."].map((heard) => pick(["C++", "C#", "Rust"], heard))).toEqual([picked(1), picked(0), undefined, undefined])
+    expect(["No tests.", "No, tests.", "No - tests.", "No-tests."].map((heard) => pick(["Tests", "No tests (Recommended)"], heard))).toEqual([picked(1), undefined, undefined, undefined])
+    expect(["No, skip tests.", "No skip tests."].map((heard) => pick(["No, skip tests", "Run tests"], heard))).toEqual([picked(0), undefined])
+    expect(["date-fns.", "date fns.", "datefns."].map((heard) => pick(["date-fns", "Luxon"], heard))).toEqual([picked(0), undefined, undefined])
+    expect(["Don't merge.", "Don’t merge.", "Dont merge."].map((heard) => pick(["Merge", "Don't merge"], heard))).toEqual([picked(1), undefined, undefined])
+    expect(["4.", "Four."].map((heard) => pick(["2", "4", "8"], heard))).toEqual([picked(1), undefined])
+    expect(["Four.", "4."].map((heard) => pick(["Two", "Four", "Eight"], heard))).toEqual([picked(1), undefined])
+    // A name that ends in a mark is its name with that mark.
+    expect(["Ship it!", "Ship it.", "Ship it"].map((heard) => pick(["Ship it!", "Hold it"], heard))).toEqual([picked(0), undefined, undefined])
+  })
+
+  test("a name is never taken by how it sounds, however Whisper writes it, so 'ghost net', 'v two', 'four workers' or 'not able' is the model's to tell", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("What should I do?", labels), heard, { inFull: true, parts: 1 })
     for (const [labels, heard] of [
-      [["Restart", "Restart yapd"], "Restart yapd, please."],
-      [["Voice", "Jarvis voice"], "Jarvis voice, please."],
-      [["Restart", "Restart yapd"], "Um, restart yapd."],
-      [["Restart", "Restart Jarvis"], "Restart Jarvis please."],
-      [["Hold", "Please hold"], "Please hold, sir."],
+      [["Mainnet", "Ghostnet"], "Ghost net."],
+      [["Day.js", "Luxon"], "Day js."],
+      [["v1", "v2", "v3"], "V two."],
+      [["1 worker", "4 workers"], "Four workers."],
+      [["Node 20", "Node 22"], "Node twenty two."],
+      [["OK", "Wait (Recommended)"], "Okay."],
+      [["Okay", "Wait (Recommended)"], "OK."],
+      [["Cannot reproduce", "Fixed"], "Can not reproduce."],
+      [["Notable changes only", "Everything"], "Not able changes only."],
+      [["Nobody", "Everyone"], "No body."],
     ] as const) {
-      expect([heard, pick(labels, heard)]).toEqual([heard, picked(1)])
-      expect([heard, Questions.resolve(part("What should I do?", labels), heard)]).toEqual([heard, picked(1)])
+      expect([heard, pick(labels, heard)]).toEqual([heard, undefined])
     }
-    expect(Questions.resolve(part("What should I do?", ["Restart", "Restart yapd"]), "Restart yapd, sir.")).toEqual(picked(1))
-    // Those still go without saying around a name that hasn't them.
-    expect(["Hold, please.", "Uh, hold, sir.", "The hold."].map((heard) => pick(["Hold", "Wait"], heard))).toEqual([picked(0), picked(0), picked(0)])
-    // A name that ends in "please" is as much his words with it as without: the model tells.
-    expect(pick(["Hold", "Hold please"], "Hold, please.")).toBeUndefined()
-  })
-
-  test("a no with a stop after it, like 'No, tests.', is his no then a name, never the option it would turn, which the model tells", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (labels: ReadonlyArray<string>, heard: string, several = false) => Questions.pick(part("What should I do?", labels, { multiSelect: several }), heard, { inFull: true, parts: 1 })
-    for (const [labels, heard] of [
-      [["Tests", "No tests (Recommended)"], "No, tests."],
-      [["Merge", "No merge (Recommended)"], "No, merge."],
-      [["Merge", "Don't merge"], "Don't. Merge."],
-      [["Merge", "Don't merge"], "Don’t, merge."],
-      [["Retry", "Never retry"], "Never, retry."],
-      [["Tests", "No tests"], "Nope, tests."],
-      [["Tests", "No tests"], "No? Tests."],
-    ] as const) {
-      expect([heard, pick(labels, heard), Questions.resolve(part("What should I do?", labels), heard)]).toEqual([heard, undefined, { _tag: "Words", text: heard }])
-    }
-    // Said so, "not now" puts it off, never sending the option named so.
-    expect(pick(["Now", "Not now"], "Not. Now.")).toEqual({ _tag: "Later" })
-    // Nor, of several, is it a list of the option called No and a name.
-    expect(pick(["No", "Tests", "Docs"], "No, tests.", true)).toBeUndefined()
-    // A name with the same stop is still that option, and one said without a stop is plain.
-    expect(pick(["No, skip tests", "Run tests"], "No, skip tests.")).toEqual(picked(0))
-    expect(pick(["Tests", "No tests"], "No tests.")).toEqual(picked(1))
-    expect(pick(["Merge", "Don't merge"], "Don’t merge.")).toEqual(picked(1))
-  })
-
-  test("a no never comes to a name by how it sounds when the name hides it, like 'not able' to Notable or 'no body' to Nobody", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("What should I do?", labels), heard, { inFull: true, parts: 1 })
-    expect([pick(["Notable changes only", "Everything"], "Not able changes only."), pick(["Nobody", "Everyone"], "No body.")]).toEqual([undefined, undefined])
-    expect(Questions.resolve(part("What should I do?", ["Notable changes only", "Everything"]), "Not able changes only")).toEqual({ _tag: "Words", text: "Not able changes only" })
-    // A name with a no of its own still sounds as it's said, and so does one said as written.
-    expect([pick(["Cannot reproduce", "Fixed"], "Can not reproduce."), pick(["Nobody", "Everyone"], "Nobody.")]).toEqual([picked(0), picked(0)])
+    // As written, each is its name.
+    expect([pick(["Mainnet", "Ghostnet"], "Ghostnet."), pick(["v1", "v2", "v3"], "V2."), pick(["OK", "Wait"], "OK."), pick(["Nobody", "Everyone"], "Nobody.")]).toEqual([
+      picked(1),
+      picked(1),
+      picked(0),
+      picked(0),
+    ])
   })
 
   test("taking back what he said, like 'cancel that', is the model's to tell, never an option it's a word of", () => {
@@ -395,440 +465,206 @@ describe("Questions", () => {
     ] as const) {
       expect([heard, pick(labels, heard)]).toEqual([heard, undefined])
     }
-    // An option named in full is plain, whatever turns it, written any way.
+    // An option named exactly is plain, whatever turns it.
     expect(pick(["Red", "Blue"], "Blue.")).toEqual(picked(1))
     expect(pick(["Keep it", "Don't keep it"], "Keep it.")).toEqual(picked(0))
-    expect(pick(["Keep it", "Don't keep it"], "Don’t keep it.")).toEqual(picked(1))
+    expect(pick(["Keep it", "Don't keep it"], "Don't keep it.")).toEqual(picked(1))
     expect(pick(["Run tests", "Skip tests"], "Skip tests.")).toEqual(picked(1))
     expect(pick(["Add tests", "No tests"], "No tests.")).toEqual(picked(1))
     expect(pick(["Merge now", "Do not merge now"], "Do not merge now.")).toEqual(picked(1))
-    expect(pick(["Cannot reproduce", "Fixed"], "Can not reproduce.")).toEqual(picked(0))
     // The model's answer, or his words dictated to the thread, are his own words then, never that option.
     const merge = part("What should I do with the branch?", ["Open a draft pull request (Recommended)", "Do not merge now"])
     expect(Questions.resolve(merge, "Merge now")).toEqual({ _tag: "Words", text: "Merge now" })
     expect(Questions.resolve(merge, "Do not merge now")).toEqual(picked(1))
-    // Nor do they name it, as what he said over yapd's pick before he heard it: only its whole name or its place does, never with a no.
-    const waiting = part("What should I do with the branch?", ["Merge now (Recommended)", "Wait for CI"])
-    expect(["Merge now, I think.", "Don't merge, I think.", "The first one.", "Not the first one."].map((heard) => Questions.mentions(waiting, 0, heard))).toEqual([
-      true,
-      false,
-      true,
-      false,
-    ])
-    expect(["Wait for CI, I think.", "Wait, I think.", "CI, I think.", "Don't wait for CI."].map((heard) => Questions.mentions(waiting, 1, heard))).toEqual([true, false, false, false])
-    // Of several, each piece is held to the same: only whole names.
-    const checks = part("Which checks should run?", ["Lint", "Tests", "Skip docs"], { multiSelect: true })
-    const several = (heard: string) => Questions.pick(checks, heard, { inFull: true, parts: 1 })
-    expect(["Lint and docs.", "All but docs.", "Lint and skip docs.", "All but skip docs."].map(several)).toEqual([undefined, undefined, picked(0, 2), undefined])
-    expect(Questions.resolve(checks, "Lint\nDocs")).toEqual({ _tag: "Words", text: "Lint\nDocs" })
-    expect(Questions.pick(part("Which checks should run?", ["No", "Docs", "Tests"], { multiSelect: true }), "No docs.", { inFull: true, parts: 1 })).toBeUndefined()
   })
 
-  test("every answer review found sent another option than his without the model, by word order, what an option leaves out, 'just' or a verb, is the model's to tell", () => {
-    for (const [asked, labels, said, several = false] of misread) {
+  test("every answer review found sent another option than his without the model is the model's to tell, or his own words when it comes back", () => {
+    for (const [asked, labels, said, several = false] of [...misread, ...reviewed]) {
       const asking = part(asked, labels, { multiSelect: several })
       for (const heard of said) {
         const answers = [Questions.pick(asking, heard, { inFull: true, parts: 1 }), Questions.pick(asking, heard, { inFull: false, parts: 1 }), Questions.resolve(asking, heard)]
         expect([labels, heard, answers]).toEqual([labels, heard, [undefined, undefined, { _tag: "Words", text: heard }]])
       }
     }
+    // "Not now" with a stop in it still puts the question off, never sending the option named so.
+    const deploy = part("Should I deploy?", ["Now", "Not now"])
+    expect(["Not. Now.", "Not - now."].map((heard) => Questions.pick(deploy, heard, { inFull: true, parts: 1 }))).toEqual([{ _tag: "Later" }, { _tag: "Later" }])
   })
 
-  test("the plain answers stay without the model: an option's whole name, its place, a plain yes to the pick heard in full, and a plain no to an option called No", () => {
+  test("a plain yes or no, 'your pick', 'the recommended one' and 'you decide' are the model's to tell, whatever the question asks, and a yes or no takes an option only as its exact name", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    expect(pick(part("Which colour?", ["Red", "Blue"]), "Blue.")).toEqual(picked(1))
-    expect(pick(part("Which database?", ["Use Postgres", "Keep SQLite"]), "Use Postgres.")).toEqual(picked(0))
-    expect(pick(part("Which colour?", ["Red", "Blue", "Green"]), "The second one.")).toEqual(picked(1))
-    expect(pick(part("Which colour?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
-    expect(pick(part("Should I also migrate the invoices table?", ["Yes", "No"]), "No.")).toEqual(picked(1))
-  })
-
-  test("a yes or an okay that starts another option's name, or has its words, is the model's to tell, never yapd's pick", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (options: ReadonlyArray<string>, heard: string, inFull = true) => Questions.pick(part("What now?", options), heard, { inFull, parts: 1 })
-    for (const [options, heard] of [
-      [["Ship it now", "Hold it for QA (Recommended)"], "Ship it."],
-      [["Proceed with the migration", "Wait for review (Recommended)"], "Proceed."],
-      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Go ahead."],
-      [["Do it again", "Mark it skipped (Recommended)"], "Do it."],
-      [["Agreed, ship it", "Revise first (Recommended)"], "Agreed."],
-      [["Okay, ship it", "Wait (Recommended)"], "OK."],
-      [["Fine as it is", "Rewrite it (Recommended)"], "Fine."],
-      [["Ship it now", "Ship it tomorrow (Recommended)"], "Ship it."],
-      [["OK, but only on staging", "Not yet (Recommended)"], "Okay, do it."],
-      // A yes with words after it that start another option, or are all its own, is to that option as much as to yapd's pick.
-      [["Ship it now", "Hold it for QA (Recommended)"], "Yes, ship it."],
-      [["Go for it", "Hold off (Recommended)"], "Yes, go for it."],
-      [["Not yet (Recommended)", "Merge it now"], "Yes, merge it."],
-      [["Proceed with the migration", "Wait for review (Recommended)"], "Yes, proceed."],
-      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sure, go ahead."],
-      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Yeah, go ahead."],
-      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sounds good, go ahead."],
-      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Okay, go ahead."],
-      [["Do it again", "Mark it skipped (Recommended)"], "Yes, do it."],
-      [["Do it again", "Mark it skipped (Recommended)"], "OK, do it."],
-      [["Do it again", "Mark it skipped (Recommended)"], "Yeah, do it."],
-      // A word of his that another option has, wherever it is in its name, may be to that option, however he agrees.
-      [["Wait for CI (Recommended)", "Merge now"], "Yes, merge it."],
-      [["Wait for CI (Recommended)", "Squash and merge"], "Merge it."],
-      [["Wait for CI (Recommended)", "Squash and merge"], "Yes, merge it."],
-      [["Hold for QA (Recommended)", "Tag and ship"], "Ship it."],
-      [["Hold for QA (Recommended)", "Tag and ship"], "Yes, ship it."],
-      // Words to go ahead, to a pick that holds back, may be to going ahead after all.
-      [["Pause (Recommended)", "Continue the migration"], "Proceed."],
-      [["Pause (Recommended)", "Continue the migration"], "Go on."],
-      [["Wait for CI (Recommended)", "Merge now"], "Yes, ship it."],
-      [["Wait for CI (Recommended)", "Merge now"], "Yes, do it."],
-      [["Not yet (Recommended)", "Deploy"], "Go ahead."],
-      [["Keep it for now (Recommended)", "Drop the table"], "Go for it."],
-      [["Abort the migration (Recommended)", "Continue anyway"], "Proceed."],
+    const pick = (asked: Questions.Said, heard: string, inFull = true) => Questions.pick(asked, heard, { inFull, parts: 1 })
+    const agreeing = ["Yes.", "Yeah.", "Sure.", "No.", "Nope.", "OK.", "Fine.", "Go ahead.", "Your pick.", "The recommended one.", "What you recommend.", "You decide.", "Up to you."]
+    for (const [asked, labels] of [
+      ["Which colour should the test use?", ["Red", "Blue (Recommended)"]],
+      ["Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]],
+      ["Which colour should the test use? Blue matches the theme.", ["Red", "Blue (Recommended)"]],
+      ["Should I keep the cache?", ["Drop it (Recommended)", "Keep it"]],
+      ["Should I add tests?", ["No, skip tests (Recommended)", "Add unit tests"]],
+      ["Should I deploy?", ["No, wait (Recommended)", "Yes, now"]],
+      ["Do you mind if I force push?", ["Force push", "Open a new branch (Recommended)"]],
+      ["What now?", ["Pause (Recommended)", "Continue the migration"]],
     ] as const) {
-      expect([heard, pick(options, heard)]).toEqual([heard, undefined])
-      // Cut off before yapd's pick, it may be that option all the same.
-      expect([heard, pick(options, heard, false)]).toEqual([heard, undefined])
+      for (const heard of agreeing) {
+        expect([asked, heard, pick(part(asked, labels), heard), pick(part(asked, labels), heard, false)]).toEqual([asked, heard, undefined, undefined])
+      }
     }
-    // "Okay" is "OK" as Whisper writes it either way, so it's the option by that name.
-    expect(pick(["OK", "Wait (Recommended)"], "Okay.")).toEqual(picked(0))
-    expect(pick(["Okay", "Wait (Recommended)"], "OK.")).toEqual(picked(0))
-    // Going ahead or agreeing past a plain yes is the model's to tell, even where only the pick could be meant; what points at the pick takes it.
-    expect(pick(["Ship it now (Recommended)", "Hold it for QA"], "Ship it.")).toEqual(undefined)
-    expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "Sounds good.")).toEqual(undefined)
-    expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "The recommended one.")).toEqual(picked(1))
-    expect(pick(["Go with the old name", "Rename it (Recommended)"], "Yes, go ahead.")).toEqual(undefined)
-    expect(pick(["Merge now (Recommended)", "Wait for CI"], "Yes, merge it.")).toEqual(undefined)
-    // A plain yes to a pick that holds back takes it, as does pointing at it; going ahead, to any pick, is the model's.
-    expect(["Yes.", "Sounds good.", "Your pick."].map((heard) => pick(["Pause (Recommended)", "Continue the migration"], heard))).toEqual([picked(0), undefined, picked(0)])
-    expect(["Go on.", "Proceed."].map((heard) => pick(["Keep going (Recommended)", "Stop the run"], heard))).toEqual([undefined, undefined])
-  })
-
-  test("a plain yes when yapd's pick is a no, or a yes or no to a question it answers when no option is either, is the model's to tell", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    // "Yes" to "Should I add tests?" is never "No, skip tests", which "no" still is.
-    const tests = part("Should I add tests?", ["No, skip tests (Recommended)", "Add unit tests"])
-    expect(["Yes.", "Yeah.", "Go ahead.", "No."].map((heard) => pick(tests, heard))).toEqual([undefined, undefined, undefined, picked(0)])
-    // Nor when the question isn't one a yes answers.
-    expect(pick(part("How should I handle the tests?", ["No tests (Recommended)", "Unit tests", "Full suite"]), "Yes.")).toBeUndefined()
-    // "Yes" to "Should I keep the cache?" may be "Keep it", and "no" "Drop it", whatever yapd would pick.
-    const cache = part("Should I keep the cache?", ["Drop it (Recommended)", "Keep it"])
-    expect(["Yes.", "Sure.", "No.", "Nope."].map((heard) => pick(cache, heard))).toEqual([undefined, undefined, undefined, undefined])
-    expect(pick(part("The cache is stale. Can we keep it for now?", ["Drop it (Recommended)", "Keep it"]), "Yes.")).toBeUndefined()
-    // However the question that asks whether is put: with any subject, or none, or starting with what it would do.
-    for (const asked of [
-      "Should migrations run first?",
-      "Should tests be added for the loader?",
-      "Is caching still needed?",
-      "Can CI run without the fixtures?",
-      "OK to drop the cache?",
-      "Ready to merge?",
-      "Proceed with the migration?",
-      "Keep the old config?",
-      "So, should I do it now?",
-      // Or followed by a remark.
-      "Should I run the migration now? It locks the table for an hour.",
-    ]) {
-      expect([asked, pick(part(asked, ["Do it", "Skip it for now (Recommended)"]), "Yes.")]).toEqual([asked, undefined])
-    }
-    expect(["Yes.", "No."].map((heard) => pick(part("Should I run the migration now? It locks the table for an hour.", ["Skip it for now (Recommended)", "Do it now"]), heard))).toEqual([
+    // Options named Yes and No take a yes or a no only as their names, never another word for one.
+    const minding = part("Do you mind if I force push?", ["Yes", "No (Recommended)"])
+    expect(["Yes.", "no", "No!", "Yeah.", "Yep.", "Sure.", "Nope.", "Don't.", "Do not.", "No thanks."].map((heard) => pick(minding, heard))).toEqual([
+      picked(0),
+      picked(1),
+      picked(1),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       undefined,
       undefined,
     ])
-    expect(pick(part("Want me to add tests?", ["Add unit tests", "Skip tests (Recommended)"]), "Yes.")).toBeUndefined()
-    // So is an okay, which is as much a yes to the question as to yapd's pick.
-    for (const [asked, labels, heard] of [
-      ["OK to merge now?", ["Not yet (Recommended)", "Merge now"], "OK."],
-      ["OK to merge now?", ["Not yet (Recommended)", "Merge now"], "Okay."],
-      ["Is it fine to drop the old table?", ["Keep it for now (Recommended)", "Drop it"], "Fine."],
-      ["Is it fine to drop the old table?", ["Keep it for now (Recommended)", "Drop it"], "That's fine."],
-      ["Should I keep the cache?", ["Drop it (Recommended)", "Keep it"], "Agreed."],
-      ["Should I keep the cache?", ["Drop it (Recommended)", "Keep it"], "Sounds good."],
-      ["Should I deploy?", ["No, wait (Recommended)", "Yes, now"], "OK."],
-      ["Should I add tests?", ["No, skip tests (Recommended)", "Add unit tests"], "Fine."],
-    ] as const) {
-      expect([asked, heard, pick(part(asked, labels), heard)]).toEqual([asked, heard, undefined])
-    }
-    expect(pick(part("Should I deploy?", ["No, wait (Recommended)", "Yes, now"]), "Sure.")).toEqual(picked(1))
-    // What only points at yapd's pick still takes it; "go with that" may point at the option said last, which the model tells.
-    expect(["Your pick.", "Go with that.", "The recommended one.", "What you recommend."].map((heard) => pick(cache, heard))).toEqual([picked(0), undefined, picked(0), picked(0)])
-    // An okay is the model's to tell, even to a question that asks which.
-    expect(["OK.", "Fine.", "Sounds good."].map((heard) => pick(part("Which colour should the test use?", ["Red", "Blue (Recommended)"]), heard))).toEqual([undefined, undefined, undefined])
-    // A question that asks which, or names its options, takes a yes as yapd's pick, and a no as which one then, as before.
-    const colour = part("Which colour should the test use?", ["Red", "Blue (Recommended)"])
-    expect([pick(colour, "Yes."), pick(colour, "No.")]).toEqual([picked(1), { _tag: "Instead" }])
-    expect(pick(part("Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
-    expect(pick(part("The test needs a colour. So, which one should it use?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
-    expect(pick(part("Which colour should the test use? Blue matches the theme.", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
-    // An option that is a yes or a no is still what a yes or no picks.
     const invoices = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
-    expect([pick(invoices, "Yes."), pick(invoices, "No.")]).toEqual([picked(0), picked(1)])
-  })
-
-  test("a plain yes takes yapd's pick only to a question that plainly asks which, or names its options with 'or': one that may ask whether, however it's put, is the model's", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (asked: string, labels: ReadonlyArray<string>, heard = "Yes.") => Questions.pick(part(asked, labels), heard, { inFull: true, parts: 1 })
-    for (const [asked, labels] of [
-      ["Should I drop the table, yes or no?", ["Drop it", "Keep it (Recommended)"]],
-      ["Drop the table? Yes or no?", ["Drop it", "Keep it (Recommended)"]],
-      ["Should I force push or not?", ["Force push", "Open a new branch (Recommended)"]],
-      ["Should I force push or no?", ["Force push", "Open a new branch (Recommended)"]],
-      ["Should I run the migration now, which locks the table for an hour or so?", ["Run it now", "Wait until tonight (Recommended)"]],
-      ["Confirm: drop the users table.", ["Drop it", "Keep it (Recommended)"]],
-      ["Should I drop the cache layer", ["Drop it", "Keep it (Recommended)"]],
-      ["Why not merge now?", ["Merge now", "Wait for CI (Recommended)"]],
-      ["What if I merge now?", ["Merge now", "Wait for CI (Recommended)"]],
-      ["What do you think, should I drop the table?", ["Drop it", "Keep it (Recommended)"]],
-      ["Which is it, or should I leave the table?", ["Drop it", "Keep it (Recommended)"]],
-      ["Should I use Postgres or something else?", ["Postgres", "SQLite (Recommended)"]],
+    expect(["Yes.", "Yes, all of them.", "No.", "Nope."].map((heard) => pick(invoices, heard))).toEqual([undefined, picked(0), picked(1), undefined])
+    // A yes with words after it, or words to go ahead, are the model's however they start another option's name.
+    for (const [labels, heard] of [
+      [["Ship it now", "Hold it for QA (Recommended)"], "Ship it."],
+      [["Proceed with the migration", "Wait for review (Recommended)"], "Proceed."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sure, go ahead."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Yes, do it."],
+      [["Agreed, ship it", "Revise first (Recommended)"], "Agreed."],
+      [["Okay, ship it", "Wait (Recommended)"], "OK."],
+      [["Wait for CI (Recommended)", "Squash and merge"], "Yes, merge it."],
+      [["Merge now (Recommended)", "Wait for CI"], "Yes, merge it."],
     ] as const) {
-      expect([asked, pick(asked, labels)]).toEqual([asked, undefined])
-      // Nor is a no to it which one then.
-      expect([asked, pick(asked, labels, "No.")]).toEqual([asked, undefined])
-    }
-    // Asking which, or naming its options with "or", a yes is to yapd's pick, and a no asks which one then.
-    for (const [asked, labels] of [
-      ["Which colour should the test use?", ["Red", "Blue (Recommended)"]],
-      ["When should I deploy?", ["Now", "Tonight (Recommended)"]],
-      ["Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]],
-      ["Should I drop the table or keep it?", ["Drop it", "Keep it (Recommended)"]],
-    ] as const) {
-      expect([asked, pick(asked, labels), pick(asked, labels, "No.")]).toEqual([asked, picked(1), { _tag: "Instead" }])
+      expect([heard, pick(part("What now?", labels), heard)]).toEqual([heard, undefined])
     }
   })
 
-  test("'I don't mind' is the model's to tell, since to 'Do you mind if I…?' it's a yes, never leaving it to yapd's pick", () => {
+  test("a place, by any words, and a number or a letter that isn't a name are the model's to tell, as is his saying one over yapd's pick before he heard it", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const push = part("Do you mind if I force push?", ["Force push", "Open a new branch (Recommended)"])
-    const pick = (heard: string) => Questions.pick(push, heard, { inFull: true, parts: 1 })
-    expect(["I don't mind.", "Don't mind.", "I don’t mind."].map(pick)).toEqual([undefined, undefined, undefined])
-    // Leaving it to yapd in so many words still takes its pick.
-    expect(["You decide.", "Up to you.", "No preference."].map(pick)).toEqual([picked(1), picked(1), picked(1)])
-  })
-
-  test("a number he says to options named with numbers takes one only as its whole name, never a place, and anything less is the model's", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (asked: Questions.Said, heard: string, inFull = true) => Questions.pick(asked, heard, { inFull, parts: 1 })
+    const colour = part("Which colour?", ["Red", "Blue", "Green"])
+    for (const heard of ["The second one.", "Second.", "Option two.", "Number 2.", "Option B.", "The third option.", "The former.", "The last one.", "The latter.", "Two.", "2.", "B.", "The two one.", "The blue one."]) {
+      expect([heard, pick(colour, heard), pick(colour, heard, false)]).toEqual([heard, undefined, undefined])
+    }
+    // Named with numbers or letters, only the name as written is one.
     const workers = part("How many parallel workers should the test run use?", ["1 worker", "2 workers", "4 workers (Recommended)", "8 workers"])
-    const pick = (heard: string, asked = workers) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    for (const [heard, index] of [
-      ["Eight workers.", 3],
-      ["Four workers.", 2],
-      ["4 workers.", 2],
-      ["The four workers.", 2],
-      ["One worker.", 0],
-      // A number alone is part of a name, and with names that have numbers, no place is ever one.
-      ["Four.", undefined],
-      ["4.", undefined],
-      ["Two.", undefined],
-      ["One.", undefined],
-      ["The four one.", undefined],
-      ["The fourth one.", undefined],
-      ["Option four.", undefined],
-      ["Last.", undefined],
-      ["Three.", undefined],
-      ["Number four.", undefined],
-    ] as const) {
-      expect([heard, pick(heard)]).toEqual([heard, index === undefined ? undefined : picked(index)])
-    }
-    // A name that's only a number is its whole name.
-    expect(pick("Four.", part("How many workers?", ["1", "2", "4", "8"]))).toEqual(picked(2))
-    expect(pick("Three.", part("How many retries?", ["2 retries", "3 retries", "5 retries"]))).toBeUndefined()
-    expect(pick("Three retries.", part("How many retries?", ["2 retries", "3 retries", "5 retries"]))).toEqual(picked(1))
-    expect(pick("Twenty two.", part("Which Node version?", ["Node 18", "Node 20 (Recommended)", "Node 22"]))).toBeUndefined()
-    expect(pick("Node twenty two.", part("Which Node version?", ["Node 18", "Node 20 (Recommended)", "Node 22"]))).toEqual(picked(2))
-    const several = part("How many workers?", ["1 worker", "2 workers", "4 workers", "8 workers"], { multiSelect: true })
-    expect(Questions.pick(several, "Two and four.", { inFull: true, parts: 1 })).toBeUndefined()
-    expect(Questions.pick(several, "Two workers and four workers.", { inFull: true, parts: 1 })).toEqual(picked(1, 2))
-    expect(Questions.resolve(workers, "4 workers")).toEqual(picked(2))
-    expect(Questions.resolve(workers, "4")).toEqual({ _tag: "Words", text: "4" })
-    // Named with numbers in words, as an agent may write them, it's the same: "four" is never the fourth, nor 4 workers.
-    const spelled = part("How many parallel workers should the test run use?", ["One worker", "Two workers", "Four workers (Recommended)", "Eight workers"])
-    expect(["Four.", "4.", "2.", "4 workers.", "Eight workers."].map((heard) => pick(heard, spelled))).toEqual([undefined, undefined, undefined, picked(2), picked(3)])
-    // And a number said in words goes by how it sounds, as in "v two" for v2.
-    expect(pick("V two.", part("Which API version?", ["v1", "v2", "v3"]))).toEqual(picked(1))
-    // Named with no numbers, a number is a place only said as one, "the blue one" is more than a name, and "one" in a name keeps places off.
-    expect(pick("Two.", part("Which colour?", ["Red", "Blue", "Green"]))).toBeUndefined()
-    expect(pick("Option two.", part("Which colour?", ["Red", "Blue", "Green"]))).toEqual(picked(1))
-    expect(pick("The blue one.", part("Which colour?", ["Red", "Blue", "Green"]))).toBeUndefined()
-    expect(pick("Two.", part("Which colour?", ["Red", "Blue", "One more"]))).toBeUndefined()
-  })
-
-  test("with a letter, number or place word in any option's name, no place is ever one, and only a whole name picks", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    // Claude lists the one it recommends first.
+    expect(["4 workers.", "4 workers", "Four workers.", "Four.", "4.", "The fourth one.", "Option four."].map((heard) => pick(workers, heard))).toEqual([
+      picked(2),
+      picked(2),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+    expect(["Node 22.", "Node twenty two.", "Twenty two."].map((heard) => pick(part("Which Node version?", ["Node 18", "Node 20 (Recommended)", "Node 22"]), heard))).toEqual([
+      picked(2),
+      undefined,
+      undefined,
+    ])
     const lettered = part("Which approach?", ["Option B (Recommended)", "Option A"])
     expect(["Option A.", "Option B.", "B.", "A.", "The second one."].map((heard) => pick(lettered, heard))).toEqual([picked(1), picked(0), undefined, undefined, undefined])
     const numbered = part("Which approach?", ["Option 2 (Recommended)", "Option 1"])
-    expect(["Option one.", "Option 1.", "Option two.", "One.", "Number one.", "The first one."].map((heard) => pick(numbered, heard))).toEqual([
-      picked(1),
-      picked(1),
-      picked(0),
-      undefined,
-      undefined,
-      undefined,
-    ])
+    expect(["Option 1.", "Option one.", "One.", "The first one."].map((heard) => pick(numbered, heard))).toEqual([picked(1), undefined, undefined, undefined])
     const merging = part("How should conflicts be settled?", ["Last write wins (Recommended)", "First write wins", "Manual merge"])
-    expect(["First write wins.", "First.", "Last.", "Second.", "The third one.", "The last one.", "Last one.", "The first one."].map((heard) => pick(merging, heard))).toEqual([
-      picked(1),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+    expect(["First write wins.", "First.", "Last.", "The last one."].map((heard) => pick(merging, heard))).toEqual([picked(1), undefined, undefined, undefined])
+    expect(Questions.resolve(workers, "4 workers")).toEqual(picked(2))
+    expect(Questions.resolve(workers, "4")).toEqual({ _tag: "Words", text: "4" })
+    expect(Questions.resolve(colour, "The second one")).toEqual({ _tag: "Words", text: "The second one" })
+    // Said over yapd's pick before he heard it, only its exact name among his words names it, never with a no, a place or a number.
+    const waiting = part("What should I do with the branch?", ["Merge now (Recommended)", "Wait for CI"])
+    expect(["Merge now, I think.", "merge now", "Merge nowhere.", "Don't merge, I think.", "The first one.", "Not the first one."].map((heard) => Questions.mentions(waiting, 0, heard))).toEqual([
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
     ])
-    // Several, each by its letter, is the model's to tell when the names have the letters; by their names, they're what he picked.
-    const several = part("Which suites?", ["Option C", "Option A", "Option B"], { multiSelect: true })
-    expect(Questions.pick(several, "A and B.", { inFull: true, parts: 1 })).toBeUndefined()
-    expect(Questions.pick(several, "Option A and option B.", { inFull: true, parts: 1 })).toEqual(picked(1, 2))
-    // A list takes only whole names, never letters or places.
-    const suites = part("Which suites?", ["Unit", "Lint", "Types"], { multiSelect: true })
-    expect(Questions.pick(suites, "A and C.", { inFull: true, parts: 1 })).toBeUndefined()
-    expect(Questions.pick(suites, "Unit and types.", { inFull: true, parts: 1 })).toEqual(picked(0, 2))
-  })
-
-  test("a bare number or letter is the model's to tell, since it may be his answer itself, like 'three' to how many: only a place said as one, like 'the second one' or 'option two', is a place", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    for (const [asked, labels, heard] of [
-      ["How many retries?", ["Once", "Twice", "Never"], "Three."],
-      ["How many retries?", ["None", "A few", "A lot"], "One."],
-      ["Which language should the bindings use?", ["Python", "Rust", "Go"], "C."],
-      ["How many days of logs should I keep?", ["A week", "A month", "Forever"], "Three."],
-      ["How many days of logs should I keep?", ["A week", "A month", "Forever"], "A."],
-      ["Which colour?", ["Red", "Blue", "Green"], "2."],
-      ["Which colour?", ["Red", "Blue", "Green"], "The two one."],
-    ] as const) {
-      expect([asked, heard, pick(part(asked, labels), heard)]).toEqual([asked, heard, undefined])
-    }
-    const colour = part("Which colour?", ["Red", "Blue", "Green"])
-    expect(["The second one.", "Second.", "Option two.", "Number 2.", "Option B.", "The third option.", "The former."].map((heard) => pick(colour, heard))).toEqual([
-      picked(1),
-      picked(1),
-      picked(1),
-      picked(1),
-      picked(1),
-      picked(2),
-      picked(0),
-    ])
-    // Nor does a bare number name yapd's pick, said over it before he heard it.
+    expect(["Wait for CI, I think.", "Wait, I think.", "CI, I think.", "Don't wait for CI."].map((heard) => Questions.mentions(waiting, 1, heard))).toEqual([true, false, false, false])
+    const languages = part("Which language should the bindings use?", ["C", "C++ (Recommended)", "Rust"])
+    expect([Questions.mentions(languages, 0, "C++, I think."), Questions.mentions(languages, 1, "C++, I think.")]).toEqual([false, true])
     const retries = part("How many retries?", ["Once", "Twice", "Never (Recommended)"])
-    expect(["Three, I think.", "C, I think.", "The third one, I think.", "Option three, I think."].map((heard) => Questions.mentions(retries, 2, heard))).toEqual([false, false, true, true])
+    expect(["Three, I think.", "C, I think.", "The third one, I think.", "Option three, I think."].map((heard) => Questions.mentions(retries, 2, heard))).toEqual([false, false, false, false])
   })
 
-  test("'the last one' said before he'd heard them all is the model's to tell, since the last he heard may not be the last there is", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const branch = part("What should I do with the branch?", ["Rebase", "Merge", "Squash", "Delete the branch"])
-    const pick = (heard: string, inFull: boolean) => Questions.pick(branch, heard, { inFull, parts: 1 })
-    expect(["The last one.", "Last.", "The latter.", "The second one."].map((heard) => pick(heard, false))).toEqual([undefined, undefined, undefined, picked(1)])
-    expect(["The last one.", "The latter."].map((heard) => pick(heard, true))).toEqual([picked(3), picked(3)])
-  })
-
-  test("after a no to yapd's pick, a place counts among the others he was offered, never the pick he turned down", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    // As the assistant leans it once it's asked "Which one then, sir: Red or Green?".
-    const colour = { ...part("Which colour?", ["Blue (Recommended)", "Red", "Green"]), recommended: Option.none<number>(), among: [1, 2] }
-    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    expect(["The first one.", "Option one.", "First.", "Option A.", "The second one.", "Option B.", "Last.", "Blue."].map((heard) => pick(colour, heard))).toEqual([
-      picked(1),
-      picked(1),
-      picked(1),
-      picked(1),
-      picked(2),
-      picked(2),
-      picked(2),
-      picked(0),
-    ])
-    // A third place, or one past what he was offered, is no place at all, and a bare letter is the model's to tell.
-    expect([pick(colour, "The third one."), pick(colour, "Option C."), pick(colour, "A.")]).toEqual([undefined, undefined, undefined])
-    // The model's answer only by a whole name.
-    expect(Questions.resolve(colour, "Red")).toEqual(picked(1))
-    expect(Questions.resolve(colour, "The first one.")).toEqual({ _tag: "Words", text: "The first one." })
-    expect(Questions.mentions(colour, 1, "The first one, I think.")).toBe(true)
-    expect(Questions.mentions(colour, 0, "The first one, I think.")).toBe(false)
-    const extras = { ...part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)"], { multiSelect: true }), recommended: Option.none<number>(), among: [0, 1] }
-    expect(["All of them.", "Both.", "Alpha and Beta.", "The first and the second."].map((heard) => pick(extras, heard))).toEqual([undefined, undefined, picked(0, 1), undefined])
-  })
-
-  test("when the question names its options so they aren't read, a place is the model's to tell, since he heard them in the question's order, not the agent's", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    // Claude lists the one it recommends first, so "the first one" he heard is Deploy now, which the agent lists second.
-    const deploy = part("Should I deploy now or wait?", ["Wait (Recommended)", "Deploy now"])
-    expect(deploy.read).toBe(false)
-    for (const heard of ["The first one.", "The latter.", "The former.", "First.", "Second.", "Last.", "Option two.", "Number one.", "A.", "B."]) {
-      expect([heard, pick(deploy, heard)]).toEqual([heard, undefined])
-    }
-    expect([Questions.mentions(deploy, 0, "The first one, I think."), Questions.mentions(deploy, 1, "The latter, I think.")]).toEqual([false, false])
-    // By name it's still plain.
-    expect(["Deploy now.", "Wait."].map((heard) => pick(deploy, heard))).toEqual([picked(1), picked(0)])
-    // Once he's heard the others after a no, it's their order he heard.
-    const rollback = { ...part("Should I deploy now, wait or roll back?", ["Wait (Recommended)", "Deploy now", "Roll back"]), recommended: Option.none<number>(), among: [1, 2] }
-    expect(rollback.read).toBe(false)
-    expect(["The first one.", "The last one."].map((heard) => pick(rollback, heard))).toEqual([picked(1), picked(2)])
-  })
-
-  test("options named alike but for their marks, like C++ and C#, go by their names as written, never by a letter's place", () => {
-    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
-    const sharp = part("Which language should the bindings use?", ["C++", "C#", "Rust"])
-    const plain = part("Which language should the bindings use?", ["C", "C++", "Rust"])
-    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    expect(["C#", "C++.", "Rust."].map((heard) => pick(sharp, heard))).toEqual([picked(1), picked(0), picked(2)])
-    expect(["C.", "C++"].map((heard) => pick(plain, heard))).toEqual([picked(0), picked(1)])
-    // A letter in their names keeps places off: which one is the model's to tell.
-    expect(["The first one.", "The second one."].map((heard) => pick(sharp, heard))).toEqual([undefined, undefined])
-    // "C" that's both "C++" and "C#" is no one's own, nor the third option's letter: the model's to tell.
-    expect(pick(sharp, "C.")).toBeUndefined()
-    // What yapd sends back of his pick, or the model's answer, is the option it names as written.
-    expect(["C++", "C#", "Rust"].map((text) => Questions.resolve(sharp, text))).toEqual([picked(0), picked(1), picked(2)])
-    expect(["C", "C++"].map((text) => Questions.resolve(plain, text))).toEqual([picked(0), picked(1)])
-  })
-
-  test("a multi-select answer takes only lists of whole names and 'none' without the model: 'all', 'both' and 'all but X' are the model's, since they take what he may not have heard", () => {
+  test("of several, only exact names joined by ', ' or ' and ', each a different option's, are taken without the model: 'all', 'both', 'just Beta' or names alike are the model's", () => {
     const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
     const pick = (heard: string) => Questions.pick(extras, heard, { inFull: true, parts: 2 })
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     expect(pick("Alpha and Gamma.")).toEqual(picked(0, 2))
+    expect(pick("gamma and alpha")).toEqual(picked(0, 2))
     expect(pick("Alpha, Beta and full history.")).toEqual(picked(0, 1, 3))
-    expect(pick("Gamma plus alpha.")).toEqual(picked(0, 2))
-    expect(pick("Alpha, Beta, and Gamma.")).toEqual(picked(0, 1, 2))
-    // With what came between them, or before them, lost, or "just" before one, it's the model's.
-    expect(pick("Alpha Gamma.")).toBeUndefined()
-    expect(pick("And Beta.")).toBeUndefined()
-    expect(pick("Just Beta.")).toBeUndefined()
-    for (const heard of ["All.", "All of them.", "Everything.", "All but Beta.", "Everything except Beta and full history."]) {
+    expect(pick("Alpha, Gamma, Full history")).toEqual(picked(0, 2, 3))
+    expect(pick("Beta.")).toEqual(picked(1))
+    for (const heard of [
+      "Alpha, Beta, and Gamma.",
+      "Gamma plus alpha.",
+      "Alpha & Gamma.",
+      "Alpha; Gamma.",
+      "Alpha,Gamma.",
+      "Alpha Gamma.",
+      "Alpha and Alpha.",
+      "And Beta.",
+      "Just Beta.",
+      "Alpha and something else.",
+      "All.",
+      "All of them.",
+      "Everything.",
+      "All but Beta.",
+      "Everything except Beta and full history.",
+      "Both.",
+      "Yes.",
+      "A and C.",
+      "The first and the second.",
+    ]) {
       expect([heard, pick(heard)]).toEqual([heard, undefined])
     }
-    // Least of all before he's heard every option, like one that drops a database.
-    const steps = part("What should I run?", ["Run tests", "Lint", "Drop the staging database"], { multiSelect: true })
-    expect(["All.", "All but lint."].map((heard) => Questions.pick(steps, heard, { inFull: false, parts: 1 }))).toEqual([undefined, undefined])
-    expect(pick("Yes.")).toEqual(picked(2))
     expect(pick("None of them.")).toEqual({ _tag: "Words", text: "None of those." })
-    expect(Questions.pick(part("Which checks?", ["Lint", "Types"], { multiSelect: true }), "Both.", { inFull: true, parts: 1 })).toBeUndefined()
-    expect(pick("Alpha and something else.")).toBeUndefined()
+    // Names a list may be read as two ways are the model's to tell.
+    const checks = part("Which checks should run?", ["Lint and tests", "Lint", "Tests"], { multiSelect: true })
+    expect(["Lint and tests.", "Lint.", "Lint, tests."].map((heard) => Questions.pick(checks, heard, { inFull: true, parts: 1 }))).toEqual([undefined, picked(1), picked(1, 2)])
+    const skipping = part("Which checks should run?", ["Lint", "Tests", "Skip docs"], { multiSelect: true })
+    expect(["Lint and skip docs.", "Lint and docs.", "All but skip docs."].map((heard) => Questions.pick(skipping, heard, { inFull: true, parts: 1 }))).toEqual([picked(0, 2), undefined, undefined])
+    const lettered = part("Which suites?", ["Option C", "Option A", "Option B"], { multiSelect: true })
+    expect(["Option A and option B.", "A and B."].map((heard) => Questions.pick(lettered, heard, { inFull: true, parts: 1 }))).toEqual([picked(1, 2), undefined])
+    // Only one is taken where only one can be.
+    expect(Questions.pick(part("Which colour?", ["Red", "Blue"]), "Red and Blue.", { inFull: true, parts: 1 })).toBeUndefined()
     // Sent as a list straight to the agent, and as one string when T3 Code takes the answer as a message.
     const asked = question(extras.id, ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
     expect(Questions.answers({ questions: [asked], mode: "live" }, { [asked.id]: { _tag: "Picked", options: [0, 2] } })).toEqual(Either.right({ [asked.id]: ["Alpha", "Gamma (Recommended)"] }))
     expect(Questions.answers({ questions: [asked], mode: "message" }, { [asked.id]: { _tag: "Picked", options: [0, 2] } })).toEqual(Either.right({ [asked.id]: "Alpha, Gamma (Recommended)" }))
   })
 
-  test("the model's answer comes back to the options it names in full, line by line, or else to his own words", () => {
+  test("the model's answer comes back to the options only when each line is exactly one's name, by the same rule as his words, or else to his own words", () => {
     const colour = part("Which colour should the test use?", ["Red", "Blue (Recommended)"])
     const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma"], { multiSelect: true })
-    expect(Questions.resolve(colour, "Blue (Recommended)")).toEqual({ _tag: "Picked", options: [1] })
-    expect(Questions.resolve(extras, "Alpha\nGamma")).toEqual({ _tag: "Picked", options: [0, 2] })
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    expect(Questions.resolve(colour, "Blue (Recommended)")).toEqual(picked(1))
+    expect(Questions.resolve(colour, "blue.")).toEqual(picked(1))
+    expect(Questions.resolve(extras, "Alpha\nGamma")).toEqual(picked(0, 2))
     expect(Questions.resolve(extras, "Alpha, Gamma")).toEqual({ _tag: "Words", text: "Alpha, Gamma" })
-    // Never by part of a name, or a place.
+    // Never by part of a name, a place, how it sounds, or with a mark or a word of its own.
     expect(Questions.resolve(colour, "The blue one")).toEqual({ _tag: "Words", text: "The blue one" })
     expect(Questions.resolve(colour, "The second one")).toEqual({ _tag: "Words", text: "The second one" })
     expect(Questions.resolve(colour, "Blue, but only for the tests.")).toEqual({ _tag: "Words", text: "Blue, but only for the tests." })
     expect(Questions.resolve(colour, "Red\nBlue")).toEqual({ _tag: "Words", text: "Red\nBlue" })
+    expect(Questions.resolve(part("What should I do?", ["Tests", "No tests"]), "No, tests")).toEqual({ _tag: "Words", text: "No, tests" })
+    expect(Questions.resolve(part("What should I do?", ["Mainnet", "Ghostnet"]), "Ghost net")).toEqual({ _tag: "Words", text: "Ghost net" })
     // An option with more on a line of its own is his words, all of them, never only the option.
     expect(Questions.resolve(colour, "Blue\nbut only for the tests")).toEqual({ _tag: "Words", text: "Blue\nbut only for the tests" })
     expect(Questions.resolve(extras, "Alpha\nGamma\nbut skip them on CI")).toEqual({ _tag: "Words", text: "Alpha\nGamma\nbut skip them on CI" })
     expect(Questions.resolve(colour, " ")).toEqual({ _tag: "Again" })
     expect(Questions.resolve(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Green.")).toEqual({ _tag: "Which" })
+    // What yapd sends back of an option is its name as the agent wrote it, which is always that option, marks and all.
+    const sharp = part("Which language should the bindings use?", ["C++", "C#", "Rust"])
+    const plain = part("Which language should the bindings use?", ["C", "C++", "Rust"])
+    expect(["C++", "C#", "Rust"].map((text) => Questions.resolve(sharp, text))).toEqual([picked(0), picked(1), picked(2)])
+    expect(["C", "C++"].map((text) => Questions.resolve(plain, text))).toEqual([picked(0), picked(1)])
+    const written = ['"main".', "`date-fns`", "Ship it!", "Use Postgres (Recommended)"]
+    const named = part("Which one?", written)
+    expect(written.map((text) => Questions.resolve(named, text))).toEqual([picked(0), picked(1), picked(2), picked(3)])
   })
 
   test("what's sent leaves out a part he skipped, needs every part a message needs, and never goes under an id or an option the question doesn't have", () => {
