@@ -440,6 +440,9 @@ const halted = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
         named.some((spoken) => !alike(beside, spoken) && alike(side === 0 ? `${beside}${words[at]}` : `${words[at]}${beside}`, spoken)),
     )
   for (let start = 0; start < words.length; start++) {
+    // Not one he turns around, like the "stop" of "Don't stop the deploy." or the "wait" of "No need to wait.", though "No, wait." is one.
+    const before = words.slice(Math.max(0, start - 3), start)
+    if ((before.length > 0 && before.at(-1) !== "no" && negations.has(before.at(-1)!)) || before.join(" ") === "no need to") continue
     const found = halting.find(
       (phrase) => phrase.words.every((word, index) => words[start + index] === word) && phrase.words.some((_, index) => !its(start + index)),
     )
