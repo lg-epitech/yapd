@@ -511,6 +511,38 @@ describe("Questions", () => {
     expect([pick(invoices, "Yes."), pick(invoices, "No.")]).toEqual([picked(0), picked(1)])
   })
 
+  test("a plain yes takes yapd's pick only to a question that plainly asks which, or names its options with 'or': one that may ask whether, however it's put, is the model's", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (asked: string, labels: ReadonlyArray<string>, heard = "Yes.") => Questions.pick(part(asked, labels), heard, { inFull: true, parts: 1 })
+    for (const [asked, labels] of [
+      ["Should I drop the table, yes or no?", ["Drop it", "Keep it (Recommended)"]],
+      ["Drop the table? Yes or no?", ["Drop it", "Keep it (Recommended)"]],
+      ["Should I force push or not?", ["Force push", "Open a new branch (Recommended)"]],
+      ["Should I force push or no?", ["Force push", "Open a new branch (Recommended)"]],
+      ["Should I run the migration now, which locks the table for an hour or so?", ["Run it now", "Wait until tonight (Recommended)"]],
+      ["Confirm: drop the users table.", ["Drop it", "Keep it (Recommended)"]],
+      ["Should I drop the cache layer", ["Drop it", "Keep it (Recommended)"]],
+      ["Why not merge now?", ["Merge now", "Wait for CI (Recommended)"]],
+      ["What if I merge now?", ["Merge now", "Wait for CI (Recommended)"]],
+      ["What do you think, should I drop the table?", ["Drop it", "Keep it (Recommended)"]],
+      ["Which is it, or should I leave the table?", ["Drop it", "Keep it (Recommended)"]],
+      ["Should I use Postgres or something else?", ["Postgres", "SQLite (Recommended)"]],
+    ] as const) {
+      expect([asked, pick(asked, labels)]).toEqual([asked, undefined])
+      // Nor is a no to it which one then.
+      expect([asked, pick(asked, labels, "No.")]).toEqual([asked, undefined])
+    }
+    // Asking which, or naming its options with "or", a yes is to yapd's pick, and a no asks which one then.
+    for (const [asked, labels] of [
+      ["Which colour should the test use?", ["Red", "Blue (Recommended)"]],
+      ["When should I deploy?", ["Now", "Tonight (Recommended)"]],
+      ["Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]],
+      ["Should I drop the table or keep it?", ["Drop it", "Keep it (Recommended)"]],
+    ] as const) {
+      expect([asked, pick(asked, labels), pick(asked, labels, "No.")]).toEqual([asked, picked(1), { _tag: "Instead" }])
+    }
+  })
+
   test("a number he says to options named with numbers takes one only as its whole name, never a place, and anything less is the model's", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const workers = part("How many parallel workers should the test run use?", ["1 worker", "2 workers", "4 workers (Recommended)", "8 workers"])

@@ -645,19 +645,28 @@ const leaving: ReadonlySet<string> = new Set([
   ...enough, "never mind", "nevermind", "forget it", "forget about it", "leave it", "cancel", "stop asking", "drop it",
 ])
 
-/** A question that asks which, how or what, rather than whether, like "Which colour?" or "What now?": never "What about the cache?". */
-const asksWhich = /^(?:which|what(?! about)|what's|how(?! about)|where|when|who|whom|whose|why)\b/i
+/** A question that asks which, how or what, rather than whether, like "Which colour?" or "What now?": never "What about the cache?", "What if I merge now?" or "Why not now?". */
+const asksWhich = /^(?:which|what(?! about| if)|what's|how(?! about| come)|where|when|who|whom|whose)\b/i
+
+/** A question put after a comma or an "or", which may ask whether, like "What do you think, should I drop it?". */
+const whetherAfter = /(?:,|\bor)\s*(?:should|shall|can|could|do|does|did|is|are|was|were|will|would|want|may|might|must|have|has|ok|okay|ready)\b/i
 
 /**
- * Whether a plain yes or no answers the part's question itself, by the last
- * sentence that asks, whatever follows it, like "It locks the table for an
- * hour.", however it's put: "Should I keep the cache?", "Is caching still
- * needed?", "Ready to merge?" or "Keep the old config?". Never one that asks
- * which, nor one that names two things, like "Red or Blue".
+ * Whether a plain yes or no can only be to yapd's pick, rather than to what
+ * the part's question asks: by the last sentence that asks, whatever follows
+ * it, like "Blue matches the theme.", only when it plainly asks which, like
+ * "Which colour?" or "So, what now?", or names its options with an "or",
+ * like "Should we use Red or Blue?". Never one that may ask whether, however
+ * it's put: "Should I keep the cache?", "Ready to merge?", "Drop the table,
+ * yes or no?", "Force push or not?", one with no question mark, like
+ * "Confirm: drop the users table.", or no question at all.
  */
-const whether = (part: Said) => {
+const asksAmong = (part: Said) => {
   const last = (part.question.split(/(?<=[.!?:])\s+/).findLast((sentence) => sentence.endsWith("?")) ?? "").replace(/^(?:so|and|then|now|also)\b,?\s*/i, "")
-  return last.endsWith("?") && !/\bor\b/i.test(last) && !asksWhich.test(last)
+  if (!last.endsWith("?") || /\byes or no\b|\bor (?:not|no)\b/i.test(last)) return false
+  if (asksWhich.test(last)) return !whetherAfter.test(last)
+  const words = wordsOf(last)
+  return /\bor\b/i.test(last) && part.options.every(({ said }) => [...wordsOf(said)].every((word) => words.has(word)))
 }
 
 /**
@@ -742,7 +751,7 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   // Otherwise, to options, it may be to what the question asks, or to one that starts like it, like "No cache" or "Sure, after the
   // release", rather than to yapd's pick: the model tells, seeing both.
   const starting = part.options.some(({ said: name }) => /^(?:yes|no)\b/i.test(name) || `${kept(name)} `.startsWith(`${said} `))
-  if ((yes || no) && part.options.length > 0 && (starting || whether(part))) return undefined
+  if ((yes || no) && part.options.length > 0 && (starting || !asksAmong(part))) return undefined
   // A plain yes, or what only points at yapd's pick, takes it once he's heard it in full; before then, he's to hear it in full.
   if ((yes || taking.has(said)) && recommended !== undefined) return asked.inFull ? picked([recommended]) : { _tag: "Again" }
   if (deciding.has(said)) return recommended !== undefined ? picked([recommended]) : words("You decide.")
