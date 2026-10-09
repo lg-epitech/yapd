@@ -4836,6 +4836,43 @@ describe("Assistant", () => {
     expect(result.shown).toBe(true)
   })
 
+  test("looking for something by name answers from what this machine found while rig's search is stalled, after a few seconds at most", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken } = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.second)
+              ? Brain.decision({ act: "find", how: "threads", text: "tezos" })
+              : Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing both request formats, sir." }),
+          undefined,
+          // Rig's threads can be seen, but its T3 Code never answers a search.
+          { search: (query) => (query === "tezos" ? [tezos.id] : []), rig: { status: Effect.succeed({ _tag: "Up" }), threads: [thread("std", "Add the std fee test", "std")] } },
+        )
+        const asked = yield* Effect.fork(dictate("Where's the Tezos thing at?"))
+        for (let second = 0; second < 4; second++) {
+          yield* TestClock.adjust("1 second")
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)))
+        }
+        yield* Fiber.join(asked)
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["The Tezos migration is comparing both request formats, sir."])
+  })
+
+  test("finding nothing says it couldn't search rig's threads, rather than that there's nothing there", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken } = yield* assistant(() => Brain.decision({ act: "find", how: "threads", text: "fee table" }), undefined, {
+          rig: { status: Effect.succeed({ _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }) },
+        })
+        yield* dictate("Find the thread about the fee table.")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["I couldn't find anything like that, sir, but I couldn't search rig's threads just now."])
+  })
+
   test("'can't reach rig' is said once each time it goes down, and only when something's asked of rig", async () => {
     let rig: Tunnel.Status = { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }
     const result = await run(

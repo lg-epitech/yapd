@@ -53,6 +53,12 @@ export interface Desk {
   readonly away: ReadonlyArray<{ readonly machine: string; readonly reason: string }>
 }
 
+/** What a search found, and the machines whose threads it couldn't search: unseen, too slow to answer, or failing. */
+export interface Searched {
+  readonly matches: ReadonlyArray<{ readonly ref: Ref; readonly snippet: string }>
+  readonly missed: ReadonlyArray<string>
+}
+
 /** A thread couldn't be read or searched, with why, in words that can be said. */
 export class ThreadsError extends Data.TaggedError("ThreadsError")<{ readonly reason: string; readonly cause?: unknown }> {}
 
@@ -86,12 +92,11 @@ export class Threads extends Context.Tag("yapd/Threads")<
     /**
      * Threads whose messages mention the words, on every machine whose threads
      * can be seen. `within` leaves out a machine that hasn't answered by then,
-     * rather than what the others found.
+     * rather than what the others found, and another machine gets a few
+     * seconds at most either way. Each machine left out is named, so finding
+     * nothing is never taken for there being nothing there.
      */
-    readonly search: (
-      words: string,
-      within?: Duration.DurationInput,
-    ) => Effect.Effect<ReadonlyArray<{ readonly ref: Ref; readonly snippet: string }>, ThreadsError>
+    readonly search: (words: string, within?: Duration.DurationInput) => Effect.Effect<Searched, ThreadsError>
     /** What each provider has used of its limits, as of at most a few minutes ago unless T3 Code stopped answering. */
     readonly usage: Effect.Effect<Option.Option<Usage>>
     /** Asks T3 Code for usage again, when what's known is getting old. */
@@ -389,6 +394,9 @@ export const matching = <E>(text: string, search: Search<E>) =>
 export const searched = <E>(text: string, search: Search<E>) =>
   Effect.map(matching(text, search), (hits) => hits.slice(0, added).map(({ ref }) => ref))
 
+/** How long another machine's T3 Code gets to search. T3 Code answers in a few ms, and further off, not much later. */
+const elsewhere = "3 seconds"
+
 /** How long usage is good for before it's asked again. */
 const stale = 5 * 60_000
 
@@ -526,13 +534,15 @@ export const make = (options: {
           }),
       })
 
-    /** Searches one machine's threads, as `search` says. */
+    /** Searches one machine's threads, as `search` says. None when it didn't answer in time. */
     const searching = (link: Link, actions: T3Actions.Actions, words: string, within: Duration.DurationInput | undefined) => {
       const asked = actions.search(words).pipe(
         Effect.map((matches) => matches.map(({ threadId, snippet }) => ({ ref: { machine: link.machine, id: threadId }, snippet }))),
         Effect.mapError((error) => new ThreadsError({ reason: T3Actions.reason(error), cause: error })),
       )
-      return within === undefined ? asked : Effect.map(Effect.timeoutOption(asked, within), Option.getOrElse(() => []))
+      // Another machine's T3 Code stalled, like over a network that's gone quiet, would otherwise keep him waiting for as long as T3 Code is given.
+      const limit = link.here ? within : (within ?? elsewhere)
+      return limit === undefined ? Effect.map(asked, Option.some) : Effect.timeoutOption(asked, limit)
     }
 
     /** When usage was last asked for, so a T3 Code that doesn't answer isn't asked on every request. */
@@ -608,17 +618,21 @@ export const make = (options: {
         Effect.gen(function* () {
           // Another machine's only while its threads can be seen: one that's down would only keep him waiting to be told so.
           const open = yield* Effect.filter(links, (link) => (link.here ? Effect.succeed(true) : Effect.map(link.live.view, Option.isSome)))
-          const asked = open.flatMap((link) => Option.toArray(Option.map(link.actions, (actions) => searching(link, actions, words, within))))
-          if (asked.length === 0) return yield* reach({ machine, id: "" }).pipe(Effect.as([]))
-          const each = yield* Effect.forEach(asked, Effect.either, { concurrency: "unbounded" })
-          const lists = each.flatMap((one) => (Either.isRight(one) ? [one.right] : []))
+          const asked = open.flatMap((link) => Option.toArray(Option.map(link.actions, (actions) => ({ link, searching: searching(link, actions, words, within) }))))
+          if (asked.length === 0) return yield* reach({ machine, id: "" }).pipe(Effect.as<Searched>({ matches: [], missed: [] }))
+          const each = yield* Effect.forEach(asked, ({ link, searching }) => Effect.either(Effect.map(searching, (found) => ({ link, found }))), {
+            concurrency: "unbounded",
+          })
           const failed = each.find(Either.isLeft)
-          if (lists.length === 0 && failed !== undefined) return yield* failed.left
+          if (failed !== undefined && each.every(Either.isLeft)) return yield* failed.left
+          const answered = each.flatMap((one) => (Either.isRight(one) && Option.isSome(one.right.found) ? [{ link: one.right.link, matches: one.right.found.value }] : []))
           // Each machine's best in turn, as its T3 Code ranked them, so one machine's many can't push another's best down.
-          return lists
-            .flatMap((matches) => matches.map((match, place) => ({ match, place })))
+          const matches = answered
+            .flatMap(({ matches }) => matches.map((match, place) => ({ match, place })))
             .toSorted((one, other) => one.place - other.place)
             .map(({ match }) => match)
+          const missed = links.filter((link) => !answered.some((searched) => searched.link === link)).map((link) => link.machine)
+          return { matches, missed } satisfies Searched
         }),
       // What's known at once, asked again meanwhile when it's old. With nothing known, or nothing recent enough to say as
       // what's used now, it's waited for, even when it's being asked for already: what's dated is only for a T3 Code that

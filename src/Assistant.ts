@@ -519,7 +519,9 @@ export const make = (options: {
      * taken: rig, further off, being slow never costs what this one found.
      */
     const searching = (heard: string) =>
-      Threads.searched(heard, (words) => threads.search(words, cap)).pipe(Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []))
+      Threads.searched(heard, (words) => Effect.map(threads.search(words, cap), ({ matches }) => matches)).pipe(
+        Effect.orElseSucceed((): ReadonlyArray<Threads.Ref> => []),
+      )
 
     /** What the brain goes by, from memory: the desk, the journal and what's known of usage. */
     const situate = (utterance: Utterance, meant: Subject, lines: ReadonlyArray<Line>) =>
@@ -864,6 +866,8 @@ export const make = (options: {
         const wanted = decision.text.trim() || thought.utterance.heard
         const now = yield* Clock.currentTimeMillis
         let found: ReadonlyArray<string>
+        /** The machines whose threads a search couldn't look through, so finding nothing isn't said as if there were nothing there. */
+        const missed = new Set<string>()
         if (decision.how === "journal") {
           const words = Threads.distinctive(wanted)
           const kept = yield* journal.since(now - 30 * day, { most: 2000 })
@@ -874,7 +878,12 @@ export const make = (options: {
             .slice(0, 8)
             .map(({ entry }) => `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}`)
         } else {
-          const matches = yield* Threads.matching(wanted, threads.search).pipe(Effect.either)
+          const search = (words: string) =>
+            Effect.map(threads.search(words), (searched) => {
+              for (const name of searched.missed) missed.add(name)
+              return searched.matches
+            })
+          const matches = yield* Threads.matching(wanted, search).pipe(Effect.either)
           if (Either.isLeft(matches)) return reply(`I couldn't search your threads just now${addressed(said)}. ${matches.left.reason}`, thought.subject)
           found = yield* Effect.forEach(matches.right.slice(0, 8), ({ ref, snippet }) =>
             Effect.gen(function* () {
@@ -884,7 +893,15 @@ export const make = (options: {
             }),
           )
         }
-        if (found.length === 0) return reply(`I couldn't find anything like that${addressed(said)}.`, thought.subject)
+        if (found.length === 0) {
+          const unsearched = [...missed].map((name) => `${name}'s`).join(" or ")
+          return reply(
+            missed.size === 0
+              ? `I couldn't find anything like that${addressed(said)}.`
+              : `I couldn't find anything like that${addressed(said)}, but I couldn't search ${unsearched} threads just now.`,
+            thought.subject,
+          )
+        }
         const decided = yield* brain.decide({ ...situation, second: Option.some({ found }) }).pipe(Effect.either)
         if (Either.isLeft(decided) || decided.right.spoken.trim() === "") {
           return reply(`I found something, but couldn't put it into words just now${addressed(said)}.`, thought.subject)

@@ -5,6 +5,7 @@ import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Store from "./Store.ts"
 import type * as T3Actions from "./T3Actions.ts"
+import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 import type * as Tunnel from "./Tunnel.ts"
@@ -138,7 +139,7 @@ describe("Threads", () => {
 
 describe("Threads on several machines", () => {
   /** What a machine's T3 Code is asked, by which machine, and what it answers a search with. */
-  const machine = (name: string, asked: Array<string>, found: Effect.Effect<ReadonlyArray<{ threadId: string; snippet: string }>> = Effect.succeed([])) =>
+  const machine = (name: string, asked: Array<string>, found: Effect.Effect<ReadonlyArray<{ threadId: string; snippet: string }>, T3CodeServer.Trouble> = Effect.succeed([])) =>
     ({
       detail: (threadId: string) => Effect.sync(() => void asked.push(`${name}: detail ${threadId}`)).pipe(Effect.as({ messages: [], runs: [], request: Option.none(), plan: Option.none() })),
       search: (query: string) => Effect.zipRight(Effect.sync(() => void asked.push(`${name}: search ${query}`)), found),
@@ -146,7 +147,7 @@ describe("Threads on several machines", () => {
 
   const live = (view: Option.Option<T3Live.View>): T3Live.T3Live["Type"] => ({ view: Effect.succeed(view), changes: Stream.never })
 
-  const make = (rig: { readonly view: Option.Option<T3Live.View>; readonly status: Tunnel.Status; readonly found?: Effect.Effect<ReadonlyArray<{ threadId: string; snippet: string }>> }, asked: Array<string>) =>
+  const make = (rig: { readonly view: Option.Option<T3Live.View>; readonly status: Tunnel.Status; readonly found?: Effect.Effect<ReadonlyArray<{ threadId: string; snippet: string }>, T3CodeServer.Trouble> }, asked: Array<string>) =>
     Effect.gen(function* () {
       const store = yield* Store.make(":memory:")
       return yield* Threads.make({
@@ -202,7 +203,7 @@ describe("Threads on several machines", () => {
     expect(seen.threads).toEqual([{ machine: "Rosie", id: "tests" }])
     expect(seen.away).toEqual([{ machine: "rig", reason: "I can't reach rig right now." }])
     expect(seen.unseen).toEqual(Option.some("I can't reach rig right now."))
-    expect(seen.search).toEqual([{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }])
+    expect(seen.search).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
     // Down, rig isn't even asked.
     expect(asked).toEqual(["Rosie: search std tests"])
   })
@@ -216,8 +217,29 @@ describe("Threads on several machines", () => {
       yield* TestClock.adjust("100 millis")
       return yield* Fiber.join(searching)
     }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
-    expect(found).toEqual([{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }])
+    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
     expect(asked.toSorted()).toEqual(["Rosie: search std tests", "rig: search std tests"])
+  })
+
+  test("a search gives rig a few seconds at most, however long T3 Code there is given, and says it left rig out", async () => {
+    const found = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const threads = yield* make({ view: Option.some(viewing()), status: { _tag: "Up" }, found: Effect.never }, [])
+      const searching = yield* Effect.fork(threads.search("std tests"))
+      yield* TestClock.adjust("3 seconds")
+      return yield* Fiber.join(searching)
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
+  })
+
+  test("a search names rig as left out when rig's T3 Code fails it, keeping what this machine found", async () => {
+    const found = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const failing = Effect.fail(new T3CodeServer.Trouble({ reason: "rig's T3 Code isn't answering." }))
+      const threads = yield* make({ view: Option.some(viewing()), status: { _tag: "Up" }, found: failing }, [])
+      return yield* threads.search("std tests")
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(found).toEqual({ matches: [{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }], missed: ["rig"] })
   })
 
   test("names this machine when its T3 Code isn't running while rig's threads can be seen, since rig's are his threads too", async () => {
