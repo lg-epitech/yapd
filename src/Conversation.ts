@@ -839,7 +839,9 @@ export const make = (options: {
          * What he said over the line, once none of it is still being made out
          * and he's finished whatever he went on to say: none until then, nor
          * when it was all yapd's own voice, which is let go, unless yapd had
-         * stopped for it, as a look at some of it found him in it.
+         * stopped for it, as a look at some of it found him in it. Words
+         * taken for its voice beside his may be his, misheard or cut off, so
+         * then none of it is taken in, and he's asked to say it all again.
          */
         const heardOut = () => {
           if (pending.length === 0 || pending.some((talk) => talk.whose === undefined)) return undefined
@@ -849,10 +851,11 @@ export const make = (options: {
           const from = (talks: ReadonlyArray<Talk>) => Math.min(...talks.map((talk) => talk.at ?? Number.POSITIVE_INFINITY))
           // Then it picks up from before where he began, as when what he said wasn't meant for it.
           if (his.length === 0) return cut && !completed && !speaking ? interrupted([], false, from(talks)) : undefined
+          const worded = talks.filter((talk) => talk.whose !== "echo" || wordsOf(talk.heard ?? "", []).length > 0)
           return interrupted(
-            his.map((talk): Piece => (talk.heard === undefined ? { audio: talk.audio } : { audio: talk.audio, heard: talk.heard })),
-            his.some((talk) => talk.whose === "mixed"),
-            from(his),
+            worded.map((talk): Piece => (talk.heard === undefined ? { audio: talk.audio } : { audio: talk.audio, heard: talk.heard })),
+            worded.length > his.length || his.some((talk) => talk.whose === "mixed"),
+            from(worded),
           )
         }
         /** How it ends once the microphone has gone and nothing's left to make out: not yet while it's still playing. */
