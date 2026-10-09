@@ -364,6 +364,13 @@ describe("Questions", () => {
     const tests = part("The slow tests take ten minutes. What should I do?", ["Skip the slow tests", "Run everything"])
     expect([Questions.pick(changelog, "Leave it.", { inFull: true, parts: 1 }), Questions.pick(deploy, "Cancel.", { inFull: true, parts: 1 })]).toEqual([undefined, undefined])
     expect(Questions.pick(tests, "Skip that one.", { inFull: true, parts: 2 })).toBeUndefined()
+    // "Later" with more to it, to an option named or starting so, is the same: the model's once he's heard it, put off before.
+    const when = (labels: ReadonlyArray<string>, heard: string, inFull: boolean) => Questions.pick(part("When should I deploy?", labels), heard, { inFull, parts: 1 })?._tag
+    expect(["Later, please.", "Um, later."].map((heard) => [when(["Now", "Later"], heard, true), when(["Now", "Later"], heard, false)])).toEqual([
+      [undefined, "Later"],
+      [undefined, "Later"],
+    ])
+    expect([when(["Now", "Later today"], "Later.", true), when(["Now", "Tonight"], "Later, please.", true)]).toEqual([undefined, "Later"])
     // With more parts after it, "skip it" to "Skip the slow tests" may be that option too, so it's asked which of them; "next" still skips it.
     const going = ["Skip it.", "Skip.", "Next.", "Never mind.", "Forget it."].map((heard) => Questions.pick(tests, heard, { inFull: true, parts: 2 })?._tag)
     expect(going).toEqual(["Which", "Which", "Skip", "Leave", "Leave"])
