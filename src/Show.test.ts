@@ -618,6 +618,16 @@ describe("Show", () => {
     ])
   })
 
+  test("with a machine it can't see, what's running is said to be here, with why it can't see the other, since what's running may be there", () => {
+    const now = Date.parse("2026-10-08T22:00:00.000Z")
+    const idle = { ...listed, state: "idle" as const, since: Date.parse("2026-10-08T21:00:00.000Z") }
+    const rig = [{ machine: "rig", reason: "I can't see rig's threads yet." }]
+    expect(Show.tally({ threads: [idle], away: rig }, ", sir", now)).toBe("Nothing's running here, sir. I can't see rig's threads yet.")
+    expect(Show.tally({ threads: [{ ...listed, state: "running" }], away: rig }, ", sir", now)).toBe("One running here, sir. I can't see rig's threads yet.")
+    // With every machine seen, it's as before.
+    expect(Show.tally({ threads: [idle], away: [] }, ", sir", now)).toBe("Nothing's running, sir.")
+  })
+
   test("a pull request that doesn't open is said with why, after its verdict", async () => {
     const opening = (url: string, opener: Show.Opener) =>
       Effect.gen(function* () {

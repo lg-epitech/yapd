@@ -447,16 +447,22 @@ export const overview = (desk: Threads.Desk, now: number): Draft => {
   return { kind: "threads", title: "What's going on", markdown: markdown.join("\n\n") }
 }
 
-/** What a card of threads comes to in a line, like "Two running and one needs you." */
+/**
+ * What a card of threads comes to in a line, like "Two running and one needs
+ * you.". With machines it can't see, it's only what's here, and it says so,
+ * with why it can't see them, since what's running may well be there.
+ */
 export const tally = (desk: Threads.Desk, address: string, now: number) => {
   const [needs = 0, running = 0, failed = 0] = grouped(desk, now).map(([, threads]) => threads.length)
-  if (desk.threads.length === 0 && desk.away.length > 0) return desk.away.map(({ reason }) => reason).join(" ")
+  const away = desk.away.map(({ reason }) => reason)
+  if (desk.threads.length === 0 && away.length > 0) return away.join(" ")
   const parts = [
     ...(running === 0 ? [] : [`${Brain.count(running)} running`]),
     ...(needs === 0 ? [] : [`${Brain.count(needs)} ${needs === 1 ? "needs" : "need"} you`]),
     ...(failed === 0 ? [] : [`${Brain.count(failed)} failed`]),
   ]
-  return parts.length === 0 ? `Nothing's running${address}.` : `${Brain.capital(Brain.both(parts))}${address}.`
+  const here = away.length > 0 ? " here" : ""
+  return [parts.length === 0 ? `Nothing's running${here}${address}.` : `${Brain.capital(Brain.both(parts))}${here}${address}.`, ...away].join(" ")
 }
 
 /**
