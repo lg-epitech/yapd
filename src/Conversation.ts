@@ -279,17 +279,6 @@ const near = (heard: string, spoken: string) => {
 const vocabulary = (text: string) =>
   text.toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").split(/\s+/).filter((word) => gist(word) !== "")
 
-/** Whether `words` are, one after another, words yapd says one after another, two of which Whisper may run into one. */
-const inTurn = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) =>
-  yapd.some((_, start) => {
-    let at = start
-    return words.every((word) => {
-      const step = at < yapd.length && alike(word, yapd[at]!) ? 1 : at + 1 < yapd.length && alike(word, yapd[at]! + yapd[at + 1]!) ? 2 : 0
-      at += step
-      return step > 0
-    })
-  })
-
 /** Words heard, from `first` to `last`, taken for yapd's, from `start` to `end`. */
 interface Match {
   readonly first: number
@@ -492,16 +481,15 @@ const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
 export type Whose = "stop" | "his" | "unclear"
 
 /**
- * Whether `words` can only be his: not one after another as yapd says them,
- * and none but those nearly anything has in line with what it was saying,
- * its name misheard and all, nor like a word of its, sounding like it or the
- * start of it cut off, alone or run together with the word beside it, as
- * "over in" may be "overin". Nothing but words nearly anything has, they're
- * his only with some it isn't saying and no two it says one after another,
- * like "Not now." or "Why did it do that?", but not "Over in your".
+ * Whether `words` can only be his: none but those nearly anything has in
+ * line with what it was saying, its name misheard and all, nor, wherever it
+ * comes, like a word of its: a letter or so apart, sounding like it, or the
+ * start of it cut off. Nothing but words nearly anything has, they're his
+ * only with some it isn't saying and no two it says one after another, like
+ * "Not now." or "Why did it do that?", but not "Over in your".
  */
 const clearly = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
-  if (words.length === 0 || inTurn(words, yapd)) return false
+  if (words.length === 0) return false
   /** Whether a word heard is its word `at`. */
   const said = (word: string, at: number) => at >= 0 && stem(word) === stem(yapd[at]!)
   if (words.every((word) => common.has(word))) {
@@ -510,13 +498,7 @@ const clearly = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
     return unsaid && !inOrder
   }
   const its = ours(words, yapd)
-  const spoken = [...yapd, ...yapd.slice(1).map((word, at) => `${yapd[at]}${word}`)]
-  const like = (heard: string) => spoken.some((word) => alike(heard, word))
-  return words.every(
-    (word, index) =>
-      common.has(word) ||
-      !(its.has(index) || like(word) || [words[index - 1], words[index + 1]].some((beside, side) => beside !== undefined && like(side === 0 ? `${beside}${word}` : `${word}${beside}`))),
-  )
+  return words.every((word, index) => common.has(word) || !(its.has(index) || yapd.some((spoken) => alike(word, spoken))))
 }
 
 /**
