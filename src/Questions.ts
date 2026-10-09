@@ -736,8 +736,8 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
  * for an option they're only a word of, nor for one named just so before
  * he's heard it in full, and words that let it go but
  * start an option, like "leave it" to "Leave the changelog", are the
- * model's too, while "skip it" or "next" to a part with more after it and
- * "Skip the slow tests" or "Next release" asks which of them.
+ * model's too once he has, while "skip it" or "next" to a part with more
+ * after it and "Skip the slow tests" or "Next release" asks which of them.
  */
 export const pick = (part: Said, heard: string, asked: { readonly inFull: boolean; readonly parts: number }): Reply | undefined => {
   const said = gist(heard)
@@ -783,10 +783,11 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (explaining.has(said)) return { _tag: "More" }
   if (later.has(said)) return { _tag: "Later" }
   // "Leave it" to "Leave the changelog", "cancel" to "Cancel the deploy", or "next one" to "Next release", may well be that option, which
-  // the model tells. Never words to stop talking, like "skip it", "next" or "stop", which no agent gets, nor "never mind" or "forget it".
+  // the model tells. Never words to stop talking, like "skip it", "next" or "stop", which no agent gets, nor "never mind" or "forget it",
+  // nor any said before he'd heard the options, which can't be to one he didn't know of, as with "Stop" above.
   const lead = /^(?:leave|cancel|drop|skip|pass|move|next)\b/.exec(said)?.[0]
   const leads = lead !== undefined && fitting(part, ({ said }) => new RegExp(`^${lead}\\b`, "i").test(said)).length > 0
-  if ((leaving.has(said) || skipping.has(said)) && !enough.has(said) && leads) return undefined
+  if ((leaving.has(said) || skipping.has(said)) && !enough.has(said) && leads && !unheard) return undefined
   // "Skip it" to "Skip the slow tests", with more parts after it, may be that option too, and leaving the part out would sound as if it
   // was taken: he's asked which of them instead, since words to stop talking never go to the model.
   if (skipping.has(said) && asked.parts > 1) return leads ? { _tag: "Which" } : { _tag: "Skip" }

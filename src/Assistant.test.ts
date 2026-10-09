@@ -2822,7 +2822,9 @@ describe("Assistant", () => {
       run(
         Effect.gen(function* () {
           const question = { id: "next", question: "Should I carry on with the migration?", options: labels.map((label) => ({ label })) }
-          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [question]), waiting: true })
+          // The model, asked, would take his words for the option named like them.
+          const named = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: labels.at(-1) ?? "", pending: "answers" })
+          const made = yield* assistant(named, undefined, { others: [cloud], items: card("q1", [question]), waiting: true })
           yield* asked(made, cloud)
           yield* (cut ? made.cut() : made.play())
           yield* made.answer(heard)
@@ -2831,9 +2833,19 @@ describe("Assistant", () => {
       )
     expect(await answering(["Continue (Recommended)", "Stop"], "Stop.", true)).toEqual({ spoken: ["I'll leave that one, sir."], answers: [] })
     expect(await answering(["Now (Recommended)", "Later"], "Later.", true)).toEqual({ spoken: ["I'll bring it back in ten minutes, sir."], answers: [] })
+    // So are words to let it go, to an option named or starting like them.
+    for (const [labels, heard] of [
+      [["Proceed (Recommended)", "Cancel"], "Cancel."],
+      [["Go on (Recommended)", "Drop it"], "Drop it."],
+      [["Go on (Recommended)", "Leave it"], "Leave it."],
+      [["Retry (Recommended)", "Cancel the migration"], "Cancel."],
+    ] as const) {
+      expect([heard, await answering(labels, heard, true)]).toEqual([heard, { spoken: ["I'll leave that one, sir."], answers: [] }])
+    }
     // Heard them all, it's the option he named.
     expect(await answering(["Continue (Recommended)", "Stop"], "Stop.", false)).toEqual({ spoken: ["Stop it is, sir."], answers: [{ next: "Stop" }] })
     expect(await answering(["Now (Recommended)", "Later"], "Later.", false)).toEqual({ spoken: ["Later it is, sir."], answers: [{ next: "Later" }] })
+    expect(await answering(["Proceed (Recommended)", "Cancel"], "Cancel.", false)).toEqual({ spoken: ["Cancel it is, sir."], answers: [{ next: "Cancel" }] })
   })
 
   test("'leave it' or 'cancel' to a question with an option that starts with it is the model's to tell, which may take it for that option", async () => {

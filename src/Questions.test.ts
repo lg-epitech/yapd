@@ -218,7 +218,14 @@ describe("Questions", () => {
       carry(["Go on (Recommended)", "Never mind"], "Never mind."),
       carry(["Go on (Recommended)", "Repeat"], "Repeat."),
       carry(["Go on (Recommended)", "Pause it"], "Pause it."),
-    ]).toEqual([{ _tag: "Leave" }, { _tag: "Later" }, { _tag: "Leave" }, { _tag: "Again" }, picked(1)])
+      // Never handed to the model either, when an option is named or starts like them.
+      carry(["Proceed (Recommended)", "Cancel"], "Cancel."),
+      carry(["Go on (Recommended)", "Drop it"], "Drop it."),
+      carry(["Go on (Recommended)", "Leave it"], "Leave it."),
+      carry(["Retry (Recommended)", "Cancel the migration"], "Cancel."),
+    ]).toEqual([{ _tag: "Leave" }, { _tag: "Later" }, { _tag: "Leave" }, { _tag: "Again" }, picked(1), { _tag: "Leave" }, { _tag: "Leave" }, { _tag: "Leave" }, { _tag: "Leave" }])
+    // With more parts after it, "skip it" to "Skip the slow tests" still asks which of them, never sounding as if it was taken.
+    expect(Questions.pick(part("What should I do?", ["Skip the slow tests", "Run everything"]), "Skip it.", { inFull: false, parts: 2 })).toEqual({ _tag: "Which" })
     // Words that let it go but start an option may be that option, which the model tells; words to stop talking, or "never mind", let it go.
     const changelog = part("Should I also update the changelog?", ["Update the changelog", "Leave the changelog"])
     const deploy = part("The deploy is failing. What now?", ["Cancel the deploy", "Retry the deploy (Recommended)"])
