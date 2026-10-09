@@ -605,10 +605,12 @@ describe("Notices", () => {
       Effect.gen(function* () {
         const live = yield* notices({ view, bounded })
         yield* live.hear(...view.map((waiting): T3Live.Change => ({ _tag: "Asked", thread: waiting, request: waiting.pendingRuntimeRequest! })))
+        // Past the while a card that can't be read is read again for, like the billing one's, which would be told after.
+        yield* live.wait(3)
         // yapd restarts with none of them heard, or is turned on.
         const restarted = yield* notices({ view, bounded })
         yield* restarted.reconcile
-        yield* restarted.flush
+        yield* restarted.wait(3)
         return { live: [...live.told, ...live.asked], restarted: [...restarted.told, ...restarted.asked] }
       }),
     )
