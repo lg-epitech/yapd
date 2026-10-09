@@ -379,6 +379,23 @@ describe("remembering", () => {
       }),
     ))
 
+  test("keeps lines rendered ahead for good, without counting them among the newest", () =>
+    run((dir) =>
+      Effect.gen(function* () {
+        const rendered: Array<string> = []
+        const voice = yield* remembering(
+          { render: (text, path) => Effect.promise(() => Bun.write(path, text)).pipe(Effect.tap(() => rendered.push(text)), Effect.asVoid) },
+          dir,
+          2,
+        )
+        yield* voice.warm(["Right away, sir."])
+        for (const text of ["one", "two", "one", "Right away, sir.", "three", "one", "Right away, sir."]) {
+          yield* voice.render(text, `${dir}/out.wav`)
+        }
+        expect(rendered).toEqual(["Right away, sir.", "one", "two", "three"])
+      }),
+    ))
+
   test("forgets a render that failed at once, even when it made room for it", () =>
     run((dir) =>
       Effect.gen(function* () {

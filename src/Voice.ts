@@ -690,14 +690,17 @@ const brief = 160
 
 /**
  * Keeps what's rendered of short lines, the ones yapd says again and again
- * like "On it.", so saying them again is a copy rather than a render. The
- * newest `most` are kept, in `dir`. One rendered for someone who stopped
- * waiting is still kept, for whoever asks next.
+ * like "On it.", so saying them again is a copy rather than a render. Those
+ * rendered ahead are kept for good, and of the rest the newest `most`, in
+ * `dir`. One rendered for someone who stopped waiting is still kept, for
+ * whoever asks next.
  */
 export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
   Effect.gen(function* () {
     const scope = yield* Effect.scope
     const kept = new Map<string, Deferred.Deferred<string, ProcessError>>()
+    /** Lines rendered ahead, which are never let go of, so however seldom one comes up it plays at once. */
+    const ahead = new Set<string>()
     const forget = (text: string, entry: Deferred.Deferred<string, ProcessError>) =>
       Effect.suspend(() => {
         if (kept.get(text) !== entry) return Effect.void
@@ -738,7 +741,8 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
           Effect.interruptible,
           Effect.forkIn(scope),
         )
-        while (kept.size > most) yield* forget(...kept.entries().next().value!)
+        const others = [...kept].filter(([text]) => !ahead.has(text))
+        for (const [text, entry] of others.slice(0, Math.max(0, others.length - most))) yield* forget(text, entry)
         return made
       }).pipe(Effect.uninterruptible)
 
@@ -762,13 +766,17 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
         text.length <= brief && (kept.has(text) || sentencesOf(text).length < 2)
           ? rendering(render)(text, path)
           : early(voice, text, path),
-      /** Renders lines ahead of time, so even the first time they're said is instant. */
+      /** Renders lines ahead of time and keeps them for good, so even the first time they're said is instant, and every time after. */
       warm: (lines: ReadonlyArray<string>) =>
         Effect.forEach(
           lines,
           (text) => {
             const path = `${dir}/warm-${crypto.randomUUID()}${extension}`
-            return render(text, path).pipe(Effect.ensuring(Effect.promise(() => rm(path, { force: true }))), Effect.ignore)
+            return Effect.sync(() => ahead.add(text)).pipe(
+              Effect.zipRight(render(text, path)),
+              Effect.ensuring(Effect.promise(() => rm(path, { force: true }))),
+              Effect.ignore,
+            )
           },
           { discard: true },
         ),
