@@ -249,6 +249,11 @@ describe("Questions", () => {
     expect(pick("Twenty two.", part("Which Node version?", ["Node 18", "Node 20 (Recommended)", "Node 22"]))).toEqual(picked(2))
     expect(Questions.pick(part("How many workers?", ["1 worker", "2 workers", "4 workers", "8 workers"], { multiSelect: true }), "Two and four.", { inFull: true, parts: 1 })).toEqual(picked(1, 2))
     expect(Questions.resolve(workers, "4")).toEqual(picked(2))
+    // Named with numbers in words, as an agent may write them, it's the same: "four" is never the fourth.
+    const spelled = part("How many parallel workers should the test run use?", ["One worker", "Two workers", "Four workers (Recommended)", "Eight workers"])
+    expect(["Four.", "4.", "2.", "Eight workers."].map((heard) => pick(heard, spelled))).toEqual([picked(2), picked(2), picked(1), picked(3)])
+    // And a number said in words goes by how it sounds, as in "v two" for v2.
+    expect(pick("V two.", part("Which API version?", ["v1", "v2", "v3"]))).toEqual(picked(1))
     // Named with no numbers, a number is a place, and "the blue one" points.
     expect(pick("Two.", part("Which colour?", ["Red", "Blue", "Green"]))).toEqual(picked(1))
     expect(pick("The blue one.", part("Which colour?", ["Red", "Blue", "One more"]))).toEqual(picked(1))
