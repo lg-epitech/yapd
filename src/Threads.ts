@@ -73,6 +73,12 @@ export class Threads extends Context.Tag("yapd/Threads")<
     readonly find: (ref: Ref) => Effect.Effect<Option.Option<T3Live.Thread>>
     /** Why a machine's threads can't be seen now, as the desk lists it among those away. None while they can. */
     readonly unseen: (machine: string) => Effect.Effect<Option.Option<string>>
+    /**
+     * Notes what he was just told: once he's heard why another machine can't
+     * be reached, it's only said that its threads still can't be seen, until
+     * it's been back and gone down again, or can't be reached for another reason.
+     */
+    readonly heard: (said: string) => Effect.Effect<void>
     readonly changes: Stream.Stream<{ readonly machine: string; readonly change: T3Live.Change }>
     readonly actions: (machine: string) => Option.Option<T3Actions.Actions>
     /** Where a thread got to, read from it now. */
@@ -448,6 +454,10 @@ export const make = (options: {
     const scope = yield* Effect.scope
     let usage: Usage | undefined
 
+    /** Which time each other machine went down that he was told why of, with why: once each time, rather than every time he asks. */
+    const told = new Map<string, string>()
+    /** An outage, as it's told: a new one, or the same one for another reason, is news. */
+    const telling = ({ outage, reason }: { readonly outage: number; readonly reason: string }) => `${outage}\n${reason}`
     const links: ReadonlyArray<Link> = [
       {
         machine,
@@ -464,8 +474,12 @@ export const make = (options: {
           here: false,
           live: other.live,
           actions: Option.some(other.actions),
-          // Reached, it's still catching up, or T3 Code there won't be followed.
-          unseen: Effect.map(other.status, (status) => (status._tag === "Down" ? status.reason : `I can't follow ${other.machine}'s threads right now.`)),
+          unseen: Effect.map(other.status, (status) => {
+            // Reached, it's still catching up, or T3 Code there won't be followed.
+            if (status._tag === "Up") return `I can't follow ${other.machine}'s threads right now.`
+            // Starting up isn't an outage, so that's said for as long as it lasts.
+            return status.outage > 0 && told.get(other.machine) === telling(status) ? `I still can't see ${other.machine}'s threads.` : status.reason
+          }),
         }),
       ),
     ]
@@ -563,6 +577,17 @@ export const make = (options: {
           onNone: () => Effect.succeed(Option.some(`I can't see ${name}'s threads.`)),
           onSome: (link) => Effect.flatMap(link.live.view, (view) => (Option.isSome(view) ? Effect.succeed(Option.none()) : Effect.map(link.unseen, Option.some))),
         }),
+      heard: (said) =>
+        Effect.forEach(
+          options.others,
+          (other) =>
+            Effect.map(other.status, (status) => {
+              // As it's said, in a sentence or at its end, whatever's at its start.
+              const reason = status._tag === "Down" ? status.reason.replace(/[.!?]+$/, "").toLowerCase() : ""
+              if (status._tag === "Down" && status.outage > 0 && reason !== "" && said.toLowerCase().includes(reason)) told.set(other.machine, telling(status))
+            }),
+          { discard: true },
+        ),
       changes: Stream.mergeAll(
         links.map((link) => Stream.map(link.live.changes, (change) => ({ machine: link.machine, change }))),
         { concurrency: "unbounded" },

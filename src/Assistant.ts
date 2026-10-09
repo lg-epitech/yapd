@@ -1798,6 +1798,8 @@ export const make = (options: {
                 }),
               ),
               Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) ? journal.reword(entry.value, instead) : Effect.void))),
+              // Why a machine can't be reached, once he's heard it, isn't said again until it's been back and gone down again.
+              Effect.zipRight(threads.heard(outcome.say)),
             ),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
             // Never said, like gone stale or dropped by a dictation that cut it off, its card is let go of all the same.

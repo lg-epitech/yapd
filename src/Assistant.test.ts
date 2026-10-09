@@ -19,6 +19,7 @@ import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
+import type * as Tunnel from "./Tunnel.ts"
 import { Warmth } from "./Voice.ts"
 import { type Decision as Written, type Material, Writer } from "./Writer.ts"
 
@@ -247,6 +248,8 @@ const assistant = (
     readonly persona?: Context.Tag.Service<Persona.Persona>
     /** The persona's line for going ahead, in place of the written one. */
     readonly onIt?: string
+    /** How the tunnel to rig stands, for rig to be followed too: its threads are never seen. */
+    readonly rig?: Effect.Effect<Tunnel.Status>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -276,7 +279,18 @@ const assistant = (
         changes: Stream.never,
       },
       actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer, given.reading, given.items))),
-      others: [],
+      // Rig, whose threads can't be seen, as its tunnel says why.
+      others:
+        given.rig === undefined
+          ? []
+          : [
+              {
+                machine: "rig",
+                live: { view: Effect.succeed(Option.none()), changes: Stream.never },
+                actions: T3Actions.make(Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." }))),
+                status: given.rig,
+              },
+            ],
       journal,
       store,
     })
@@ -4789,5 +4803,38 @@ describe("Assistant", () => {
     )
     expect(result.said).toEqual(["Fix the loader: checks pass and it's waiting for a review, sir.", "Checks pass and it's waiting for a review, sir."])
     expect(result.opened).toEqual([url, url])
+  })
+
+  test("'can't reach rig' is said once each time it goes down, and only when something's asked of rig", async () => {
+    let rig: Tunnel.Status = { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, seen } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.includes("rig")
+              ? Brain.decision({ act: "send", machine: "rig", text: "Add a test." })
+              : Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "The Tezos migration is comparing both request formats, sir." }),
+          undefined,
+          { rig: Effect.sync(() => rig) },
+        )
+        yield* dictate("What's the Tezos one doing?")
+        yield* dictate("Tell the std thread on rig to add a test.")
+        yield* dictate("Tell the std thread on rig to add a test, I said.")
+        // Back, then down again.
+        rig = { _tag: "Up" }
+        rig = { _tag: "Down", reason: "I can't reach rig right now.", outage: 2 }
+        yield* dictate("Tell the std thread on rig to add a test.")
+        return { spoken: spoken(), away: seen.map(({ desk }) => desk.away) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      // Nothing was asked of rig, so nothing is said of it.
+      "The Tezos migration is comparing both request formats, sir.",
+      "I can't reach rig right now, sir.",
+      "I still can't see rig's threads, sir.",
+      "I can't reach rig right now, sir.",
+    ])
+    // The model always knows why.
+    expect(result.away[0]).toEqual([{ machine: "rig", reason: "I can't reach rig right now." }])
   })
 })
