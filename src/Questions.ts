@@ -70,6 +70,8 @@ export interface Wording {
   readonly more: string
   /** After a plain no to yapd's pick: which one then, of the others. */
   readonly instead: string
+  /** After words a form that takes only its options can't take: which one, of them all, with yapd's pick. */
+  readonly which: string
   /** After he skipped it, when T3 Code needs an answer to it: asked once more, saying so. */
   readonly needed: string
   /** When it's let go unanswered: it still waits for him, and he can ask for it. */
@@ -96,8 +98,10 @@ export type Reply =
   | { readonly _tag: "Again" }
   /** He wants to know what the options mean. */
   | { readonly _tag: "More" }
-  /** A plain no to yapd's pick, or words a form can't take: which one, then. */
+  /** A plain no to yapd's pick: which one then, of the others. */
   | { readonly _tag: "Instead" }
+  /** Words a form that takes only its options can't take: which of them, then. */
+  | { readonly _tag: "Which" }
   /** He wants it put off. */
   | { readonly _tag: "Later" }
   /** He wants it let go. */
@@ -297,6 +301,13 @@ const otherwise = (part: Said, sir: string) => {
   return others.length === 1 ? `${others[0]} then${sir}?` : `${which(part)} then${sir}: ${either(others)}?`
 }
 
+/** Which one it takes, of them all, with yapd's pick: "Which one, sir: Red or Blue? I'd go with Blue." */
+const choosing = (part: Said, sir: string) => {
+  if (part.options.length === 0) return asked(part)
+  const options = part.several ? either(part.options.map(({ said }) => said)) : offered(part)
+  return `${which(part)}${sir}: ${options}?${leaning(part)}`
+}
+
 /**
  * How each part of a question asked of `called` is put to him, or what's
  * told when it can't be asked: too many parts or options to take in, or
@@ -343,6 +354,7 @@ export const worded = (input: { readonly called: string; readonly parts: Readonl
         here,
         more: explained(part, sir),
         instead: otherwise(part, sir),
+        which: choosing(part, sir),
         needed: `That one needs an answer${sir}: ${line}`,
         letGo: `I'll leave the question on ${called} for now${sir}; ask me for it when you're ready.`,
         terms: [...new Set(names.filter((name) => name !== ""))],
@@ -548,8 +560,8 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   const said = gist(heard)
   if (said === "") return undefined
   const picked = (options: ReadonlyArray<number>): Reply => ({ _tag: "Picked", options })
-  // A form that takes only its options asks which one instead.
-  const words = (text: string): Reply => (part.ownWords ? { _tag: "Words", text } : { _tag: "Instead" })
+  // A form that takes only its options asks which of them instead.
+  const words = (text: string): Reply => (part.ownWords ? { _tag: "Words", text } : { _tag: "Which" })
   if (!steers(said)) {
     const single = meant(part, said)
     if (single !== undefined) return picked([single])
@@ -583,7 +595,7 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
  * What the model's answer to a part comes to: the options, when every line
  * of it names one, as a list only for a part that takes several; otherwise
  * his own words, as he'd type them, or, for a form that takes only its
- * options, which one instead. Nothing at all is to hear it again.
+ * options, which of them instead. Nothing at all is to hear it again.
  */
 export const resolve = (part: Said, text: string): Reply => {
   const trimmed = text.trim()
@@ -601,7 +613,7 @@ export const resolve = (part: Said, text: string): Reply => {
   const options = [...new Set(found.flatMap((index) => (index === undefined ? [] : [index])))].toSorted((a, b) => a - b)
   const every = found.length > 0 && !found.includes(undefined)
   if (every && (part.several || options.length === 1)) return { _tag: "Picked", options }
-  return part.ownWords ? { _tag: "Words", text: trimmed } : { _tag: "Instead" }
+  return part.ownWords ? { _tag: "Words", text: trimmed } : { _tag: "Which" }
 }
 
 /**

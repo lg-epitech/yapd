@@ -63,7 +63,7 @@ export const Decision = Schema.Struct({
   machine: Schema.String,
   /** With OPEN shown: "answers" if this answers it, "replaces" if it's something new. "" without OPEN. */
   pending: Schema.Literal("answers", "replaces", ""),
-  /** answer: missed · send: now|after|restart · decide: accept|session|decline · again: same|more|instead · dismiss: later
+  /** answer: missed · send: now|after|restart · decide: accept|session|decline · again: same|more|instead|which · dismiss: later
    *  · reply: skip · find: threads|journal
    *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind: at|finished|asked|checks|merged
    *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|memories */
@@ -1104,6 +1104,9 @@ const settling = (open: Assistant.Open, heard: string, said: string, target: str
         case "Instead":
           // Once it's asked which one then, a no is never to yapd's pick again: what it's to is the model's to judge.
           return open.asked === open.wording?.instead ? undefined : answers({ act: "again", how: "instead" })
+        case "Which":
+          // Once it's asked which of them, what his words are to is the model's to judge.
+          return open.asked === open.wording?.which ? undefined : answers({ act: "again", how: "which" })
         case "Later":
           return answers({ act: "dismiss", how: "later" })
         case "Leave":

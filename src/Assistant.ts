@@ -829,10 +829,11 @@ export const make = (options: {
      * already: he asked to hear it, so he's still there to answer it. A
      * thread's question is asked as `how` says: in full, as he asked to hear
      * it again, which uses up none of its asks; with what its options mean;
-     * which one then, without yapd's pick; as a part T3 Code needs an answer
-     * to; or, by default, once more as it went unanswered.
+     * which one then, without yapd's pick; which of them all, to a form his
+     * words didn't fit; as a part T3 Code needs an answer to; or, by
+     * default, once more as it went unanswered.
      */
-    const reask = (said: Lines, how: "still" | "again" | "more" | "instead" | "needed" = "still") =>
+    const reask = (said: Lines, how: "still" | "again" | "more" | "instead" | "which" | "needed" = "still") =>
       Effect.gen(function* () {
         const before = yield* askedLately
         if (asking === undefined) return quiet({ _tag: "Nothing" })
@@ -844,7 +845,7 @@ export const make = (options: {
         const asked =
           wording === undefined
             ? Brain.reworded(open, before, said)
-            : how === "more" || how === "instead" || how === "needed"
+            : how === "more" || how === "instead" || how === "which" || how === "needed"
               ? wording[how]
               : Brain.reworded({ ...open, rewordings: how === "again" ? wording.again : wording.still }, before, said)
         if (asked === undefined) {
@@ -853,7 +854,7 @@ export const make = (options: {
           return unfinished(left, open.decision.rest, said)
         }
         // Heard again on his asking, or with what its options mean, a thread's question is asked no more often: a minute on, it's still asked once more.
-        const counted = wording === undefined || how === "still" || how === "instead" || how === "needed"
+        const counted = wording === undefined || how === "still" || how === "instead" || how === "which" || how === "needed"
         // Its wording stays as it was: asked which one then, what a yes is to is worked out from these words, as `leaning` has it.
         asking = { ...asking, open: { ...open, asked }, asks: asking.asks + (counted ? 1 : 0), repeat: undefined, due: undefined, held: new Set(), whole: undefined }
         yield* Effect.logInfo(`Asked again: ${asked}`)
@@ -1921,7 +1922,8 @@ export const make = (options: {
         // He didn't catch the question, so it's asked again in other words, now rather than later: a thread's in full, as he asked, or
         // with what its options mean, or which one then, without yapd's pick.
         if (decision.act === "again" && decision.pending === "answers") {
-          return yield* reask(said, open.kind !== "question" ? "still" : decision.how === "more" || decision.how === "instead" ? decision.how : "again")
+          const how = decision.how === "more" || decision.how === "instead" || decision.how === "which" ? decision.how : "again"
+          return yield* reask(said, open.kind !== "question" ? "still" : how)
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
         // time the words say: it's asked about at the time it first went, which may not be theirs, like at once to a turn stopped for it.
@@ -1951,11 +1953,13 @@ export const make = (options: {
           const part = open.wording?.part ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
           switch (answer?._tag) {
-            // Nothing in it, he wants to hear it again; words a form can't take, which one it takes.
+            // Nothing in it, he wants to hear it again; words a form can't take, which of them it takes, with yapd's pick.
             case "Again":
               return yield* reask(said, "again")
             case "Instead":
               return yield* reask(said, "instead")
+            case "Which":
+              return yield* reask(said, "which")
             case "Skip":
               // A part T3 Code needs an answer to is asked once more, saying so; skipped again, the question is let go with a word.
               if (question.mode === "message" && asked?.required === true) {

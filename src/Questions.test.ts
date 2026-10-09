@@ -138,6 +138,9 @@ describe("Questions", () => {
     expect(wording(described)[0]!.more).toBe("Red: a red test. Blue: a blue test. Green. I'd go with Blue. Which one, sir?")
     expect(wording(described)[0]!.instead).toBe("Which one then, sir: Red or Green?")
     expect(first!.instead).toBe("Red then, sir?")
+    // Words a form can't take: which of them all, yapd's pick kept.
+    expect(first!.which).toBe("Which one, sir: Red or Blue? I'd go with Blue.")
+    expect(second!.which).toBe("Which of them, sir: Alpha, Beta or Gamma?")
     expect(first!.letGo).toBe("I'll leave the question on the Tezos migration for now, sir; ask me for it when you're ready.")
     expect(wording(part("Which library?", ["`date-fns`", "Day.js"]))[0]!.terms).toEqual(["date-fns", "Day.js"])
   })
@@ -209,8 +212,8 @@ describe("Questions", () => {
     expect(["Skip.", "Stop.", "Skip the flaky test."].map((heard) => Questions.pick(next, heard, { inFull: true, parts: 1 }))).toEqual([{ _tag: "Leave" }, picked(1), picked(0)])
     expect(pick("Ghostnet, but only for the tests.")).toBeUndefined()
     expect(pick("Mainnet and Ghostnet.")).toBeUndefined()
-    // A form that takes only its options asks which one, rather than send words it can't take.
-    expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Instead" })
+    // A form that takes only its options asks which of them, rather than send words it can't take.
+    expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Which" })
   })
 
   test("a number he says to options named with numbers is the one a name has, never a place, and one no name has is the model's", () => {
@@ -280,7 +283,7 @@ describe("Questions", () => {
     expect(Questions.resolve(colour, "Blue\nbut only for the tests")).toEqual({ _tag: "Words", text: "Blue\nbut only for the tests" })
     expect(Questions.resolve(extras, "Alpha\nGamma\nbut skip them on CI")).toEqual({ _tag: "Words", text: "Alpha\nGamma\nbut skip them on CI" })
     expect(Questions.resolve(colour, " ")).toEqual({ _tag: "Again" })
-    expect(Questions.resolve(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Green.")).toEqual({ _tag: "Instead" })
+    expect(Questions.resolve(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Green.")).toEqual({ _tag: "Which" })
   })
 
   test("what's sent leaves out a part he skipped, needs every part a message needs, and never goes under an id or an option the question doesn't have", () => {

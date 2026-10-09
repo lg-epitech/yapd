@@ -1727,6 +1727,26 @@ describe("Assistant", () => {
     expect(await answering(["Red", "Blue (Recommended)"], "Yes.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
   })
 
+  test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          // The model, for what isn't plain, has his words as they are.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: situation.utterance.heard, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [{ ...colour, allowCustomAnswer: false }]),
+          })
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const which = "Which one, sir: Red or Blue? I'd go with Blue."
+    expect(await answering("Purple, please.", "Yes.")).toEqual({ spoken: [which, "Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
+    expect(await answering("None of those.", "Red.")).toEqual({ spoken: [which, "Red it is, sir."], answers: [{ [colour.id]: "Red" }] })
+  })
+
   test("after which one then, a yes is to what he heard last: yapd's pick once it's said again, and a second no is the model's to judge, never yapd's pick", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (...heard: ReadonlyArray<string>) =>

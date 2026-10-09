@@ -847,7 +847,7 @@ describe("Brain", () => {
       ...asks.flatMap((worded) => (worded._tag === "Ask" ? [worded.asking.asked, ...worded.asking.rewordings, worded.asking.about] : [worded.spoken])),
       ...asks.flatMap((worded) =>
         worded._tag === "Ask"
-          ? (worded.asking.parts ?? []).flatMap((part) => [part.first, part.next("Mainnet"), part.last("Mainnet"), ...part.again, ...part.still, part.here, part.more, part.instead, part.needed, part.letGo])
+          ? (worded.asking.parts ?? []).flatMap((part) => [part.first, part.next("Mainnet"), part.last("Mainnet"), ...part.again, ...part.still, part.here, part.more, part.instead, part.which, part.needed, part.letGo])
           : [],
       ),
       Brain.dropped({ kind: "approval", about: "allow Migrate Tezos Integration to push the branch" }, lines),
