@@ -32,7 +32,7 @@ private final class Watched {
 }
 
 /// What `/state` points at: a card put up a moment ago, `fresh`, or a while before.
-private func pointing(_ id: String, fresh: Bool) -> Status.Showing {
+func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   let format = ISO8601DateFormatter()
   format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
   let at = format.string(from: fresh ? Date() : Date(timeIntervalSinceNow: -3600))

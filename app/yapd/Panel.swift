@@ -13,21 +13,23 @@ import SwiftUI
 final class Panel {
   /// How wide a card is, in points.
   static let width: CGFloat = 360
-  /// How long a card stays up once yapd stops talking about it, or after it's shown with nothing said.
-  private static let linger: Duration = .seconds(20)
-  /// How long a card that yapd is about to talk about waits for it to start, before it lingers as if it had.
-  private static let patience: Duration = .seconds(5)
-
-  /// Where a card is in being talked about: not yet, now, or done with.
-  private enum Talk { case coming, talking, done }
 
   private var panel: NSPanel?
-  private var talk = Talk.done
-  private var fading: Task<Void, Never>?
+  /// When the card fades, as yapd talks about it. Set up on init, since it has the panel do the fading itself.
+  private var fading: Fading!
   /// The card it shows, or showed last.
   private(set) var card: Card?
   /// Told when a card goes away, by its close button or by fading, so yapd can take it down too.
   var closed: (Card) -> Void = { _ in }
+
+  init() {
+    fading = Fading(
+      Fading.Doing(
+        wait: { delay in try? await Task.sleep(for: delay) },
+        fade: { [weak self] in await self?.fadeAway() }
+      )
+    )
+  }
 
   /// Shows a card. `talking` is whether yapd is about to talk about it, which it fades after; otherwise it lingers.
   func show(_ card: Card, talking: Bool) {
@@ -59,28 +61,17 @@ final class Panel {
     panel.contentView = effect
     panel.alphaValue = 1
     panel.orderFrontRegardless()
-    talk = talking ? .coming : .done
-    fade(after: talking ? Self.patience : Self.linger)
+    fading.shown(talking: talking)
   }
 
-  /// Whether yapd is speaking now: a card fades a while after yapd stops talking about it.
+  /// Whether yapd is speaking now, with a card up or not: a card fades a while after yapd stops talking about it, even one fetched after it started.
   func heard(speaking: Bool) {
-    guard panel?.isVisible == true else { return }
-    switch talk {
-    case .coming where speaking:
-      talk = .talking
-      fading?.cancel()
-    case .talking where !speaking:
-      talk = .done
-      fade(after: Self.linger)
-    default:
-      break
-    }
+    fading.heard(speaking: speaking)
   }
 
   /// Takes the card away at once, like when yapd took it down.
   func hide() {
-    fading?.cancel()
+    fading.hidden()
     panel?.orderOut(nil)
   }
 
@@ -89,23 +80,15 @@ final class Panel {
     if let card { closed(card) }
   }
 
-  private func fade(after delay: Duration) {
-    fading?.cancel()
-    fading = Task { [weak self] in
-      try? await Task.sleep(for: delay)
-      guard !Task.isCancelled, let self, let panel = self.panel else { return }
-      // Not yet talked about after all: it lingers as if it had been.
-      if self.talk == .coming {
-        self.talk = .done
-        return self.fade(after: Self.linger)
-      }
-      await NSAnimationContext.runAnimationGroup { context in
-        context.duration = 0.6
-        panel.animator().alphaValue = 0
-      }
-      guard !Task.isCancelled else { return }
-      self.close()
+  /// Fades the card away, then puts it away, unless another went up or it was taken away meanwhile.
+  private func fadeAway() async {
+    guard let panel else { return }
+    await NSAnimationContext.runAnimationGroup { context in
+      context.duration = 0.6
+      panel.animator().alphaValue = 0
     }
+    guard !Task.isCancelled else { return }
+    close()
   }
 
   private func make() -> NSPanel {
