@@ -52,16 +52,16 @@ export class Audio extends Context.Tag("yapd/Audio")<
     readonly play: (path: string, from?: number) => Effect.Effect<Playback, AudioError, Scope.Scope>
     /**
      * 32 ms frames of 16 kHz mono from the microphone while playing, with yapd's
-     * own voice cancelled out once that's learnt: see `echoing`. None when
+     * own voice cancelled out once that's learnt: see `echo`. None when
      * there's no microphone to listen to.
      */
     readonly microphone: Effect.Effect<Option.Option<Queue.Dequeue<Float32Array>>, never, Scope.Scope>
     /**
-     * Whether yapd's own voice can still get into the microphone: it's talking,
-     * and hasn't said enough since the microphone came on for the echo
-     * cancellation to have learnt it, so what sounds like the user may be yapd.
+     * Whether yapd's own voice may be in a frame from the microphone, so what
+     * sounds like the user may be yapd. Told as the frame came in, so whoever
+     * listens knows even when running behind.
      */
-    readonly echoing: Effect.Effect<boolean>
+    readonly echo: (frame: Float32Array) => Effect.Effect<Echo | undefined>
     /** Turns the microphone off until the next update. */
     readonly rest: Effect.Effect<void>
     /**
@@ -72,6 +72,14 @@ export class Audio extends Context.Tag("yapd/Audio")<
     readonly warm: Effect.Effect<void>
   }
 >() {}
+
+/**
+ * How yapd's own voice may be in a frame from the microphone: "talking" while
+ * it says its first seconds since the microphone came on, before the echo
+ * cancellation has learnt its voice, and "fading" for a moment after it stops
+ * talking, while the last of what it said is still on its way in.
+ */
+export type Echo = "talking" | "fading"
 
 /** What the speaker and microphone are doing. The microphone is open while yapd speaks too, so that wins. */
 export type Doing = "idle" | "speaking" | "listening"
@@ -132,7 +140,7 @@ export const AfplayAudio = Layer.effectContext(
         report(playing > 0, false)
       }),
       microphone: Effect.succeed(Option.none()),
-      echoing: Effect.succeed(false),
+      echo: () => Effect.succeed(undefined),
       rest: Effect.void,
       warm: Effect.void,
     }
@@ -195,6 +203,13 @@ const quiet20ms = (() => {
  */
 const learning = 3_000
 
+/**
+ * Frames from the microphone after yapd stops talking that may still carry
+ * the last of what it said, through the room and the helper: about half a
+ * second's worth.
+ */
+const trailing = 16
+
 const permissionLog = (permission: string) => {
   switch (permission) {
     case "authorized":
@@ -247,6 +262,10 @@ export const native = (
     let heard = 0
     /** When what the helper is playing started, if it's playing. */
     let playingSince: number | undefined
+    /** Frames still to come since it stopped that may carry the last of its voice. */
+    let fading = 0
+    /** How yapd's voice may be in each frame, as it came in. */
+    const echoes = new WeakMap<Float32Array, Echo>()
     let permission: string | undefined
     let closing = false
     /** What the socket hasn't taken yet; it's written out once it drains. */
@@ -293,14 +312,25 @@ export const native = (
     const now = () => runSync(Clock.currentTimeMillis)
     /** The helper went quiet, so the echo cancellation heard yapd until now. */
     const quiet = () => {
-      if (playingSince !== undefined) heard += now() - playingSince
+      if (playingSince !== undefined) {
+        heard += now() - playingSince
+        fading = trailing
+      }
       playingSince = undefined
     }
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
-        // Even while yapd's own voice gets through, which whoever listens tells from the user by what's said.
-        if (listening && frames !== undefined) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
+        if (!listening || frames === undefined) return
+        const frame = new Float32Array(message.payload.buffer)
+        // Passed on even while yapd's own voice may be in it, which whoever listens tells from the user by what's said.
+        // Whether it may is told now, in order with what the helper says it played, since they may be running behind.
+        if (playingSince !== undefined && heard + now() - playingSince < learning) echoes.set(frame, "talking")
+        else if (playingSince === undefined && fading > 0) {
+          fading--
+          echoes.set(frame, "fading")
+        }
+        runSync(PubSub.publish(frames, frame))
         return
       }
       const event = decodeEvent(new TextDecoder().decode(message.payload))
@@ -321,6 +351,7 @@ export const native = (
           if (listening && frames === undefined) frames = runSync(PubSub.sliding<Float32Array>(64))
           heard = 0
           playingSince = undefined
+          fading = 0
           return
         case "playing":
           // Silence, which neither speaks nor teaches the echo cancellation anything.
@@ -540,7 +571,7 @@ export const native = (
       microphone: Effect.suspend(() =>
         listening && frames !== undefined ? Effect.map(PubSub.subscribe(frames), Option.some) : Effect.succeed(Option.none()),
       ),
-      echoing: Effect.sync(() => playingSince !== undefined && heard + now() - playingSince < learning),
+      echo: (frame) => Effect.sync(() => echoes.get(frame)),
       // Playing anything sets the helper up, so it plays a moment's silence. It isn't heard, and isn't waited for.
       warm: Effect.sync(() => {
         if (connection === undefined || listening || current !== undefined || warming !== undefined) return

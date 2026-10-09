@@ -104,7 +104,7 @@ const conversation = (
                 volume: () => Effect.void,
               }),
         microphone: Effect.succeed(Option.some(microphone)),
-        echoing: Effect.succeed(false),
+        echo: () => Effect.succeed(undefined),
         rest: Effect.void,
         warm: Effect.void,
       }),
@@ -1139,18 +1139,87 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         const echoed = [...answers]
         yield* helper.wait(1)
         yield* helper.finish
-        yield* helper.talk(0.9, 10)
+        // The first half second after it stops goes with what may be the last of its voice, so he carries on past it.
+        yield* helper.talk(0.9, 30)
         yield* helper.quiet
         return { echoed, answered: yield* Fiber.join(asking), answers, transcribed: helper.transcribed }
       }),
     )
-    // Each made out once, and only what he said after the question passed on.
+    // Only what he said after the question passed on.
     expect(result).toEqual({
       echoed: [],
       answered: true,
       answers: ["The docs site."],
-      transcribed: ["Which one, sir?", "Or the docs site?", "The docs site."],
+      transcribed: ["Which one, sir?", "Or the docs site? The docs site.", "The docs site."],
     })
+  })
+
+  test("lets go of the last of its voice coming in just after a line ends, rather than taking that for him", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Codex opened the"], [0.82, "pull request."]], {
+          duration: 2,
+          spoken: "Codex opened the pull request, sir.",
+        })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, 20)
+        yield* helper.wait(1.5)
+        yield* helper.finish
+        yield* helper.talk(0.82, 3)
+        yield* helper.quiet
+        yield* helper.wait(4)
+        const exit = yield* Fiber.await(helper.fiber)
+        return { exit: exit._tag, commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ exit: "Success", commands: ["play"], sent: [], replies: [] })
+  })
+
+  test("doesn't take the last of a question's own voice, coming in just after it's asked, for an answer", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const helper = yield* overHelper([[0.8, "Which one, sir? Yapd or the docs"], [0.85, "Site."]], { duration: 3 })
+        yield* Fiber.interrupt(helper.fiber)
+        const asking = yield* Effect.fork(
+          helper.ask({
+            audio: "/tmp/question.wav",
+            spoken: "Which one, sir: yapd or the docs site?",
+            answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+          }),
+        )
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, 40)
+        yield* helper.wait(2.5)
+        yield* helper.finish
+        yield* helper.talk(0.85, 3)
+        yield* helper.quiet
+        yield* helper.wait(9)
+        return { answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    expect(result).toEqual({ answered: false, answers: [] })
+  })
+
+  test("lets go of its voice still coming in once it has stopped for him, rather than adding it to what he said", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes three seconds over what he said, while its voice gets in again.
+        const helper = yield* overHelper([[0.9, "Hold on."], [0.8, "the tests pass now and the pull request"]], { delays: [3] })
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        yield* helper.talk(0.8, 10)
+        yield* helper.wait(2)
+        const stopped = [...helper.commands]
+        // The last of its voice, still coming in after it stopped.
+        yield* helper.talk(0.8, 3)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { stopped, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ stopped: ["play", "stop"], sent: ["Hold on."], replies: ["Hold on."] })
   })
 })
 

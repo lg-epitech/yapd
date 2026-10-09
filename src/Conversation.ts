@@ -34,8 +34,9 @@ type Signal =
   | { readonly _tag: "Partial"; readonly audio: Float32Array }
   /**
    * yapd's own voice stopped getting into the microphone partway through what
-   * may be it, as the echo cancellation learnt it or yapd stopped: what was
-   * said until then, made out on its own. What follows is passed on without it.
+   * may be it, as the echo cancellation learnt it or a moment after yapd
+   * stopped: what was said until then, made out on its own. What follows is
+   * passed on without it.
    */
   | { readonly _tag: "Cleared"; readonly audio: Float32Array }
   /** The microphone stopped, like when the helper quits. */
@@ -318,12 +319,13 @@ export const make = (options: {
         yield* Stream.fromQueue(microphone.value).pipe(
           Stream.mapEffect((frame) =>
             Effect.gen(function* () {
+              const echo = yield* audio.echo(frame)
               const event = endpointer.push(frame, yield* detect.value(frame))
               if (event === undefined) {
                 // Only while he talks, since a pause may be the end of what he said, which is then made out whole.
                 if (since === undefined || endpointer.pausing) return undefined
                 // From here it can only be him, or its voice carrying on, so that's told apart from what came before.
-                if (cleared === undefined && !(yield* audio.echoing)) {
+                if (cleared === undefined && echo === undefined) {
                   const said = endpointer.soFar()
                   cleared = said.length - frame.length
                   since = 0
@@ -335,8 +337,9 @@ export const make = (options: {
               }
               switch (event._tag) {
                 case "Onset":
-                  // As it starts, since by the time it's made out, yapd may well have learnt its own voice.
-                  unsure = yield* audio.echoing
+                  // As it starts, since by the time it's made out, yapd may well have learnt its own voice. Only
+                  // while it talks: what begins as it stops is far likelier him answering than the last of its voice.
+                  unsure = echo === "talking"
                   return { _tag: "Onset", echo: unsure } satisfies Signal
                 case "Speech":
                   since = unsure ? 0 : undefined

@@ -1,7 +1,7 @@
 import type { Socket } from "bun"
 import { describe, expect, test } from "bun:test"
 import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Option, Queue, Runtime, type Scope, Stream, TestClock, TestContext } from "effect"
-import { Activity, Audio, native } from "./Audio.ts"
+import { Activity, Audio, type Echo, native } from "./Audio.ts"
 import * as Helper from "./Helper.ts"
 
 interface Command {
@@ -173,33 +173,49 @@ describe("Native audio", () => {
       }),
     ))
 
-  test("hears from yapd's first word, saying its own voice may be in that until it has played three seconds on a new voice processor", () =>
+  test("hears from yapd's first word, saying its own voice may be in what it hears until it has played three seconds on a new voice processor", () =>
     run(
       Effect.gen(function* () {
         const fake = yield* device()
         const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)))
+        /** How yapd's voice may be in the next frame heard. */
+        const hear = (microphone: Queue.Dequeue<Float32Array>) => Effect.flatMap(Queue.take(microphone), fake.audio.echo)
         yield* fake.audio.play("/tmp/fake.wav")
         const microphone = yield* fake.audio.microphone
         if (Option.isNone(microphone)) return expect(Option.isSome(microphone)).toBe(true)
         yield* fake.frame(0.5)
         yield* flush
         expect(yield* Queue.poll(microphone.value)).toEqual(Option.some(new Float32Array(512).fill(0.5)))
-        expect(yield* fake.audio.echoing).toBe(true)
         yield* TestClock.adjust("2 seconds")
-        expect(yield* fake.audio.echoing).toBe(true)
+        yield* fake.frame(0.5)
+        // Heard before it finished, though only looked at after.
         yield* fake.finish
         yield* flush
+        expect(yield* hear(microphone.value)).toBe("talking")
+        // The last of its voice may still come in for half a second after it stops, however long that takes to look at.
+        // One at a time, since the socket takes only so much at once.
+        for (let frame = 0; frame < 17; frame++) yield* Effect.zipRight(fake.frame(0), flush)
+        const after = yield* Effect.forEach(Array.from({ length: 17 }), () => hear(microphone.value))
+        expect(after).toEqual([...Array.from({ length: 16 }, (): Echo => "fading"), undefined])
         // Only what it plays teaches the echo cancellation its voice, however long the quiet after.
         yield* TestClock.adjust("1 minute")
-        expect(yield* fake.audio.echoing).toBe(false)
         yield* fake.audio.play("/tmp/next.wav")
-        expect(yield* fake.audio.echoing).toBe(true)
+        yield* fake.frame(0)
+        yield* flush
+        expect(yield* hear(microphone.value)).toBe("talking")
         yield* TestClock.adjust("1 second")
-        expect(yield* fake.audio.echoing).toBe(false)
+        yield* fake.frame(0)
+        yield* flush
+        expect(yield* hear(microphone.value)).toBeUndefined()
         // Once it has rested, the next voice processor starts over.
         yield* fake.audio.rest
         yield* fake.audio.play("/tmp/after.wav")
-        expect(yield* fake.audio.echoing).toBe(true)
+        yield* flush
+        const next = yield* fake.audio.microphone
+        if (Option.isNone(next)) return expect(Option.isSome(next)).toBe(true)
+        yield* fake.frame(0)
+        yield* flush
+        expect(yield* hear(next.value)).toBe("talking")
       }),
     ))
 
