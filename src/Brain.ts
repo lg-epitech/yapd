@@ -486,8 +486,15 @@ const gitFlags = new Map([
   ["restore", riskyFlags.restore],
 ])
 
-/** Commands that never run what they're given, only look for it, like grep looking for "rm" through a folder with `-r`. */
-const readers = new Set(["grep", "egrep", "fgrep"])
+/** Commands that never run what they're given, only look for it, like grep looking for "rm" through a folder with `-r`, or rg, ag and ack. */
+const readers = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"])
+
+/**
+ * What has a search run a command of its own, which could be anything, on
+ * what it finds: rg's `--pre`, ack's and ag's `--pager`, and git grep's `-O`,
+ * whole or cut short as they take it.
+ */
+const runsOnFinds = new RegExp(String.raw`\s(?:--pre\b|${abbreviated("pager")}|${abbreviated("open-files-in-pager")}|-[a-zA-Z]*O)`)
 
 /** Git's subcommands that never run what they're given, like log looking for "clean" or a commit's message. */
 const gitReaders = new Set(["log", "show", "commit", "tag", "notes", "merge", "stash", "diff", "status", "blame", "shortlog"])
@@ -509,9 +516,10 @@ const plain = (word: string) => word.replace(/\$(?=["'])|["'\\]/g, "")
 
 /**
  * The checks above that count for a command, by what runs: none for one that
- * only looks for what it's given, like `grep 'rm' -r src`, and only its own
- * for a git subcommand, so `git log --grep clean -f` and `git commit -m "rm"
- * -r` are a plain yes. What runs is the first word, after any settings, like
+ * only looks for what it's given, like `grep 'rm' -r src` or `git grep 'rm
+ * -rf'`, unless it runs a command of its own on what it finds, and only its
+ * own for a git subcommand, so `git log --grep clean -f` and `git commit -m
+ * "rm" -r` are a plain yes. What runs is the first word, after any settings, like
  * `LC_ALL=C`, and words that run the rest as it is, like sudo, or a shell's
  * "-c". Any other command could run any of what's in it, like find's -exec,
  * xargs or ssh, so every check counts, wherever its name is; so it does when
@@ -530,7 +538,7 @@ const counting = (command: string): ReadonlyArray<(command: string) => boolean> 
     else break
   }
   const name = plain(words[at] ?? "").replace(/^.*\//, "")
-  if (readers.has(name)) return []
+  if (readers.has(name)) return runsOnFinds.test(command) ? everyFlag : []
   if (name !== "git") return everyFlag
   for (at += 1; at < words.length; at += 1) {
     const word = plain(words[at] ?? "")
@@ -538,6 +546,7 @@ const counting = (command: string): ReadonlyArray<(command: string) => boolean> 
     else if (!gitAlone.test(word)) break
   }
   const subcommand = plain(words[at] ?? "")
+  if (subcommand === "grep") return runsOnFinds.test(command) ? everyFlag : []
   const own = gitFlags.get(subcommand)
   return own !== undefined ? [own] : gitReaders.has(subcommand) ? [] : everyFlag
 }

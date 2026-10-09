@@ -420,6 +420,10 @@ describe("Brain", () => {
       'mcp__git__git_reset {"mode":"hard"}',
       "git_reset\nhard\ntrue",
       "mcp__git__clean\nflags\n-fd",
+      "rg --pre 'rm' -r x src",
+      "git grep -O'rm -rf' -e x",
+      "ack --pager='rm -rf ~/work' x",
+      "rg -l x | xargs rm -rf",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -506,6 +510,14 @@ describe("Brain", () => {
       "mcp__git__reset\nmode\nsoft\ntarget\nHEAD~1",
       "mcp__git__branch\nname\nold\nmode\ndelete",
       "mcp__git__log\nflags\n-f",
+      "rg 'rm -rf' src",
+      'rg -n "push --force" src',
+      "rg rm -r src",
+      "git grep 'rm -rf'",
+      "git grep -n 'push --force'",
+      "ag 'rm -rf' src",
+      "ack 'rm -rf'",
+      "ack -r 'clean -f' lib",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
