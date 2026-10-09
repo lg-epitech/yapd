@@ -1682,7 +1682,12 @@ describe("Assistant", () => {
     expect(await answering(sharp, "The first one.")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
     expect(await answering(sharp, "The second one.")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
     expect(await answering(sharp, "The sharp one.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
-    expect(await answering(language("C", "C++", "Rust"), "The first one.")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
+    // "C", which both are without their marks, is no letter's place either: which he meant is the model's.
+    expect(await answering(sharp, "C.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
+    const plain = language("C", "C++", "Rust")
+    expect(await answering(plain, "The first one.")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
+    expect(await answering(plain, "The second one.")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    expect(await answering(plain, "The plus plus one.", "C++")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
   })
 
   test("words that aren't an option go as the answer in his words, and a message to a thread waiting on a question he heard is sent as its answer", async () => {
