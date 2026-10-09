@@ -2408,6 +2408,107 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ answered: true, answers: ["Yes."] })
   })
 
+  test("lets go of what the user goes on with just after its first seconds, when what he said over them was let go, rather than act on the rest alone", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Tell it to fix the tests,"], [0.91, "and then merge it."]], { live: true })
+        yield* helper.wait(1.2)
+        yield* helper.talk(0.9, 28)
+        yield* helper.quiet
+        // A moment later, past its first three seconds.
+        yield* helper.talk(0, 8)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, transcribed: helper.transcribed, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({
+      commands: ["play"],
+      transcribed: ["Tell it to fix the tests,", "and then merge it."],
+      responded: [],
+      sent: [],
+      replies: [],
+    })
+  })
+
+  test("lets go of what the user goes on with just after its first seconds, though it stopped for that, once what he said before is made out to be let go", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes two seconds over the first part, while he goes on.
+        const helper = yield* overHelper([[0.9, "Tell it to fix the tests,"], [0.91, "and then merge it."]], { live: true, delays: [2] })
+        yield* helper.wait(1.2)
+        yield* helper.talk(0.9, 28)
+        yield* helper.quiet
+        yield* helper.talk(0, 8)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, plays: helper.plays, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    // Stopped for what came after its first seconds, then again from before he began, with none of it taken in.
+    expect(result).toEqual({ commands: ["play", "volume", "stop", "play"], plays: [0, 0], responded: [], sent: [], replies: [] })
+  })
+
+  test("lets go of what the user goes on with over them, when what he said just before was let go, rather than act on the rest alone", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Tell it to fix the tests,"], [0.91, "and then deploy it."]], { live: true })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.9, 20)
+        yield* helper.quiet
+        yield* helper.talk(0, 4)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play"], responded: [], sent: [], replies: [] })
+  })
+
+  test("takes only the stop of what the user said over them, never adding what he goes on with straight after, which is the rest of it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes half a second, and working out what to do two.
+        const helper = yield* overHelper([[0.9, "Wait for the tests to pass,"], [0.91, "then merge it."]], {
+          live: true,
+          delays: [0.5],
+          responding: 2,
+          intent: "dismiss",
+        })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 25)
+        yield* helper.quiet
+        yield* helper.talk(0, 4)
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { commands: helper.commands.slice(0, 2), responded: [...new Set(helper.responded)], sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "stop"], responded: ["Wait."], sent: [], replies: ["Wait."] })
+  })
+
+  test("adds what the user says straight after a stop of his it ran into, when all that's left of it is its own voice", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd."], [0.9, "Stop."], [0.91, "Tell it to open a PR."]], { live: true, responding: 2 })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, 15)
+        yield* helper.talk(0.9, 8)
+        yield* helper.quiet
+        yield* helper.talk(0, 4)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { responded: helper.responded.at(-1), sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ responded: "Stop. Tell it to open a PR.", sent: ["Stop. Tell it to open a PR."], replies: ["Stop. Tell it to open a PR."] })
+  })
+
   test("can't ask a question without its words, which tell its own voice getting into the microphone from an answer", () => {
     // @ts-expect-error Without them, any of its voice that got through would be taken for him.
     const unspoken: Conversation.Question = { audio: "/tmp/question.wav", answer: () => Effect.succeed(Option.none()) }
