@@ -66,6 +66,8 @@ export type Subject =
       readonly about: Option.Option<Threads.Ref>
       /** What he missed that it told him, by journal entry, which counts as heard once he's heard it to the end, said again or not. */
       readonly missed?: ReadonlyArray<number>
+      /** Whether it answered him catching up, even with nothing he missed, so what he says back to it is part of catching up. */
+      readonly catchingUp?: true
       /** The question it asks, if it does: once that's closed, however quietly, it's told rather than asked again (I4). */
       readonly question?: Open
       /** The question it was, in the words it was asked in, once it's closed: shown as it was, but told rather than asked again (I4). */
@@ -282,14 +284,34 @@ const alone = (kept: Kept) => {
 /**
  * Whether a journal entry is him catching up, asking what he missed, at once
  * or on a second look, or asking to hear something again, like a catch-up he
- * didn't hear through: neither tells him anything until he's heard the answer.
+ * didn't hear through, or saying something back to what he missed, like
+ * "thanks" or "stop" over it: none tells him anything until he's heard the
+ * answer, and what a reply cut off he never did.
  */
 const catchUp = (kept: Kept) => {
   if (Brain.catchingUp(kept.text ?? "")) return true
   if (typeof kept.detail !== "object" || kept.detail === null) return false
-  const { decision, second } = kept.detail as { readonly decision?: Partial<Brain.Decision>; readonly second?: Partial<Brain.Decision> }
-  return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again"
+  const { decision, second, over } = kept.detail as {
+    readonly decision?: Partial<Brain.Decision>
+    readonly second?: Partial<Brain.Decision>
+    readonly over?: unknown
+  }
+  return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again" || over === "catch-up"
 }
+
+/** Whether "it" is an answer telling him what he missed, or what he asked catching up, so what he says back to it is part of catching up. */
+const caughtUp = (subject: Subject) => subject._tag === "Answer" && (subject.missed !== undefined || subject.catchingUp === true)
+
+/**
+ * What "it" means once what came of something he said is said: said back to
+ * catching up, whatever came of it, like an answer, a card or a later step of
+ * the request, is part of catching up too, unless it asks him something, so
+ * thanks after it doesn't hide what he didn't hear either.
+ */
+const along = (thought: Pick<Thought, "utterance" | "subject">, subject: Subject): Subject =>
+  thought.utterance.via === "reply" && caughtUp(thought.subject) && subject._tag === "Answer" && subject.question === undefined && !caughtUp(subject)
+    ? { ...subject, catchingUp: true }
+    : subject
 
 /** Whether he only told yapd to stop what it's saying, like "skip" or "stop, stop", rather than taking it in, like "thanks". */
 const hushed = (heard: string) => enough.has([...new Set(gist(heard).split(" "))].join(" "))
@@ -826,7 +848,7 @@ export const make = (options: {
         const ref = Option.map(about, ({ ref }) => ref)
         const told = {
           say: text,
-          subject: { _tag: "Answer", said: text, about: ref, ...(missed.length === 0 ? {} : { missed }) },
+          subject: { _tag: "Answer", said: text, about: ref, ...(missed.length === 0 ? {} : { missed }), ...(catching ? { catchingUp: true } : {}) },
           kind: "answer",
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
@@ -958,8 +980,9 @@ export const make = (options: {
      * already, which it never is twice: neither then, nor when reading the
      * project, which comes back later, would ask while another question is open.
      */
-    const begun = (outcome: Drafts.Outcome, utterance: Utterance, said: Lines, asked: boolean): Effect.Effect<Outcome> =>
+    const begun = (outcome: Drafts.Outcome, thought: Thought, said: Lines, asked: boolean): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
+        const { utterance } = thought
         switch (outcome._tag) {
           case "Said":
             return reply(outcome.spoken, { _tag: "Nothing" })
@@ -1004,8 +1027,8 @@ export const make = (options: {
             yield* outcome.then.pipe(Effect.ensuring(settled), Effect.forkIn(scope))
             yield* background(
               outcome.then.pipe(
-                Effect.flatMap((after) => begun(after, utterance, said, asked)),
-                Effect.flatMap((told) => deliver(told, utterance)),
+                Effect.flatMap((after) => begun(after, thought, said, asked)),
+                Effect.flatMap((told) => deliver(told, thought)),
                 Effect.ensuring(arrived),
                 Effect.annotateLogs({ utterance: utterance.id }),
               ),
@@ -1020,8 +1043,8 @@ export const make = (options: {
               outcome.then.pipe(
                 Effect.flatMap((after) =>
                   // A launch takes the reading's place at once, rather than once it's this request's turn, so nothing in between can hide it.
-                  (after._tag === "Launching" ? begun(after, utterance, said, asked) : turn.withPermits(1)(begun(after, utterance, said, asked))).pipe(
-                    Effect.flatMap((told) => deliver(told, utterance)),
+                  (after._tag === "Launching" ? begun(after, thought, said, asked) : turn.withPermits(1)(begun(after, thought, said, asked))).pipe(
+                    Effect.flatMap((told) => deliver(told, thought)),
                   ),
                 ),
                 Effect.ensuring(settled),
@@ -1057,7 +1080,7 @@ export const make = (options: {
         const prompt = ready.value
         if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
         const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance.heard), undefined, { utterance: utterance.id, step })
-        const told = yield* begun(outcome, utterance, said, false)
+        const told = yield* begun(outcome, thought, said, false)
         // What comes of starting it is known only later, so the rest isn't done on the strength of it, and he's told so, ahead of any question.
         const rest = thought.decision.rest.trim()
         if (rest === "") return told
@@ -1088,7 +1111,7 @@ export const make = (options: {
           yield* Effect.logInfo("Leaving it, since that didn't settle the project")
           return reply(said.leaving, thought.subject)
         }
-        return yield* begun(outcome, utterance, said, true)
+        return yield* begun(outcome, thought, said, true)
       })
 
     /** What a thread is called in what's said, unless it's the one he's on about, which goes without saying. */
@@ -1332,8 +1355,9 @@ export const make = (options: {
         const utterance: Utterance = { ...thought.utterance, heard: thought.decision.rest }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
+        // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
         const thinking = yield* job(
-          think(utterance, { _tag: "Answer", said: first.say, about: on }, [
+          think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on }), [
             { speaker: "user", text: thought.utterance.heard },
             // Nothing said of the step before, like a thanks, is nothing to show.
             ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say } satisfies Line]),
@@ -1347,7 +1371,7 @@ export const make = (options: {
         yield* background(
           Fiber.join(thinking).pipe(
             // Only what's done waits its turn, not working it out.
-            Effect.flatMap((next) => turn.withPermits(1)(Effect.flatMap(then(next, quiet(first.subject), step, said, true), (after) => deliver(after, thought.utterance)))),
+            Effect.flatMap((next) => turn.withPermits(1)(Effect.flatMap(then(next, quiet(first.subject), step, said, true), (after) => deliver(after, thought)))),
             Effect.annotateLogs({ utterance: thought.utterance.id }),
           ),
           thought.utterance.turns,
@@ -1665,7 +1689,7 @@ export const make = (options: {
           if (decision.act === "resume") return quiet(decided.subject)
           yield* close(open, "replaced", utterance.id)
           const left = open.news === undefined ? Brain.left(open, said) : `${open.news} ${unaskedAfter(open)}, since you'd moved on.`
-          yield* deliver(unfinished(reply(left, decided.subject), open.decision.rest, said), utterance)
+          yield* deliver(unfinished(reply(left, decided.subject), open.decision.rest, said), decided)
           return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         }
         // Saying again just what was asked about, like the same message to the same thread, is a yes to it. To sending one again, whatever
@@ -1722,27 +1746,63 @@ export const make = (options: {
           yield* Effect.logInfo(`Not taking "${heard}" as the answer, with only ${voiced.toFixed(2)} s of speech`)
           return Option.none()
         }
-        return Option.some(
-          Effect.flatMap(options.awaiting, (arrived) =>
-            background(
-              turn.withPermits(1)(
-                Effect.gen(function* () {
-                  yield* Effect.logInfo(`Heard: ${heard}`)
-                  const outcome = yield* acting(thought)
-                  yield* note(thought, outcome, at)
-                  yield* deliver(outcome, utterance)
-                  yield* offering
-                }),
-              ).pipe(Effect.ensuring(arrived), Effect.annotateLogs({ utterance: utterance.id })),
-              turns,
-            ),
-          ),
-        )
+        return Option.some(replying(thought))
       })
 
-    /** Says what came of a request ahead of anything else, and notes it in the journal. */
-    const deliver = (outcome: Outcome, utterance: Pick<Utterance, "id" | "turns">): Effect.Effect<void> =>
+    /**
+     * What's said over an answer or right after it: a follow-up to it, with
+     * "it" what the answer was about, like "tell it to fix the tests" after
+     * how a thread is doing, worked out as he talks and acted on once he's
+     * stopped, as what he dictates is. Talk that wasn't meant for yapd, or a
+     * change to a thread with too little speech to be his, isn't taken: the
+     * answer carries on, or the microphone closes. `line` is what he heard of
+     * it, which can be its words for no app to show its card.
+     */
+    const followUp =
+      (about: Subject, line: Effect.Effect<string>) =>
+      (heard: string, voiced: number): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+        Effect.gen(function* () {
+          const at = yield* Clock.currentTimeMillis
+          const { turns } = yield* options.power
+          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
+          const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line }])
+          if (thought.decision.act === "resume") return Option.none()
+          if (Brain.murmured(thought.decision, utterance)) {
+            yield* Effect.logInfo(`Not taking "${heard}" as a follow-up, with only ${voiced.toFixed(2)} s of speech`)
+            return Option.none()
+          }
+          return Option.some(replying(thought))
+        })
+
+    /**
+     * What's said back to something yapd said, once he's stopped: acted on in
+     * the background, in its turn, with nothing but answers said until what
+     * comes of it is, and noted like what he dictates.
+     */
+    const replying = (thought: Thought) =>
+      Effect.flatMap(options.awaiting, (arrived) =>
+        background(
+          turn.withPermits(1)(
+            Effect.gen(function* () {
+              yield* Effect.logInfo(`Heard: ${thought.utterance.heard}`)
+              const outcome = yield* acting(thought)
+              yield* note(thought, outcome, thought.utterance.at)
+              yield* deliver(outcome, thought)
+              yield* offering
+            }),
+          ).pipe(Effect.ensuring(arrived), Effect.annotateLogs({ utterance: thought.utterance.id })),
+          thought.utterance.turns,
+        ),
+      )
+
+    /**
+     * Says what came of a request ahead of anything else, and notes it in the
+     * journal. `of` is what he said that it came of, as it was worked out, or
+     * only which request it's for, like one a restart found.
+     */
+    const deliver = (outcome: Outcome, of: Thought | Pick<Utterance, "id" | "turns">): Effect.Effect<void> =>
       Effect.gen(function* () {
+        const utterance = "utterance" in of ? of.utterance : of
         if (outcome.say === "") return
         // Turned off since, nothing about it is said, so nothing is noted as said.
         const power = yield* options.power
@@ -1764,7 +1824,8 @@ export const make = (options: {
                 ...(open === undefined ? {} : { detail: { question: Brain.alone(open), open: open.id } }),
               })
         yield* Effect.logInfo(`Said: ${outcome.say}`)
-        const { subject, missed, card } = outcome
+        const { missed, card } = outcome
+        const subject = "utterance" in of ? along(of, outcome.subject) : outcome.subject
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
         let unsaid: Effect.Effect<void> = Effect.void
         // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
@@ -1785,10 +1846,11 @@ export const make = (options: {
         const used = Effect.sync(() => {
           reworded = true
         })
+        const kind = open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer"
         yield* options.tell(
           {
             id: mint(at, "a"),
-            kind: open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer",
+            kind,
             priority: "needs-you",
             spoken: outcome.say,
             ...(instead === undefined ? {} : { instead: { spoken: instead, when: off, used } }),
@@ -1829,6 +1891,8 @@ export const make = (options: {
                   }),
                 }),
             ...(outcome.confirmed === undefined ? {} : { confirmed: outcome.confirmed }),
+            // An answer can be followed up about what it was about, in the words he heard it in.
+            ...(kind === "answer" ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) } : {}),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {
@@ -1853,13 +1917,16 @@ export const make = (options: {
         const { utterance, decision } = thought
         const { second } = outcome
         const ms = (yield* Clock.currentTimeMillis) - began
+        // Said back to what he missed, cutting it off or after it, it's part of catching up, so it never hides what he didn't hear
+        // of that from the next "what did I miss?": heard to the end, it's heard, and never told again anyway.
+        const over = utterance.via === "reply" && caughtUp(thought.subject) ? { over: "catch-up" } : {}
         // What was said back has an entry of its own.
         yield* journal.write({
           at: utterance.at,
           kind: utterance.via === "reply" ? "reply" : "dictation",
           text: utterance.heard,
           utterance: utterance.id,
-          detail: { via: utterance.via, source: thought.source, decision, ...(second === undefined ? {} : { second }), ms, outcome: outcome.kind },
+          detail: { via: utterance.via, source: thought.source, decision, ...(second === undefined ? {} : { second }), ...over, ms, outcome: outcome.kind },
         })
         yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
       })
@@ -1997,7 +2064,7 @@ export const make = (options: {
         yield* Effect.logInfo(`Routed: ${routed(thought, (yield* Clock.currentTimeMillis) - began)}`)
         const outcome = yield* acting(thought).pipe(Effect.ensuring(letGo))
         yield* note(thought, outcome, began)
-        yield* deliver(outcome, utterance)
+        yield* deliver(outcome, thought)
         yield* offering
         return Option.some(utterance.id)
       }).pipe(Effect.ensuring(letGo), turn.withPermits(1), Effect.annotateLogs({ utterance: utterance.id }))
@@ -2032,7 +2099,7 @@ export const make = (options: {
 
     return {
       think,
-      act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought.utterance), outcome))),
+      act: (thought) => turn.withPermits(1)(Effect.flatMap(acting(thought), (outcome) => Effect.as(deliver(outcome, thought), outcome))),
       heard,
       prepare: (press: number, turns: number, began?: number) =>
         Effect.gen(function* () {

@@ -1,7 +1,7 @@
 import type { Effect } from "effect"
 import type { Ticket } from "./ClaudeCode.ts"
 import type { Priority } from "./Condenser.ts"
-import type { Question, Update } from "./Conversation.ts"
+import type { Answer, Question, Update } from "./Conversation.ts"
 
 /** An update that is condensed, rendered, and waiting for its turn to be spoken. */
 export interface Ready {
@@ -57,7 +57,7 @@ export interface Notice {
    * end: never when it can't be played or breaks off before that's known.
    */
   readonly confirmed?: Effect.Effect<void>
-  /** Run once it's been said to the end, or answered, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
+  /** Run once it's been said to the end, or for a question, answered, which is when the user has heard all of it: never when it's cut off, even by a follow-up, dropped or can't be said. */
   readonly heard?: Effect.Effect<void>
   /**
    * Run once it's done with, said or not, like gone stale, dropped or never
@@ -70,6 +70,12 @@ export interface Notice {
    * what undoes its `saying`, since it counts as never said.
    */
   readonly question?: Pick<Question, "answer"> & { readonly unanswered: Effect.Effect<void>; readonly unsaid: Effect.Effect<void> }
+  /**
+   * For an answer: what to make of what the user says over it, or right
+   * after it's said to the end, while the microphone stays open as after an
+   * update, like a follow-up about the thread it was about.
+   */
+  readonly followUp?: Answer["followUp"]
 }
 
 /** A notice that is rendered, and waiting for its turn like updates do. */

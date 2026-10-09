@@ -2,9 +2,9 @@
 
 A short list of what this branch changed and what yapd can do now. The commit log has the detail, including every fix that came out of review.
 
-Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite` and `yapd.before-m2.sqlite`.
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite` and `yapd.before-followups.sqlite`.
 
-Live on `dev` now: everything below except rig. Cards for "show me" appear once the menu bar app is rebuilt from this branch; until then yapd says the gist without them. Being built: an agent's questions read out and answered by voice. Built, waiting on its first run with you: rig.
+Live on `dev` now: everything below. Rig's threads are followed, waiting on their first voice checks with you. Being built: an agent's questions read out and answered by voice.
 
 ## Talk to it (the shortcut)
 
@@ -17,6 +17,7 @@ Live on `dev` now: everything below except rig. Cards for "show me" appear once 
 - "No, the Mina one" to its question does that instead, and "yes, but once it's done" or "yes, and then tell it…" does what you add. Two things in one breath ("stop the Tezos one and tell the Mina one…") are done in order, the first said at once; if one doesn't go, it says what it left.
 - Nothing is ever sent twice behind your back: the same words to a thread that hasn't answered since get "I sent that a minute ago, sir. Again?", and a message yapd can't confirm got there, even across a restart, gets "Send it again?", to which saying the same words again is a yes.
 - Answers come before any update waiting to be read.
+- Heard to the end, an answer like a thread's status gets the same few seconds for a reply as an update: "tell it to fix the tests", "stop it" or "show me that" act on the thread it was about, and "thanks" or "skip" end it without the model.
 - "Stop", "skip" or "enough" over an update skips it. "What did I miss?" leaves out what's about to be read anyway, and says how many are coming up.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
 
@@ -55,3 +56,5 @@ Live on `dev` now: everything below except rig. Cards for "show me" appear once 
 - With an older yapd on rig, a connection dropped while starting work there is said as "I can't reach rig" rather than "it may have started".
 - "Show Last Card" just after closing a card can come to nothing if the close reaches yapd after it: choose it again.
 - A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.
+- Catching up, if yapd has to ask "which one?" about your follow-up, the next "what did I miss?" may say "Nothing else." though an update is still unheard.
+- After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
