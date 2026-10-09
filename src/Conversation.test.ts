@@ -1298,6 +1298,59 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     )
     expect(result).toEqual({ sent: ["Hold on, which PR was that?"], replies: ["Hold on, which PR was that?"] })
   })
+
+  test("keeps what the user goes on to say past them once what he said over them is his, though it's in yapd's words", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.93, "Hold on, tell it to"], [0.94, "merge the pull request."]])
+        yield* helper.wait(2.3)
+        yield* helper.talk(0.93, 10)
+        yield* helper.wait(1)
+        yield* helper.talk(0.94, 30)
+        yield* helper.quiet
+        yield* helper.wait(4)
+        return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({
+      commands: ["play", "stop"],
+      sent: ["Hold on, tell it to merge the pull request."],
+      replies: ["Hold on, tell it to merge the pull request."],
+    })
+  })
+
+  test("keeps what the user went on to say past them, in yapd's words, when what he said over them is made out only after", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes three seconds over what he said over them.
+        const helper = yield* overHelper([[0.93, "Hold on, tell it to"], [0.94, "merge the pull request."]], { delays: [3] })
+        yield* helper.wait(2.3)
+        yield* helper.talk(0.93, 10)
+        yield* helper.wait(1)
+        yield* helper.talk(0.94, 30)
+        yield* helper.quiet
+        yield* helper.wait(4)
+        return { sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ sent: ["Hold on, tell it to merge the pull request."], replies: ["Hold on, tell it to merge the pull request."] })
+  })
+
+  test("makes out a short interruption across the end of them whole, when neither side of it is enough on its own", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.93, "Not"], [0.94, "now."]])
+        yield* helper.wait(2.7)
+        yield* helper.talk(0.93, 8)
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.94, 8)
+        yield* helper.quiet
+        yield* helper.wait(4)
+        return { commands: helper.commands.slice(0, 2), transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "stop"], transcribed: ["Not", "now.", "Not now."], sent: ["Not now."], replies: ["Not now."] })
+  })
 })
 
 describe("Responder", () => {

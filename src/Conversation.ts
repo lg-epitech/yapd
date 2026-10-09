@@ -688,11 +688,33 @@ export const make = (options: {
               }
               const looked = pending.find((talk) => talk.id === signal.id)
               if (looked === undefined) break
-              looked.his = signal.his
+              // His already when what he said just before it, as yapd's voice stopped getting in, was: see below.
+              looked.his = looked.his === true || signal.his
               looked.some = signal.some
               looked.heard = signal.heard
-              yield* Effect.logInfo(signal.his ? `Heard: ${signal.heard}` : `Carried on over its own voice${signal.heard === "" ? "" : `: ${signal.heard}`}`)
-              if (signal.his && playing) yield* halt
+              yield* Effect.logInfo(looked.his ? `Heard: ${signal.heard}` : `Carried on over its own voice${signal.heard === "" ? "" : `: ${signal.heard}`}`)
+              if (looked.his && playing) yield* halt
+              // What was said before yapd's voice stopped getting into the microphone, and the rest, which may still be under way.
+              const index = pending.indexOf(looked)
+              const [head, rest] = looked.carried ? [looked, pending[index + 1]] : [pending[index - 1], looked]
+              // What he went on with is his too, however many of its words yapd was saying.
+              if (head?.carried === true && head.his === true) {
+                if (rest !== undefined) rest.his = true
+                else if (doubt !== undefined) doubt.his = true
+              }
+              // Too little either side to tell on its own, like "Not | now.", it's made out whole.
+              if (head?.carried === true && head.his === false && rest?.his === false) {
+                const audio = Endpointer.concat([head.audio, rest.audio])
+                pending.splice(pending.indexOf(head), 2, {
+                  id: yield* look(audio, { at: head.at ?? 0, over: true }),
+                  audio,
+                  at: head.at,
+                  carried: false,
+                  his: undefined,
+                  some: undefined,
+                  heard: undefined,
+                })
+              }
               const heard = heardOut()
               if (heard !== undefined) return heard
               // It was all yapd's own voice, so it's as if nothing had been said.
