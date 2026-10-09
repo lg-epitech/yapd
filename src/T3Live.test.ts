@@ -333,6 +333,27 @@ describe("T3Live.follow", () => {
     expect(lines.some((line) => line.includes(secret))).toBe(false)
   })
 
+  test("never leaves part of the token in the log where what T3 Code said is cut short", async () => {
+    const secret = "t3-secret-token-ABCDEFGHIJKLMNOP"
+    const lines: Array<string> = []
+    const logger = Logger.map(Logger.logfmtLogger, (line) => void lines.push(line))
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const { sockets, dial } = fake()
+        yield* T3Live.follow(Effect.succeed({ server: { origin: "http://127.0.0.1:50001" }, token: Redacted.make(secret) }), dial)
+        yield* flush
+        // It breaks, saying the token where the line is cut.
+        sockets[0]!.emit({ _tag: "Open" })
+        sockets[0]!.emit({ _tag: "Message", data: JSON.stringify({ _tag: "Defect", defect: `${"y".repeat(290)}${secret}` }) })
+        yield* flush
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(TestContext.TestContext, Logger.replace(Logger.defaultLogger, logger)))),
+    )
+    const broke = lines.filter((line) => line.includes("it broke"))
+    expect(broke).toHaveLength(1)
+    expect(broke[0]).toContain(`${"y".repeat(290)}[token]`)
+    expect(lines.some((line) => line.includes(secret.slice(0, 10)))).toBe(false)
+  })
+
   test("says in the log why it lost T3 Code after following it", async () => {
     const lines: Array<string> = []
     const logger = Logger.map(Logger.logfmtLogger, (line) => void lines.push(line))

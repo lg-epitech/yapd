@@ -257,26 +257,33 @@ const dial: Dial = (url, token) => {
       socket.onopen = () => listener({ _tag: "Open" })
       socket.onmessage = (event) => listener({ _tag: "Message", data: String(event.data) })
       socket.onerror = (event) => {
-        failed = "message" in event && String(event.message) !== "" ? String(event.message) : "the socket failed"
+        const message = "message" in event ? String(event.message) : ""
+        // Bun says the same for a refused token as for a protocol turned down, and T3 Code mostly turns down credentials.
+        failed = message.includes("101")
+          ? `it turned the socket down, most likely the token (${message})`
+          : message !== ""
+            ? message
+            : "the socket failed"
       }
       socket.onclose = (event) => {
         const closed = event.reason || `closed with ${event.code}`
-        listener({ _tag: "Closed", reason: failed === undefined ? closed : `${failed}, ${closed}` })
+        // Bun closes with the same words it failed with, which are said once.
+        listener({ _tag: "Closed", reason: failed === undefined ? closed : failed.includes(closed) ? failed : `${failed}, ${closed}` })
       }
     },
   }
 }
 
-/** What T3 Code sent, short enough for a line of the log. */
-const brief = (value: unknown) => {
-  const text = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value))
+/** What T3 Code sent, short enough for a line of the log, with the token taken out first so no part of it is left by the cut. */
+const brief = (value: unknown, token: Redacted.Redacted) => {
+  const text = Server.withheld(typeof value === "string" ? value : (JSON.stringify(value) ?? String(value)), token)
   return text.length > 300 ? `${text.slice(0, 300)}...` : text
 }
 
 /** Why a subscription T3 Code ended came to an end, in its own words when it gave any. */
-const ended = (exit: unknown) =>
+const ended = (exit: unknown, token: Redacted.Redacted) =>
   Either.match(Server.outcome(exit), {
-    onLeft: (error) => (error._tag === "Refusal" ? `it ended the subscription: ${error.tag}: ${error.message}` : `it ended the subscription: ${brief(exit)}`),
+    onLeft: (error) => (error._tag === "Refusal" ? `it ended the subscription: ${error.tag}: ${error.message}` : `it ended the subscription: ${brief(exit, token)}`),
     onRight: () => "it ended the subscription",
   })
 
@@ -367,8 +374,8 @@ export const follow = (locate: Effect.Effect<Server.Located, Server.Trouble>, co
               if (Either.isLeft(message)) break
               const { _tag, requestId, values, exit, defect } = message.right
               // The subscription ended, or the connection's own calls broke, whatever the socket still answers.
-              if (_tag === "Exit" && requestId === subscription) return over(ended(exit))
-              if (_tag === "Defect") return over(`it broke: ${brief(defect)}`)
+              if (_tag === "Exit" && requestId === subscription) return over(ended(exit, token))
+              if (_tag === "Defect") return over(`it broke: ${brief(defect, token)}`)
               if (_tag !== "Chunk" || requestId !== subscription) break
               for (const value of values ?? []) {
                 const item = decodeItem(value)
