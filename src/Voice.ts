@@ -691,9 +691,9 @@ const brief = 160
 /**
  * Keeps what's rendered of short lines, the ones yapd says again and again
  * like "On it.", so saying them again is a copy rather than a render. Those
- * rendered ahead are kept for good, and of the rest the newest `most`, in
- * `dir`. One rendered for someone who stopped waiting is still kept, for
- * whoever asks next.
+ * rendered ahead are kept for good, however long, and of the rest the newest
+ * `most`, in `dir`. One rendered for someone who stopped waiting is still
+ * kept, for whoever asks next.
  */
 export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
   Effect.gen(function* () {
@@ -701,6 +701,8 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
     const kept = new Map<string, Deferred.Deferred<string, ProcessError>>()
     /** Lines rendered ahead, which are never let go of, so however seldom one comes up it plays at once. */
     const ahead = new Set<string>()
+    /** Whether a line is kept once rendered: a short one, or one rendered ahead however long, which would otherwise be rendered ahead for nothing. */
+    const keeps = (text: string) => text.length <= brief || ahead.has(text)
     const forget = (text: string, entry: Deferred.Deferred<string, ProcessError>) =>
       Effect.suspend(() => {
         if (kept.get(text) !== entry) return Effect.void
@@ -748,7 +750,7 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
 
     const render = (text: string, path: string) =>
       Effect.gen(function* () {
-        if (text.length > brief) return yield* voice.render(text, path)
+        if (!keeps(text)) return yield* voice.render(text, path)
         const file = yield* Deferred.await(yield* claim(text))
         yield* Effect.tryPromise(() => Bun.write(path, Bun.file(file))).pipe(
           Effect.catchAll(() => voice.render(text, path)),
@@ -758,12 +760,13 @@ export const remembering = (voice: Voice["Type"], dir: string, most = 64) =>
     return {
       render,
       /**
-       * A short line already kept is copied whole, quicker than any first part
-       * of it would render, and one of a single sentence has no part to have
-       * early, so it's kept like any short line. Others come in parts.
+       * A line already kept, short or rendered ahead, is copied whole, quicker
+       * than any first part of it would render, and one of a single sentence
+       * has no part to have early, so it's kept like any short line. Others
+       * come in parts.
        */
       renderFirst: (text: string, path: string) =>
-        text.length <= brief && (kept.has(text) || sentencesOf(text).length < 2)
+        keeps(text) && (kept.has(text) || sentencesOf(text).length < 2)
           ? rendering(render)(text, path)
           : early(voice, text, path),
       /** Renders lines ahead of time and keeps them for good, so even the first time they're said is instant, and every time after. */
