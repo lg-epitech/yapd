@@ -1432,7 +1432,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "undo": take back what you just did for him, as LATELY shows it. "how" is "carry" when he wants a thread you stopped to carry on, "" to withdraw the message you just sent, like "scratch that". "target" is the thread, when he names one.
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
-- "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN.
+- "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
 - These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "mode" to change when you talk; "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it; "show" something on his screen.`
 
@@ -1448,7 +1448,8 @@ const choosing = `Choosing a thread:
 - If THREADS or LATELY shows you started the same work in the last 30 minutes, or may have, as when T3 Code didn't say whether it started, don't start it again: "answer" that it's already under way, or may be, naming it.`
 
 const opening = `OPEN: when it's shown, you asked him something and are waiting. Decide first whether his words answer it: by position ("the second"), by name, by how they sound, or yes or no to a single choice. Set "pending" to "answers" or "replaces". If they answer it, decide on what he asked in the first place with the thread he picked. If they don't, do what he said instead: your question is dropped. Without OPEN, "pending" is "".
-When OPEN asks yes or no to doing something, it says what a yes does. A plain yes is that act on that thread, with "text" empty. A no is "dismiss". A no with something else instead, like "no, the Mina one" or "no, tell it to use the other table", is that something else, decided in full, with "pending" "answers": yapd does that and not what it asked.`
+When OPEN asks yes or no to doing something, it says what a yes does. A plain yes is that act on that thread, with "text" empty. A no is "dismiss". A no with something else instead, like "no, the Mina one" or "no, tell it to use the other table", is that something else, decided in full, with "pending" "answers": yapd does that and not what it asked.
+When OPEN asks a thread's question, a no is its answer, never "dismiss": the option it comes to, like "Leave the changelog", or his own words, like "No".`
 
 const answering = `Answers:
 - Answer from THREADS, WAITING ON YOU, LATELY, UNHEARD and USAGE. Never make up a state: say what you don't know.

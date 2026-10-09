@@ -203,6 +203,14 @@ describe("Brain", () => {
     expect(looked).toContain("Asking him: «Which colour should the test use?» Its options: «Red», «Blue».")
   })
 
+  test("a no to a thread's question is told to the model as its answer, never as letting it go", () => {
+    const { open } = questionOpen(0)
+    const shown = Brain.prompt(situation("No.", { open: Option.some(open), desk: desk([ref(tezos)]) }), Option.none())
+    expect(shown).not.toMatch(/no to OPEN\./)
+    expect(shown).toContain(`or no to OPEN, unless OPEN asks a thread's question, which a no answers.`)
+    expect(shown).toContain(`When OPEN asks a thread's question, a no is its answer, never "dismiss"`)
+  })
+
   test("'what's the question' and 'what are the options' are worked out without the model", () => {
     const decided = (heard: string, part: number) => {
       const { open, desk: shown } = questionOpen(part)
