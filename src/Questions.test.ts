@@ -330,6 +330,30 @@ describe("Questions", () => {
     expect(pick(["Hold", "Hold please"], "Hold, please.")).toBeUndefined()
   })
 
+  test("a no with a stop after it, like 'No, tests.', is his no then a name, never the option it would turn, which the model tells", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (labels: ReadonlyArray<string>, heard: string, several = false) => Questions.pick(part("What should I do?", labels, { multiSelect: several }), heard, { inFull: true, parts: 1 })
+    for (const [labels, heard] of [
+      [["Tests", "No tests (Recommended)"], "No, tests."],
+      [["Merge", "No merge (Recommended)"], "No, merge."],
+      [["Merge", "Don't merge"], "Don't. Merge."],
+      [["Merge", "Don't merge"], "Don’t, merge."],
+      [["Retry", "Never retry"], "Never, retry."],
+      [["Tests", "No tests"], "Nope, tests."],
+      [["Tests", "No tests"], "No? Tests."],
+    ] as const) {
+      expect([heard, pick(labels, heard), Questions.resolve(part("What should I do?", labels), heard)]).toEqual([heard, undefined, { _tag: "Words", text: heard }])
+    }
+    // Said so, "not now" puts it off, never sending the option named so.
+    expect(pick(["Now", "Not now"], "Not. Now.")).toEqual({ _tag: "Later" })
+    // Nor, of several, is it a list of the option called No and a name.
+    expect(pick(["No", "Tests", "Docs"], "No, tests.", true)).toBeUndefined()
+    // A name with the same stop is still that option, and one said without a stop is plain.
+    expect(pick(["No, skip tests", "Run tests"], "No, skip tests.")).toEqual(picked(0))
+    expect(pick(["Tests", "No tests"], "No tests.")).toEqual(picked(1))
+    expect(pick(["Merge", "Don't merge"], "Don’t merge.")).toEqual(picked(1))
+  })
+
   test("taking back what he said, like 'cancel that', is the model's to tell, never an option it's a word of", () => {
     const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
     const deploy = part("The deploy failed. What now?", ["Retry (Recommended)", "Cancel the deploy"])

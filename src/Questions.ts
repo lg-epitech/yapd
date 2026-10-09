@@ -466,6 +466,9 @@ const exactly = (part: Said, text: string) => {
   return wanted === "" ? undefined : one(fitting(part, ({ label, said }) => [label, unmarked(label), said].some((name) => verbatim(name) === wanted)))
 }
 
+/** A word that says no, with a stop after it and more words after that, like "No, tests." or "Don't. Merge.": the stop counts. */
+const stopped = /(?:^|[^\p{L}\p{N}'’])(?:no|not|nope|nah|never|none|nor|neither|without|cannot|\p{L}+n['’]t|(?:do|does|did|ca|wo|is|are|was|were|should|would|could|have|has|had|must|need)nt|aint)\s*[,.;:!?…—–]+\s*[\p{L}\p{N}]/iu
+
 /**
  * The options his words are the whole name of, nothing of it left out and
  * nothing added: as written, marks and all, which tells "C#" from "C++";
@@ -476,11 +479,15 @@ const exactly = (part: Said, text: string) => {
  * named alike, which only the model can tell apart. Part of a name, a word
  * of it, or its words in another order are never one: "merge now" is never
  * "Do not merge now", "just lint" never "Tests and lint", and "the code,
- * not the test" never "Fix the test, not the code".
+ * not the test" never "Fix the test, not the code". Nor is a no with a
+ * stop after it the name it would turn, unless the name has that stop as
+ * written: "No, tests." is never "No tests".
  */
 const wholly = (part: Said, heard: string): ReadonlyArray<number> => {
   const exact = exactly(part, heard)
   if (exact !== undefined) return [exact]
+  // A no with a stop after it, like "No, tests." or "Don't. Merge.", is his no then a name: never the name it would turn, like No tests.
+  if (stopped.test(heard)) return []
   // His words without what goes without saying, or with every word kept, for a name that has them, like "Hold please".
   const his = [...new Set([bare(heard), unled(kept(heard))])].filter((said) => said !== "")
   if (his.length === 0) return []
@@ -713,6 +720,8 @@ const hushing = (said: string) => [repeating, later, skipping, leaving].some((ph
  * what came before it lost, Lint.
  */
 const listed = (part: Said, heard: string): ReadonlyArray<number> | undefined => {
+  // "No, tests." is his no then a name, never the option called No and another.
+  if (stopped.test(heard)) return undefined
   const pieces = heard.replace(/([,;])\s*(?:and|plus)\b/gi, "$1").split(/[,;&+]|\b(?:and|plus)\b/i)
   if (pieces.some((piece) => gist(piece) === "")) return undefined
   const found = pieces.map((piece) => whole(part, piece))
