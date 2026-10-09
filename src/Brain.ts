@@ -1391,6 +1391,9 @@ export const speakable = (text: string, desk: Threads.Desk) =>
     .replace(/\s{2,}/g, " ")
     .trim()
 
+/** Whether text has nothing in it only meant to be read, like a link, a path, a branch, an id, an address or a hash, so it can be said as it is. */
+export const readable = (text: string) => unreadable.every(([pattern]) => text.search(pattern) === -1)
+
 // ---------------------------------------------------------------- prompt
 
 const contract = `Reply with only a JSON object with the keys "act", "target", "sure", "spoken", "others", "machine", "pending", "how", "when", "text" and "rest", in that order. Every key is always there: "" where it doesn't apply.
