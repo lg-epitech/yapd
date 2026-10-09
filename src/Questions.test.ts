@@ -213,6 +213,36 @@ describe("Questions", () => {
     expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Instead" })
   })
 
+  test("a number he says to options named with numbers is the one a name has, never a place, and one no name has is the model's", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const workers = part("How many parallel workers should the test run use?", ["1 worker", "2 workers", "4 workers (Recommended)", "8 workers"])
+    const pick = (heard: string, asked = workers) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    for (const [heard, index] of [
+      ["Four.", 2],
+      ["4.", 2],
+      ["Two.", 1],
+      ["One.", 0],
+      ["The four one.", 2],
+      ["Eight workers.", 3],
+      // A place said as one still is.
+      ["The fourth one.", 3],
+      ["Option four.", 3],
+      ["Last.", 3],
+      ["Three.", undefined],
+      ["Number four.", undefined],
+    ] as const) {
+      expect([heard, pick(heard)]).toEqual([heard, index === undefined ? undefined : picked(index)])
+    }
+    expect(pick("Four.", part("How many workers?", ["1", "2", "4", "8"]))).toEqual(picked(2))
+    expect(pick("Three.", part("How many retries?", ["2 retries", "3 retries", "5 retries"]))).toEqual(picked(1))
+    expect(pick("Twenty two.", part("Which Node version?", ["Node 18", "Node 20 (Recommended)", "Node 22"]))).toEqual(picked(2))
+    expect(Questions.pick(part("How many workers?", ["1 worker", "2 workers", "4 workers", "8 workers"], { multiSelect: true }), "Two and four.", { inFull: true, parts: 1 })).toEqual(picked(1, 2))
+    expect(Questions.resolve(workers, "4")).toEqual(picked(2))
+    // Named with no numbers, a number is a place, and "the blue one" points.
+    expect(pick("Two.", part("Which colour?", ["Red", "Blue", "Green"]))).toEqual(picked(1))
+    expect(pick("The blue one.", part("Which colour?", ["Red", "Blue", "One more"]))).toEqual(picked(1))
+  })
+
   test("a multi-select answer takes lists, 'all', 'both', 'all but X' and 'none'", () => {
     const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
     const pick = (heard: string) => Questions.pick(extras, heard, { inFull: true, parts: 2 })

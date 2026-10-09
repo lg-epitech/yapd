@@ -1462,6 +1462,28 @@ describe("Assistant", () => {
     expect((await answering("All but Beta.")).asked).toBe(0)
   })
 
+  test("a number said to options named with numbers sends the option with that number, never the one in that place", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const workers = {
+      id: "How many parallel workers should the test run use?",
+      header: "Workers",
+      question: "How many parallel workers should the test run use?",
+      options: [{ label: "1 worker" }, { label: "2 workers" }, { label: "4 workers (Recommended)" }, { label: "8 workers" }],
+    }
+    const answering = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [workers]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), asked: made.seen.length }
+        }),
+      )
+    for (const heard of ["Four.", "4."]) {
+      expect(await answering(heard)).toEqual({ spoken: ["4 workers it is, sir."], answers: [{ [workers.id]: "4 workers (Recommended)" }], asked: 0 })
+    }
+  })
+
   test("words that aren't an option go as the answer in his words, and a message to a thread waiting on a question he heard is sent as its answer", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }

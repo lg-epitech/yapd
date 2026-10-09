@@ -359,8 +359,36 @@ export const ack = (part: Said, answer: Answer) => (answer._tag === "Picked" ? s
 
 // ---------------------------------------------------------------- answers
 
-/** How it sounds, spaces and marks aside: "ghost net" is Ghostnet, "day js" is Day.js. */
-const sound = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "")
+/** Numbers as words, up to nineteen, and the tens after. */
+const units: Readonly<Record<string, number>> = Object.fromEntries(
+  [...numbers, "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"].map((word, count) => [word, count]),
+)
+const tens: Readonly<Record<string, number>> = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 }
+
+/**
+ * Words as compared, with the numbers in them as figures: "four workers" is
+ * "4 workers" and "twenty two" is "22", as Whisper writes them either way.
+ * "One" only when it's all there is or comes first, as in "one worker": in
+ * "the blue one" it only points.
+ */
+const figures = (said: string) => {
+  const words = said.split(" ")
+  return words
+    .flatMap((word, index) => {
+      const ten = tens[word]
+      const unit = units[words[index + 1] ?? ""] ?? 0
+      if (ten !== undefined) return [String(ten + (unit > 0 && unit < 10 ? unit : 0))]
+      const previous = tens[words[index - 1] ?? ""]
+      const count = units[word]
+      // The unit of "twenty two" is in the 22 already.
+      if (previous !== undefined && count !== undefined && count > 0 && count < 10) return []
+      return count !== undefined && (word !== "one" || index === 0) ? [String(count)] : [word]
+    })
+    .join(" ")
+}
+
+/** How it sounds, spaces and marks aside: "ghost net" is Ghostnet, "day js" is Day.js, "four workers" is 4 workers. */
+const sound = (text: string) => figures(gist(text)).replace(/[^\p{L}\p{N}]+/gu, "")
 
 /** The places of the options that fit, which settle it only when there's one. */
 const fitting = (part: Said, fits: (choice: Choice) => boolean) => part.options.flatMap((choice, index) => (fits(choice) ? [index] : []))
@@ -370,6 +398,12 @@ const one = (indices: ReadonlyArray<number>) => (indices.length === 1 ? indices[
 const byName = (part: Said, said: string) =>
   one(fitting(part, ({ label, said: name }) => [label, unmarked(label), name].some((written) => gist(written) === said))) ??
   (sound(said) === "" ? undefined : one(fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => sound(written) === sound(said)))))
+
+/**
+ * Whether the options are named with numbers, like "2 workers" or "Node 20":
+ * then a number he says is the one in a name, never a place.
+ */
+const numbered = (part: Said) => part.options.some(({ label, by }) => by === "label" && /\d/.test(figures(gist(unmarked(label)))))
 
 /** An option by its place: "the second one", "number two", "option B", "last". */
 const place = /^(the )?(?:(option|number|choice) )?(first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th|one|two|three|four|[1-4]|[a-d])(?: one| option)?$/
@@ -388,6 +422,8 @@ const byPlace = (part: Said, said: string) => {
   // A letter on its own only when no option goes by one, and "the one" is no place at all.
   if (kind === undefined && /^[a-d]$/.test(which) && part.options.some(({ said }) => /^\p{L}$/u.test(said.trim()))) return undefined
   if (kind === undefined && the !== undefined && which === "one") return undefined
+  // "Four" to 2, 4, 8 or 16 workers is 4 workers, not the fourth: only "the fourth" or "option four" is a place then.
+  if (kind !== "option" && kind !== "choice" && /^(?:one|two|three|four|[1-4])$/.test(which) && numbered(part)) return undefined
   const index = which === "last" || which === "latter" ? part.options.length - 1 : places[which]
   return index !== undefined && index >= 0 && index < part.options.length ? index : undefined
 }
@@ -398,12 +434,14 @@ const pointing: ReadonlySet<string> = new Set([
   "we'll", "want", "choose", "a", "an", "just", "only",
 ])
 
-/** An option by the words he named it with, all of them its own and no other's: "the blue one", "full history". */
+/** An option by the words he named it with, all of them its own and no other's: "the blue one", "full history", "the four one" for 4 workers. */
 const byWords = (part: Said, said: string) => {
-  const named = said.split(" ").filter((word) => !pointing.has(word))
+  const named = figures(said)
+    .split(" ")
+    .filter((word) => !pointing.has(word))
   if (named.length === 0) return undefined
   const having = (choice: Choice) => {
-    const own = wordsOf(`${unmarked(choice.label)} ${choice.said}`)
+    const own = new Set([unmarked(choice.label), choice.said].flatMap((name) => figures(gist(name)).split(" ")))
     return named.every((word) => own.has(word))
   }
   return one(fitting(part, having))
