@@ -28,13 +28,19 @@ export type Act =
   | { readonly _tag: "Undo"; readonly to: Option.Option<Threads.Ref>; readonly carry: boolean }
   /** Allows, or turns down, what the thread waits on him for: only `requestId`, the request he heard. Never for always. */
   | { readonly _tag: "Decide"; readonly to: Threads.Ref; readonly requestId: string; readonly decision: Decision }
-  /** Answers the thread's question, only `requestId`, the one he heard, by its questions' ids, with the option he picked, said back, when he picked one. */
+  /**
+   * Answers the thread's question, only `requestId`, the one he heard, by its
+   * questions' ids, with the option he picked, said back, when he picked one;
+   * `as` "message" when what he said was a message for the thread, which went
+   * as the answer, since the thread was waiting on it.
+   */
   | {
       readonly _tag: "Reply"
       readonly to: Threads.Ref
       readonly requestId: string
       readonly answers: Readonly<Record<string, string | ReadonlyArray<string>>>
       readonly said: Option.Option<string>
+      readonly as?: "answer" | "message"
     }
 
 /** What an approval is answered with by voice: allowed, for the rest of the thread's work when he says so, or turned down. */
@@ -210,6 +216,8 @@ const revealed = "That sounds like a secret, and I never give one by voice, so i
 export const guarded = (outcome: Outcome) => "reason" in outcome && [secretive, withheld, unread, revealed].includes(outcome.reason)
 /** Why an approval or an answer isn't sent when what the thread waits on isn't what it answers. */
 const mismatched = "It isn't waiting on that kind of answer, so it needs T3 Code."
+/** Why an answer isn't sent when T3 Code takes it as a message, which needs every part it needs. */
+const incomplete = "It needs an answer to every part, so it needs T3 Code."
 /** Why another answer to the same request isn't sent while an earlier, different one may have got there. */
 const answeredBefore = "Your earlier answer may already have got there, so this one needs T3 Code."
 /** Why another answer to the same request isn't sent once an earlier, different one went. */
@@ -875,28 +883,40 @@ export const make = (options: {
       if (thread.pendingRuntimeRequest.id !== act.requestId && !read.right.pending.includes(act.requestId)) return yield* moot
       const request = read.right.request
       if (Option.exists(request, ({ _tag }) => _tag === "Secret")) return yield* failing({ _tag: "Refused", reason: secretive } satisfies Outcome, doing[kind])
-      // An answer in his own words that looks like a secret isn't given by voice, whatever the question said it was for.
-      if (act._tag === "Reply" && Option.isNone(act.said) && Object.values(act.answers).flat().some(T3Actions.revealing)) {
+      const question = Option.getOrUndefined(Option.filter(request, (request) => request._tag === "Question"))
+      const questions = question?._tag === "Question" ? question.questions : []
+      // An answer in his own words that looks like a secret isn't given by voice, whatever the question said it was for, even beside an
+      // option he picked for another part: only what's one of its part's options, as it takes it, is never his own words.
+      const offered = (id: string, value: string) => questions.some((asked) => asked.id === id && asked.options.some((option) => T3Actions.choice(option) === value))
+      if (act._tag === "Reply" && Object.entries(act.answers).some(([id, value]) => [value].flat().some((given) => !offered(id, given) && T3Actions.revealing(given)))) {
         return yield* failing({ _tag: "Refused", reason: revealed } satisfies Outcome, doing[kind])
       }
       const fits = Option.exists(request, (request) =>
         act._tag === "Decide" ? request._tag === "Approval" && request.decisions.some(({ decision }) => decision === act.decision) : request._tag === "Question",
       )
-      if (!fits) return yield* failing({ _tag: "Refused", reason: mismatched } satisfies Outcome, doing[kind])
+      // T3 Code takes an answer under a key the question doesn't have without a word, and the agent never gets it.
+      const unasked = act._tag === "Reply" && Object.keys(act.answers).some((id) => !questions.some((asked) => asked.id === id))
+      if (!fits || unasked) return yield* failing({ _tag: "Refused", reason: mismatched } satisfies Outcome, doing[kind])
+      // Taken as a message to the thread, each part is one string, and every part it needs has one.
+      const message = question?._tag === "Question" && question.mode === "message"
+      if (act._tag === "Reply" && message && questions.some(({ id, required }) => required && [act.answers[id] ?? []].flat().join("").trim() === "")) {
+        return yield* failing({ _tag: "Refused", reason: incomplete } satisfies Outcome, doing[kind])
+      }
+      const answer = act._tag === "Reply" && message ? { ...act, answers: Object.fromEntries(Object.entries(act.answers).map(([id, value]) => [id, [value].flat().join(", ")])) } : act
       const now = yield* Clock.currentTimeMillis
       const latest = (yield* ledger.steps(now - answering, { kinds: [kind], machine: act.to.machine, thread: act.to.id })).findLast((row) =>
         Option.exists(command(row.body), (body) => (body._tag === "Decide" || body._tag === "Answer") && body.requestId === act.requestId),
       )
       // A different answer from one that never left yapd takes its place; from one that went, or may have, even given up on since, it would
       // contradict what T3 Code may have.
-      if (latest !== undefined && !alike(latest.body, act)) {
+      if (latest !== undefined && !alike(latest.body, answer)) {
         if (latest.state === "failed") {
           yield* ledger.settle(latest.commandId, "abandoned", { reason: replaced, from: ["failed"] })
         } else if (latest.state !== "refused" && (latest.state !== "abandoned" || unsettled(latest))) {
           return yield* failing({ _tag: "Refused", reason: latest.state === "sent" ? answeredAlready : answeredBefore } satisfies Outcome, doing[kind])
         }
       }
-      const earlier = latest !== undefined && alike(latest.body, act) ? latest : undefined
+      const earlier = latest !== undefined && alike(latest.body, answer) ? latest : undefined
       if (earlier?.state === "sent") return settled(earlier)
       /** The same answer, given up on without knowing whether it got there: it's never sent again, under its own ids or new ones. */
       const unconfirmed = failing({ _tag: "Unknown", reason: unconfirmedAnswer, again: Option.none() } satisfies Outcome, doing[kind])
@@ -907,9 +927,9 @@ export const make = (options: {
         kind,
         act.to,
         () =>
-          act._tag === "Decide"
-            ? { _tag: "Decide", requestId: act.requestId, decision: act.decision }
-            : { _tag: "Answer", requestId: act.requestId, answers: act.answers },
+          answer._tag === "Decide"
+            ? { _tag: "Decide", requestId: answer.requestId, decision: answer.decision }
+            : { _tag: "Answer", requestId: answer.requestId, answers: answer.answers },
         reached.right,
         wanted,
       )
@@ -1142,6 +1162,8 @@ export const done = (act: Act, how: Ledger.How, lines: Lines, called: Option.Opt
       ? `${it} waiting on you for something${addressed(lines)}, so that will go once it's dealt with.`
       : `${it} finishing something off${addressed(lines)}, so that will go once it's done.`
   }
+  // A message that went as the answer to what the thread was waiting on, which he's told, since it's not what he asked for.
+  if (act._tag === "Reply" && act.as === "message") return `${naming(lines.onIt, called)} It was waiting on a question, so that's its answer.`
   return naming(
     act._tag === "Stop"
       ? lines.stopped

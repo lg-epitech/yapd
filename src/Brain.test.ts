@@ -839,7 +839,7 @@ describe("Brain", () => {
       ...asks.flatMap((worded) => (worded._tag === "Ask" ? [worded.asking.asked, ...worded.asking.rewordings, worded.asking.about] : [worded.spoken])),
       ...asks.flatMap((worded) =>
         worded._tag === "Ask"
-          ? (worded.asking.parts ?? []).flatMap((part) => [part.first, part.next("Mainnet"), part.last("Mainnet"), ...part.again, ...part.still, part.here, part.more, part.instead, part.letGo])
+          ? (worded.asking.parts ?? []).flatMap((part) => [part.first, part.next("Mainnet"), part.last("Mainnet"), ...part.again, ...part.still, part.here, part.more, part.instead, part.needed, part.letGo])
           : [],
       ),
       Brain.dropped({ kind: "approval", about: "allow Migrate Tezos Integration to push the branch" }, lines),
@@ -851,6 +851,8 @@ describe("Brain", () => {
       Hands.done({ _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "accept" }, "now", lines, Option.some("Migrate Tezos Integration")),
       Hands.done({ _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "decline" }, "now", lines, Option.none()),
       Hands.done({ _tag: "Reply", to: ref(tezos), requestId: "q1", answers: { q: "ghostnet" }, said: Option.some("Ghostnet") }, "now", lines, Option.none()),
+      // A message that went as the answer to the question it was waiting on.
+      Hands.done({ _tag: "Reply", to: ref(tezos), requestId: "q1", answers: { q: "Start with mainnet." }, said: Option.none(), as: "message" }, "now", lines, Option.some("Migrate Tezos Integration")),
       Hands.failed({ _tag: "Decide", to: ref(tezos), requestId: "r1", decision: "accept" }, { _tag: "Refused", reason: Hands.plainly("Runtime request r1 is expired.") }, lines, Option.none()),
       Hands.failed({ _tag: "Reply", to: ref(tezos), requestId: "q1", answers: {}, said: Option.none() }, { _tag: "Unknown", reason: "T3 Code is taking too long.", again: Option.none() }, lines, Option.some("Migrate Tezos Integration")),
       Hands.failed({ _tag: "Message", to: ref(tezos), text: "Merge it.", how: "now" }, { _tag: "Refused", reason: Hands.given }, lines, Option.some("Migrate Tezos Integration")),
