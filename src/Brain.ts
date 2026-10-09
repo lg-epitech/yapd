@@ -358,9 +358,10 @@ export const needing = (desk: Threads.Desk, lines: Lines, now: number) => {
   const away = desk.away.map(({ reason }) => reason)
   // Seeing no threads at all, it can't say nothing needs him, only why it can't see.
   if (parts.length === 0 && desk.threads.length === 0 && away.length > 0) return away.join(" ")
+  // With a machine it can't see, nothing it can see needs him, which is only what's here: there may well be something there.
   const said =
     parts.length === 0
-      ? `Nothing needs you right now${addressed(lines)}.`
+      ? `Nothing needs you${away.length > 0 ? " here" : ""} right now${addressed(lines)}.`
       : parts.length === 1
         ? `${capital(parts[0]!)}${addressed(lines)}.`
         : `${capital(count(parts.length))} things${addressed(lines)}: ${both(parts)}.`

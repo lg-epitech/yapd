@@ -91,6 +91,13 @@ const which = (candidates: ReadonlyArray<Threads.Ref>): Assistant.Open => ({
 })
 
 describe("Brain", () => {
+  test("who needs him, with a machine it can't see, is only what's here, with why it can't see the other", () => {
+    const idle = desk().threads.map((listed) => ({ ...listed, state: "idle" as const }))
+    expect(Brain.needing({ threads: idle, away: desk().away }, lines, now)).toBe("Nothing needs you here right now, sir. I can't see rig's threads yet.")
+    // With every machine seen, as before.
+    expect(Brain.needing({ threads: idle, away: [] }, lines, now)).toBe("Nothing needs you right now, sir.")
+  })
+
   test("the first, the second and the last pick the open question's candidates in order", () => {
     const candidates = [ref(mina), ref(tezos), ref(std)]
     const asking = situation("", { open: Option.some(which(candidates)), desk: desk(candidates) })
