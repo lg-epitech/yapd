@@ -1037,6 +1037,22 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toMatchObject({ sent: ["Hold on."], replies: ["Hold on."] })
   })
 
+  test("goes back to before the user began when he wasn't talking to it, since it only stopped once it made out it was him", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Hold on, merge it."]], { intent: "resume" })
+        yield* helper.wait(2)
+        yield* helper.talk(0.9, 10)
+        yield* helper.wait(1.5)
+        yield* helper.quiet
+        return { commands: helper.commands, plays: helper.plays }
+      }),
+    )
+    expect(result.commands.slice(0, 3)).toEqual(["play", "stop", "play"])
+    // A second and a half before he began, two seconds in, rather than before where it stopped, three and a half seconds in.
+    expect(result.plays).toEqual([0, 0.5])
+  })
+
   test("carries on when Whisper can't make out what may be its own voice", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

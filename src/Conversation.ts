@@ -64,7 +64,7 @@ type Outcome =
   | { readonly _tag: "Finished" }
   | {
       readonly _tag: "Interrupted"
-      /** How far it got, in seconds. */
+      /** How far it got, in seconds: no further than where he began, when it carried on over him until it made out it was him. */
       readonly at: number
       readonly duration: number
       readonly audio: Float32Array
@@ -78,6 +78,8 @@ interface Talk {
   /** What passes on what was made of it, when it had to be. */
   readonly id: number
   readonly audio: Float32Array
+  /** How far into the line it began, when yapd carried on over it: none when it stopped for it at once. */
+  readonly at: number | undefined
   /** Whether he carried on in the talk after it, which was told apart from it as yapd's voice stopped getting into the microphone. */
   readonly carried: boolean
   /** Whether it was him, unknown while it's being made out, and whether any of it was, too little to tell on its own. */
@@ -527,9 +529,10 @@ export const make = (options: {
             )
             return id
           })
-        const interrupted = (audio: Float32Array, heard: string | undefined): Outcome => ({
+        const interrupted = (audio: Float32Array, heard: string | undefined, began = Number.POSITIVE_INFINITY): Outcome => ({
           _tag: "Interrupted",
-          at: stoppedAt ?? playback.duration,
+          // Stopped for him only once it made out it was him, it goes back to where he began, as it would have stopped there otherwise.
+          at: Math.min(stoppedAt ?? playback.duration, began),
           duration: playback.duration,
           audio,
           ear,
@@ -549,8 +552,11 @@ export const make = (options: {
           // A word or so of his just before what he carried on with goes with it, though too little to tell on its own.
           const his = talks.filter((talk, index) => talk.his === true || (talk.some === true && talk.carried && talks[index + 1]?.his === true))
           if (his.length === 0) return undefined
+          const began = Math.min(...his.map((talk) => talk.at ?? Number.POSITIVE_INFINITY))
           // Each made out on its own, unless there's more than one, which Whisper then hears together.
-          return his.length === 1 ? interrupted(his[0]!.audio, his[0]!.heard) : interrupted(Endpointer.concat(his.map((talk) => talk.audio)), undefined)
+          return his.length === 1
+            ? interrupted(his[0]!.audio, his[0]!.heard, began)
+            : interrupted(Endpointer.concat(his.map((talk) => talk.audio)), undefined, began)
         }
         /** How it ends once the microphone has gone and nothing's left to make out: not yet while it's still playing. */
         const deafened = Effect.gen(function* () {
@@ -586,6 +592,7 @@ export const make = (options: {
               pending.push({
                 id: before.his ? fresh() : yield* look(signal.audio, before),
                 audio: signal.audio,
+                at: before.at,
                 carried: true,
                 his: before.his ? true : undefined,
                 some: before.his ? true : undefined,
@@ -614,6 +621,7 @@ export const make = (options: {
                 pending.push({
                   id: yield* look(signal.audio, doubted),
                   audio: signal.audio,
+                  at: doubted.at,
                   carried: false,
                   his: undefined,
                   some: undefined,
@@ -621,9 +629,9 @@ export const make = (options: {
                 })
                 break
               }
-              if (pending.length === 0) return interrupted(signal.audio, undefined)
+              if (pending.length === 0) return interrupted(signal.audio, undefined, doubted?.at)
               // Said after what's still being made out, it waits for that, so what he said stays in order.
-              pending.push({ id: fresh(), audio: signal.audio, carried: false, his: true, some: true, heard: undefined })
+              pending.push({ id: fresh(), audio: signal.audio, at: doubted?.at, carried: false, his: true, some: true, heard: undefined })
               const heard = heardOut()
               if (heard !== undefined) return heard
               break
