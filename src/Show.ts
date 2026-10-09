@@ -785,10 +785,11 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
       })
 
     // Asked for by id, like by an app for a card it put away, it's only that one: a request that comes late never takes down one put up since.
-    // Asked for as it was shown, it's only while it's still up since then: put back up since, like by the app's Show Last Card, it's up anew,
-    // so the app's request for when it put it away before, coming late, leaves it up.
+    // Asked for as it was shown, it's only while it hasn't been put up again after then: put back up since, like by the app's Show Last Card,
+    // it's up anew, so the app's request for when it put it away before, coming late, leaves it up. One naming a showing still to come, as
+    // the app does once it's asked for the card back, covers the one up until then, so putting it away right after asking still does.
     const hide = (id?: string, shown?: number) =>
-      takeDown((card, since) => (id === undefined || card.id === id) && (shown === undefined || since === shown))
+      takeDown((card, since) => (id === undefined || card.id === id) && (shown === undefined || since <= shown))
 
     /** Opens a thread's pull request, and says whether it did, or why not: its address isn't https, or the browser didn't open it in time. */
     const opening = (thread: T3Live.Thread) =>
