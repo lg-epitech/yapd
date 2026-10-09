@@ -255,6 +255,29 @@ describe("Questions", () => {
     expect(pick(["Go with the old name", "Rename it (Recommended)"], "Yes, go ahead.")).toEqual(picked(1))
   })
 
+  test("a plain yes when yapd's pick is a no, or a yes or no to a question it answers when no option is either, is the model's to tell", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    // "Yes" to "Should I add tests?" is never "No, skip tests", which "no" still is.
+    const tests = part("Should I add tests?", ["No, skip tests (Recommended)", "Add unit tests"])
+    expect(["Yes.", "Yeah.", "Go ahead.", "No."].map((heard) => pick(tests, heard))).toEqual([undefined, undefined, undefined, picked(0)])
+    // Nor when the question isn't one a yes answers.
+    expect(pick(part("How should I handle the tests?", ["No tests (Recommended)", "Unit tests", "Full suite"]), "Yes.")).toBeUndefined()
+    // "Yes" to "Should I keep the cache?" may be "Keep it", and "no" "Drop it", whatever yapd would pick.
+    const cache = part("Should I keep the cache?", ["Drop it (Recommended)", "Keep it"])
+    expect(["Yes.", "Sure.", "No.", "Nope."].map((heard) => pick(cache, heard))).toEqual([undefined, undefined, undefined, undefined])
+    expect(pick(part("The cache is stale. Can we keep it for now?", ["Drop it (Recommended)", "Keep it"]), "Yes.")).toBeUndefined()
+    // What only agrees with yapd's pick still takes it.
+    expect(["Sounds good.", "Your pick."].map((heard) => pick(cache, heard))).toEqual([picked(0), picked(0)])
+    // A question that asks which, or names its options, takes a yes as yapd's pick, and a no as which one then, as before.
+    const colour = part("Which colour should the test use?", ["Red", "Blue (Recommended)"])
+    expect([pick(colour, "Yes."), pick(colour, "No.")]).toEqual([picked(1), { _tag: "Instead" }])
+    expect(pick(part("Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
+    // An option that is a yes or a no is still what a yes or no picks.
+    const invoices = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
+    expect([pick(invoices, "Yes."), pick(invoices, "No.")]).toEqual([picked(0), picked(1)])
+  })
+
   test("a number he says to options named with numbers is the one a name has, never a place, and one no name has is the model's", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const workers = part("How many parallel workers should the test run use?", ["1 worker", "2 workers", "4 workers (Recommended)", "8 workers"])

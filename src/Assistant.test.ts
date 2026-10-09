@@ -2655,6 +2655,42 @@ describe("Assistant", () => {
     expect(await answering(["OK", "Wait (Recommended)"], "Okay.", "Wait (Recommended)")).toEqual({ asked: 0, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
   })
 
+  test("a plain yes to a question whose pick is a no, or a yes or no to one it answers with no option either, is the model's to tell, so yes and no never send the same", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: string, labels: ReadonlyArray<string>, heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const part = { id: "part", question, options: labels.map((label) => ({ label })) }
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [part]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken(), answers: answered(made.dispatched) }
+        }),
+      )
+    const tests = ["No, skip tests (Recommended)", "Add unit tests"]
+    expect(await answering("Should I add tests?", tests, "Yes.", "Add unit tests")).toEqual({
+      asked: 1,
+      spoken: ["A question on Cloud deployment discovery, sir: Should I add tests? No, skip tests or Add unit tests? I'd go with No, skip tests.", "Add unit tests it is, sir."],
+      answers: [{ part: "Add unit tests" }],
+    })
+    expect(await answering("Should I add tests?", tests, "No.", "Add unit tests")).toEqual({
+      asked: 0,
+      spoken: [expect.stringMatching(/^A question/), "No, skip tests it is, sir."],
+      answers: [{ part: "No, skip tests (Recommended)" }],
+    })
+    const cache = ["Drop it (Recommended)", "Keep it"]
+    expect(await answering("Should I keep the cache?", cache, "Yes.", "Keep it")).toEqual({
+      asked: 1,
+      spoken: ["A question on Cloud deployment discovery, sir: Should I keep the cache? Drop it or Keep it? I'd go with Drop it.", "Keep it it is, sir."],
+      answers: [{ part: "Keep it" }],
+    })
+    expect(await answering("Should I keep the cache?", cache, "No.", "Drop it (Recommended)")).toEqual({
+      asked: 1,
+      spoken: [expect.stringMatching(/^A question/), "Drop it it is, sir."],
+      answers: [{ part: "Drop it (Recommended)" }],
+    })
+  })
+
   test("'skip it' to a part with more after it and an option that starts with skip asks which of them, never leaving the part out as if he'd heard it taken", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const tests = { id: "tests", question: "The slow tests take ten minutes. What should I do?", options: [{ label: "Skip the slow tests" }, { label: "Run everything" }] }

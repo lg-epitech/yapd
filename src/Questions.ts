@@ -568,6 +568,20 @@ const leaving: ReadonlySet<string> = new Set([
   ...enough, "never mind", "nevermind", "forget it", "forget about it", "leave it", "cancel", "stop asking", "drop it",
 ])
 
+/**
+ * Whether a plain yes or no answers the part's question itself, like
+ * "Should I keep the cache?", by its last sentence: never one that asks
+ * which, nor one that names two things, like "Red or Blue".
+ */
+const whether = (part: Said) => {
+  const last = part.question.split(/(?<=[.!?:])\s+/).at(-1) ?? ""
+  return (
+    /^(?:should|shall|can|could|may|must|do|does|did|is|are|was|will|would|have|has)\s+(?:i|we|you|it|they|this|that|these|those|there|the|my|our|your)\b/i.test(last) &&
+    last.endsWith("?") &&
+    !/\bor\b/i.test(last)
+  )
+}
+
 /** Whether it answers how it's asked rather than which option, which then only an option's name in full picks. */
 const steers = (said: string) => [yeses, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
 
@@ -618,8 +632,10 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
  * its place, or words only it has, though never by a name several share;
  * several, for a part that takes several; yapd's pick, on a yes once he's
  * heard it in full, unless the yes may be to another, like "ship it" to
- * "Ship it now"; the option that starts with yes or no, on a plain yes
- * or no; his own words for "you decide" or "none of those"; or what he
+ * "Ship it now", or to the question, as when the pick is a no; the option
+ * that starts with yes or no, on a plain yes or no, which is otherwise the
+ * model's when the question asks whether; his own words for "you decide"
+ * or "none of those"; or what he
  * wants done with the question itself. `inFull` is whether he heard the
  * part through to yapd's pick, and `parts` how many it has. Undefined for
  * anything else, which is the model's to judge. Words like "stop", "skip" or
@@ -654,6 +670,11 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   const agreeing = yeses.has(said) || taking.has(said)
   // "Ship it" to "Ship it now", heard in full or not, may well be that option rather than a yes to yapd's pick: which is the model's to tell.
   if (agreeing && elsewhere(part, said, recommended)) return undefined
+  // A plain yes may be to the question, not to yapd's pick, when that's a no, like "No, skip tests" to "Should I add tests?", and so may a
+  // plain no to one a yes or no answers, like "Should I keep the cache?", with no option that's either: the model tells, seeing both.
+  const pickedNo = recommended !== undefined && /^no\b/i.test(part.options[recommended]?.said ?? "")
+  const neither = part.options.length > 0 && fitting(part, ({ said }) => /^(?:yes|no)\b/i.test(said)).length === 0
+  if ((yeses.has(said) && pickedNo) || ((yeses.has(said) || noes.has(said)) && neither && whether(part))) return undefined
   if (agreeing && recommended !== undefined) return asked.inFull ? picked([recommended]) : { _tag: "Again" }
   if (deciding.has(said)) return recommended !== undefined ? picked([recommended]) : words("You decide.")
   if (nones.has(said)) return words("None of those.")
