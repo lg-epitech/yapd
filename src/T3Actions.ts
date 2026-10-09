@@ -420,7 +420,7 @@ export interface Ran {
   readonly failure: Option.Option<typeof Failure.Type>
   /** The agent's own ids for the thread's conversations. */
   readonly natives: ReadonlyArray<string>
-  /** The last run before it that didn't fail, when that went well, so a Stop hook came of it: when it started and ended, in ms, for when words can't tell whose a Stop is. */
+  /** The last run before it that didn't fail or stop before it said anything, when that went well, so a Stop hook came of it: when it started and ended, in ms, for when words can't tell whose a Stop is. */
   readonly previous: Option.Option<{ readonly startedAt: number; readonly endedAt: number }>
 }
 
@@ -445,9 +445,16 @@ export const ran = (projection: (typeof Bounded.Type)["projection"], runId: stri
     .at(-1)?.failure
   const prompt = projection.messages.find(({ id, role }) => role === "user" && id !== undefined && id === run.userMessageId)?.text
   const startedAt = Option.orElse(instant(run.startedAt), () => instant(run.requestedAt))
-  // The last that got going before it, but for any that failed, which have no Stop hook: one taken out of the queue never got going.
+  // The last that got going before it, but for any that failed, which have no Stop hook, nor one stopped before it said anything, which
+  // has none either, like a message sent and stopped at once: one taken out of the queue never got going.
   const before = projection.runs
-    .filter(({ ordinal, startedAt, status }) => ordinal < run.ordinal && status !== "failed" && Option.isSome(instant(startedAt)))
+    .filter(
+      ({ id, ordinal, startedAt, status }) =>
+        ordinal < run.ordinal &&
+        status !== "failed" &&
+        !(["interrupted", "cancelled"].includes(status) && answers(projection, id).length === 0) &&
+        Option.isSome(instant(startedAt)),
+    )
     .toSorted((a, b) => b.ordinal - a.ordinal)[0]
   return Option.some({
     id: run.id,

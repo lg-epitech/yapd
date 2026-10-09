@@ -412,6 +412,39 @@ describe("Notices", () => {
     expect(result.some((line) => /^Open Mina SSV2 Bug Tickets hit Claude's limit, sir; it resets at \d/.test(line))).toBe(true)
   })
 
+  test("a run that fails after one interrupted before it said anything, right after one that went well, is said when that one's late Stop came after it started", async () => {
+    // A message sent and stopped at once, then sent again, which failed: the one interrupted said nothing and has no Stop of its own, so the
+    // one Stop since, a moment getting going and with words T3 Code kept otherwise, is still the turn that went well's, not this one's.
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-3", lastErrorClass: "provider_error" })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, told } = yield* notices({
+          view: [tezos],
+          bounded: {
+            tezos: {
+              runs: [
+                { id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), completedAt: new Date(now - 3_050).toISOString() },
+                { id: "run-2", status: "interrupted", ordinal: 2, startedAt: new Date(now - 3_020).toISOString(), completedAt: new Date(now - 3_010).toISOString() },
+                { id: "run-3", status: "failed", ordinal: 3, startedAt: new Date(now - 3_000).toISOString(), completedAt: new Date(now - 1_500).toISOString() },
+              ],
+              messages: [
+                { id: "a1", runId: "run-1", role: "assistant", text: "The fee table is in.", createdAt: minutes(1) },
+                { id: "a3", runId: "run-3", role: "assistant", text: "Let me look at the tickets first.", createdAt: minutes(0) },
+              ],
+              turnItems: [failure("run-3", "provider_error", "API Error: 500 Internal server error")],
+              sessions: ["s-tezos"],
+            },
+          },
+          stops: new Map([["s-tezos", [{ at: now - 2_700, message: "Fee table: done and pushed to the branch." }]]]),
+        })
+        yield* hear(ended(tezos, "run-3"))
+        yield* wait(10)
+        return told
+      }),
+    )
+    expect(result).toEqual(["Migrate Tezos Integration failed, sir: the model provider had an error."])
+  })
+
   test("a short turn of yapd's right after the one before it is left to its own hook, however late or early that one's came", async () => {
     // yapd's message waited behind a turn that went well, and ran in a few seconds: its own Stop came after the earlier one's, which
     // came late for the Tezos thread, after it had started, and early for the loader, before the earlier run's checkpoint was taken.
