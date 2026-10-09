@@ -381,6 +381,14 @@ const forced = /\bbranch\s+(?:-\S+\s+)*(?:-[a-zA-Z]*D\b|--delete\s+--force|--for
 const continued = (text: string) => text.replace(/\\\r?\n/g, "")
 
 /**
+ * A command as the shell runs it once it takes away the quotes around what
+ * it's given, so `rm '-rf'` is `rm -rf`, which the patterns above, looking
+ * for a flag where a word starts, would miss with its quotes. It's looked
+ * through as well as the command as written, whose quotes JSON needs.
+ */
+const unquoted = (command: string) => command.replace(/["']/g, "")
+
+/**
  * A name set to true among what a tool is given, as its JSON writes it, or
  * as it's looked through, a name and its value a line each: how a tool is
  * told to do what a command's flags would.
@@ -403,7 +411,7 @@ const deleting = /(?:\b|_)(?:rm|rmdir|unlink|delete|remove|erase|trash|destroy|p
  */
 export const dangerous = (text: string) => {
   const command = continued(text)
-  return risky.test(command) || forced.test(command) || forcing.test(text) || (recursing.test(text) && deleting.test(text))
+  return [command, unquoted(command)].some((run) => risky.test(run) || forced.test(run)) || forcing.test(text) || (recursing.test(text) && deleting.test(text))
 }
 
 /**
