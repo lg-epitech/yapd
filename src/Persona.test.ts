@@ -310,6 +310,10 @@ describe("Persona", () => {
     expect(Persona.afterOnIt("On it, staging only.", Persona.plain)).toBe("Staging only.")
     expect(Persona.afterOnIt("On it, tests first.", Persona.plain)).toBe("Tests first.")
     expect(Persona.afterOnIt("On it, chief, staging only.", Persona.plain)).toBe("Staging only.")
+    // Nor one of them that goes on into the sentence.
+    expect(Persona.afterOnIt("On it, master branch only.", Persona.plain)).toBe("Master branch only.")
+    expect(Persona.afterOnIt("On it, miss nothing in staging.", Persona.plain)).toBe("Miss nothing in staging.")
+    expect(Persona.afterOnIt("On it, love the idea.", Persona.plain)).toBe("Love the idea.")
     expect(Persona.afterOnIt("On it, in yapd.", Persona.plain)).toBe("In yapd.")
     expect(Persona.afterOnIt("On it, in yapd, on Fable.", Persona.plain)).toBe("In yapd, on Fable.")
     expect(Persona.afterOnIt("On it, on Fable.", sir)).toBe("On Fable.")

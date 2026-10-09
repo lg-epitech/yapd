@@ -47,11 +47,12 @@ export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim(
 /**
  * How he may be addressed when the lines don't say yet, as when they're still
  * being written in his style, or couldn't be: only the usual ways of
- * addressing someone, like "sir" in "On it, sir." or "boss" in "On it, boss,
- * in yapd.", since any other word after "On it", like "staging" in "On it,
- * staging only.", is what was said.
+ * addressing someone, set off on their own, like "sir" in "On it, sir." or
+ * "boss" in "On it, boss, in yapd.", since any other word after "On it", like
+ * "staging" in "On it, staging only.", or one of them going on into the
+ * sentence, like "master" in "On it, master branch only.", is what was said.
  */
-const someone = String.raw`,?\s*(?:sir|sire|ma['’]am|madam|miss|boss|chief|captain|mate|buddy|pal|friend|dude|love|master|my (?:lord|lady|liege))`
+const someone = String.raw`,?\s*(?:sir|sire|ma['’]am|madam|miss|boss|chief|captain|mate|buddy|pal|friend|dude|love|master|my (?:lord|lady|liege))(?=\s*(?:[,.!?…;:—–-]|$))`
 
 /**
  * What's said past an "On it" it starts with, addressing him or not, which a
