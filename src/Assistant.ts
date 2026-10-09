@@ -1605,6 +1605,22 @@ export const make = (options: {
         return regarding(`I'll bring it back in ten minutes${addressed(said)}.`, askedAbout(open))
       })
 
+    /**
+     * What a thread's request is asked from, now it's open again some other
+     * way than from the queue, like read back on his asking: any copy still
+     * queued to come back is taken out, so it's never asked twice over, nor
+     * from a part he's past, once it's let go. How often it was put off, or
+     * had its place taken, carries over.
+     */
+    const unqueued = (from: Queued): Queued => {
+      const { requestId } = from.asking.asks
+      const queued = asked.filter(({ asking: waiting }) => waiting.asks.requestId === requestId)
+      if (queued.length === 0) return from
+      asked.splice(0, asked.length, ...asked.filter(({ asking: waiting }) => waiting.asks.requestId !== requestId))
+      const most = (count: "snoozed" | "interrupted") => Math.max(from[count] ?? 0, ...queued.map((waiting) => waiting[count] ?? 0)) || undefined
+      return { ...from, snoozed: most("snoozed"), interrupted: most("interrupted") }
+    }
+
     /** Opens a part of a thread's question, in these words, with what he answered of it before, as it was asked from `from`. */
     const askingPart = (open: Open, from: Queued | undefined, asks: QuestionAsks, wording: Questions.Wording, words: string, utterance: Pick<Utterance, "turns" | "at">) =>
       Effect.gen(function* () {
@@ -1625,7 +1641,7 @@ export const make = (options: {
           },
           utterance,
         )
-        if (asking?.open.asks === asks && from !== undefined) asking.from = resumed(from, { asks }, {})
+        if (asking?.open.asks === asks && from !== undefined) asking.from = unqueued(resumed(from, { asks }, {}))
         return outcome
       })
 
@@ -1766,7 +1782,7 @@ export const make = (options: {
           thought.utterance,
         )
         // Asked as a notice would be, under the entry it was just kept under.
-        if (asking?.open.utterance === thought.utterance.id && asking.open.asks === asks) asking.from = { asking: { ...waiting, asks }, again: false, kept }
+        if (asking?.open.utterance === thought.utterance.id && asking.open.asks === asks) asking.from = unqueued({ asking: { ...waiting, asks }, again: false, kept })
         return read
       })
 

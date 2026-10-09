@@ -1907,6 +1907,50 @@ describe("Assistant", () => {
     })
   })
 
+  test("a question put off, then read back on his asking, is the one asked from then on: let go, it isn't brought back, and a 'later' after counts with the first", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const leave = "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."
+    const back = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    // He hears it again, and lets it go unanswered twice.
+    const unheeded = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Later.")
+        yield* made.wait(60)
+        yield* made.dictate("What's the question?")
+        yield* made.unanswered()
+        yield* made.wait(61)
+        yield* made.unanswered()
+        const left = made.spoken().length
+        yield* made.wait(600)
+        return { spoken: made.spoken().slice(1, left), after: made.spoken().length - left }
+      }),
+    )
+    expect(unheeded).toEqual({
+      spoken: ["I'll bring it back in ten minutes, sir.", back, "Back to Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.", leave],
+      after: 0,
+    })
+    // He puts it off each time he hears it again: the third time, it's let go, and nothing comes back.
+    const putOff = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Later.")
+        for (const _ of [1, 2]) {
+          yield* made.wait(60)
+          yield* made.dictate("What's the question?")
+          yield* made.answer("Later.")
+        }
+        const left = made.spoken().length
+        yield* made.wait(1200)
+        return { spoken: made.spoken().slice(1, left), after: made.spoken().length - left }
+      }),
+    )
+    expect(putOff.spoken.at(-1)).toBe(leave)
+    expect(putOff.after).toBe(0)
+  })
+
   test("a message for now to a thread whose question T3 Code takes as a message itself still goes as a message", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", responseMode: "message", questions: [{ ...colour, id: "0" }] }]
