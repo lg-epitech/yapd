@@ -1663,6 +1663,34 @@ describe("Assistant", () => {
     }
   })
 
+  test("a letter or place word an option's name has, with the options out of order, sends the option of that name, never the one in that place", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string, text: string, multiSelect = false) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "way", question: "Which way should it go?", options: labels.map((label) => ({ label })), multiSelect }
+          // The model, only for what isn't plain, names the options he meant as they're written, one a line.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await answering(["Option B (Recommended)", "Option A"], "A.", "Option A")).toEqual({ asked: 1, spoken: ["Option A it is, sir."], answers: [{ way: "Option A" }] })
+    expect(await answering(["Option 2 (Recommended)", "Option 1"], "Option one.", "")).toEqual({ asked: 0, spoken: ["Option 1 it is, sir."], answers: [{ way: "Option 1" }] })
+    const merging = ["Last write wins (Recommended)", "First write wins", "Manual merge"]
+    expect(await answering(merging, "First.", "")).toEqual({ asked: 0, spoken: ["First write wins it is, sir."], answers: [{ way: "First write wins" }] })
+    expect(await answering(merging, "Last.", "")).toEqual({ asked: 0, spoken: ["Last write wins it is, sir."], answers: [{ way: "Last write wins (Recommended)" }] })
+    expect(await answering(["Option C", "Option A", "Option B"], "A and B.", "Option A\nOption B", true)).toEqual({
+      asked: 1,
+      spoken: ["Option A and Option B it is, sir."],
+      answers: [{ way: ["Option A", "Option B"] }],
+    })
+  })
+
   test("an option named like another but for its marks, like C# beside C++, is sent as the one he picked, by its place or by the model", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const language = (...labels: ReadonlyArray<string>) => ({

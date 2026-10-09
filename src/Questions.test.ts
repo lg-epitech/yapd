@@ -313,6 +313,35 @@ describe("Questions", () => {
     expect(pick("The blue one.", part("Which colour?", ["Red", "Blue", "One more"]))).toEqual(picked(1))
   })
 
+  test("a letter, number or place word an option's name has is that name's, never a place, with the options listed in any order", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    // Claude lists the one it recommends first.
+    const lettered = part("Which approach?", ["Option B (Recommended)", "Option A"])
+    expect(["Option A.", "Option B.", "B.", "The second one."].map((heard) => pick(lettered, heard))).toEqual([picked(1), picked(0), picked(0), picked(1)])
+    // "A" on its own, which may only point, is the model's to tell.
+    expect(pick(lettered, "A.")).toBeUndefined()
+    const numbered = part("Which approach?", ["Option 2 (Recommended)", "Option 1"])
+    expect(["Option one.", "Option 1.", "Option two.", "One.", "Number one.", "The first one."].map((heard) => pick(numbered, heard))).toEqual([
+      picked(1),
+      picked(1),
+      picked(0),
+      picked(1),
+      undefined,
+      picked(0),
+    ])
+    const merging = part("How should conflicts be settled?", ["Last write wins (Recommended)", "First write wins", "Manual merge"])
+    expect(["First.", "Last.", "Second.", "The third one."].map((heard) => pick(merging, heard))).toEqual([picked(1), picked(0), picked(1), picked(2)])
+    // Said as a place, it may be that place or that name, which the model tells.
+    expect(["The last one.", "Last one.", "The first one."].map((heard) => pick(merging, heard))).toEqual([undefined, undefined, undefined])
+    // Several, each by its letter, is the model's to tell when the names have the letters; by their names, they're what he picked.
+    const several = part("Which suites?", ["Option C", "Option A", "Option B"], { multiSelect: true })
+    expect(Questions.pick(several, "A and B.", { inFull: true, parts: 1 })).toBeUndefined()
+    expect(Questions.pick(several, "Option A and option B.", { inFull: true, parts: 1 })).toEqual(picked(1, 2))
+    // A letter no name has is still a place.
+    expect(Questions.pick(part("Which suites?", ["Unit", "Lint", "Types"], { multiSelect: true }), "A and C.", { inFull: true, parts: 1 })).toEqual(picked(0, 2))
+  })
+
   test("options named alike but for their marks, like C++ and C#, go by their names as written, never by a letter's place", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const sharp = part("Which language should the bindings use?", ["C++", "C#", "Rust"])

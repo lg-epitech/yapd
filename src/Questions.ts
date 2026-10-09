@@ -380,8 +380,9 @@ const tens: Readonly<Record<string, number>> = { twenty: 20, thirty: 30, forty: 
 /**
  * Words as compared, with the numbers in them as figures: "four workers" is
  * "4 workers" and "twenty two" is "22", as Whisper writes them either way.
- * "One" only when it's all there is or comes first, as in "one worker": in
- * "the blue one" it only points. "Okay" is "ok", which Whisper writes too.
+ * "One" only when it's all there is, comes first, as in "one worker", or
+ * follows what it numbers, as in "option one": in "the blue one" it only
+ * points. "Okay" is "ok", which Whisper writes too.
  */
 const figures = (said: string) => {
   const words = said.split(" ")
@@ -395,7 +396,8 @@ const figures = (said: string) => {
       const count = units[word]
       // The unit of "twenty two" is in the 22 already.
       if (previous !== undefined && count !== undefined && count > 0 && count < 10) return []
-      return count !== undefined && (word !== "one" || index === 0) ? [String(count)] : [word]
+      const numbering = /^(?:option|choice|number|plan|tier|version)$/.test(words[index - 1] ?? "")
+      return count !== undefined && (word !== "one" || index === 0 || numbering) ? [String(count)] : [word]
     })
     .join(" ")
 }
@@ -446,6 +448,23 @@ const places: Readonly<Record<string, number>> = {
   fourth: 3, "4th": 3, four: 3, "4": 3, d: 3,
 }
 
+/** The words the options' names have, as written and as compared, but "a" before another word, which only points. */
+const ownWords = (part: Said) =>
+  new Set(
+    part.options.flatMap(({ label, said }) =>
+      [unmarked(label), said].flatMap((name) => {
+        const kept = gist(name)
+          .split(" ")
+          .filter((word, index, all) => word !== "a" || index === all.length - 1)
+          .join(" ")
+        return [...kept.split(" "), ...figures(kept).split(" ")]
+      }),
+    ),
+  )
+
+/** A place said as one, by its order, like "the first one" or "last one", rather than "first" on its own, which may be a name's word. */
+const ordinally = (said: string) => /^(?:the (?:first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th)(?: one| option)?|(?:first|second|third|fourth|last|1st|2nd|3rd|4th) one)$/.test(said)
+
 const byPlace = (part: Said, said: string) => {
   const found = place.exec(said)
   if (found === null) return undefined
@@ -453,6 +472,11 @@ const byPlace = (part: Said, said: string) => {
   // A letter on its own only when no option goes by one, and "the one" is no place at all.
   if (kind === undefined && /^[a-d]$/.test(which) && part.options.some(({ said }) => /^\p{L}$/u.test(said.trim()))) return undefined
   if (kind === undefined && the !== undefined && which === "one") return undefined
+  // A letter, a number or a word like "first" that an option's name has is that name's, never a place, as "A" to "Option B" and "Option A",
+  // or "first" to "First write wins": the name decides, or the model does. Only "option four" to options that count, like 4 workers, is.
+  const counting = (kind === "option" || kind === "choice") && /^(?:one|two|three|four|[1-4])$/.test(which) && !part.opaque
+  const own = ownWords(part)
+  if (!counting && (own.has(which) || own.has(figures(which)))) return undefined
   // "Four" to 2, 4, 8 or 16 workers is 4 workers, not the fourth: only "the fourth" or "option four" is a place then.
   if (kind !== "option" && kind !== "choice" && /^(?:one|two|three|four|[1-4])$/.test(which) && numbered(part)) return undefined
   const index = which === "last" || which === "latter" ? part.options.length - 1 : places[which]
@@ -594,7 +618,10 @@ const steers = (said: string) => [yeses, taking, noes, deciding, nones, repeatin
 const meant = (part: Said, said: string) => {
   const names = named(part, said)
   if (names.length > 1) return undefined
-  return names[0] ?? (steers(said) ? undefined : (byPlace(part, said) ?? byWords(part, said)))
+  if (names[0] !== undefined) return names[0]
+  if (steers(said)) return undefined
+  // "The last one" to "Last write wins", listed first, may be either, which the model tells: only a bare "last" is that name's.
+  return byPlace(part, said) ?? (ordinally(said) ? undefined : byWords(part, said))
 }
 
 /**
