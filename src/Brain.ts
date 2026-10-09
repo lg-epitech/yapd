@@ -312,9 +312,8 @@ const risky = new RegExp(
     String.raw`\b(?:s3|gsutil)\s+(?:rm|rb)\b`,
     String.raw`\s-delete\b`,
     String.raw`\bshred\b`,
-    // Forcing what git keeps: a push with a lease, a reset, a rewrite, or skipping its checks.
+    // Forcing what git keeps: a push with a lease, a rewrite, or skipping its checks.
     String.raw`--force-with-lease`,
-    String.raw`reset\s+--hard`,
     String.raw`git\s+filter-(?:branch|repo)`,
     String.raw`--no-verify`,
     // Throwing away work not yet committed: changes checked out over, a stash dropped.
@@ -412,7 +411,7 @@ const flagsAfter = (command: string, name: RegExp) => {
 }
 
 /** The names below, so a command with none of them, like most, is passed over at once. */
-const flaggable = /rm|push|clean|branch|restore|gcloud|az|rsync/i
+const flaggable = /rm|push|reset|clean|branch|restore|gcloud|az|rsync/i
 
 /** What a flag anywhere after a command's name makes risky, read a command at a time, under the git subcommand each is for. */
 const riskyFlags = {
@@ -422,8 +421,12 @@ const riskyFlags = {
     const removing = flagged(command, /(?:^|[^\w-]|\bgit-)rm$/i, /-[a-z]*r|--recursive/iy)
     return removing !== -1 && !/--cached/i.test(command.slice(removing))
   },
-  // A push that forces, wherever the flag goes, or that deletes a branch, and a clean that forces, by "-f" or by name.
-  push: (command: string) => after(command, /\bpush\b/i, /\s(?:-f\b|--force\b|\+\S|--delete\b|-d\b|:\S)/i),
+  // A push that forces, deletes a branch, or mirrors or prunes, which deletes what's only there, wherever the flag goes, together with
+  // others or apart, like "-uf", or by what it pushes, like "+main" or ":old".
+  push: (command: string) => after(command, /\bpush\b/i, /\s(?:-[a-z\d]*[fd]|--force\b|--delete\b|--mirror\b|--prune\b|\+\S|:\S)/i),
+  // A reset that throws away what isn't committed, wherever "--hard" goes, like `git reset HEAD~1 --hard`.
+  reset: (command: string) => after(command, /\breset\b/i, /\s--hard\b/i),
+  // A clean that forces, by "-f" or by name.
   clean: (command: string) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f|--force\b/iy) !== -1,
   // Deleting a branch whatever it holds, as "-d" alone never does: "-D", or "-d" or "--delete" with "-f" or "--force", together or apart.
   branch: (command: string) => {
@@ -447,6 +450,7 @@ const everyFlag = Object.values(riskyFlags)
 const gitFlags = new Map([
   ["rm", riskyFlags.rm],
   ["push", riskyFlags.push],
+  ["reset", riskyFlags.reset],
   ["clean", riskyFlags.clean],
   ["branch", riskyFlags.branch],
   ["restore", riskyFlags.restore],

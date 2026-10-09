@@ -375,6 +375,19 @@ describe("Brain", () => {
       'rm "a|b" -rf ~/work',
       "rm a\\;b -rf ~/work",
       "git push origin 'a;b' --force",
+      "git push -uf origin main",
+      "git push -fu origin main",
+      "git push -vf",
+      "git push -qf origin main",
+      "git push origin main -uf",
+      "git push origin -ud old",
+      "git push --mirror",
+      "git push --prune origin",
+      "git reset -q --hard",
+      "git reset HEAD~1 --hard",
+      "git reset -q HEAD~1 --hard",
+      "git -C ~/work reset -q --hard HEAD~2",
+      "git submodule foreach 'git reset --hard'",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -437,6 +450,12 @@ describe("Brain", () => {
       "mcp__fs__list\npath\nsrc\nremove_duplicates\nfalse\nrecursive\ntrue",
       "rm 'a;b' -f build.log",
       'git commit -m "wip; tidy" && git push origin main',
+      "git push -u origin feature",
+      "git push -uv origin main",
+      "git reset -q HEAD~1",
+      "git reset --soft HEAD~1",
+      'git commit -m "git reset --hard was wrong"',
+      "grep -rn 'reset --hard' docs",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
