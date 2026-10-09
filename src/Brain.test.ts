@@ -301,6 +301,39 @@ describe("Brain", () => {
     expect(named(["Stop the run", "Retry the deploy (Recommended)"], "Stop the run.", { subject: other })?.act).toBe("stop")
   })
 
+  test("words said over and over, like 'no, no', are never taken for the option they name said once, but still do what they ask of the question", () => {
+    const { open, desk: shown } = questionOpen(0)
+    const over = (labels: ReadonlyArray<string>, heard: string, inFull = true) => {
+      const asked: Questions.Question = { id: "next", header: "", question: "Do you mind if I force push?", options: labels.map((label) => ({ label, description: "" })), multiSelect: false, allowCustomAnswer: true, required: true }
+      const worded = Questions.worded({ called: "Migrate Tezos Integration", parts: [Questions.said(asked, Questions.sayQuestion(asked.question))], lines })
+      if (worded._tag !== "Ask") throw new Error("Only told")
+      const wording = worded.parts[0]!
+      const asking: Assistant.Open = { ...open, asked: wording.first, asks: { _tag: "Question", requestId: "q1", questions: [asked], mode: "live", part: 0, collected: {}, inFull }, wording }
+      const subject: Assistant.Subject = { _tag: "Answer", said: asking.asked, about: Option.some(ref(tezos)) }
+      const made = Brain.fast(situation(heard, { open: Option.some(asking), desk: shown, subject }), lines)
+      return made === undefined ? undefined : { act: made.act, how: made.how, text: made.text }
+    }
+    // His words aren't the option's name, so it's the model's to tell, heard in full or not.
+    for (const [labels, heard] of [
+      [["Yes", "No"], "No, no."],
+      [["Yes", "No"], "Yes, yes."],
+      [["Yes", "No"], "No no no."],
+      [["Go ahead", "Wait"], "Go ahead, go ahead."],
+      [["Neither", "Both"], "Both, both."],
+      [["OK", "Cancel"], "Cancel, cancel."],
+      [["None", "Some"], "None, none."],
+      [["Leave it", "Fix it"], "Leave it, leave it."],
+    ] as const) {
+      expect([heard, over(labels, heard)]).toEqual([heard, undefined])
+      expect([heard, over(labels, heard, false)?.act === "reply"]).toEqual([heard, false])
+    }
+    // Words to stop talking, over and over, still let it go, never sending the option named so.
+    expect(over(["Stop", "Go on"], "Stop, stop.")).toEqual({ act: "dismiss", how: "", text: "" })
+    // Named nothing like an option, they're what they'd be said once: letting it go, or none of those.
+    expect(over(["Red", "Blue"], "Never mind, never mind.")).toEqual({ act: "dismiss", how: "", text: "" })
+    expect(over(["Red", "Blue"], "None, none.")).toEqual({ act: "reply", how: "", text: "None of those." })
+  })
+
   test("a bare stop never stops a thread", () => {
     const busy: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
     // Not even while he's hearing about one that's running.

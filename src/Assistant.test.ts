@@ -773,8 +773,9 @@ const misread: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<stri
  * no with a stop or a mark after it; a name with what goes without saying
  * left out; "all" before he'd heard them all, and "I don't mind"; a name
  * by how it sounds, hiding a no or joining numbers; a letter for a name
- * with a symbol; and more than a yes or a no to options named Yes and No.
- * Several when he could pick several.
+ * with a symbol; more than a yes or a no to options named Yes and No; and
+ * a name said over and over, taken as said once. Several when he could
+ * pick several.
  */
 const reviewed: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<string>, heard: ReadonlyArray<string>, several?: boolean]> = [
   ["How many retries?", ["Once", "Twice", "Never"], ["Three."]],
@@ -830,6 +831,10 @@ const reviewed: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<str
   ["Deploy or roll back?", ["Roll back the release", "Deploy anyway"], ["The first one."]],
   ["Should I deploy or roll back?", ["Roll back the release (Recommended)", "Deploy anyway"], ["The first one."]],
   ["What should I do?", ["Cancel deploy", "Deploy"], ["Cancel, deploy."]],
+  ["Do you mind if I force push?", ["Yes", "No"], ["No, no.", "Yes, yes."]],
+  ["Should I deploy now?", ["Go ahead", "Wait"], ["Go ahead, go ahead."]],
+  ["Should I update the docs or the tests?", ["Neither", "Both"], ["Both, both."]],
+  ["Ready to deploy?", ["OK", "Cancel"], ["Cancel, cancel."]],
 ]
 
 describe("Assistant", () => {

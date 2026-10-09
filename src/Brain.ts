@@ -1250,7 +1250,8 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
  * come to, as `Questions.pick` has it: the options he picked, his own words,
  * or what he wants done with the question itself, like hearing it again,
  * what its options mean, or putting it off. Anything else is the model's to
- * judge.
+ * judge. `heard` is his words as he said them, and `said` as they're
+ * compared, said once when he said them over and over.
  */
 const settling = (open: Assistant.Open, heard: string, said: string, target: string): Decision | undefined => {
   const { asks } = open
@@ -1266,8 +1267,13 @@ const settling = (open: Assistant.Open, heard: string, said: string, target: str
     }
     case "Question": {
       const part = open.wording?.part
-      const reply = part === undefined ? undefined : Questions.pick(part, heard, { inFull: asks.inFull, parts: asks.questions.length })
-      if (part === undefined || reply === undefined) return undefined
+      if (part === undefined) return undefined
+      const asked = { inFull: asks.inFull, parts: asks.questions.length }
+      // Said over and over, like "never mind, never mind", it's what it would be said once, but never an option, like "No" for "no, no":
+      // only his words as he said them name one.
+      const once = said === gist(heard) ? undefined : Questions.pick(part, said, asked)
+      const reply = Questions.pick(part, heard, asked) ?? (once?._tag === "Picked" ? undefined : once)
+      if (reply === undefined) return undefined
       const answers = (given: Partial<Decision> & Pick<Decision, "act">) => decision({ target, pending: "answers", ...given })
       switch (reply._tag) {
         case "Picked":
@@ -1394,7 +1400,7 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
     const question = open.value
     const candidates = question.candidates.flatMap((ref) => desk.threads.filter((listed) => Threads.same(listed.ref, ref)))
     // What a thread waits on him for, answered in so many words, or by its option, which may well be "No".
-    const settled = settling(question, meant ? said : utterance.heard, said, candidates[0]?.handle ?? "")
+    const settled = settling(question, utterance.heard, said, candidates[0]?.handle ?? "")
     if (settled !== undefined) return settled
     // A no to a thread's question that its options and yapd's pick don't settle, like one with no pick, or before he'd heard it, may be
     // to the question itself, which is the model's to judge, as are its other answers: only words to stop talking let it go here.
