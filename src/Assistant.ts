@@ -117,12 +117,10 @@ export interface Outcome {
   readonly missed?: ReadonlyArray<number>
   /** What was decided on a second look, at a thread or at what was found, which the answer is. */
   readonly second?: Brain.Decision
-  /**
-   * The line for going ahead it says last, if it says one, noted with the
-   * persona once it's known to play, so the next is a different one, and
-   * never when it's dropped or can't be played.
-   */
+  /** The line for going ahead it says last, if it says one. */
   readonly onIt?: string
+  /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
+  readonly confirmed?: Effect.Effect<void>
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -810,7 +808,13 @@ export const make = (options: {
             return reply(outcome.spoken, { _tag: "Nothing" })
           case "Started": {
             const { started, machine, spoken } = outcome
-            return { say: spoken, subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) }, kind: "done" } satisfies Outcome
+            return {
+              say: spoken,
+              subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) },
+              kind: "done",
+              // Only once it's known to play, so a line for going ahead that's dropped as yapd is turned off, or can't be played, never counts as the last one he heard.
+              confirmed: persona.said(spoken),
+            } satisfies Outcome
           }
           case "Asked": {
             const about = outcome.about || "that"
@@ -1057,14 +1061,20 @@ export const make = (options: {
             // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, or in the queue a stop held till he says, he's told why.
             const quietly = at.quietly === true && outcome.waiting === undefined && !Hands.held(outcome)
             // His line for going ahead, a different one from the last he heard, picked only when it's said, and noted only once it plays.
-            const onIt = !quietly && Hands.goesAhead(act, outcome.how, outcome) ? yield* persona.onIt : undefined
+            const onIt = !quietly && Hands.goesAhead(act, outcome.how, outcome) ? yield* persona.onIt() : undefined
             const line = quietly ? "" : Hands.done(act, outcome.how, onIt === undefined ? said : { ...said, onIt }, called, outcome)
             yield* noting(line === "" ? undefined : line, {
               how: outcome.how,
               ...(outcome.waiting === undefined ? {} : { waiting: outcome.waiting }),
               ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }),
             })
-            const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done", ...(onIt === undefined ? {} : { onIt }) }
+            const first: Outcome = {
+              say: line,
+              subject: { ...subject, said: line },
+              kind: "done",
+              // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that couldn't be played, never counts as the last one he heard.
+              ...(onIt === undefined ? {} : { onIt, confirmed: persona.said(onIt) }),
+            }
             // Taking a stop back is two steps, letting go of the queue, then the message to carry on, as is a restart done as a stop, then the message.
             return yield* free(onward(thought, first, Option.some(outcome.to), at.step + (act._tag === "Undo" || outcome.stopped !== undefined ? 2 : 1), said))
           }
@@ -1178,12 +1188,14 @@ export const make = (options: {
         const second = first.second ?? after.second
         // Of two lines for going ahead, the one said last is the last he heard.
         const onIt = after.onIt ?? first.onIt
+        const confirmed = after.confirmed ?? first.confirmed
         return {
           ...after,
           say: joined(first.say, after.say, said),
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
           ...(onIt === undefined ? {} : { onIt }),
+          ...(confirmed === undefined ? {} : { confirmed }),
         }
       })
 
@@ -1476,7 +1488,7 @@ export const make = (options: {
           })
         }
         yield* Effect.logInfo(`Said: ${outcome.say}`)
-        const { subject, missed, onIt } = outcome
+        const { subject, missed } = outcome
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
         let unsaid: Effect.Effect<void> = Effect.void
         yield* options.tell(
@@ -1502,8 +1514,7 @@ export const make = (options: {
               }),
             ),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
-            // Only once it's known to play, so a line for going ahead dropped as yapd was turned off, or that couldn't be played, never counts as the last one he heard.
-            ...(onIt === undefined ? {} : { confirmed: persona.said(onIt) }),
+            ...(outcome.confirmed === undefined ? {} : { confirmed: outcome.confirmed }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {

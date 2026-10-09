@@ -1,6 +1,7 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
 import type * as Ledger from "./Ledger.ts"
+import { afterOnIt, type Lines, Persona, withOnIt } from "./Persona.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
@@ -95,20 +96,38 @@ export const resolve = (
 }
 
 /**
+ * Whether the line for going ahead goes in front of what's said once new work
+ * started: only before the writer's own words, when they match what started.
+ * An "On it" the writer put in front anyway goes, since the line takes its
+ * place, and with only that there are no words of its own.
+ */
+export const ahead = (spoken: string, { request }: Pick<Resolved, "request">, started: Started, lines: Pick<Lines, "address">) =>
+  started.worktree === request.worktree &&
+  (request.model === undefined || same(request.model, started.model)) &&
+  afterOnIt(spoken, lines) !== ""
+
+/**
  * What's said once it started. The writer's own words when they match what
- * started, since it says names the way people do. Otherwise the plain facts,
+ * started, since it says names the way people do, after the line for going
+ * ahead, `lines.onIt`, which they leave to yapd. Otherwise the plain facts,
  * with what the launcher had to add.
  */
-export const confirmation = (spoken: string, { unsure, machine, project, catalog, request }: Resolved, started: Started) => {
-  const asked = started.worktree === request.worktree && (request.model === undefined || same(request.model, started.model))
+export const confirmation = (
+  spoken: string,
+  { unsure, machine, project, catalog, request }: Resolved,
+  started: Started,
+  lines: Pick<Lines, "onIt" | "address">,
+) => {
   const title = catalog.models.find(({ name }) => same(name, started.model))?.title ?? started.model
   const where = started.worktree ? "in a worktree" : "without a worktree"
   const plain = `Started in ${project.name}${machine.here ? "" : ` on ${machine.name}`}, on ${title}, ${where}.`
-  const said = asked && spoken.trim() !== "" ? spoken.trim() : plain
+  // The writer's own words, or the plain facts: whether they say where it is goes by them alone, not by a line of his that may name a worktree.
+  const own = ahead(spoken, { request }, started, lines)
+  const told = own ? afterOnIt(spoken, lines) : plain
   return [
-    said,
+    own ? withOnIt(lines.onIt, told) : plain,
     // It's how they catch a worktree that was misheard, so it's never left to the writer alone.
-    ...(/work\s?-?tree/i.test(said) ? [] : [`That's ${where}.`]),
+    ...(/work\s?-?tree/i.test(told) ? [] : [`That's ${where}.`]),
     ...(unsure ? [`I couldn't tell whether you wanted a worktree, so I went by your rules.`] : []),
     ...(started.warning === undefined ? [] : [started.warning]),
   ].join(" ")
@@ -191,6 +210,7 @@ export const make = (options: {
 }) =>
   Effect.gen(function* () {
     const writer = yield* Writer
+    const persona = yield* Persona
     const scope = yield* Effect.scope
     const writing = yield* Effect.makeSemaphore(writers)
     const research = options.machines.some(({ researcher }) => researcher.available)
@@ -300,9 +320,12 @@ export const make = (options: {
           if (Either.isLeft(outcome)) yield* Effect.logInfo(`Found ${started.thread} after all: ${outcome.left.reason}`)
           yield* settle("sent")
           yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
+          // Picked only when it's said, so a pick never played doesn't keep it from coming up, and noted as heard by whoever says it, once it is.
+          const written = yield* persona.lines
+          const lines = ahead(spoken, resolved, started, written) ? { ...written, onIt: yield* persona.onIt() } : written
           const begun = {
             _tag: "Started",
-            spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
+            spoken: [confirmation(spoken, resolved, started, lines), warning].filter(Boolean).join(" "),
             started,
             machine,
             request,

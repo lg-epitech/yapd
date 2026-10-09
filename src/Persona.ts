@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Random, Ref, Schema, SubscriptionRef } from "effect"
+import { Clock, Context, Effect, Layer, Option, Random, Ref, Schema, SubscriptionRef } from "effect"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 import * as Settings from "./Settings.ts"
@@ -63,6 +63,45 @@ export const sayable = (lines: Lines) => [
 export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
 
 /**
+ * What ends a sentence or sets a part of it off: a stop, a comma, a dash, or a
+ * hyphen with a space after it. Never a hyphen joining a word or a number, as
+ * in "master-only" or "-1", nor a bracket or a quote, which belong to what's said.
+ */
+const mark = String.raw`(?:[,.!?…;:—–]|-(?=\s|$))`
+
+/** After how he's addressed, only a mark or the end: a word that goes on into the sentence, like "master" in "master branch only", is what was said. */
+const alone = String.raw`(?=\s*(?:${mark}|$))`
+
+/**
+ * How he may be addressed when the lines don't say yet, as when they're still
+ * being written in his style, or couldn't be: only the usual ways of
+ * addressing someone, set off on their own, like "sir" in "On it, sir." or
+ * "boss" in "On it, boss, in yapd.", since any other word after "On it", like
+ * "staging" in "On it, staging only.", or one of them going on into the
+ * sentence, like "master" in "On it, master branch only.", is what was said.
+ */
+const someone = String.raw`,?\s*(?:sir|sire|ma['’]am|madam|miss|boss|chief|captain|mate|buddy|pal|friend|dude|love|master|my (?:lord|lady|liege))${alone}`
+
+/**
+ * What's said past an "On it" it starts with, addressing him or not, which a
+ * model may still write where yapd says a line of its own for going ahead:
+ * "On it, sir, in yapd." is "In yapd.", and "On it, sir." is nothing.
+ */
+export const afterOnIt = (spoken: string, lines: Pick<Lines, "address">) => {
+  const address = lines.address.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const onIt = new RegExp(`^on it(?:${address === "" ? someone : `,?\\s*${address}${alone}`})?(?![\\p{L}\\p{N}])(?:\\s*${mark})*\\s*`, "iu")
+  const said = spoken.trim()
+  const rest = said.replace(onIt, "")
+  return rest === said ? said : `${rest.charAt(0).toUpperCase()}${rest.slice(1)}`
+}
+
+/** A line for going ahead with more said after it, as a sentence of its own. */
+export const withOnIt = (onIt: string, rest: string) => {
+  const line = onIt.trim()
+  return [line === "" || /[.!?…]$/.test(line) ? line : `${line}.`, rest.trim()].filter((part) => part !== "").join(" ")
+}
+
+/**
  * The lines that tell rather than ask: worded as a question, he'd answer one
  * yapd isn't waiting on. Not "misheard", which may well ask him to say it
  * again, nor "again", which asks whether to send something once more.
@@ -106,12 +145,18 @@ export class Persona extends Context.Tag("yapd/Persona")<
     readonly lines: Effect.Effect<Lines>
     /**
      * The line to say once he's asked for something: one of his own, never
-     * the one he heard last, or the written one. Picking it changes nothing,
-     * since a reply that has one may yet be dropped or say something else.
+     * the one he heard last, nor one picked lately that's yet to play, nor
+     * `besides`, one said in the same breath, or the written one. A line
+     * picked never counts as heard, since a reply that has one may yet be
+     * dropped or say something else.
      */
-    readonly onIt: Effect.Effect<string>
-    /** Notes a line as being said, so the next line for going ahead is a different one. Only his own count. */
-    readonly said: (line: string) => Effect.Effect<void>
+    readonly onIt: (besides?: string) => Effect.Effect<string>
+    /**
+     * Notes what's being said, so the next line for going ahead is a
+     * different one from his own it starts with, said on its own or with more
+     * after it, and that one no longer waits to play. Only his own count.
+     */
+    readonly said: (spoken: string) => Effect.Effect<void>
   }
 >() {}
 
@@ -135,23 +180,59 @@ const ownLines = Effect.gen(function* () {
 const owning = (own: ReadonlyArray<string>) => (lines: Lines): Lines => (own.length === 0 ? lines : { ...lines, onIt: own[0]! })
 
 /**
- * One of his own lines, never the one said last, so they vary, and how to
- * note one as said. Only noting changes which comes next: a line picked for a
- * reply that's then dropped, or queued, or that fails, was never heard.
- * Without his own, it's the line as it is now.
+ * How long a line picked but not yet played is kept from being picked again.
+ * Two replies can each pick one before either plays, and they'd often pick
+ * the same; one never played, since its reply was dropped, is let go by then.
+ */
+const playing = 2 * 60_000
+
+/**
+ * One of his own lines, never the one said last, nor one picked lately that's
+ * yet to play, nor one said alongside, so they vary, and how to note one as
+ * said. Only noting makes one the last he heard: a line picked for a reply
+ * that's then dropped, or queued, or that fails, was never heard, and is only
+ * kept from coming up again for a while. Without his own, it's the line as it
+ * is now, even twice in one breath.
  */
 const alternating = (own: ReadonlyArray<string>, lines: Effect.Effect<Lines>) =>
   Effect.gen(function* () {
-    const last = yield* Ref.make<string | undefined>(undefined)
+    // The one he heard last and those picked lately, oldest first.
+    const recent = yield* Ref.make<ReadonlyArray<{ readonly line: string; readonly at: number; readonly heard: boolean }>>([])
     return {
-      onIt:
+      onIt: (besides?: string) =>
         own.length === 0
           ? Effect.map(lines, ({ onIt }) => onIt)
-          : Effect.flatMap(Ref.get(last), (said) => {
-              const others = own.length === 1 ? own : own.filter((line) => line !== said)
-              return Effect.map(Random.nextIntBetween(0, others.length), (index) => others[index]!)
+          : Effect.gen(function* () {
+              const now = yield* Clock.currentTimeMillis
+              const roll = yield* Random.next
+              // All at once, so two replies picking together can't both miss what the other picked.
+              return yield* Ref.modify(recent, (recent) => {
+                const kept = recent.filter(({ heard, at }) => heard || now - at < playing)
+                const waiting = kept.filter(({ heard }) => !heard).map(({ line }) => line).toReversed()
+                // With too few to avoid them all, what's avoided longest is what's likeliest to be heard just before: `besides`, said in the
+                // same breath, then the latest picked, which plays next unless it's dropped, then the one he heard last, then older picks,
+                // any of which may never play.
+                const avoided = [besides, ...waiting.slice(0, 1), ...kept.filter(({ heard }) => heard).map(({ line }) => line), ...waiting.slice(1)]
+                const others = avoided
+                  .map((_, index) => own.filter((line) => !avoided.slice(0, avoided.length - index).includes(line)))
+                  .find((lines) => lines.length > 0) ?? own
+                const line = others[Math.floor(roll * others.length)]!
+                return [line, [...kept, { line, at: now, heard: false }]]
+              })
             }),
-      said: (line: string) => (own.includes(line) ? Ref.set(last, line) : Effect.void),
+      said: (spoken: string) => {
+        const said = spoken.trim()
+        // The longest that fits, in case one of his lines starts another.
+        const [played] = own
+          .filter((line) => said.startsWith(line) && !/^[\p{L}\p{N}]/u.test(said.slice(line.length)))
+          .toSorted((one, other) => other.length - one.length)
+        // Now the last he heard, in place of the one before and of its pick, which has played.
+        return played === undefined
+          ? Effect.void
+          : Effect.flatMap(Clock.currentTimeMillis, (at) =>
+              Ref.update(recent, (recent) => [...recent.filter(({ line, heard }) => !heard && line !== played), { line: played, at, heard: true }]),
+            )
+      },
     }
   })
 
@@ -222,4 +303,4 @@ export const layer = Layer.scoped(
 )
 
 /** The plain lines, for tests and for wherever there's no style. */
-export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain), onIt: Effect.succeed(plain.onIt), said: () => Effect.void })
+export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain), onIt: () => Effect.succeed(plain.onIt), said: () => Effect.void })
