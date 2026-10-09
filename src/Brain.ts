@@ -229,12 +229,11 @@ export const echoes = (line: string, before: ReadonlyArray<string>, lines: Pick<
 }
 
 /**
- * A question on its own, without the news it follows: "Send it again?" of "I
+ * A question on its own, without any news it follows: "Send it again?" of "I
  * couldn't confirm it got there, sir. Send it again?", which a line saying it
- * again may leave the news out of. One asked again in other words follows none.
+ * again may leave the news out of. One that follows none is all it asked.
  */
-export const alone = (open: Pick<Assistant.Open, "asked" | "news">) =>
-  open.news !== undefined && open.asked.startsWith(`${open.news} `) ? open.asked.slice(open.news.length).trim() : open.asked
+export const alone = (open: Pick<Assistant.Open, "asked" | "question">) => open.question ?? open.asked
 
 /** The threads a question chooses between, as they're named in it: "A or B". */
 export const choices = (candidates: ReadonlyArray<Threads.Listed>) => either(candidates.slice(0, 3).map((listed) => named(listed, candidates)))
@@ -289,7 +288,7 @@ export const confirming = (doing: string, lines: Lines, asked: ReadonlyArray<str
  * news before it, and than any asked in the last ten minutes. None once every
  * wording has been used.
  */
-export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about" | "news">, before: ReadonlyArray<string>, lines: Lines) => {
+export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about" | "question">, before: ReadonlyArray<string>, lines: Lines) => {
   const wordings =
     open.kind === "which"
       ? [`Which one${addressed(lines)}: ${open.about}?`, `I still need to know which you meant${addressed(lines)}: ${open.about}?`]
