@@ -93,6 +93,17 @@ export const resolve = (
 }
 
 /**
+ * Whether the line for going ahead goes in front of what's said once new work
+ * started: only before the writer's own words, when they match what started.
+ * An "On it" the writer put in front anyway goes, since the line takes its
+ * place, and with only that there are no words of its own.
+ */
+export const ahead = (spoken: string, { request }: Pick<Resolved, "request">, started: Started, lines: Pick<Lines, "address">) =>
+  started.worktree === request.worktree &&
+  (request.model === undefined || same(request.model, started.model)) &&
+  afterOnIt(spoken, lines) !== ""
+
+/**
  * What's said once it started. The writer's own words when they match what
  * started, since it says names the way people do, after the line for going
  * ahead, `lines.onIt`, which they leave to yapd. Otherwise the plain facts,
@@ -104,13 +115,10 @@ export const confirmation = (
   started: Started,
   lines: Pick<Lines, "onIt" | "address">,
 ) => {
-  const asked = started.worktree === request.worktree && (request.model === undefined || same(request.model, started.model))
   const title = catalog.models.find(({ name }) => same(name, started.model))?.title ?? started.model
   const where = started.worktree ? "in a worktree" : "without a worktree"
   const plain = `Started in ${project.name}${machine.here ? "" : ` on ${machine.name}`}, on ${title}, ${where}.`
-  // An "On it" the writer put in front anyway goes, since the line for going ahead takes its place, and with only that there are no words of its own.
-  const words = afterOnIt(spoken, lines)
-  const said = asked && words !== "" ? withOnIt(lines.onIt, words) : plain
+  const said = ahead(spoken, { request }, started, lines) ? withOnIt(lines.onIt, afterOnIt(spoken, lines)) : plain
   return [
     said,
     // It's how they catch a worktree that was misheard, so it's never left to the writer alone.
@@ -233,8 +241,9 @@ export const make = (options: {
           }
           const started = outcome.right
           yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
-          // Picked as it's about to be said, and noted as heard by whoever says it, once it is.
-          const lines = { ...(yield* persona.lines), onIt: yield* persona.onIt() }
+          // Picked only when it's said, so a pick never played doesn't keep it from coming up, and noted as heard by whoever says it, once it is.
+          const written = yield* persona.lines
+          const lines = ahead(spoken, resolved, started, written) ? { ...written, onIt: yield* persona.onIt() } : written
           const begun = {
             _tag: "Started",
             spoken: [confirmation(spoken, resolved, started, lines), warning].filter(Boolean).join(" "),

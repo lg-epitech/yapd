@@ -75,6 +75,8 @@ const drafts = (
     const asked: Array<Material> = []
     const researched: Array<{ readonly machine: string; readonly directory: string }> = []
     const catalogs: Array<string> = []
+    /** How many times a line for going ahead was picked. */
+    let picks = 0
     const launcher = (machine: string, catalog: Catalog) => ({
       catalog: Effect.sync(() => void catalogs.push(machine)).pipe(
         Effect.zipRight(machine === "rig" && options.rigDown === true ? Effect.fail(new LaunchError({ reason: "I can't reach rig." })) : Effect.succeed(catalog)),
@@ -121,7 +123,7 @@ const drafts = (
       }),
       Effect.provideService(Persona.Persona, {
         lines: Effect.succeed(options.lines ?? Persona.plain),
-        onIt: () => Effect.succeed((options.lines ?? Persona.plain).onIt),
+        onIt: () => Effect.sync(() => (picks++, (options.lines ?? Persona.plain).onIt)),
         said: () => Effect.void,
       }),
     )
@@ -172,6 +174,7 @@ const drafts = (
       started,
       said,
       spoken: () => said.map(({ spoken }) => spoken),
+      picks: () => picks,
       asked,
       researched,
       catalogs,
@@ -368,16 +371,17 @@ describe("Drafts", () => {
     const said = (spoken: string) =>
       run(
         Effect.gen(function* () {
-          const { dictate, spoken: told } = yield* drafts(() => decision({ evidence: "yapd", spoken }), {
+          const { dictate, spoken: told, picks } = yield* drafts(() => decision({ evidence: "yapd", spoken }), {
             lines: { ...Persona.plain, onIt: "Right away, sir.", address: "sir" },
           })
           yield* dictate("In yapd, fix the loader.")
-          return told()
+          return { said: told(), picks: picks() }
         }),
       )
-    expect(await said("In yapd, on Fable, in a worktree.")).toEqual(["Right away, sir. In yapd, on Fable, in a worktree."])
-    expect(await said("On it, sir, in yapd, on Fable, in a worktree.")).toEqual(["Right away, sir. In yapd, on Fable, in a worktree."])
-    expect(await said("On it.")).toEqual(["Started in yapd, on Claude Fable 5.1, in a worktree."])
+    expect(await said("In yapd, on Fable, in a worktree.")).toEqual({ said: ["Right away, sir. In yapd, on Fable, in a worktree."], picks: 1 })
+    expect(await said("On it, sir, in yapd, on Fable, in a worktree.")).toEqual({ said: ["Right away, sir. In yapd, on Fable, in a worktree."], picks: 1 })
+    // With only the plain facts said, no line is picked, so none is kept from coming up as if it were about to play.
+    expect(await said("On it.")).toEqual({ said: ["Started in yapd, on Claude Fable 5.1, in a worktree."], picks: 0 })
   })
 
   test("says the line for going ahead in front of the writer's words, in place of an \"On it\" it wrote anyway", () => {
