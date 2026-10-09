@@ -424,14 +424,17 @@ const says = (word: string, yapd: ReadonlyArray<string>) =>
  * The first stop or wait he said in `words`, as he'd say it on its own: none
  * when there's none with a word yapd isn't saying itself, nor saying run
  * together with a word heard beside it, like the "stop" of "stop rage" for
- * "storage".
+ * "storage", but not one beside a word of its as it is, like the "wait" of
+ * "Over in yapd. Wait.", which "yapd" sounds like already.
  */
 const halted = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   const named = yapd.filter((word) => !common.has(word))
   const its = (at: number) =>
     says(words[at]!, yapd) ||
     [words[at - 1], words[at + 1]].some(
-      (beside, side) => beside !== undefined && named.some((spoken) => alike(side === 0 ? `${beside}${words[at]}` : `${words[at]}${beside}`, spoken)),
+      (beside, side) =>
+        beside !== undefined &&
+        named.some((spoken) => !alike(beside, spoken) && alike(side === 0 ? `${beside}${words[at]}` : `${words[at]}${beside}`, spoken)),
     )
   for (let start = 0; start < words.length; start++) {
     const found = halting.find(

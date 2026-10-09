@@ -839,6 +839,15 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("Over in t3code, wait a second.", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("stop")
     expect(stopIn("Over in t3code, wait a second.", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("Wait a second.")
     expect(whose("yapd's tests, hold on.", "yapd's tests are failing on the main branch")).toBe("stop")
+    // Beside a word of its that ends as a "wait" would sound, run together with it, but only beside it.
+    for (const [heard, line] of [
+      ["Over in yapd. Wait.", long], ["Over in yapd, wait.", long], ["Codex finished. Wait.", "Codex finished the migration and the tests pass"],
+      ["The build. Wait.", "The build is green and the tests pass"],
+    ] as const) {
+      expect([heard, whose(heard, line), stopIn(heard, line)]).toEqual([heard, "stop", "Wait."])
+    }
+    // All of the longest he said.
+    expect(stopIn("Over in yapd. Wait a second.", long)).toBe("Wait a second.")
     // His stop, with a word of its like it, but not the same, nor the start of one.
     expect([whose("Wait.", "Codex wants your approval to delete the old branch."), stopIn("Wait.", "Codex wants your approval")]).toEqual(["stop", "Wait."])
     expect(whose("Stop.", "Claude finished the first two steps of the plan.")).toBe("stop")
@@ -2142,6 +2151,21 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       sent: [],
       replies: ["Stop."],
     })
+  })
+
+  test("stops for a wait of the user's straight after its name, which ends as a \"wait\" would sound, acting on that alone", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd."], [0.9, "Wait."]], { intent: "dismiss", live: true })
+        yield* helper.wait(0.1)
+        yield* helper.talk(0.8, 20)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "stop"], responded: ["Wait."], sent: [], replies: ["Wait."] })
   })
 
   test("stops for what's clearly the user once he's finished, and acts on exactly what Whisper heard, though it's about what yapd is saying", async () => {
