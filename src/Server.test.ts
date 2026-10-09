@@ -45,7 +45,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
  */
 const stateful = Effect.gen(function* () {
   const { id, kind, title, at } = card
-  const ref = yield* SubscriptionRef.make<Server.State>({ on: true, activity: "idle", updates: [update], showing: { id, kind, title, at }, revision: 0 })
+  const ref = yield* SubscriptionRef.make<Server.State>({ on: true, activity: "idle", updates: [update], showing: { id, kind, title, at, revision: 0 }, revision: 0 })
   const pages: Array<Server.Page> = []
   let watching = 0
   return {
@@ -60,10 +60,10 @@ const stateful = Effect.gen(function* () {
         Effect.map(SubscriptionRef.get(ref), (state) => (id !== update.id ? "unknown" : state.on ? "queued" : "off")),
       utter: (text) => Effect.map(SubscriptionRef.get(ref), (state) => (state.on ? Option.some(`u-${text.length}`) : Option.none())),
       card: (id) => Effect.succeed(id === card.id ? Option.some(card) : Option.none()),
-      hide: (id) =>
+      hide: (id, shown) =>
         SubscriptionRef.update(ref, (state) => ({
           ...state,
-          showing: id === undefined || state.showing?.id === id ? null : (state.showing ?? null),
+          showing: (id === undefined || state.showing?.id === id) && (shown === undefined || state.showing?.revision === shown) ? null : (state.showing ?? null),
           revision: (state.revision ?? 0) + 1,
         })),
       back: (id, revision) =>
@@ -71,7 +71,7 @@ const stateful = Effect.gen(function* () {
           ? Effect.succeed("unknown" as const)
           : SubscriptionRef.modify(ref, (state): readonly ["back" | "changed", Server.State] =>
               revision === undefined || state.revision === revision
-                ? ["back", { ...state, showing: { id, kind, title, at }, revision: (state.revision ?? 0) + 1 }]
+                ? ["back", { ...state, showing: { id, kind, title, at, revision: (state.revision ?? 0) + 1 }, revision: (state.revision ?? 0) + 1 }]
                 : ["changed", state],
             ),
       threads: Effect.succeed(machines),
@@ -141,7 +141,7 @@ describe("Server", () => {
       const utter = (body: string) => call("/utterances", { method: "POST", headers: { "content-type": "application/json" }, body })
 
       expect(yield* Effect.promise(() => fetch(`${url}/state`).then((response) => response.json()))).toEqual({
-        on: true, activity: "idle", updates: [update], showing: { id: "c1", kind: "pr", title: card.title, at: card.at }, revision: 0,
+        on: true, activity: "idle", updates: [update], showing: { id: "c1", kind: "pr", title: card.title, at: card.at, revision: 0 }, revision: 0,
       })
       expect((yield* call("/updates/a1/replay", { method: "POST" })).status).toBe(202)
       expect((yield* call("/updates/zz/replay", { method: "POST" })).status).toBe(404)
@@ -231,6 +231,17 @@ describe("Server", () => {
       expect(yield* json("/state")).toMatchObject({ showing: { id: "c1" } })
       expect((yield* named("c1")).status).toBe(204)
       expect(yield* json("/state")).toMatchObject({ showing: null })
+      // Named as it was shown, only while it's still up as it went up then: put back up since, it's up anew, and stays.
+      const asShown = (query: string) => call(`/cards/current?id=c1&${query}`, { method: "DELETE" })
+      expect((yield* back('{"id": "c1"}')).status).toBe(204)
+      const before = ((yield* json("/state")) as Server.State).showing!.revision
+      expect((yield* back('{"id": "c1"}')).status).toBe(204)
+      expect((yield* asShown(`shown=${before}`)).status).toBe(204)
+      expect(yield* json("/state")).toMatchObject({ showing: { id: "c1", revision: before + 1 } })
+      for (const revision of ["", "x", "-1", "1.5", "1e3", "99999999999999999999"]) expect((yield* asShown(`shown=${revision}`)).status).toBe(400)
+      expect(yield* json("/state")).toMatchObject({ showing: { id: "c1", revision: before + 1 } })
+      expect((yield* asShown(`shown=${before + 1}`)).status).toBe(204)
+      expect(yield* json("/state")).toMatchObject({ showing: null })
 
       const threads = yield* call("/threads")
       expect(threads.status).toBe(200)
@@ -294,7 +305,7 @@ describe("Server", () => {
       const server = yield* Server.serve(0, {
         ...api,
         card: (id) => noting("card", api.card(id)),
-        hide: (id) => noting("hide", api.hide(id)),
+        hide: (id, shown) => noting("hide", api.hide(id, shown)),
         back: (id, revision) => noting("back", api.back(id, revision)),
         threads: noting("threads", api.threads),
         journal: (page) => noting("journal", api.journal(page)),

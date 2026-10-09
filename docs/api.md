@@ -26,7 +26,8 @@ There's no authentication: anything that can reach the port can use it, as hooks
     "id": "cmgi3k2xa4f1",
     "kind": "pr",
     "title": "Migrate the Tezos integration",
-    "at": "2026-10-02T14:05:40.000Z"
+    "at": "2026-10-02T14:05:40.000Z",
+    "revision": 6
   },
   "revision": 7
 }
@@ -36,7 +37,8 @@ There's no authentication: anything that can reach the port can use it, as hooks
 - `activity`: `speaking` while yapd plays something, `listening` while the microphone is open without it, for a reply after an update or while you dictate, and `idle` otherwise.
 - `updates`: the last five updates yapd said, newest first, to [hear again](#hearing-an-update-again). `text` is what it said and `at` when the agent's turn ended. They're forgotten when yapd restarts.
 - `showing`: the [card](#cards) yapd is showing, or `null`. `kind` and `title` are the card's, and `at` is when yapd put it up. Fetch the card itself from `/cards/{id}`. A yapd from before cards doesn't send it at all.
-- `revision`: goes up by one each time yapd puts a card up or takes one down, or is asked to take one down that's down already. It starts from `0` when yapd starts. Send it to [put a card back up](#cards) only if nothing came since. A yapd from before it doesn't send it.
+- `revision` in `showing`: the `revision` the card went up at, this time. It stays the same while the card stays up, even as the state's own moves on, and a card put back up is up anew, at a later one. Send it to [take the card down](#cards) only as it went up then. A yapd from before it doesn't send it.
+- `revision`: goes up by one each time yapd puts a card up or takes one down, or is asked to take one down and doesn't, like one that's down already. It starts from `0` when yapd starts. Send it to [put a card back up](#cards) only if nothing came since. A yapd from before it doesn't send it.
 
 The menu bar app's icon shows "not running" when it can't reach the API, "off" when `on` is false, and `activity` otherwise. A card that's showing opens in a panel under the icon.
 
@@ -118,13 +120,13 @@ When you ask about a thread that waits on something that can't be read aloud, li
 | `200` | The card. |
 | `404` | No such card, or yapd restarted since. |
 
-`DELETE /cards/current` takes the card down, so `showing` becomes `null`. With `?id=`, it takes that card down only if it's still the one up, and leaves any other up, as the menu bar app does for a card it put away: a request that gets there late never takes down a card put up since. It answers `204` either way, whether or not it took one down.
+`DELETE /cards/current` takes the card down, so `showing` becomes `null`. With `?id=`, it takes that card down only if it's still the one up, and leaves any other up, as the menu bar app does for a card it put away: a request that gets there late never takes down a card put up since. With `&shown=` too, the `revision` in `showing` as you had it, it takes the card down only if it's still up as it went up then, so a request that gets there late, like the menu bar app's for a card it put away just before showing it again, never takes down the same card put back up since either. Without it, as from an app or a script from before it, it takes the card down whichever time it went up. It answers `204` either way, whether or not it took one down, and `400` when `shown` isn't a whole number.
 
 ```sh
-curl -X DELETE 'http://127.0.0.1:4747/cards/current?id=cmgi3k2xa4f1'
+curl -X DELETE 'http://127.0.0.1:4747/cards/current?id=cmgi3k2xa4f1&shown=6'
 ```
 
-`PUT /cards/current` with one of those cards' `id` puts it back up, as the menu's Show Last Card does, so `showing` points at it again and "hide that" takes it down. Nothing is said of it. With the [`revision`](#state) of the state you had when you asked, it does so only if the state is still at that revision, and otherwise leaves what's up as it is and answers `409`: a request that gets there late, like the menu bar app's for a card it showed again just before you closed it or yapd put another up, never undoes what came since. Without one, as from an app or a script from before revisions, it puts the card back up whatever came since.
+`PUT /cards/current` with one of those cards' `id` puts it back up, as the menu's Show Last Card does, so `showing` points at it again, at the `revision` it went back up at, and "hide that" takes it down. Nothing is said of it. With the [`revision`](#state) of the state you had when you asked, it does so only if the state is still at that revision, and otherwise leaves what's up as it is and answers `409`: a request that gets there late, like the menu bar app's for a card it showed again just before you closed it or yapd put another up, never undoes what came since. Without one, as from an app or a script from before revisions, it puts the card back up whatever came since.
 
 ```sh
 curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1", "revision": 7}' http://127.0.0.1:4747/cards/current

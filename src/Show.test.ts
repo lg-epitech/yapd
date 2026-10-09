@@ -258,9 +258,9 @@ describe("Show", () => {
       caption: "Checks pass, sir.",
       at: now,
     }
-    // To the millisecond, which the menu bar app reads it to.
-    expect(Show.pointer(Option.some(card))).toStrictEqual({ id: "c1", kind: "pr", title: "Migrate Tezos", at: "2026-10-08T22:00:00.000Z" })
-    expect(Show.pointer(Option.none())).toBeNull()
+    // To the millisecond, which the menu bar app reads it to, with the revision it went up at, not the one yapd is at.
+    expect(Show.pointer({ card: Option.some(card), revision: 5, since: 3 })).toStrictEqual({ id: "c1", kind: "pr", title: "Migrate Tezos", at: "2026-10-08T22:00:00.000Z", revision: 3 })
+    expect(Show.pointer({ card: Option.none(), revision: 5, since: 3 })).toBeNull()
     expect(Show.face(card)).toStrictEqual({ ...card, at: "2026-10-08T22:00:00.000Z" })
     const { url: _url, caption: _caption, ...bare } = card
     expect(Show.face(bare)).toStrictEqual({ ...bare, at: "2026-10-08T22:00:00.000Z" })
@@ -328,7 +328,7 @@ describe("Show", () => {
           for (let tries = 0; tries < 100 && left; tries++) left = yield* Effect.zipRight(Effect.promise(() => Bun.sleep(10)), show.watched)
 
           expect(before).toEqual({ on: true, activity: "idle", updates: [], showing: null, revision: 0 })
-          expect(state).toEqual({ on: true, activity: "idle", updates: [], showing: { id: card.id, kind: "said", title: "What I said", at: new Date(card.at).toISOString() }, revision: 1 })
+          expect(state).toEqual({ on: true, activity: "idle", updates: [], showing: { id: card.id, kind: "said", title: "What I said", at: new Date(card.at).toISOString(), revision: 1 }, revision: 1 })
           expect(state.showing?.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/)
           expect(served).toEqual({ id: card.id, kind: "said", title: "What I said", markdown: card.markdown, caption: "Two running, sir.", at: new Date(card.at).toISOString() })
           expect(threads).toEqual(Show.listing(desk))
@@ -360,6 +360,85 @@ describe("Show", () => {
       ),
     )
     expect(result).toEqual({ late: 204, kept: true, own: 204, after: Option.none() })
+  })
+
+  test("an app's request to take down a card as it was shown before, coming late, leaves it up once it's been put back up since, and takes it down as it's shown now", async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const { url, revision, putBack } = yield* serving(show)
+          const takeDown = (query: string) => Effect.promise(() => fetch(`${url}/cards/current?${query}`, { method: "DELETE" }).then((response) => response.status))
+          const showing = Effect.map(
+            Effect.promise(() => fetch(`${url}/state`).then((response) => response.json() as Promise<Server.State>)),
+            ({ showing }) => (showing == null ? null : { id: showing.id, revision: showing.revision }),
+          )
+          const card = yield* show.put(Show.said("One running.", Option.none()))
+          // He put it away, and showed it again from the menu before the app's request to take it down came: it's back up, anew.
+          const first = yield* showing
+          const back = yield* putBack(card.id, yield* revision)
+          const again = yield* showing
+          const late = { status: yield* takeDown(`id=${card.id}&shown=${first?.revision}`), up: yield* showing }
+          // Put away again, the app's request names it as it's up now, and it goes.
+          const own = { status: yield* takeDown(`id=${card.id}&shown=${again?.revision}`), up: yield* showing }
+          return { card: card.id, first, back, again, late, own }
+        }),
+      ),
+    )
+    expect(result).toEqual({
+      card: result.card,
+      first: { id: result.card, revision: 1 },
+      back: 204,
+      again: { id: result.card, revision: 2 },
+      late: { status: 204, up: { id: result.card, revision: 2 } },
+      own: { status: 204, up: null },
+    })
+  })
+
+  test("the card that's up is still up as it went up once yapd is asked to take down another, or none, so a request to take it down as it was shown still does", async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const { url } = yield* serving(show)
+          const takeDown = (query: string) => Effect.promise(() => fetch(`${url}/cards/current?${query}`, { method: "DELETE" }).then((response) => response.status))
+          const state = Effect.promise(() => fetch(`${url}/state`).then((response) => response.json() as Promise<Server.State>))
+          const old = yield* show.put(Show.said("One running.", Option.none()))
+          yield* show.hide()
+          const card = yield* show.put(Show.said("Two running.", Option.none()))
+          const shown = (yield* state).showing?.revision
+          // The app's request for one it put away before, then one naming a card that's down already.
+          yield* takeDown(`id=${old.id}&shown=1`)
+          yield* show.hide(old.id)
+          const kept = yield* state
+          const status = yield* takeDown(`id=${card.id}&shown=${shown}`)
+          return { shown, kept: { id: kept.showing?.id === card.id, shown: kept.showing?.revision, revision: kept.revision }, status, after: (yield* state).showing }
+        }),
+      ),
+    )
+    expect(result).toEqual({ shown: 3, kept: { id: true, shown: 3, revision: 5 }, status: 204, after: null })
+  })
+
+  test("a request to take down a card that names it alone, like an app's from before showings were told apart, takes it down whichever time it went up", async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const { url, revision, putBack } = yield* serving(show)
+          const takeDown = (query: string) => Effect.promise(() => fetch(`${url}/cards/current?${query}`, { method: "DELETE" }).then((response) => response.status))
+          const shown = Effect.promise(() => fetch(`${url}/state`).then((response) => response.json() as Promise<Server.State>)).pipe(
+            Effect.map(({ showing }) => showing?.revision ?? null),
+          )
+          const card = yield* show.put(Show.said("One running.", Option.none()))
+          const first = yield* shown
+          yield* putBack(card.id, yield* revision)
+          const again = yield* shown
+          const status = yield* takeDown(`id=${card.id}`)
+          return { first, again, status, after: yield* shown }
+        }),
+      ),
+    )
+    expect(result).toEqual({ first: 1, again: 2, status: 204, after: null })
   })
 
   test("an app's request to put a card back up, asked at the revision it had last, does nothing once that card was put away or another went up", async () => {

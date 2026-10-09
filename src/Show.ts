@@ -46,6 +46,12 @@ export type Draft = Omit<Card, "id" | "at">
 export interface Up {
   readonly card: Option.Option<Card>
   readonly revision: number
+  /**
+   * The revision the card that's up went up at, this time: put back up, it's
+   * up anew, so a request to take it down as it was up before, coming late,
+   * leaves it up. Taking nothing down leaves it as it is.
+   */
+  readonly since: number
 }
 
 /**
@@ -83,8 +89,12 @@ export class Show extends Context.Tag("yapd/Show")<
   {
     /** Puts a card up in place of the one there, as it's talked about: saying `line` again puts it back up. */
     readonly put: (draft: Draft, line?: Line) => Effect.Effect<Card>
-    /** Takes the card down, or `id` only while it's the one up, and says whether it did. */
-    readonly hide: (id?: string) => Effect.Effect<boolean>
+    /**
+     * Takes the card down, or `id` only while it's the one up, and, asked as
+     * it was `shown` at a revision, only while it's still up since then, and
+     * says whether it did.
+     */
+    readonly hide: (id?: string, shown?: number) => Effect.Effect<boolean>
     /**
      * Puts one of the cards put up lately back up as it was, with nothing said
      * of it, or, asked at a `revision`, only while what's up is still at it,
@@ -96,7 +106,7 @@ export class Show extends Context.Tag("yapd/Show")<
     readonly card: (id: string) => Effect.Effect<Option.Option<Card>>
     /** The card that's up, then each time that changes. */
     readonly showing: Stream.Stream<Option.Option<Card>>
-    /** The card that's up and the revision it's at, then each time either changes. */
+    /** The card that's up, the revision it went up at and the one yapd is at, then each time they change. */
     readonly up: Stream.Stream<Up>
     /** The card on his screen: the one that's up, if it went up while an app was there to show it and one still is. */
     readonly seen: Effect.Effect<Option.Option<Card>>
@@ -686,13 +696,13 @@ export const face = (card: Card): Server.Card => ({
   at: new Date(card.at).toISOString(),
 })
 
-/** The card that's up, as `/state` points at it. */
-export const pointer = (card: Option.Option<Card>): Server.Showing | null =>
-  Option.match(card, { onNone: () => null, onSome: ({ id, kind, title, at }) => ({ id, kind, title, at: new Date(at).toISOString() }) })
+/** The card that's up, as `/state` points at it, with the revision it went up at. */
+export const pointer = ({ card, since }: Up): Server.Showing | null =>
+  Option.match(card, { onNone: () => null, onSome: ({ id, kind, title, at }) => ({ id, kind, title, at: new Date(at).toISOString(), revision: since }) })
 
-/** The state as `/state` gives it, with the card that's up and the revision it's at, then each time either changes. */
+/** The state as `/state` gives it, with the card that's up, the revision it went up at and the one yapd is at, then each time they change. */
 export const stated = (state: Stream.Stream<Omit<Server.State, "showing" | "revision">>, show: Show["Type"]): Stream.Stream<Server.State> =>
-  Stream.zipLatestWith(state, show.up, (state, { card, revision }) => ({ ...state, showing: pointer(card), revision }))
+  Stream.zipLatestWith(state, show.up, (state, up) => ({ ...state, showing: pointer(up), revision: up.revision }))
 
 /** What the API serves of the cards, the threads on `desk` and the journal's pages, and how it counts a UI that shows cards as watching. */
 export const served = (
@@ -701,7 +711,7 @@ export const served = (
   page: (page: Server.Page) => Effect.Effect<ReadonlyArray<Kept>>,
 ): Pick<Server.Api, "card" | "hide" | "back" | "threads" | "journal" | "watch"> => ({
   card: (id) => Effect.map(show.card(id), Option.map(face)),
-  hide: (id) => Effect.asVoid(show.hide(id)),
+  hide: (id, shown) => Effect.asVoid(show.hide(id, shown)),
   back: show.back,
   threads: Effect.map(desk, listing),
   journal: (asked) => Effect.map(page(asked), (kept) => kept.map(entry)),
@@ -719,7 +729,7 @@ const patience = "3 seconds"
 /** What's on the user's screen, reading threads with `read` for their cards, and opening pull requests with `open`. */
 export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = browser) =>
   Effect.gen(function* () {
-    const up = yield* SubscriptionRef.make<Up>({ card: Option.none(), revision: 0 })
+    const up = yield* SubscriptionRef.make<Up>({ card: Option.none(), revision: 0, since: 0 })
     const recent = new Map<string, Card>()
     /** The request each of those cards was put up for, when it went up with what was said for one. */
     const requests = new Map<string, string>()
@@ -743,7 +753,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         }
         shownTo = watching > 0
         if (line !== undefined) withLine = { line, draft }
-        yield* SubscriptionRef.update(up, ({ revision }) => ({ card: Option.some(card), revision: revision + 1 }))
+        yield* SubscriptionRef.update(up, ({ revision }) => ({ card: Option.some(card), revision: revision + 1, since: revision + 1 }))
         yield* Effect.logInfo(`Showing ${card.kind}: ${card.title}`)
         return card
       })
@@ -755,24 +765,30 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
     )
 
     /**
-     * Takes the card down when it's `which`, in the same step as it's looked
-     * at, and says whether it did. Even taking nothing down is a revision, so
-     * a request asked before it, like the app's to put back up a card it then
-     * put away while yapd had it down already, never undoes it by coming late.
+     * Takes the card down when it's `which`, as it's been up since the
+     * revision it went up at, in the same step as it's looked at, and says
+     * whether it did. Even taking nothing down is a revision, so a request
+     * asked before it, like the app's to put back up a card it then put away
+     * while yapd had it down already, never undoes it by coming late; but
+     * the card that's up is still up as it went up, so a request to take it
+     * down as it was then still does.
      */
-    const takeDown = (which: (card: Card) => boolean) =>
+    const takeDown = (which: (card: Card, since: number) => boolean) =>
       Effect.gen(function* () {
-        const was = yield* SubscriptionRef.modify(up, ({ card, revision }) =>
-          Option.exists(card, which)
-            ? [card, { card: Option.none<Card>(), revision: revision + 1 }]
-            : [Option.none<Card>(), { card, revision: revision + 1 }],
+        const was = yield* SubscriptionRef.modify(up, (now): readonly [Option.Option<Card>, Up] =>
+          Option.exists(now.card, (card) => which(card, now.since))
+            ? [now.card, { ...now, card: Option.none(), revision: now.revision + 1 }]
+            : [Option.none(), { ...now, revision: now.revision + 1 }],
         )
         if (Option.isSome(was)) yield* Effect.logInfo(`Took down ${was.value.kind}: ${was.value.title}`)
         return Option.isSome(was)
       })
 
     // Asked for by id, like by an app for a card it put away, it's only that one: a request that comes late never takes down one put up since.
-    const hide = (id?: string) => takeDown((card) => id === undefined || card.id === id)
+    // Asked for as it was shown, it's only while it's still up since then: put back up since, like by the app's Show Last Card, it's up anew,
+    // so the app's request for when it put it away before, coming late, leaves it up.
+    const hide = (id?: string, shown?: number) =>
+      takeDown((card, since) => (id === undefined || card.id === id) && (shown === undefined || since === shown))
 
     /** Opens a thread's pull request, and says whether it did, or why not: its address isn't https, or the browser didn't open it in time. */
     const opening = (thread: T3Live.Thread) =>
@@ -869,7 +885,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           // late, like the app's for a card it showed again just before it was put away or another went up, never undoes what
           // came since. Asked at none, like by an app from before revisions, it goes back up whatever came since.
           const again = yield* SubscriptionRef.modify(up, (now): readonly [boolean, Up] =>
-            revision === undefined || now.revision === revision ? [true, { card: Option.some(card), revision: now.revision + 1 }] : [false, now],
+            revision === undefined || now.revision === revision
+              ? [true, { card: Option.some(card), revision: now.revision + 1, since: now.revision + 1 }]
+              : [false, now],
           )
           if (!again) return "changed" as const
           // The latest shown again, so it's kept as long as one just made.
