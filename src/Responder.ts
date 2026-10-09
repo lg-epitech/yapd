@@ -148,7 +148,7 @@ export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): 
   if (said === "") return Effect.succeed(undefined)
   if (enough.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
   if (asked(interruption)) {
-    // Taken only for a reply that says it, so his lines vary as he hears them.
+    // Only picked: it's noted as said once it's passed on, since he may yet carry on talking and this reply be dropped.
     return agreed.has(said)
       ? Effect.map(onIt, (spoken) => ({ intent: "send", spoken, message: typed(interruption.heard) }))
       : Effect.succeed(undefined)

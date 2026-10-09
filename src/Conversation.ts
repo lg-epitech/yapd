@@ -444,6 +444,8 @@ export const make = (options: {
               Effect.as(error.reason),
             ),
           ),
+          // Noted once it's what will be said, now or later, so a line for going ahead picked for nothing never counts as the last one he heard.
+          Effect.tap(persona.said),
           Effect.ensuring(
             Effect.sync(() => {
               if (sending.get(update) === mark) sending.delete(update)

@@ -28,20 +28,32 @@ const update: Conversation.Update = {
 
 /**
  * Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply,
- * taking what's said to Sam for talk with someone else, and the relay `sending` seconds to send.
+ * taking what's said to Sam for talk with someone else, the relay `sending` seconds to send, and follow-ups going out
+ * as `result` says: sent, queued, or held back as the session has moved on.
  */
-const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: ReadonlyArray<Effect.Effect<void>> = []) =>
+const conversation = (
+  said: ReadonlyArray<string>,
+  sending = 0,
+  deliveries: ReadonlyArray<Effect.Effect<void>> = [],
+  result: "sent" | "queued" | "moved" = "sent",
+) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
     const heard: Array<string> = []
     const sent: Array<string> = []
     const late: Array<string> = []
     const saying: Array<string> = []
+    /** The lines the persona was told are being said. */
+    const noted: Array<string> = []
     const transcripts = [...said]
     let dispatches = 0
     let replies = 0
     const layer = Layer.mergeAll(
-      Persona.Plain,
+      Layer.succeed(Persona.Persona, {
+        lines: Effect.succeed(Persona.plain),
+        onIt: Effect.succeed(Persona.plain.onIt),
+        said: (line) => Effect.sync(() => void noted.push(line)),
+      }),
       Journal.memory,
       Layer.succeed(Audio, {
         play: () =>
@@ -79,8 +91,9 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
     const context = yield* Layer.build(layer)
     const made = yield* Conversation.make({
       dir: "/tmp",
-      moved: () => Effect.succeed(false),
-      send: (update, message) => Context.get(context, Relays).send(update.thread, message).pipe(Effect.as("sent" as const)),
+      moved: () => Effect.succeed(result === "moved"),
+      send: (update, message) =>
+        Context.get(context, Relays).send(update.thread, message).pipe(Effect.as(result === "queued" ? "queued" : "sent")),
       late: (_, spoken) => Effect.sync(() => void late.push(spoken)),
       replied: Effect.sync(() => void replies++),
       saying: (_, line) => Effect.sync(() => void saying.push(line)),
@@ -103,7 +116,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
       question((heard) =>
         Effect.succeed(heard.startsWith("Yes") ? Option.some(Effect.sync(() => void answers.push(heard))) : Option.none()),
       )
-    return { ...made, fiber, heard, sent, late, saying, speak, wait, question, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
+    return { ...made, fiber, heard, sent, late, saying, noted, speak, wait, question, ask, frames, disconnect: Queue.shutdown(microphone), replies: () => replies }
   })
 
 /** Talks, then waits for the reply to be sent and read out. */
@@ -279,6 +292,23 @@ describe("Follow-ups", () => {
       }),
     )
     expect(result).toEqual({ sent: ["Just merge it."], saying: ["On it."] })
+  })
+
+  test("tells the persona only the line said of a follow-up, never one for going ahead when it's queued or held back", async () => {
+    const follow = (result: "sent" | "queued" | "moved") =>
+      scoped(
+        Effect.gen(function* () {
+          const { fiber, speak, wait, saying, noted } = yield* conversation(["Just merge it."], 0, [], result)
+          yield* speak
+          yield* wait(5)
+          yield* wait(20)
+          yield* Fiber.join(fiber)
+          return { saying, noted }
+        }),
+      )
+    expect(await follow("sent")).toEqual({ saying: ["On it."], noted: ["On it."] })
+    expect(await follow("queued")).toEqual({ saying: [Persona.plain.queued], noted: [Persona.plain.queued] })
+    expect(await follow("moved")).toEqual({ saying: [Conversation.movedOn], noted: [Conversation.movedOn] })
   })
 
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {
@@ -678,7 +708,7 @@ describe("quick replies", () => {
     expect(reply("Merge the other one too.", "The PR is up.", false)).toBeUndefined()
   })
 
-  test("takes a line for going ahead only when it's said, so the next one said is never the last one again", () => {
+  test("picks a line for going ahead only for a reply that goes ahead", () => {
     let taken = 0
     const onIt = Effect.sync(() => (++taken % 2 === 0 ? "Very good, sir." : "Right away, sir."))
     const heard = "The PR is up. Should I merge it?"

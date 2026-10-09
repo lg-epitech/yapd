@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Random, Schema, SubscriptionRef, SynchronizedRef } from "effect"
+import { Context, Effect, Layer, Option, Random, Ref, Schema, SubscriptionRef } from "effect"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 import * as Settings from "./Settings.ts"
@@ -71,8 +71,14 @@ export class Persona extends Context.Tag("yapd/Persona")<
   {
     /** The lines as they are now: plain until the user's style has been written in. */
     readonly lines: Effect.Effect<Lines>
-    /** The line to say once he's asked for something, taken only when it's about to be said, since his own vary. */
+    /**
+     * The line to say once he's asked for something: one of his own, never
+     * the one he heard last, or the written one. Picking it changes nothing,
+     * since a reply that has one may yet be dropped or say something else.
+     */
     readonly onIt: Effect.Effect<string>
+    /** Notes a line as being said, so the next line for going ahead is a different one. Only his own count. */
+    readonly said: (line: string) => Effect.Effect<void>
   }
 >() {}
 
@@ -96,18 +102,24 @@ const ownLines = Effect.gen(function* () {
 const owning = (own: ReadonlyArray<string>) => (lines: Lines): Lines => (own.length === 0 ? lines : { ...lines, onIt: own[0]! })
 
 /**
- * One of his own lines, never the one said last time, so they vary. Each one
- * taken is taken to be said, which is why reading the lines leaves it alone.
+ * One of his own lines, never the one said last, so they vary, and how to
+ * note one as said. Only noting changes which comes next: a line picked for a
+ * reply that's then dropped, or queued, or that fails, was never heard.
  * Without his own, it's the line as it is now.
  */
 const alternating = (own: ReadonlyArray<string>, lines: Effect.Effect<Lines>) =>
   Effect.gen(function* () {
-    if (own.length === 0) return Effect.map(lines, ({ onIt }) => onIt)
-    const last = yield* SynchronizedRef.make<string | undefined>(undefined)
-    return SynchronizedRef.modifyEffect(last, (said) => {
-      const others = own.length === 1 ? own : own.filter((line) => line !== said)
-      return Effect.map(Random.nextIntBetween(0, others.length), (index) => [others[index]!, others[index]!] as const)
-    })
+    const last = yield* Ref.make<string | undefined>(undefined)
+    return {
+      onIt:
+        own.length === 0
+          ? Effect.map(lines, ({ onIt }) => onIt)
+          : Effect.flatMap(Ref.get(last), (said) => {
+              const others = own.length === 1 ? own : own.filter((line) => line !== said)
+              return Effect.map(Random.nextIntBetween(0, others.length), (index) => others[index]!)
+            }),
+      said: (line: string) => (own.includes(line) ? Ref.set(last, line) : Effect.void),
+    }
   })
 
 export const prompt = (style: string) =>
@@ -135,7 +147,7 @@ export const layer = Layer.scoped(
     const own = yield* ownLines
     const ref = yield* SubscriptionRef.make(plain)
     const lines = Effect.map(SubscriptionRef.get(ref), owning(own))
-    const persona = { lines, onIt: yield* alternating(own, lines) }
+    const persona = { lines, ...(yield* alternating(own, lines)) }
     // All of his own, so whichever comes up plays at once.
     const warm = (lines: Lines) => warmth.warm([...sayable(owning(own)(lines)), ...own.slice(1)])
     if (Option.isNone(style)) {
@@ -173,4 +185,4 @@ export const layer = Layer.scoped(
 )
 
 /** The plain lines, for tests and for wherever there's no style. */
-export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain), onIt: Effect.succeed(plain.onIt) })
+export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain), onIt: Effect.succeed(plain.onIt), said: () => Effect.void })

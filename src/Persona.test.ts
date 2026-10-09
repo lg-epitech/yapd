@@ -80,9 +80,9 @@ const persona = (
     ),
   )
 
-/** What's said for going ahead, `times` times over, picked the same way every run. */
+/** What's said for going ahead, `times` times over, each noted as said, picked the same way every run. */
 const goingAhead = (persona: Context.Tag.Service<Persona.Persona>, times: number) =>
-  Effect.runSync(Effect.replicateEffect(persona.onIt, times).pipe(Effect.withRandom(Random.make("yapd"))))
+  Effect.runSync(Effect.replicateEffect(Effect.tap(persona.onIt, persona.said), times).pipe(Effect.withRandom(Random.make("yapd"))))
 
 const own = ["Right away, sir.", "Very good, sir.", "Consider it done, sir.", "Very well, sir."]
 
@@ -125,13 +125,33 @@ describe("Persona", () => {
     const { persona: said } = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") })
     const read: Array<string> = []
     const lines = Effect.runSync(
-      Effect.replicateEffect(Effect.zipLeft(said.onIt, Effect.tap(said.lines, ({ onIt }) => read.push(onIt))), 200).pipe(
-        Effect.withRandom(Random.make("yapd")),
-      ),
+      Effect.replicateEffect(
+        Effect.zipLeft(Effect.tap(said.onIt, said.said), Effect.tap(said.lines, ({ onIt }) => read.push(onIt))),
+        200,
+      ).pipe(Effect.withRandom(Random.make("yapd"))),
     )
     expect(new Set(read)).toEqual(new Set(["Right away, sir."]))
     lines.forEach((line, index) => expect(line).not.toBe(lines[index - 1]))
     expect(new Set(lines)).toEqual(new Set(own))
+  })
+
+  test("a line picked for a reply that's then dropped, queued or fails doesn't count as the last one he heard", async () => {
+    const { persona: said } = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") })
+    const heard = Effect.runSync(
+      Effect.replicateEffect(
+        Effect.gen(function* () {
+          const last = yield* Effect.tap(said.onIt, said.said)
+          // Picked, then never said, like when he carries on talking and the reply is worked out again.
+          yield* said.onIt
+          return [last, yield* said.onIt] as const
+        }),
+        200,
+      ).pipe(Effect.withRandom(Random.make("yapd"))),
+    )
+    heard.forEach(([last, next]) => expect(next).not.toBe(last))
+    // Lines that aren't his own, like the one for being queued, leave the last one he heard as it was.
+    Effect.runSync(said.said(own[0]!).pipe(Effect.zipRight(said.said(jarvis.queued))))
+    expect(new Set(Effect.runSync(Effect.replicateEffect(said.onIt, 40)))).toEqual(new Set(own.slice(1)))
   })
 
   test("renders all his own lines ahead, and not the written one they replace", async () => {
