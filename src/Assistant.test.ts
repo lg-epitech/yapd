@@ -7893,6 +7893,56 @@ describe("Assistant", () => {
     expect(result.answers).toEqual([{ [colour.id]: "Red" }])
   })
 
+  test("a rig question brought back each time rig drops out as he answers is asked the fourth time all the same, never let go for want of words, and his answer then goes", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        let status: Tunnel.Status = { _tag: "Up" }
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.sync(() => status), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Heard each time it comes up; rig drops just before he answers, four times, and is back a minute later each time.
+        for (const outage of [1, 2, 3, 4]) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          seen = false
+          status = { _tag: "Down", reason: "I can't reach rig right now.", outage }
+          yield* made.answer("Red.")
+          yield* made.wait(60)
+          seen = true
+          status = { _tag: "Up" }
+          yield* made.wait(10)
+          yield* made.wait(1)
+        }
+        yield* made.questions().at(-1)!.stale
+        yield* made.play(made.questions().at(-1))
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), answers: answered(rig) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const away = "I couldn't get your answer to it, sir: I can't reach rig right now. I'll ask you again once I can."
+    const here = `Here's the question on Fee table checks on rig, sir: ${line}`
+    expect(result.spoken).toEqual([
+      `A question on Fee table checks on rig, sir: ${line}`,
+      away,
+      here,
+      away,
+      `Back to Fee table checks on rig, sir: ${line}`,
+      away,
+      `Fee table checks on rig still needs an answer, sir: ${line}`,
+      away,
+      here,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
   test("an answer to a rig question or approval given while rig is out of sight, back as the model works it out, goes to rig, never said to be dealt with", async () => {
     const approving = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
     /** Asked and heard, then rig drops out, and he answers in words only the model makes out, which rig is back by the end of. */
@@ -8067,6 +8117,102 @@ describe("Assistant", () => {
       "Approved, sir.",
     ])
     expect(result.sent).toBe(0)
+    expect(result.decided).toEqual(["r9 accept"])
+  })
+
+  test("a question asked in every way lately, brought back once T3 Code is back from a restart as he answered, is asked as it was first brought back, never let go for want of words", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), seen: () => seen, waiting: true })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("Rosie"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "Rosie", "10 seconds"))
+        yield* made.flush
+        const heard = Effect.gen(function* () {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+        })
+        // Heard, then its place taken twice by what the model can't make out, then left unanswered, so each of its words has been used.
+        yield* asked(made, cloud)
+        yield* heard
+        for (const _ of [1, 2]) {
+          yield* made.dictate("What was that about the fee tables?")
+          yield* heard
+        }
+        yield* made.unanswered()
+        yield* made.wait(61)
+        yield* heard
+        // He answers as T3 Code restarts here, and it's back a minute later.
+        seen = false
+        yield* made.answer("Red.")
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* heard
+        yield* made.answer("Red.")
+        return { spoken: made.spoken().filter((line) => !line.startsWith("I couldn't work that out")), answers: answered(made.dispatched) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const here = `Here's the question on Cloud deployment discovery, sir: ${line}`
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      here,
+      `Back to Cloud deployment discovery, sir: ${line}`,
+      `Cloud deployment discovery still needs an answer, sir: ${line}`,
+      "I couldn't get your answer to it, sir: T3 Code isn't running, so I can't see your threads. I'll ask you again once I can.",
+      here,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("a rig approval brought back each time rig drops out as he allows it is asked the third time all the same, never let go for want of words", async () => {
+    const asking = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [asking], seen: () => seen, dispatched: rig, items: approval("r9", "npm install left-pad") },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Read back to him, as on his asking, and heard each time it comes up; rig drops just as he allows it, three times, and is back a
+        // minute later each time.
+        yield* asked(made, asking, "rig")
+        for (const _ of [1, 2, 3]) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          seen = false
+          yield* made.answer("Yes.")
+          yield* made.wait(60)
+          seen = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+        }
+        yield* made.questions().at(-1)!.stale
+        yield* made.play(made.questions().at(-1))
+        yield* made.answer("Yes.")
+        return { spoken: made.spoken(), decided: rig.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    const away = "I couldn't get your go-ahead to it, sir: I can't follow rig's threads right now. I'll ask you again once I can."
+    const still = "Shall I still allow Fee table checks on rig to run npm install left-pad, sir?"
+    expect(result.spoken).toEqual([
+      "Fee table checks on rig wants to run npm install left-pad. Allow it, sir?",
+      away,
+      still,
+      away,
+      "Do you still want me to allow Fee table checks on rig to run npm install left-pad, sir?",
+      away,
+      still,
+      "Approved, sir.",
+    ])
     expect(result.decided).toEqual(["r9 accept"])
   })
 
@@ -8248,6 +8394,43 @@ describe("Assistant", () => {
       ],
       open: true,
     })
+  })
+
+  test("presses that come to nothing over a thread's question never use up the words it's asked in: a fourth brings it back all the same, and heard, it's still asked once more a minute on before it's let go", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    /** Cut off by the shortcut `presses` times, each dictation coming to nothing, then heard in full and left unanswered, and again once it's asked once more. */
+    const pressed = (presses: number) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+          yield* asked(made, cloud)
+          for (let press = 1; press <= presses; press++) {
+            yield* made.questions().at(-1)!.stale
+            yield* made.cut()
+            yield* made.prepare(press, 1)
+            yield* made.nothing(press)
+            yield* made.flush
+          }
+          const brought = made.spoken().slice(1)
+          yield* made.play()
+          yield* made.unanswered()
+          yield* made.wait(61)
+          const again = made.spoken().slice(1 + brought.length)
+          const open = Option.isSome(yield* made.open)
+          yield* made.play()
+          yield* made.unanswered()
+          yield* made.wait(61)
+          return { brought, again, open, then: made.spoken().slice(1 + brought.length + again.length), after: Option.isSome(yield* made.open) }
+        }),
+      )
+    const here = `Here's the question on Cloud deployment discovery, sir: ${line}`
+    const back = `Back to Cloud deployment discovery, sir: ${line}`
+    const still = `Cloud deployment discovery still needs an answer, sir: ${line}`
+    // Let go only once it's been asked twice, as one he heard and left unanswered is.
+    const then = ["I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."]
+    expect(await pressed(3)).toEqual({ brought: [here, back, still], again: [back], open: true, then, after: false })
+    expect(await pressed(4)).toEqual({ brought: [here, back, still, here], again: [back], open: true, then, after: false })
   })
 
   test("a thread's question closed quietly, as when it's answered in T3 Code, is told as the question it was when he asks to hear or see it again, never as one about a project", async () => {

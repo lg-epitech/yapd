@@ -360,6 +360,15 @@ interface Queued {
   readonly snoozed?: number | undefined
   /** Asked no more, but let go with a word, once it's had its place taken too often. */
   readonly letGo?: boolean | undefined
+  /**
+   * Brought back from a wait that was no asking of his, nor anything taking
+   * its place, like a press that came to nothing, yapd turned off and on, or
+   * its machine's threads out of sight as he answered: it's put even in words
+   * asked lately, never let go for want of others.
+   */
+  readonly costless?: boolean | undefined
+  /** The words it was brought back in at no cost to him lately, which it can still be asked once more in, as it goes unanswered. */
+  readonly free?: ReadonlyArray<string> | undefined
 }
 
 /** A thread's question, with how far he'd got in answering it. */
@@ -436,6 +445,7 @@ const resumed = (from: Queued, open: Pick<Open, "asks">, changes: Omit<Queued, "
   asks: undefined,
   back: undefined,
   letGo: undefined,
+  costless: undefined,
   ...changes,
 })
 
@@ -892,11 +902,11 @@ export const make = (options: {
           // first thing after, from the part he'd got to, or when it was due to be anyway; the third time it's let go with a word.
           // Turned off, it's asked once yapd is on again, out of sight, like rig's while it can't be reached, once its machine's
           // threads can be seen again, and cut off by a press that came to nothing, at once: none is any asking of his, nor anything
-          // taking its place.
+          // taking its place, so none costs it the words it's asked in.
           const waits = how === "dropped: off" || how === "dropped: out of sight" || how === "dropped: nothing said"
           const interrupted = (from.interrupted ?? 0) + (!waits && said !== undefined ? 1 : 0)
           const back = said === undefined ? from.back : "here"
-          if (waits) asked.unshift(resumed(from, open, { asks: asking.asks, back }))
+          if (waits) asked.unshift(resumed(from, open, { asks: asking.asks, back, costless: true }))
           else if (how === "replaced" || how === "dropped: unclear") {
             asked.unshift(resumed(from, open, { asks: asking.asks, back, interrupted, notBefore: due, letGo: interrupted >= interruptions }))
           }
@@ -904,9 +914,9 @@ export const make = (options: {
           // What a thread waits on him for, cut off before he heard all of it by something new, or what made no sense, is asked once more,
           // after; cut off by turning yapd off, it's asked once it's on again, since it still waits on him, and that's no asking of his.
           // Out of sight, heard or not, it's asked once its machine's threads can be seen again: in other words, when he'd heard it.
-          if (how === "dropped: off") asked.unshift(from)
-          else if (how === "dropped: out of sight") asked.unshift(said === undefined ? from : { ...from, back: "here" })
-          else if (!from.again && (how === "replaced" || how === "dropped: unclear")) asked.unshift({ ...from, again: true })
+          if (how === "dropped: off") asked.unshift({ ...from, costless: true })
+          else if (how === "dropped: out of sight") asked.unshift({ ...from, ...(said === undefined ? {} : { back: "here" as const }), costless: true })
+          else if (!from.again && (how === "replaced" || how === "dropped: unclear")) asked.unshift({ ...from, again: true, costless: undefined })
         }
         asking = undefined
         version++
@@ -1030,18 +1040,22 @@ export const make = (options: {
         asking.due = undefined
         if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
         const { wording } = open
+        // Asked once more as it went unanswered, words it was only brought back in at no cost to him lately, like as a press came to
+        // nothing, are still his to hear once more, rather than it being let go for want of others: its asks still bound it.
+        const spare = how === "still" ? before.filter((line) => !(from?.free ?? []).includes(line)) : before
+        const anew = (question: typeof open) => Brain.reworded(question, before, said) ?? Brain.reworded(question, spare, said)
         // Asked which one, which of them, or for a part it needs already, the same words again would only get the same answer, and no
         // question is asked twice in the same words: it's let go instead. What its options mean is said as often as he asks.
         const asked =
           wording === undefined
-            ? Brain.reworded(open, before, said)
+            ? anew(open)
             : how === "more"
               ? wording.more
               : how === "instead" || how === "which" || how === "needed"
                 ? open.asked === wording[how]
                   ? undefined
                   : wording[how]
-                : Brain.reworded({ ...open, rewordings: how === "again" ? wording.again : wording.still }, before, said)
+                : anew({ ...open, rewordings: how === "again" ? wording.again : wording.still })
         if (asked === undefined) {
           const message = leftWith(open.asks)
           const away = message === undefined ? Option.none<Outcome>() : yield* putBack(open, said)
@@ -2078,13 +2092,15 @@ export const make = (options: {
      * way than from the queue, like read back on his asking: any copy still
      * queued to come back is taken out, so it's never asked twice over, nor
      * from a part he's past, once it's let go. How often it was put off, or
-     * had its place taken, carries over.
+     * had its place taken, carries over, as do the words it was brought back
+     * in at no cost to him.
      */
     const unqueued = (from: Queued): Queued => {
       const queued = dequeue(from.asking.asks.requestId)
       if (queued.length === 0) return from
       const most = (count: "snoozed" | "interrupted") => Math.max(from[count] ?? 0, ...queued.map((waiting) => waiting[count] ?? 0)) || undefined
-      return { ...from, snoozed: most("snoozed"), interrupted: most("interrupted") }
+      const free = [...new Set([from, ...queued].flatMap((waiting) => waiting.free ?? []))]
+      return { ...from, snoozed: most("snoozed"), interrupted: most("interrupted"), ...(free.length === 0 ? {} : { free }) }
     }
 
     /** Opens a part of a thread's question, in these words, with what he answered of it before, as it was asked from `from`. */
@@ -2836,17 +2852,23 @@ export const make = (options: {
         }
         const before = yield* askedLately
         const said = yield* persona.lines
-        /** In words not asked lately, of these: brought back, or asked once more, then the other way. */
-        const fresh = (wordings: ReadonlyArray<string>) => Brain.reworded({ kind: "question", asked: "", about, rewordings: wordings }, before, said)
+        /** In words not asked `lately`, of these: brought back, or asked once more, then the other way. */
+        const fresh = (wordings: ReadonlyArray<string>, lately: ReadonlyArray<string>) => Brain.reworded({ kind: "question", asked: "", about, rewordings: wordings }, lately, said)
         const back = waiting.back ?? (request._tag === "Question" && request.part > 0 ? "here" : undefined)
         // Brought back, a part of a question is put as `back` says, and an approval he'd heard in other words than it was asked in. Either
         // way it names its thread, since it comes up of yapd's own accord: "Again, sir: …" is only for his asking to hear it again.
-        const wording =
+        const worded = (lately: ReadonlyArray<string>) =>
           back === undefined
             ? words
             : part === undefined
-              ? Brain.reworded({ kind: request._tag === "Approval" ? "approval" : "question", asked: words, about, rewordings }, before, said)
-              : fresh(back === "still" ? [...part.still, part.here] : [part.here, ...part.still])
+              ? Brain.reworded({ kind: request._tag === "Approval" ? "approval" : "question", asked: words, about, rewordings }, lately, said)
+              : fresh(back === "still" ? [...part.still, part.here] : [part.here, ...part.still], lately)
+        // Words it was only brought back in at no cost to him lately are still its to be put in, rather than it being let go for want of
+        // others; and brought back at no cost to him now, it's put as it was first brought back, or asked, even in words asked lately.
+        const free = (waiting.free ?? []).filter((line) => before.includes(line))
+        const unsaid = worded(before)
+        const wording =
+          unsaid ?? worded(before.filter((line) => !free.includes(line))) ?? (waiting.costless === true ? (part?.here ?? words) : undefined)
         if (wording === undefined) {
           yield* Effect.logInfo(`Letting go of the question on ${about}, since it's been asked in every way lately`)
           if (left !== undefined) return yield* deliver(yield* unbidden(ref, left, said), { id: utterance, turns })
@@ -2871,7 +2893,7 @@ export const make = (options: {
           { turns, at },
         )
         if (asking?.open.utterance === utterance) {
-          asking.from = waiting
+          asking.from = { ...waiting, free: waiting.costless === true && unsaid !== undefined ? [...free, wording] : free }
           // Asked once more as it went unanswered, it's asked no more after that.
           if (waiting.asks !== undefined) asking.asks = waiting.asks
         }
