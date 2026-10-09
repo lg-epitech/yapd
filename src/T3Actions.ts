@@ -71,7 +71,8 @@ const Plan = Schema.Struct({
   steps: Schema.optional(Schema.Array(Schema.Struct({ text: Schema.String, status: Schema.String }))),
 })
 
-const Bounded = Schema.Struct({
+/** A thread as T3 Code reads it out: its last turns, as it bounds them, or the whole of it, which comes the same way. */
+const Snapshot = Schema.Struct({
   projection: Schema.Struct({
     runs: Schema.Array(Run),
     messages: Schema.Array(Message),
@@ -253,13 +254,33 @@ export interface Found {
   readonly at: Option.Option<number>
 }
 
-/** Finds a message yapd sent in a thread's bounded read: among its messages, the runs they started, or its turn items. */
-export const found = (projection: (typeof Bounded.Type)["projection"], messageId: string): Option.Option<Found> => {
-  const run = projection.runs.find(({ userMessageId }) => userMessageId === messageId)
-  const item = projection.turnItems
+/** What a thread's read holds: its runs, messages, turn items and plans. */
+type Projection = (typeof Snapshot.Type)["projection"]
+
+/** What a thread's read has of a message yapd sent: the run it started or waits in, its turn item, and the message itself. */
+const parts = (projection: Projection, messageId: string) => ({
+  run: projection.runs.find(({ userMessageId }) => userMessageId === messageId),
+  item: projection.turnItems
     .flatMap((item) => Option.toArray(decodeItem(item)))
-    .find((item) => item.type === "user_message" && item.messageId === messageId)
-  const message = projection.messages.find(({ id }) => id === messageId)
+    .find((item) => item.type === "user_message" && item.messageId === messageId),
+  message: projection.messages.find(({ id }) => id === messageId),
+})
+
+/**
+ * Whether a read shows a message yapd sent only by the run it waited in,
+ * cancelled, with neither the message nor its turn item: as the bounded read
+ * does once enough turns after it have pushed both out of it. Then one taken
+ * out of the queue can't be told from one he moved from the queue into the
+ * turn under way, which cancels the run it waited in too.
+ */
+const thin = (projection: Projection, messageId: string) => {
+  const { run, item, message } = parts(projection, messageId)
+  return run?.status === "cancelled" && item === undefined && message === undefined
+}
+
+/** Finds a message yapd sent in a thread's read, bounded or whole: among its messages, the runs they started, or its turn items. */
+export const found = (projection: Projection, messageId: string): Option.Option<Found> => {
+  const { run, item, message } = parts(projection, messageId)
   if (run === undefined && item === undefined && message === undefined) return Option.none()
   const intent = item?.inputIntent
   const target = item?.runId ?? message?.runId
@@ -349,7 +370,10 @@ export const reason = (error: Server.Trouble | Server.Refusal) =>
 export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => {
   /** The thread's last turns, as T3 Code bounds them. */
   const bounded = (threadId: string) =>
-    Effect.flatMap(reach, ({ api }) => api(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`, Bounded))
+    Effect.flatMap(reach, ({ api }) => api(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`, Snapshot))
+
+  /** The whole thread, every message and turn item of it, which can be large and slow to read, so it's only read when its last turns can't tell. */
+  const whole = (threadId: string) => Effect.flatMap(reach, ({ api }) => api(`/api/orchestration/threads/${encodeURIComponent(threadId)}`, Snapshot))
 
   /** Where a message yapd sent got to in the thread, if it's there at all. */
   const message = (threadId: string, messageId: string) => Effect.map(bounded(threadId), ({ projection }) => found(projection, messageId))
@@ -392,6 +416,21 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
       }),
 
     message,
+
+    /**
+     * Where a message yapd sent got to, as `message` has it, unless the
+     * thread's last turns show it only by the run it waited in, cancelled:
+     * then as the whole thread has it, read once, since enough turns after it
+     * push out of the bounded read all that tells one he moved into the turn
+     * under way from one taken out of the queue. That read failing, as a
+     * large thread can be too slow to, fails it, so it's taken as neither.
+     */
+    traced: (threadId: string, messageId: string) =>
+      Effect.gen(function* () {
+        const { projection } = yield* bounded(threadId)
+        if (!thin(projection, messageId)) return found(projection, messageId)
+        return found((yield* whole(threadId)).projection, messageId)
+      }),
 
     /** Whether a message yapd sent is in the thread. */
     has: (threadId: string, messageId: string) => Effect.map(message(threadId, messageId), Option.isSome),
