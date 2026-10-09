@@ -366,6 +366,10 @@ describe("Brain", () => {
     expect(Brain.repeated(`Boss, ${choices}?`, [`${choices}, boss?`], { address: "boss" })).toBe(true)
     expect(Brain.repeated(`Sir, ${choices}?`, [`${choices}?`], { address: "boss" })).toBe(false)
     expect(Brain.repeated(`Now, ${choices}?`, [`${choices}, sir?`], lines)).toBe(false)
+    // Said anywhere in a longer line, it's said again all the same, but not a question whose words only begin it.
+    expect(Brain.echoes(`It's, sir, on your screen. ${choices}?`, [`${choices}, sir?`], lines)).toBe(true)
+    expect(Brain.echoes(`The loader is fixed.`, [`${choices}, sir?`, ""], lines)).toBe(false)
+    expect(Brain.echoes(`${choices}ville is up.`, [`${choices}, sir?`], lines)).toBe(false)
   })
 
   test("a near-silence 'Thank you.' is ignored", () => {
