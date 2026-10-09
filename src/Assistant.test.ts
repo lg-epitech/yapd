@@ -1417,6 +1417,33 @@ describe("Assistant", () => {
     expect(result.kept).toBe(0)
   })
 
+  test("an answer that looks like a secret, to a question answered in T3 Code meanwhile, isn't kept in the journal either", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "shown", header: "Question", question: "What does the dialog show?" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "four two seven one nine three", pending: "answers" }),
+          undefined,
+          { others: [cloud], items },
+        )
+        yield* asked(made, cloud)
+        const question = made.questions().at(-1)!
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("q1")
+        yield* made.answer("Four two seven one nine three.", question)
+        const kept = yield* made.journal.since(0)
+        return {
+          dispatched: made.dispatched.length,
+          replies: kept.filter(({ kind }) => kind === "reply").length,
+          kept: kept.filter((entry) => /4 2 7|four two seven/i.test(JSON.stringify(entry))).length,
+        }
+      }),
+    )
+    // Noted as an answer that came too late, but not in his words.
+    expect(result).toEqual({ dispatched: 0, replies: 1, kept: 0 })
+  })
+
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {
     const result = await run(
       Effect.gen(function* () {

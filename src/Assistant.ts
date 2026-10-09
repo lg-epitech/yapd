@@ -1684,10 +1684,21 @@ export const make = (options: {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
         const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
-        /** What it asked was dealt with in T3 Code meanwhile, so a late answer to it does nothing, and nothing's said: it's only noted. */
+        /**
+         * What it asked was dealt with in T3 Code meanwhile, so a late answer to
+         * it does nothing, and nothing's said: it's only noted, but not in his
+         * words when they look like a secret, as an answer given in time isn't.
+         */
         const late = Effect.gen(function* () {
-          yield* Effect.logInfo(`Not acting on "${heard}", since what it answers was dealt with in T3 Code`)
-          yield* journal.write({ at, kind: "reply", text: heard, utterance: utterance.id, detail: { via: "reply", gone: open.asked } })
+          const withheld = T3Actions.revealing(heard)
+          yield* Effect.logInfo(`Not acting on ${withheld ? "what he said" : `"${heard}"`}, since what it answers was dealt with in T3 Code`)
+          yield* journal.write({
+            at,
+            kind: "reply",
+            ...(withheld ? {} : { text: heard }),
+            utterance: utterance.id,
+            detail: { via: "reply", gone: open.asked, ...(withheld ? { withheld } : {}) },
+          })
         })
         if (gone.has(open.id)) return Option.some(late)
         const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open) }, [{ speaker: "yapd", text: open.asked }])
