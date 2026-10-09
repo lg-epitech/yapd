@@ -78,6 +78,12 @@ export interface Tunnel {
   readonly master: Remote.Master
 }
 
+/** The connection each tunnel holds open, by its machine's hostname in lowercase, for other yapd commands to go through. */
+export const masters =
+  (tunnels: ReadonlyMap<string, Pick<Tunnel, "master">>): Remote.Masters =>
+  (host) =>
+    tunnels.get(host)?.master ?? Effect.succeed(Option.none())
+
 /**
  * Runs SSH here. Opening the connection leaves it running in the background,
  * and with a ProxyCommand or ProxyJump, the proxy it reaches the machine

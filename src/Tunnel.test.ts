@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ProcessError } from "./Process.ts"
-import type { Exec } from "./Remote.ts"
+import * as Remote from "./Remote.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Server from "./T3CodeServer.ts"
 import * as Tunnel from "./Tunnel.ts"
@@ -69,7 +69,7 @@ const machine = (
   /** When each try to connect was made, by the test's clock. */
   const tries: Array<number> = []
   let tokens = 0
-  const exec: Exec = (command) =>
+  const exec: Remote.Exec = (command) =>
     Effect.gen(function* () {
       yield* settle
       const line = command.join(" ")
@@ -461,5 +461,24 @@ describe("Tunnel", () => {
     expect(statuses).toEqual([{ _tag: "Down", reason: "yapd on rig answered in a way I don't understand.", outage: 1 }, { _tag: "Up" }])
     expect(lines.length).toBeGreaterThan(0)
     expect(lines.filter((line) => line.includes(secret))).toEqual([])
+  })
+
+  test("a reply to an update from rig goes through the connection its tunnel holds open, however its hook spells the machine", async () => {
+    const calls: Array<ReadonlyArray<string>> = []
+    const tunnels = new Map([["rig", { master: Effect.succeed(Option.some("/home/me/.yapd/ssh-rig.sock")) }]])
+    const relay = Remote.relay(
+      new Map([["rig", "me@rig.example.com"], ["box", "box"]]),
+      () => "rosie",
+      (command) => Effect.sync(() => void calls.push(command)).pipe(Effect.as("{}")),
+      Tunnel.masters(tunnels),
+    )
+    const from = (host: string) => ({ agent: "claude" as const, session: "s", cwd: "/home/me/std", message: "Done.", origin: { host } })
+    await Effect.runPromise(relay.send(from("Rig"), "Add a test."))
+    // A machine with no tunnel connects as it always did.
+    await Effect.runPromise(relay.send(from("box"), "Add a test."))
+    expect(calls.map((command) => command.slice(0, 3))).toEqual([
+      ["ssh", "-S", "/home/me/.yapd/ssh-rig.sock"],
+      ["ssh", "-o", "BatchMode=yes"],
+    ])
   })
 })

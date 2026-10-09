@@ -33,6 +33,7 @@ import * as T3CodeServer from "./T3CodeServer.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 import { Vocabulary, WhisperTranscriber } from "./Transcriber.ts"
+import * as Tunnel from "./Tunnel.ts"
 import { SileroVad } from "./Vad.ts"
 import { KokoroVoice } from "./Voice.ts"
 import { ProviderWriter } from "./Writer.ts"
@@ -40,11 +41,28 @@ import { ProviderWriter } from "./Writer.ts"
 // `yapd serve`, apart from the other commands, since only the daemon needs the
 // models and the native onnxruntime they bring, which hooks would load on every turn.
 
+/** The tunnel to each machine in `YAPD_REMOTES`, by its hostname in lowercase, held open while yapd serves. */
+class Tunnels extends Context.Tag("yapd/Tunnels")<Tunnels, ReadonlyMap<string, Tunnel.Tunnel>>() {}
+
+/**
+ * One tunnel to each machine, opened as yapd starts and closed as it stops.
+ * None is waited for: a machine that can't be reached is tried again in the
+ * background, while everything else goes on as if it weren't there.
+ */
+const TunnelsLive = Layer.scoped(
+  Tunnels,
+  Effect.gen(function* () {
+    const remotes = yield* Config.remotes
+    return new Map(yield* Effect.forEach(remotes, ([host, destination]) => Effect.map(Tunnel.forward(host, destination), (tunnel) => [host, tunnel] as const)))
+  }),
+)
+
 /**
  * T3 Code first, since it only claims threads it can find, and its sessions
  * must go through it. Then each agent's own way in, whatever it runs in. A
  * waiting Claude Code hook holds its connection wherever it runs, but other
- * machines' T3 Code and Codex are only reachable from there. The sessions yapd
+ * machines' T3 Code and Codex are only reachable from there, through the
+ * connection the tunnel there keeps open while it's up. The sessions yapd
  * started itself come last, as what's left when nothing has them open.
  */
 const Relays = Layer.effect(
@@ -55,7 +73,7 @@ const Relays = Layer.effect(
     return Relay.make([
       here(yield* T3Code.relay),
       yield* ClaudeCode.relay,
-      Remote.relay(remotes, hostname),
+      Remote.relay(remotes, hostname, undefined, Tunnel.masters(yield* Tunnels)),
       here(Codex.relay),
       here(CliLauncher.relay()),
     ])
@@ -73,7 +91,8 @@ export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
   const daemon = yield* Daemon.make
   const preferences = yield* Preferences.path
-  const everywhere = yield* machines
+  const tunnels = yield* Tunnels
+  const everywhere = yield* machines(Tunnel.masters(tunnels))
   const journal = yield* Journal.Journal
   const ledger = yield* Ledger.Ledger
   yield* Effect.forkScoped(
@@ -81,12 +100,21 @@ export const serve = Effect.gen(function* () {
   )
   const token = yield* Config.t3codeToken
   const live = yield* T3Live.T3Live
+  // As the machine is called when yapd starts, which is what its threads are known by while it runs.
+  const machine = everywhere.find(({ here }) => here)?.name ?? hostname()
+  // Each other machine's threads, followed and acted on through the tunnel to its T3 Code, which asks there again where it is and for the
+  // token whenever it stops answering, as after T3 Code restarted there. Known by its name in YAPD_REMOTES, as the machine is everywhere else.
+  const others = yield* Effect.forEach(tunnels, ([host, tunnel]) =>
+    Effect.map(
+      T3Live.follow(tunnel.refresh).pipe(Effect.annotateLogs({ machine: host })),
+      (live): Threads.Other => ({ machine: host, live, actions: T3Actions.make(Tunnel.transport(tunnel.locate)), status: tunnel.status }),
+    ),
+  )
   const threads = yield* Threads.make({
-    // As the machine is called when yapd starts, which is what its threads are known by while it runs.
-    machine: everywhere.find(({ here }) => here)?.name ?? hostname(),
+    machine,
     live,
     actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
-    others: [],
+    others,
     journal,
     store: yield* Store.Store,
   })
@@ -118,20 +146,28 @@ export const serve = Effect.gen(function* () {
     upcoming: daemon.upcoming,
   })
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
-  // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it.
-  yield* Effect.forkScoped(
-    live.view.pipe(
-      Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
-      Effect.timeoutFail({ duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }),
-      Effect.zipRight(hands.reconcile),
-      Effect.flatMap(({ undelivered, unconfirmed, readying }) =>
-        Effect.all([Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered)), Effect.flatMap(readying, assistant.unconfirmed)], {
-          concurrency: "unbounded",
-          discard: true,
-        }),
+  // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it. Each machine's once its own
+  // T3 Code has, so one that's down holds up none of the rest, and this one's takes in what went to a machine yapd no longer follows.
+  const followed = [{ machine, live }, ...others]
+  const elsewhere = (name: string) => others.some((other) => other.machine === name)
+  yield* Effect.forEach(
+    followed,
+    ({ machine: name, live }) =>
+      Effect.forkScoped(
+        live.view.pipe(
+          Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
+          Effect.timeoutFail({ duration: catchingUp, onTimeout: () => `${name === machine ? "T3 Code" : `${name}'s T3 Code`} didn't catch up in time` }),
+          Effect.zipRight(hands.reconcileOn((on) => (name === machine ? on === machine || !elsewhere(on) : on === name))),
+          Effect.flatMap(({ undelivered, unconfirmed, readying }) =>
+            Effect.all(
+              [Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered)), Effect.flatMap(readying, assistant.unconfirmed)],
+              { concurrency: "unbounded", discard: true },
+            ),
+          ),
+          Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent${name === machine ? "" : ` to ${name}`} before restarting: ${reason}`)),
+        ),
       ),
-      Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent before restarting: ${reason}`)),
-    ),
+    { discard: true },
   )
   const shortcut = yield* Shortcut
   // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed on.
@@ -215,7 +251,7 @@ export const serve = Effect.gen(function* () {
       Layer.provideMerge(
         Layer.mergeAll(KokoroVoice, DeviceAudio, SileroVad, WhisperTranscriber, Floor.layer, Settings.layer, Journal.layer, T3Live.layer, Ledger.layer),
       ),
-      Layer.provideMerge(Layer.mergeAll(ClaudeCode.WaitingLive, Store.layer)),
+      Layer.provideMerge(Layer.mergeAll(ClaudeCode.WaitingLive, Store.layer, TunnelsLive)),
     ),
   ),
   // Outermost, so layers log through it too.
