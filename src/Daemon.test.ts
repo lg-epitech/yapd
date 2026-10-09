@@ -53,6 +53,8 @@ const make = (says?: string, options: {
   readonly unrenderable?: ReadonlyArray<string>
   /** Plays like afplay, which can't say it's playing, so that's known only once it has played to the end. */
   readonly afplay?: boolean
+  /** How many frames from the microphone, from the first, may carry yapd's own voice, as before the echo cancellation has learnt it. */
+  readonly echoing?: number
   /** Where the lines the persona is told are being said go, in order. */
   readonly noted?: Array<string>
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
@@ -81,6 +83,7 @@ const make = (says?: string, options: {
   let handle: Handle
   let rests = 0
   let warms = 0
+  let echoed = 0
   const layer = Layer.mergeAll(
     options.noted === undefined
       ? Persona.Plain
@@ -129,7 +132,7 @@ const make = (says?: string, options: {
           }
         }),
       microphone: Effect.succeed(listening ? Option.some(microphone) : Option.none()),
-      echo: () => Effect.succeed(undefined),
+      echo: () => Effect.sync(() => (echoed++ < (options.echoing ?? 0) ? "talking" : undefined)),
       rest: Effect.sync(() => void rests++),
       warm: Effect.sync(() => void warms++),
     }),
@@ -1616,6 +1619,44 @@ describe("Daemon", () => {
     // Its own words went after all, and so they're what it's noted as having said.
     expect(result.played).toEqual(["yapd. The PR is ready.", "It's on your screen. Nothing's running."])
     expect(result.told).toEqual(["It's on your screen. Nothing's running."])
+  })
+
+  test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s said in other words in its place tells its own voice getting into the microphone by those, so it's never what he said", async (_, kind) => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Its own voice gets in, as before the echo cancellation has learnt it, which Whisper hears as the words said in its place.
+        const { made, wait, flush, speak, played } = yield* make(undefined, { microphone: true, echoing: 40, transcripts: ["The Tezos one are both running."] })
+        const told: Array<string> = []
+        const noting = (what: string) => Effect.sync(() => void told.push(what))
+        const taken = (heard: string) => Effect.succeed(Option.some(noting(`took: ${heard}`)))
+        yield* Effect.forkScoped(
+          made.tell({
+            id: "a",
+            kind,
+            ...(kind === "question" ? { open: "open-a" } : {}),
+            priority: "needs-you",
+            spoken: "It's on your screen: two threads are running. Which one?",
+            at: 0,
+            stale: Effect.succeed(false),
+            instead: { spoken: "Codex on yapd and the Tezos one are both running their tests now. Which one?", when: Effect.succeed(true) },
+            heard: noting("heard"),
+            ...(kind === "answer"
+              ? { followUp: taken }
+              : { question: { answer: taken, unanswered: noting("unanswered"), unsaid: noting("unsaid") } }),
+          }),
+        )
+        yield* flush
+        yield* wait(5)
+        yield* speak
+        yield* wait(5)
+        yield* wait(10)
+        return { played: [...played], told }
+      }),
+    )
+    expect(result).toEqual({
+      played: ["Codex on yapd and the Tezos one are both running their tests now. Which one?"],
+      told: kind === "answer" ? ["heard"] : ["heard", "unanswered"],
+    })
   })
 
   test("a notice that goes stale while the words said in its place are rendered is never played, nor told it was said in them", async () => {
