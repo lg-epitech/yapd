@@ -1738,6 +1738,37 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ answered: true, answers: ["Yapd."] })
   })
 
+  test("takes a quick yes to a short question it asked over them, said as the last of its voice comes in", async () => {
+    for (const said of ["Yes.", "Yeah.", "Yes, please."]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const answers: Array<string> = []
+          const helper = yield* overHelper([[0.8, "Send it"], [0.82, "again?"], [0.9, said]], { duration: 1.2 })
+          yield* Fiber.interrupt(helper.fiber)
+          const asking = yield* Effect.fork(
+            helper.ask({
+              audio: "/tmp/question.wav",
+              spoken: "Send it again?",
+              answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+            }),
+          )
+          yield* helper.wait(0.2)
+          yield* helper.talk(0.8, 20)
+          yield* helper.wait(1)
+          yield* helper.finish
+          // The last of its voice, then him a moment later, before Silero has heard the end of it.
+          yield* helper.talk(0.82, 3)
+          yield* helper.talk(0, 6)
+          yield* helper.talk(0.9, 12)
+          yield* helper.quiet
+          yield* helper.wait(9)
+          return { answered: yield* Fiber.join(asking), answers }
+        }),
+      )
+      expect([said, result]).toEqual([said, { answered: true, answers: [said] }])
+    }
+  }, 30_000)
+
   test("takes a quick reply to a short line it said over them, said as the last of its voice comes in", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

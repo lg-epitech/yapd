@@ -572,12 +572,13 @@ export const unfaded = (heard: string, saying: string) => {
  * voice stopped getting in partway through a word, nothing's taken out of
  * it, as nothing would be once it had. Begun as yapd stopped, only the last
  * of its voice can be in it, coming in first, so it's his once he's talked on
- * `past` that, however much of it is yapd's words.
+ * `past` that, however much of it is yapd's words, and any word of his will
+ * do, even a "Yes." to what it asked.
  */
 const judged = (heard: string, saying: string, more: string, from: Begun, cut: Cut, past: boolean) => {
   if (from.stopped === true) {
     const kept = unfaded(heard, saying)
-    const his = past && theirs(kept, "", 1)
+    const his = past && wordsOf(kept, true).length > 0
     return { kept, his, some: his }
   }
   // Begun once yapd had stopped talking, none of what it said can be in it, so a word of his is enough.
