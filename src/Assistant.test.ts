@@ -1430,6 +1430,49 @@ describe("Assistant", () => {
     expect((await answering("All but Beta.")).asked).toBe(0)
   })
 
+  test("words that aren't an option go as the answer in his words, and a message to a thread waiting on a question he heard is sent as its answer", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        let decided = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Ghostnet, but only for the tests.", pending: "answers" })
+        const made = yield* assistant((situation) => decided(situation), undefined, { others: [cloud], items: [...card("q1", [network]), ...card("q2", [network]), ...card("q3", [network])] })
+        yield* asked(made, cloud)
+        yield* made.answer("Ghostnet, but only for the tests.")
+        // Another he heard and let be, then told it as a message: it goes as the answer, and he's told so.
+        const next = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(next)
+        yield* asked(made, next)
+        yield* made.answer("Never mind.")
+        decided = (situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" })
+        yield* made.dictate("Tell the cloud one to start with mainnet.")
+        // Once it's done, not now, it's still a message, queued behind the turn.
+        const last = { ...cloud, pendingRuntimeRequest: { id: "q3", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(last)
+        yield* asked(made, last)
+        yield* made.answer("Never mind.")
+        decided = (situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet once it's done.", how: "after" })
+        yield* made.dictate("Tell the cloud one to start with mainnet once it's done.")
+        return {
+          spoken: made.spoken().filter((line) => !line.startsWith("A question on")),
+          sent: made.dispatched.map(({ type, requestId, answers, text }) => (type === "runtime-request.respond" ? { requestId, answers } : { text })),
+        }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "On it, sir.",
+      "I'll leave that one, sir.",
+      "On it, sir. It was waiting on a question, so that's its answer.",
+      "I'll leave that one, sir.",
+      expect.stringMatching(/^(On it|I'll get to it|Cloud deployment discovery is waiting on you)/),
+    ])
+    expect(result.sent).toEqual([
+      { requestId: "q1", answers: { network: "Ghostnet, but only for the tests." } },
+      { requestId: "q2", answers: { network: "Start with mainnet." } },
+      { text: "Start with mainnet once it's done." },
+    ])
+  })
+
   test("a plain yes takes the option yapd said it would go with, but only once he heard that far; cut off, it's asked again in full", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
@@ -1852,7 +1895,7 @@ describe("Assistant", () => {
         )
         yield* asked(made, cloud)
         yield* made.answer("Four two seven one nine three.")
-        // Nor told to it as a message while it waits on that.
+        // Nor told to it as a message while it waits on that, which goes as its answer.
         act = "send"
         yield* made.dictate("Tell the cloud one it shows 4 2 7 1 9 3.")
         const kept = yield* made.journal.since(0)
@@ -1867,7 +1910,7 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual([
       "A question on Cloud deployment discovery, sir: What does the dialog show?",
       "I couldn't get your answer to it, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
-      "That didn't go through, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
+      "I couldn't get your answer to it, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
     ])
     expect(result.dispatched).toBe(0)
     expect(result.steps).toBe(0)

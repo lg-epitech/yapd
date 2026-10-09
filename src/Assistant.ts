@@ -1215,10 +1215,17 @@ export const make = (options: {
           Option.match(to, { onNone: () => true, onSome: ({ machine, id }) => row.machine === machine && row.thread === id }),
       )
       switch (decision.act) {
-        case "send":
-          return Option.isNone(to)
-            ? undefined
-            : { _tag: "Message", to: to.value, text: decision.text.trim() || heard, how: when(decision.how) }
+        case "send": {
+          if (Option.isNone(to)) return undefined
+          const text = decision.text.trim() || heard
+          // To a thread waiting on a question he's heard, it goes as the answer to the part he'd got to, in his words.
+          if (asks?._tag === "Question") {
+            const question = asks.questions[asks.part]
+            const replied = question === undefined ? undefined : replying({ ...asks, collected: { ...asks.collected, [question.id]: { _tag: "Words", text } } })
+            return replied === undefined ? undefined : { _tag: "Reply", to: to.value, requestId: asks.requestId, answers: replied.answers, said: Option.none(), as: "message" }
+          }
+          return { _tag: "Message", to: to.value, text, how: when(decision.how) }
+        }
         case "stop":
           return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
         case "undo":
@@ -1740,11 +1747,29 @@ export const make = (options: {
         return read
       })
 
+    /**
+     * What a message for now goes as instead, to a thread waiting on a
+     * question he's heard and it still waits on: its answer, since a message
+     * steered into the turn meanwhile may sit unread, or end the question.
+     * Never for one T3 Code takes as a message itself, nor one he hasn't
+     * heard, which its own notice asks.
+     */
+    const answerFor = (plan: Brain.Plan) =>
+      Effect.gen(function* () {
+        const { decision, target } = plan
+        if (Option.isNone(target) || when(decision.how) !== "now") return undefined
+        const pending = target.value.thread.pendingRuntimeRequest
+        const heard = pending === null ? undefined : known.get(pending.id)
+        if (heard?.asks._tag !== "Question" || heard.asks.mode !== "live" || !Threads.same(heard.ref, target.value.ref)) return undefined
+        return (yield* still(heard.ref, heard.asks.requestId)) ? heard.asks : undefined
+      })
+
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
     const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping = { step: 0, twice: false }): Effect.Effect<Outcome> => {
       const { decision, target } = plan
       switch (decision.act) {
         case "send":
+          return Effect.flatMap(answerFor(plan), (asks) => write(plan, thought, said, at, asks))
         case "stop":
         case "undo":
           return write(plan, thought, said, at)
