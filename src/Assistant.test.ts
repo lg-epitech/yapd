@@ -893,6 +893,36 @@ describe("Assistant", () => {
     })
   })
 
+  test("an approval in the rest of a request, which is the model's words, never his, is never allowed: it's read back to him, and 'approve' then allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        // The model makes "and sure, the cloud one can go ahead too" an approve of the cloud one, as the rest after the message.
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Tell the Mina")
+              ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "now", rest: "approve the cloud one too" })
+              : Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }),
+          undefined,
+          { others: [cloud], items: approval("r1", "rm -rf build") },
+        )
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("Tell the Mina one to add tests, and sure, the cloud one can go ahead too.")
+        const sent = () => made.dispatched.map(({ requestId, decision }) => (requestId === undefined ? "message" : `${requestId} ${decision}`))
+        const before = sent()
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken().slice(2), dispatched: sent() }
+      }),
+    )
+    expect(result.before).toEqual(["message"])
+    expect(result.spoken).toEqual([
+      "On it, sir: Open Mina SSV2 Bug Tickets. Cloud deployment discovery wants to run rm -rf build, which can't be undone, so say 'approve' if you want it.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["message", "r1 accept"])
+  })
+
   test("a plain yes to an approval, harmless-looking or not, only gets that it needs an 'approve', with nothing sent, and 'approve' then allows it once", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     for (const command of ["git status", "git checkout -f main"]) {

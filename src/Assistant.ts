@@ -1552,6 +1552,7 @@ export const make = (options: {
       target: Option.Option<Threads.Listed>,
       heard: string,
       last: Option.Option<Ledger.Row>,
+      step: number,
       asks?: Asks,
     ): Hands.Act | undefined => {
       const to = Option.map(target, ({ ref }) => ref)
@@ -1580,10 +1581,11 @@ export const make = (options: {
           return { _tag: "Undo", to, carry: decision.how === "carry" || stopped }
         case "decide": {
           if (Option.isNone(to) || asks?._tag !== "Approval") return undefined
-          // Allowed only with "approve" as his answer, however it came here, never a plain yes, nor with more after it; for the rest of the
-          // thread's work only when he said so, whatever the model took it for; never for always.
+          // Allowed only with "approve" as his answer, however it came here, never a plain yes, nor with more after it, nor in the rest of a
+          // request, whose words are the model's; for the rest of the thread's work only when he said so, whatever the model took it for;
+          // never for always.
           const allowing = decision.how === "accept" || decision.how === "session"
-          if (allowing && (decision.rest.trim() !== "" || !Brain.approving(heard))) return undefined
+          if (allowing && (step > 0 || decision.rest.trim() !== "" || !Brain.approving(heard))) return undefined
           const allowed: Hands.Decision | undefined =
             decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(heard) ? "acceptForSession" : allowing ? "accept" : undefined
           return allowed === undefined ? undefined : { _tag: "Decide", to: to.value, requestId: asks.requestId, decision: allowed }
@@ -1902,7 +1904,7 @@ export const make = (options: {
           yield* Effect.logInfo("Not doing it, since yapd was turned off after it was said")
           return quiet(thought.subject)
         }
-        const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted, asks)
+        const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted, at.step, asks)
         if (act === undefined) return reply(said.cantTell, thought.subject)
         // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
         // by while its machine's threads couldn't be seen, which its T3 Code may not show as answered just yet.
@@ -2257,8 +2259,10 @@ export const make = (options: {
         if (pending === null) return reply(Brain.dealtWith(said), thought.subject)
         const heard = Option.getOrUndefined(yield* meant(target.ref, pending.id, decision.act === "decide" ? "Approval" : "Question", thought.utterance))
         // Allowed only with "approve", whatever the model took his words for: a plain yes, however it's put, has it read back to him. So
-        // does an approve with more after it, which may as well be to what's in the rest, as the model split it.
-        const unapproved = heard?._tag === "Approval" && decision.how !== "decline" && (decision.rest.trim() !== "" || !Brain.approving(thought.utterance.heard))
+        // does an approve with more after it, which may as well be to what's in the rest, as the model split it, and one in the rest of a
+        // request, whose words are the model's, never his.
+        const unapproved =
+          heard?._tag === "Approval" && decision.how !== "decline" && (at.step > 0 || decision.rest.trim() !== "" || !Brain.approving(thought.utterance.heard))
         const hearing = decision.act === "reply" && decision.text.trim() === ""
         if (heard?._tag === "Approval" && !unapproved) return yield* write(plan, thought, said, at, heard)
         // Words a form that takes only its options can't take ask the part he'd got to once more, as over the question itself.
