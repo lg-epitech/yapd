@@ -2122,6 +2122,47 @@ describe("Assistant", () => {
     expect(result.dispatched).toBe(0)
   })
 
+  test("a question he heard and left unanswered, its place then taken, comes back when it was due to anyway, never sooner", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        // Asked once more a minute after it went unanswered, unless he says something meanwhile.
+        yield* made.unanswered()
+        yield* made.wait(20)
+        yield* made.dictate("What's the status on Mina?")
+        yield* made.wait(39)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        return { soon, spoken: made.spoken() }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.soon).toBe(2)
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+    ])
+  })
+
+  test("a question that has its place taken before it's begun playing loses no turn to it: taken three times, it's still asked", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        // Its turn never comes before he dictates something else.
+        for (const _ of [1, 2, 3]) yield* made.dictate("What's the status on Mina?")
+        return { spoken: made.spoken(), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken.at(-1)).toBe(`A question on Cloud deployment discovery, sir: ${line}`)
+    expect(result.open).toBe(true)
+  })
+
   test("a thread's question goes with its options, for what he says over it, or dictates, to be heard listening for them", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const library = { id: "library", question: "Which date library should we use?", options: [{ label: "`date-fns` (Recommended)" }, { label: "Day.js" }] }
