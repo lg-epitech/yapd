@@ -596,6 +596,15 @@ describe("Questions", () => {
     }
   })
 
+  test("'I don't mind' is the model's to tell, since to 'Do you mind if I…?' it's a yes, never leaving it to yapd's pick", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const push = part("Do you mind if I force push?", ["Force push", "Open a new branch (Recommended)"])
+    const pick = (heard: string) => Questions.pick(push, heard, { inFull: true, parts: 1 })
+    expect(["I don't mind.", "Don't mind.", "I don’t mind."].map(pick)).toEqual([undefined, undefined, undefined])
+    // Leaving it to yapd in so many words still takes its pick.
+    expect(["You decide.", "Up to you.", "No preference."].map(pick)).toEqual([picked(1), picked(1), picked(1)])
+  })
+
   test("a number he says to options named with numbers takes one only as its whole name, never a place, and anything less is the model's", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const workers = part("How many parallel workers should the test run use?", ["1 worker", "2 workers", "4 workers (Recommended)", "8 workers"])

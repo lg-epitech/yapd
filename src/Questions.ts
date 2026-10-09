@@ -642,11 +642,10 @@ const taking: ReadonlySet<string> = new Set([
 /** Plain noes. */
 const noes: ReadonlySet<string> = new Set(["no", "nope", "nah", "no thanks", "no thank you", "don't", "do not", "no don't"])
 
-/** Leaving the choice to yapd. */
+/** Leaving the choice to yapd. Never "I don't mind", which to "Do you mind if I force push?" is a yes: the model tells. */
 const deciding: ReadonlySet<string> = new Set([
   "you decide", "your call", "up to you", "it's up to you", "whatever you think", "no preference", "either", "either one",
-  "either is fine", "either's fine", "whichever", "whichever you like", "whichever you think", "don't mind", "i don't mind",
-  "you choose", "you pick", "your choice",
+  "either is fine", "either's fine", "whichever", "whichever you like", "whichever you think", "you choose", "you pick", "your choice",
 ])
 
 /** None of the options, which the agent should hear. */
