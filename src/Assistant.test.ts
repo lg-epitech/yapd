@@ -2218,7 +2218,8 @@ describe("Assistant", () => {
       `A question on Cloud deployment discovery, sir: ${line}`,
       `Here's the question on Cloud deployment discovery, sir: ${line}`,
       "Cloud deployment discovery asked you something, sir.",
-      `Again, sir: ${line}`,
+      // Brought back a second time within ten minutes, it still names its thread.
+      `Back to Cloud deployment discovery, sir: ${line}`,
       "I couldn't work that out just now, sir. What you said is in my log.",
       "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
     ])
@@ -2606,7 +2607,7 @@ describe("Assistant", () => {
       status,
       `Here's the question on Cloud deployment discovery, sir: ${line}`,
       status,
-      `Again, sir: ${line}`,
+      `Back to Cloud deployment discovery, sir: ${line}`,
       status,
       "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
     ])
@@ -7655,6 +7656,51 @@ describe("Assistant", () => {
     expect(result.here).toEqual([])
   })
 
+  test("a rig question brought back a second time within ten minutes, after rig drops out twice, still names its thread", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        let status: Tunnel.Status = { _tag: "Up" }
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.sync(() => status), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Heard each time it comes up; rig drops just before he answers, twice, and is back a minute or two later each time.
+        for (const [outage, away] of [[1, 120], [2, 60]] as const) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          seen = false
+          status = { _tag: "Down", reason: "I can't reach rig right now.", outage }
+          yield* made.answer("Red.")
+          yield* made.wait(away)
+          seen = true
+          status = { _tag: "Up" }
+          yield* made.wait(10)
+          yield* made.wait(1)
+        }
+        yield* made.questions().at(-1)!.stale
+        yield* made.play(made.questions().at(-1))
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), answers: answered(rig) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const away = "I couldn't get your answer to it, sir: I can't reach rig right now. I'll ask you again once I can."
+    expect(result.spoken).toEqual([
+      `A question on Fee table checks on rig, sir: ${line}`,
+      away,
+      `Here's the question on Fee table checks on rig, sir: ${line}`,
+      away,
+      `Back to Fee table checks on rig, sir: ${line}`,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
   test("an answer to a question given while T3 Code restarts on this Mac is never sent nor said to be dealt with: he's told why, and it's asked again once T3 Code is back", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
@@ -7800,7 +7846,7 @@ describe("Assistant", () => {
         "I'll bring it back in ten minutes, sir.",
         "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
         "I'll bring it back in ten minutes, sir.",
-        "Again, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+        "Back to Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
         "I'll leave the question on Fee table checks on rig for now, sir; ask me for it when you're ready.",
       ],
       after: [],

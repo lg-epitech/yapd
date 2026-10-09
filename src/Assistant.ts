@@ -2682,18 +2682,17 @@ export const make = (options: {
         }
         const before = yield* askedLately
         const said = yield* persona.lines
-        /** In words not asked lately, of these: brought back, or asked once more, then in full again. */
+        /** In words not asked lately, of these: brought back, or asked once more, then the other way. */
         const fresh = (wordings: ReadonlyArray<string>) => Brain.reworded({ kind: "question", asked: "", about, rewordings: wordings }, before, said)
         const back = waiting.back ?? (request._tag === "Question" && request.part > 0 ? "here" : undefined)
-        // Brought back, a part of a question is put as `back` says, and an approval he'd heard in other words than it was asked in.
+        // Brought back, a part of a question is put as `back` says, and an approval he'd heard in other words than it was asked in. Either
+        // way it names its thread, since it comes up of yapd's own accord: "Again, sir: …" is only for his asking to hear it again.
         const wording =
           back === undefined
             ? words
             : part === undefined
               ? Brain.reworded({ kind: request._tag === "Approval" ? "approval" : "question", asked: words, about, rewordings }, before, said)
-              : back === "still"
-                ? fresh([...part.still, part.here, ...part.again])
-                : fresh([part.here, ...part.again, ...part.still])
+              : fresh(back === "still" ? [...part.still, part.here] : [part.here, ...part.still])
         if (wording === undefined) {
           yield* Effect.logInfo(`Letting go of the question on ${about}, since it's been asked in every way lately`)
           yield* letBe(waiting)
