@@ -479,18 +479,28 @@ export type Whose = "echo" | "his" | "mixed"
  * Whose voice was heard over a line yapd was `saying`, before the echo
  * cancellation had learnt its voice, going by Whisper's words, which this
  * only ever tells by, never changes. Its own: nothing, nothing but what
- * Whisper makes up, or what it was saying, in order, as near as Whisper
- * hears it, its name misheard and all, with at most common words besides,
- * which Whisper makes up of its voice too, like "That's it.". His: a "stop"
- * or "wait" it isn't saying, a few common words said just so, like "Not
- * now.", or none of its words but those nearly anything has. Some of each,
- * otherwise.
+ * Whisper makes up, like "That's it.", or what it was saying, in order, as
+ * near as Whisper hears it, its name misheard and all. His: a "stop" or
+ * "wait" it isn't saying, a few common words said just so, like "Not now.",
+ * or none of its words but those nearly anything has. Some of each,
+ * otherwise, as when its voice runs into his stop.
  */
 export const whose = (heard: string, saying: string): Whose => {
   const yapd = vocabulary(saying)
   const words = wordsOf(heard, yapd)
   if (words.length === 0) return "echo"
-  if (halted(words, yapd)) return "his"
+  if (halted(words, yapd)) {
+    // With its own voice running into it, before he speaks or after, three words of it or more, or four after, which are less
+    // likely, or two or three not just anything has, he's asked to say it again. Fewer, like "the migration" in "Tell it to stop
+    // the migration.", are as likely his own.
+    const { its } = ours(words, yapd)
+    const own = words.map((_, index) => !its.has(index))
+    const told = (part: ReadonlyArray<string>, least: number) => {
+      const telling = part.filter((word) => !common.has(word)).length
+      return telling > 0 && (part.length >= least || telling >= least - 1)
+    }
+    return told(words.slice(0, own.indexOf(true)), 3) || told(words.slice(own.lastIndexOf(true) + 1), 4) ? "mixed" : "his"
+  }
   if (inTurn(words, yapd)) return "echo"
   if (curt.has(words.join(" "))) return "his"
   const { its, telling } = ours(words, yapd)
