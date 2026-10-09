@@ -247,6 +247,18 @@ describe("Questions", () => {
       [["Fine as it is", "Rewrite it (Recommended)"], "Fine."],
       [["Ship it now", "Ship it tomorrow (Recommended)"], "Ship it."],
       [["OK, but only on staging", "Not yet (Recommended)"], "Okay, do it."],
+      // A yes with words after it that start another option, or are all its own, is to that option as much as to yapd's pick.
+      [["Ship it now", "Hold it for QA (Recommended)"], "Yes, ship it."],
+      [["Go for it", "Hold off (Recommended)"], "Yes, go for it."],
+      [["Not yet (Recommended)", "Merge it now"], "Yes, merge it."],
+      [["Proceed with the migration", "Wait for review (Recommended)"], "Yes, proceed."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sure, go ahead."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Yeah, go ahead."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sounds good, go ahead."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Okay, go ahead."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Yes, do it."],
+      [["Do it again", "Mark it skipped (Recommended)"], "OK, do it."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Yeah, do it."],
     ] as const) {
       expect([heard, pick(options, heard)]).toEqual([heard, undefined])
       // Cut off before yapd's pick, it may be that option all the same.

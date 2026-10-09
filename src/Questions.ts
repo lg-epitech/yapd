@@ -513,16 +513,25 @@ const opening = (part: Said, said: string) => {
   return fitting(part, ({ label, said: name }) => [unmarked(label), name].some((written) => `${figures(gist(written))} `.startsWith(words)))
 }
 
+/** A yes at the start of words that agree, like "yes" in "yes, ship it" or "sounds good" in "sounds good, go ahead". */
+const yesFirst = /^(?:(?:yes|yeah|yep|yup|sure|ok|okay|sounds good) )+/
+
 /**
  * Whether words that agree may be to another option than yapd's pick: they,
  * or the word they start with, start its name, or its name has them all,
  * like "ship it" to "Ship it now", "okay, do it" to "OK, but only on
- * staging", or "fine" to "Fine as it is".
+ * staging", or "fine" to "Fine as it is"; and so with what follows a yes,
+ * like "yes, ship it" to "Ship it now" or "sure, go ahead" to "Go ahead
+ * with the rename".
  */
 const elsewhere = (part: Said, said: string, pick: number | undefined) => {
   const [first = ""] = said.split(" ")
   const starts = first === said || pointing.has(first) ? [said] : [said, first]
-  return [...starts.flatMap((words) => opening(part, words)), ...having(part, said)].some((index) => index !== pick)
+  const rest = said.replace(yesFirst, "")
+  const after = rest === said || rest === "" ? [] : [rest]
+  const opens = [...starts, ...after].flatMap((words) => opening(part, words))
+  const has = [said, ...after].flatMap((words) => having(part, words))
+  return [...opens, ...has].some((index) => index !== pick)
 }
 
 /** Words an option's name has that say nothing of which it is. */

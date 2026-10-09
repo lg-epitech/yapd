@@ -2753,6 +2753,15 @@ describe("Assistant", () => {
       [["Go ahead with the rename", "Keep the old name (Recommended)"], "Go ahead."],
       [["Do it again", "Mark it skipped (Recommended)"], "Do it."],
       [["Agreed, ship it", "Revise first (Recommended)"], "Agreed."],
+      // So is a yes with the other option's words after it.
+      [["Ship it now", "Hold it for QA (Recommended)"], "Yes, ship it."],
+      [["Go for it", "Hold off (Recommended)"], "Yes, go for it."],
+      [["Merge it now", "Not yet (Recommended)"], "Yes, merge it."],
+      [["Proceed with the migration", "Wait for review (Recommended)"], "Yes, proceed."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sure, go ahead."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sounds good, go ahead."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Yes, do it."],
+      [["Do it again", "Mark it skipped (Recommended)"], "OK, do it."],
     ] as const) {
       const [named] = labels
       expect([heard, await answering(labels, heard, named)]).toEqual([heard, { asked: 1, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
