@@ -160,6 +160,12 @@ export const cut = (text: string, fraction: number) => {
 const glance = Math.round(rate / frame)
 /** Frames of quiet in it after which the last word said is over, so a look at all of it then hears that in full too: a fifth of a second. */
 const hush = 6
+/**
+ * Frames of quiet in it, once yapd's voice can no longer be getting in, that
+ * end it, so what he says next, which may begin as its voice stops, is heard
+ * on its own, as over the rest of what it says: a quarter of a second.
+ */
+const lull = 8
 
 /** Seconds either side of the user talking that yapd's words are looked for in what he said, since where each falls in a line is only guessed. */
 const reach = 4
@@ -671,20 +677,29 @@ export const make = (options: {
         let fading = false
         /** Frames of that since all of it was last passed on, once it's speech. */
         let since: number | undefined
+        /** Whether yapd's own voice has stopped getting in since that began: past its first seconds, or once it stopped talking. */
+        let past = false
         const reset = () => {
           unsure = false
           fading = false
           since = undefined
+          past = false
         }
         yield* Stream.fromQueue(microphone.value).pipe(
           Stream.mapEffect((frame) =>
             Effect.gen(function* () {
               const echo = yield* audio.echo(frame)
+              if (unsure && echo !== "talking") past = true
               const event = endpointer.push(frame, yield* detect.value(frame))
               if (event === undefined) {
                 if (since === undefined) return undefined
                 // Once as he pauses, when all he said so far is over, and about a second at a time while he talks.
                 if (endpointer.pausing) {
+                  if (past && endpointer.silent >= lull) {
+                    const audio = endpointer.end()
+                    reset()
+                    return audio === undefined ? undefined : ({ _tag: "Utterance", audio } satisfies Signal)
+                  }
                   if (endpointer.silent !== hush) return undefined
                   since = 0
                   return { _tag: "Partial", audio: endpointer.soFar(), paused: true } satisfies Signal

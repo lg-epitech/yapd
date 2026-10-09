@@ -2361,6 +2361,53 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
+  test("stops at once for the user talking a moment after its first seconds, though its own voice got in right up to their end, and takes what he said whole", async () => {
+    const said = "Tell it to open a PR."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass now and the"], [0.9, said]], { live: true })
+        yield* helper.wait(0.3)
+        // Its own voice until a little past its first three seconds, then a moment's quiet, shorter than ends what he says, and him.
+        yield* helper.talk(0.8, 88)
+        yield* helper.talk(0, 12)
+        yield* helper.talk(0.9, 6)
+        const stopped = [...helper.commands]
+        yield* helper.talk(0.9, 14)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { stopped, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ stopped: ["play", "volume", "stop"], responded: [said], sent: [said], replies: [said] })
+  })
+
+  test("takes a quick answer said a moment after a short question it asked over them, though the question's own voice got in right up to its end", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const helper = yield* overHelper([[0.8, "Send it again?"], [0.9, "Yes."]], { duration: 1.8, live: true })
+        yield* Fiber.interrupt(helper.fiber)
+        const asking = yield* Effect.fork(
+          helper.ask({
+            audio: "/tmp/question.wav",
+            spoken: "Send it again?",
+            answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+          }),
+        )
+        yield* helper.wait(0.1)
+        yield* helper.talk(0.8, 52)
+        yield* helper.finish
+        // A moment's quiet, shorter than ends what he says, then him.
+        yield* helper.talk(0, 10)
+        yield* helper.talk(0.9, 12)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    expect(result).toEqual({ answered: true, answers: ["Yes."] })
+  })
+
   test("can't ask a question without its words, which tell its own voice getting into the microphone from an answer", () => {
     // @ts-expect-error Without them, any of its voice that got through would be taken for him.
     const unspoken: Conversation.Question = { audio: "/tmp/question.wav", answer: () => Effect.succeed(Option.none()) }

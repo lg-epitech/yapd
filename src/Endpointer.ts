@@ -53,7 +53,7 @@ export class Endpointer {
   constructor(private readonly options: Options = defaults) {}
 
   push(frame: Float32Array, probability: number): Event | undefined {
-    const { on, off, confirm, abandon, silence, lead, tail, longest } = this.options
+    const { on, off, confirm, abandon, silence, lead, longest } = this.options
     const isVoiced = probability >= on
     this.frames.push(frame)
 
@@ -89,9 +89,7 @@ export class Endpointer {
         if (isVoiced) this.quiet = 0
         else if (probability < off || this.quiet > 0) this.quiet++
         if (this.quiet < silence && this.frames.length < longest) return undefined
-        const kept = this.frames.slice(0, this.frames.length - Math.max(0, this.quiet - tail))
-        this.reset()
-        return { _tag: "Utterance", audio: concat(kept) }
+        return { _tag: "Utterance", audio: this.end()! }
       }
     }
   }
@@ -109,6 +107,14 @@ export class Endpointer {
   /** How many frames the user has been quiet for partway through: none while they talk. */
   get silent(): number {
     return this.phase === "speech" ? this.quiet : 0
+  }
+
+  /** Ends what the user is saying now, as if they'd gone quiet for good, keeping as much of the quiet as then: none when they aren't. */
+  end(): Float32Array | undefined {
+    if (this.phase !== "speech") return undefined
+    const kept = this.frames.slice(0, this.frames.length - Math.max(0, this.quiet - this.options.tail))
+    this.reset()
+    return concat(kept)
   }
 
   private reset() {
