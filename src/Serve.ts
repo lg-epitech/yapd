@@ -86,7 +86,7 @@ export const serve = Effect.gen(function* () {
     machine: everywhere.find(({ here }) => here)?.name ?? hostname(),
     live,
     actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
-    others: everywhere.filter(({ here }) => !here).map(({ name }) => name),
+    others: [],
     journal,
     store: yield* Store.Store,
   })
