@@ -96,6 +96,15 @@ describe("Brain", () => {
     expect(Brain.needing({ threads: idle, away: desk().away }, lines, now)).toBe("Nothing needs you here right now, sir. I can't see rig's threads yet.")
     // With every machine seen, as before.
     expect(Brain.needing({ threads: idle, away: [] }, lines, now)).toBe("Nothing needs you right now, sir.")
+    // With only rig's to be seen, it's what's on rig, never "here".
+    const rig = idle.map((listed) => ({ ...listed, here: false, ref: { ...listed.ref, machine: "rig" } }))
+    const mac = [{ machine: "Rosie", reason: "T3 Code isn't running on Rosie, so I can't see its threads." }]
+    expect(Brain.needing({ threads: rig, away: mac }, lines, now)).toBe(
+      "Nothing needs you on rig right now, sir. T3 Code isn't running on Rosie, so I can't see its threads.",
+    )
+    // Rosie's and rig's seen, and only a third machine away, it's what's on those two.
+    const alaska = [{ machine: "alaska", reason: "I can't reach alaska right now." }]
+    expect(Brain.needing({ threads: [...idle, ...rig], away: alaska }, lines, now)).toBe("Nothing needs you right now, sir. I can't reach alaska right now.")
   })
 
   test("the first, the second and the last pick the open question's candidates in order", () => {

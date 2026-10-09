@@ -462,8 +462,7 @@ export const tally = (desk: Threads.Desk, address: string, now: number) => {
     ...(needs === 0 ? [] : [`${Brain.count(needs)} ${needs === 1 ? "needs" : "need"} you`]),
     ...(failed === 0 ? [] : [`${Brain.count(failed)} failed`]),
   ]
-  const seen = [...new Set(desk.threads.map(({ ref }) => ref.machine))]
-  const here = away.length === 0 ? "" : desk.threads.every((listed) => listed.here) ? " here" : seen.length === 1 ? ` on ${seen[0]}` : ""
+  const here = Brain.whereSeen(desk)
   return [parts.length === 0 ? `Nothing's running${here}${address}.` : `${Brain.capital(Brain.both(parts))}${here}${address}.`, ...away].join(" ")
 }
 

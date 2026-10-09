@@ -337,6 +337,17 @@ export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.
 /** "Say that again", with nothing said lately. */
 export const nothingSaid = (lines: Lines) => `I haven't said anything just now${addressed(lines)}.`
 
+/**
+ * Where what it found is, said after it when there's a machine it can't see,
+ * since it's only what's there: " here", or " on rig" with only rig's threads
+ * to be seen. Nothing with every machine seen, or with several of them.
+ */
+export const whereSeen = (desk: Threads.Desk) => {
+  if (desk.away.length === 0) return ""
+  const machines = [...new Set(desk.threads.map(({ ref }) => ref.machine))]
+  return desk.threads.every((listed) => listed.here) ? " here" : machines.length === 1 ? ` on ${machines[0]}` : ""
+}
+
 /** What each thread waits on the user for, for "who needs me". */
 export const needing = (desk: Threads.Desk, lines: Lines, now: number) => {
   const day = 24 * 60 * 60_000
@@ -358,10 +369,10 @@ export const needing = (desk: Threads.Desk, lines: Lines, now: number) => {
   const away = desk.away.map(({ reason }) => reason)
   // Seeing no threads at all, it can't say nothing needs him, only why it can't see.
   if (parts.length === 0 && desk.threads.length === 0 && away.length > 0) return away.join(" ")
-  // With a machine it can't see, nothing it can see needs him, which is only what's here: there may well be something there.
+  // With a machine it can't see, nothing it can see needs him, which is only what's on the one it can: there may well be something there.
   const said =
     parts.length === 0
-      ? `Nothing needs you${away.length > 0 ? " here" : ""} right now${addressed(lines)}.`
+      ? `Nothing needs you${whereSeen(desk)} right now${addressed(lines)}.`
       : parts.length === 1
         ? `${capital(parts[0]!)}${addressed(lines)}.`
         : `${capital(count(parts.length))} things${addressed(lines)}: ${both(parts)}.`
