@@ -262,13 +262,19 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
   const message = projection.messages.find(({ id }) => id === messageId)
   if (run === undefined && item === undefined && message === undefined) return Option.none()
   const intent = item?.inputIntent
-  const into = Option.flatMap(Option.fromNullable(item?.runId ?? message?.runId), (runId) => Option.fromNullable(projection.runs.find(({ id }) => id === runId)))
+  const target = item?.runId ?? message?.runId
+  const into = Option.flatMap(Option.fromNullable(target), (runId) => Option.fromNullable(projection.runs.find(({ id }) => id === runId)))
+  // Taken out of the queue into the turn under way, with that turn's item hidden since, as T3 Code hides a rolled-back turn's: the run it
+  // waited in is cancelled, and the message names another, the one it went into.
+  const promoted = item === undefined && run?.status === "cancelled" && target != null && target !== run.id
   return Option.some({
     // One with no turn item yet still has its run to say: one it started is a turn of its own, unless it waits in the queue or was taken out of it.
     intent:
       intent !== undefined && intents.includes(intent)
         ? Option.some(intent as Intent)
-        : run === undefined || run.status === "cancelled"
+        : promoted
+          ? Option.some("promoted_queued_to_steer" as const)
+          : run === undefined || run.status === "cancelled"
           ? Option.none()
           : Option.some(run.status === "queued" ? ("queued_turn" as const) : ("turn_start" as const)),
     run: Option.map(Option.fromNullable(run), ({ id, status, queueHeld }) => ({ id, status, held: queueHeld === true })),

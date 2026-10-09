@@ -715,17 +715,26 @@ describe("Hands", () => {
   test("a yes to sending again a message steered into a turn T3 Code rolled back since, which hides that turn's item, says it was rolled back, never that it's being worked on", async () => {
     const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
     const started = "2026-10-08T21:58:00.000Z"
-    /** Steered into the turn under way, its answer lost, then sent again once that turn is rolled back, with T3 Code's answer kept, or lost again. */
-    const resent = (again: "kept" | "lost") =>
+    /**
+     * Steered into the turn under way, or waiting behind it till he takes it out of the queue into it, its answer lost, then sent again once
+     * that turn is rolled back, with T3 Code's answer kept, or lost again.
+     */
+    const resent = (again: "kept" | "lost", promoted = false) =>
       run(
         Effect.gen(function* () {
+          const doing = promoted ? "preparing" : "running"
           const { send, again: resend, answering, reads, bounded, becomes, dispatched } = yield* hands({
-            thread: thread(tezos.id, { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "running", status: "running", latestRunStartedAt: started }),
-            runs: [{ id: "run-1", status: "running", ordinal: 1 }],
+            thread: thread(tezos.id, { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: doing, status: doing, latestRunStartedAt: started }),
+            runs: [{ id: "run-1", status: doing, ordinal: 1 }],
           })
           answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
           reads(false)
           yield* send("u1", "Open a PR.")
+          // Taken out of the queue into the turn as T3 Code does it: the run it waited in is cancelled, and the message is that turn's.
+          if (promoted) {
+            bounded.runs[1]!.status = "cancelled"
+            Object.assign(bounded.messages[0]!, { runId: "run-1" })
+          }
           // Rolled back, its run says so, and T3 Code no longer shows that turn's items, so only the message names the run it went into.
           bounded.runs[0]!.status = "rolled_back"
           bounded.turnItems.length = 0
@@ -741,6 +750,8 @@ describe("Hands", () => {
       )
     for (const again of ["kept", "lost"] as const) {
       expect(await resent(again)).toEqual({ said: "That went in, sir, but it's been rolled back since.", ids: ["yapd:u1:0", "yapd:u1:0"] })
+      // Never taken for withdrawn, though the run it waited in shows cancelled.
+      expect(await resent(again, true)).toEqual({ said: "That went in, sir, but it's been rolled back since.", ids: ["yapd:u1:0", "yapd:u1:0"] })
     }
   })
 
