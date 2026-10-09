@@ -638,6 +638,9 @@ describe("Condenser", () => {
     expect(Condenser.prompt("yapd", interruption.turn, Option.none())).toContain(Condenser.aloud)
     expect(Responder.prompt(interruption, Option.none())).toContain(Condenser.aloud)
     expect(Condenser.aloud).toContain("never about an agent or a session, or what you asked one to do")
+    // Never "On it", which yapd says in his own words, so nothing the model is told teaches it to write that.
+    expect(Condenser.aloud).toContain(`Talk about the work as yours, like "I've fixed the loader" or "we're nearly there", never`)
+    expect(Condenser.prompt("yapd", interruption.turn, Option.some("Call me sir."))).not.toMatch(/\bon it\b/i)
     expect(Condenser.aloud).toContain("Translate titles, headings and quotes too")
     expect(Condenser.aloud).toContain("a wallet, email or street address")
   })
