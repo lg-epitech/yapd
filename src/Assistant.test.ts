@@ -7663,4 +7663,28 @@ describe("Assistant", () => {
     // Never said at all, it's asked as it was first going to be.
     expect(await pressed("queued")).toEqual({ atOnce: [first], then: [still], open: true })
   })
+
+  test("a thread's question closed quietly, as when it's answered in T3 Code, is told as the question it was when he asks to hear or see it again, never as one about a project", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const told = "I asked you the question on Cloud deployment discovery, sir: which colour should the test use."
+    const result = await run(
+      Effect.gen(function* () {
+        // The model's only asked what he meant by "Remind me what you wanted from me there.", which it takes for asking to hear it again.
+        const made = yield* assistant(() => Brain.decision({ act: "again", how: "same" }), undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* made.show.watch
+        yield* asked(made, cloud)
+        yield* made.settled("q1")
+        const before = made.spoken().length
+        yield* made.dictate("Remind me what you wanted from me there.")
+        const shown = made.seen.at(-1)?.subject
+        yield* made.dictate("Say that again.")
+        yield* made.dictate("Show me what you said.")
+        return { said: made.spoken().slice(before), open: yield* made.open, shown: shown?._tag === "Answer" ? shown.said : undefined }
+      }).pipe(Effect.scoped),
+    )
+    expect(result.said).toEqual([told, told, `It's on your screen. ${told}`])
+    expect(result.open).toEqual(Option.none())
+    // What the model is shown it said is the same.
+    expect(result.shown).toBe(told)
+  })
 })

@@ -878,6 +878,24 @@ describe("Brain", () => {
     expect(Brain.alone({ asked: `${choices}, sir?` })).toBe(`${choices}, sir?`)
   })
 
+  test("a closed question said again is told, never asked: a thread's by the part he'd got to, an approval or a resend as what it would have done", () => {
+    expect(Brain.recalled(questionOpen(0).open, lines)).toBe("I asked you the question on Migrate Tezos Integration, sir: which colour should the test use.")
+    expect(Brain.recalled(questionOpen(1).open, lines)).toBe("I asked you the question on Migrate Tezos Integration, sir: which test extras should run.")
+    // A part with only its options to say, and one whose words start with a name, which keeps its capital.
+    const { open } = questionOpen(0)
+    const wording = open.wording!
+    expect(Brain.recalled({ ...open, wording: { ...wording, part: { ...wording.part, question: "" } } }, lines)).toBe("I asked you the question on Migrate Tezos Integration, sir.")
+    expect(Brain.recalled({ ...open, wording: { ...wording, part: { ...wording.part, question: "PR or branch?" } } }, lines)).toBe(
+      "I asked you the question on Migrate Tezos Integration, sir: PR or branch.",
+    )
+    expect(Brain.recalled({ kind: "approval", about: "allow Migrate Tezos Integration to push the branch" }, lines)).toBe(
+      "I asked whether to allow Migrate Tezos Integration to push the branch, sir.",
+    )
+    expect(Brain.recalled({ kind: "resend", about: "send that to Migrate Tezos Integration again", news: "That didn't get to Migrate Tezos Integration, sir." }, lines)).toBe(
+      "That didn't get to Migrate Tezos Integration, sir. I asked whether to send that to Migrate Tezos Integration again.",
+    )
+  })
+
   test("a near-silence 'Thank you.' is ignored", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")

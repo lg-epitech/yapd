@@ -324,18 +324,30 @@ export const left = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines)
       ? `I didn't ask whether to ${open.about}, since you'd moved on${addressed(lines)}.`
       : `I left ${open.about || "what you dictated"}, since you'd moved on${addressed(lines)}.`
 
+/** A question as it's told rather than asked, after a colon: "which colour should the test use." */
+const told = (question: string) => {
+  const plain = question.trim().replace(/[.?!…]+$/, "")
+  return `${/^(I\b|I'|[A-Z][A-Z\d])/.test(plain) ? plain : `${plain.charAt(0).toLowerCase()}${plain.slice(1)}`}.`
+}
+
 /**
  * A question that's closed, said or shown again: what it asked, told rather
  * than asked, after any news it followed, whatever came of it, so a closed
- * question is never asked again (I4).
+ * question is never asked again (I4). A thread's is told by the part he'd
+ * got to, in its own words when it has any.
  */
-export const recalled = (open: Pick<Assistant.Open, "kind" | "about" | "news">, lines: Lines) => {
+export const recalled = (open: Pick<Assistant.Open, "kind" | "about" | "news" | "wording">, lines: Lines) => {
+  const part = open.wording?.part.question.trim() ?? ""
   const asked =
     open.kind === "which"
       ? `I asked whether you meant ${open.about}${addressed(lines)}.`
       : yesNo(open.kind)
         ? `I asked whether to ${open.about}${addressed(lines)}.`
-        : `I asked which project ${open.about || "that"} should go in${addressed(lines)}.`
+        : open.kind === "question"
+          ? part === ""
+            ? `I asked you ${open.about}${addressed(lines)}.`
+            : `I asked you ${open.about}${addressed(lines)}: ${told(part)}`
+          : `I asked which project ${open.about || "that"} should go in${addressed(lines)}.`
   return open.news === undefined ? asked : `${open.news} ${unaddressed(asked, lines)}`
 }
 
