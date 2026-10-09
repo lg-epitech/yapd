@@ -1266,14 +1266,15 @@ export const make = (options: {
      * each part: the options he picked, as it takes them, his own words as he
      * said them, and nothing for a part he skipped. Never something he didn't
      * say, nor nothing at all. What's said back is the options he picked for
-     * the last part he answered, when he picked any.
+     * the part he just answered, when he picked any: never one from a part
+     * before, acknowledged already, as if it answered one he skipped.
      */
     const replying = (asks: QuestionAsks) => {
       const sent = Questions.answers(asks, asks.collected)
       if (Either.isLeft(sent) || Object.keys(sent.right).length === 0) return undefined
-      const last = asks.questions.findLast(({ id }) => Object.hasOwn(sent.right, id))
-      const answer = last === undefined ? undefined : asks.collected[last.id]
-      const said = last !== undefined && answer?._tag === "Picked" ? Option.some(Questions.spoken(Questions.said(last, Option.none()), answer.options)) : Option.none<string>()
+      const just = asks.questions[asks.part - 1]
+      const answer = just === undefined ? undefined : asks.collected[just.id]
+      const said = just !== undefined && answer?._tag === "Picked" ? Option.some(Questions.spoken(Questions.said(just, Option.none()), answer.options)) : Option.none<string>()
       return { answers: sent.right, said }
     }
 

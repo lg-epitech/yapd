@@ -1427,6 +1427,8 @@ describe("Assistant", () => {
     const needed = "That one needs an answer, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
     const last = "And last: Which test extras should run? Any of Alpha, Beta and Gamma?"
     expect(await answering("live", "Skip.", "Skip.")).toEqual({ spoken: [`Skipped, sir. ${last}`, "I'll leave that one, sir."], answers: [], open: false })
+    // The last part skipped, what's said back is never the pick he made of the one before, as if it answered this one.
+    expect(await answering("live", "Red.", "Skip.")).toEqual({ spoken: [`Red, sir. ${last}`, "On it, sir."], answers: [{ "0": "Red" }], open: false })
     expect(await answering("message", "Skip.", "Red.", "Alpha and Gamma.")).toEqual({
       spoken: [needed, `Red, sir. ${last}`, "Alpha and Gamma it is, sir."],
       answers: [{ "0": "Red", "1": "Alpha, Gamma" }],
