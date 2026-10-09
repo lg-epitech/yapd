@@ -109,6 +109,8 @@ interface Talk {
   readonly ended: number
   /** What was made of it, unknown while it's being made out. */
   told: Told | undefined
+  /** Whisper's words for it, which tell whether it goes on from what came before, or reads as broken off itself. */
+  heard: string | undefined
 }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
@@ -536,6 +538,14 @@ const heardIn = (heard: string, yapd: ReadonlyArray<string>): Heard => {
 /** What's heard over yapd while its own voice can still get into the microphone comes to: a stop or a wait of his, all his, or unclear, which is let go. */
 export type Whose = "stop" | "his" | "unclear"
 
+/** Whether a word heard is yapd's word `at`, or "and" for its "in". */
+const spokenAt = (word: string, yapd: ReadonlyArray<string>, at: number) =>
+  at >= 0 && (stem(word) === stem(yapd[at]!) || (word === "and" && yapd[at] === "in"))
+
+/** Whether two of `words`, one after the other, are two yapd says one after the other, however common, like the "Over and" of "Over and yet.". */
+const paired = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) =>
+  words.some((word, index) => index > 0 && yapd.some((_, at) => spokenAt(word, yapd, at) && spokenAt(words[index - 1]!, yapd, at - 1)))
+
 /**
  * Whether `words` can only be his: no two it says one after another, however
  * common, like the "Over and" of "Over and yet." for "Over in yapd" or the
@@ -548,10 +558,8 @@ export type Whose = "stop" | "his" | "unclear"
  */
 const clearly = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   if (words.length === 0) return false
-  /** Whether a word heard is its word `at`, or "and" for its "in". */
-  const said = (word: string, at: number) => at >= 0 && (stem(word) === stem(yapd[at]!) || (word === "and" && yapd[at] === "in"))
-  if (words.some((word, index) => index > 0 && yapd.some((_, at) => said(word, at) && said(words[index - 1]!, at - 1)))) return false
-  if (words.every((word) => common.has(word))) return words.some((word) => !yapd.some((_, at) => said(word, at)))
+  if (paired(words, yapd)) return false
+  if (words.every((word) => common.has(word))) return words.some((word) => !yapd.some((_, at) => spokenAt(word, yapd, at)))
   const its = ours(words, yapd)
   return words.every((word, index) => common.has(word) || !(its.has(index) || yapd.some((spoken) => alike(word, spoken))))
 }
@@ -593,37 +601,60 @@ const mistaken = (stop: string, heard: string, saying: string) => {
 }
 
 /**
+ * How what he said can't stand on its own, so what he goes on with soon
+ * after may be the rest of it, which taken on its own would change what he
+ * said: "cut off" when it reads as broken off, like "Tell it to fix the
+ * tests," or "If.", or is his stop taken out of more, so anything he goes on
+ * with is, and "said" when it reads as said in full, as yapd's own voice
+ * heard as words of their own does too, like "There are three open form
+ * requests.", so only what reads as going on from it is, like "And then
+ * merge it.", and anything new is heard on its own.
+ */
+type Open = "cut off" | "said"
+
+/** Words what goes on from something said before starts with, like the "And" of "And then merge it.", which is then the rest of that. */
+const continuing = /^[^\p{L}\p{N}]*(and|or|but|then|because|unless|until|otherwise|instead|also|plus|except|though|although|nor)\b/iu
+
+/**
  * Whose voice was heard, what's taken of it, and the stop of his in it,
  * however it's taken: none when there's none. `open` when it can't stand on
- * its own, as `openEnded` has it, so what he goes on with straight after is
- * the rest of it.
+ * its own, as `openEnded` has it.
  */
 interface Told {
   readonly whose: Whose
   readonly taken: string
   readonly stop: string | undefined
-  readonly open: boolean
+  readonly open: Open | undefined
 }
 
 /**
  * Whether what was heard over a line yapd was `saying`, when it isn't
  * clearly his, may have words of his but for his stop, or more after that,
  * like "Tell it to fix the tests," or the "for the tests to pass" of "Wait
- * for the tests to pass,": what he goes on with straight after may then be
- * the rest of it, which taken on its own would change what he said. Not
- * when what's left is all its voice, like "Over in yapd. Stop.", after which
- * what he says is something new.
+ * for the tests to pass,", and how, as `Open` has it. Of his, as far as can
+ * be told, are words that aren't its voice and that not just anything has,
+ * or turn what's said around, any word after the last of its, however
+ * common, like the "if" of "the tests pass now and if", and all of it when
+ * nothing in it tells its voice, like "If." on its own as it says "if": no
+ * word of its not just anything has, nor two it says one after another. Not
+ * when what's left is all its voice, like "Over in yapd. Stop." or "Over and
+ * yet.", after which what he says is something new.
  */
-const openEnded = (heard: string, saying: string) => {
+const openEnded = (heard: string, saying: string): Open | undefined => {
   const yapd = vocabulary(saying)
   const told = heardIn(heard, yapd)
   const { words } = told
   const stop = haltAt(told, yapd)
-  if (stop !== undefined && stop.end < words.length) return true
+  if (stop !== undefined && stop.end < words.length) return "cut off"
   const its = ours(words, yapd)
-  return words.some(
-    (word, index) => (stop === undefined || index < stop.start) && !its.has(index) && (!common.has(word) || negations.has(word)),
-  )
+  const said = stop === undefined ? words : words.slice(0, stop.start)
+  const last = Math.max(-1, ...its)
+  const telling = [...its].some((at) => !common.has(words[at]!)) || paired(words, yapd)
+  const his =
+    said.length > 0 &&
+    (!telling || said.some((word, index) => index > last || (!its.has(index) && (!common.has(word) || negations.has(word)))))
+  if (!his) return undefined
+  return stop !== undefined || unfinished(heard) ? "cut off" : "said"
 }
 
 /**
@@ -644,11 +675,11 @@ type Look = "whole" | "soFar" | "stop" | "plain"
  */
 const taking = (heard: string, saying: string, look: Look, stopped?: string): Told => {
   const told = look === "whole" ? whose(heard, saying) : look === "plain" ? "his" : undefined
-  if (told === "his") return { whose: told, taken: heard, stop: stopIn(heard, saying), open: false }
+  if (told === "his") return { whose: told, taken: heard, stop: stopIn(heard, saying), open: undefined }
   const kept = told === "unclear" && stopped !== undefined && !mistaken(stopped, heard, saying)
   const stop = kept ? stopped : told === "unclear" ? undefined : stopIn(look === "soFar" ? cutShort(heard) : heard, saying)
   // What a look at some of it found, and Whisper left out of all of it, may be anywhere in it.
-  const going = look === "whole" && (kept || openEnded(heard, saying))
+  const going = look !== "whole" ? undefined : kept ? "cut off" : openEnded(heard, saying)
   return stop === undefined ? { whose: "unclear", taken: "", stop, open: going } : { whose: "stop", taken: stop, stop, open: going }
 }
 
@@ -914,10 +945,10 @@ export const make = (options: {
         let onset = { at: 0, began: 0 }
         /**
          * What he said over the line before what's still being made out, when
-         * it can't stand on its own: where he began it, and when it ended, by
-         * the clock.
+         * it can't stand on its own: where he began it, when it ended, by the
+         * clock, and how, as `Open` has it.
          */
-        let left: { readonly at: number; readonly ended: number } | undefined
+        let left: { readonly at: number; readonly ended: number; readonly open: Open } | undefined
         /** One look at a time, so Whisper never works on two at once. */
         const whisper = yield* Effect.makeSemaphore(1)
         let lingering: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
@@ -994,22 +1025,22 @@ export const make = (options: {
           ...(open ? { open } : {}),
         })
         /**
-         * Takes what he went on with straight after something he said over the
-         * line that can't stand on its own, as `goingOn` has it, for the rest
-         * of that, of which only a stop of his is taken, so nothing he said is
-         * passed on without the start of it. Returns where that leaves it, as
-         * far as it's made out.
+         * Takes what he went on with soon after something he said over the
+         * line that can't stand on its own, as `goingOn` and `Open` have it,
+         * for the rest of that, of which only a stop of his is taken, so
+         * nothing he said is passed on without the start of it. Returns where
+         * that leaves it, as far as it's made out.
          */
         const rest = () => {
           let open = left
           for (const talk of pending) {
-            if (talk.told === undefined) return open
-            if (open !== undefined && talk.began - open.ended <= goingOn) {
-              const { stop } = talk.told
-              talk.told = { whose: stop === undefined ? "unclear" : "stop", taken: stop ?? "", stop, open: true }
+            const { told, heard = "" } = talk
+            if (told === undefined) return open
+            if (open !== undefined && talk.began - open.ended <= goingOn && (open.open === "cut off" || continuing.test(heard))) {
+              talk.told = { whose: told.stop === undefined ? "unclear" : "stop", taken: told.stop ?? "", stop: told.stop, open: open.open }
               talk.at = open.at
-              open = { at: open.at, ended: talk.ended }
-            } else open = talk.told.open ? { at: talk.at ?? Number.POSITIVE_INFINITY, ended: talk.ended } : undefined
+              open = { at: open.at, ended: talk.ended, open: open.open }
+            } else open = told.open === undefined ? undefined : { at: talk.at ?? Number.POSITIVE_INFINITY, ended: talk.ended, open: told.open }
           }
           return open
         }
@@ -1054,8 +1085,9 @@ export const make = (options: {
               yield* stopLingering
               onset = { at: yield* position, began: yield* Clock.currentTimeMillis }
               // Over what may be its own voice, it carries on just as it was until it's made out that it isn't, as over the rest of what
-              // he said, straight after something that can't stand on its own, since only a stop of his in that is taken.
-              const going = left !== undefined && onset.began - (pending.at(-1)?.ended ?? left.ended) <= goingOn ? left : undefined
+              // he said soon after something that reads as broken off, since only a stop of his in that is taken. After what reads as said
+              // in full, only what's made out to go on from it is the rest, so what's new stops it at once, as after its first seconds.
+              const going = left?.open === "cut off" && onset.began - (pending.at(-1)?.ended ?? left.ended) <= goingOn ? left : undefined
               if (signal.echo || going !== undefined) doubt = { at: going?.at ?? onset.at, looking: undefined, stopped: undefined, paused: undefined }
               else if (playing) yield* playback.volume(ducked)
               break
@@ -1092,15 +1124,15 @@ export const make = (options: {
                 // Said nothing more since he paused, the look then has all of it, and is told as that, once it's back.
                 const paused = doubted.paused !== undefined && signal.audio.length <= doubted.paused.samples ? doubted.paused : undefined
                 const id = paused?.id ?? (yield* look(signal.audio, doubted.at, "whole", doubted.stopped))
-                pending.push({ id, audio: signal.audio, at: doubted.at, began: onset.began, ended, told: undefined })
+                pending.push({ id, audio: signal.audio, at: doubted.at, began: onset.began, ended, told: undefined, heard: undefined })
                 if (paused?.looked !== undefined) yield* Queue.offer(signals, paused.looked)
                 break
               }
               // Said after what's still being made out, it waits for that, so what he said stays in order, and is made out meanwhile, since
-              // it may turn out to be the rest of that, as it is of what he said straight before that can't stand on its own.
+              // it may turn out to be the rest of that, as it may be of what he said just before that can't stand on its own.
               if (pending.length === 0 && (left === undefined || onset.began - left.ended > goingOn)) return interrupted([{ audio: signal.audio }])
               const id = yield* look(signal.audio, onset.at, "plain")
-              pending.push({ id, audio: signal.audio, at: undefined, began: onset.began, ended, told: undefined })
+              pending.push({ id, audio: signal.audio, at: undefined, began: onset.began, ended, told: undefined, heard: undefined })
               break
             }
             case "Looked": {
@@ -1116,6 +1148,7 @@ export const make = (options: {
               const looked = pending.find((talk) => talk.id === signal.id)
               if (looked === undefined) break
               looked.told = signal.whole ?? signal.told
+              looked.heard = signal.heard
               rest()
               const told = looked.told
               yield* Effect.logInfo(
