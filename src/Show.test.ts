@@ -395,6 +395,28 @@ describe("Show", () => {
     })
   })
 
+  test("a request to take down a card as the app expects it shown once asked for back, made before that comes, takes down the card still up from before", async () => {
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const show = yield* Show.make(() => Effect.die("Nothing is read here."), () => Effect.die("Nothing opens here."))
+          const { url, revision, putBack } = yield* serving(show)
+          const takeDown = (query: string) => Effect.promise(() => fetch(`${url}/cards/current?${query}`, { method: "DELETE" }).then((response) => response.status))
+          const state = Effect.promise(() => fetch(`${url}/state`).then((response) => response.json() as Promise<Server.State>))
+          const card = yield* show.put(Show.said("One running.", Option.none()))
+          // He asked for it back while it was still up, at this revision, then put it away before that came: the app names the showing it expects.
+          const asked = (yield* revision) ?? 0
+          const status = yield* takeDown(`id=${card.id}&shown=${asked + 1}`)
+          const after = (yield* state).showing
+          // The request to have it back, coming after, is turned away, and nothing comes back up.
+          const late = yield* putBack(card.id, asked)
+          return { status, after, late, end: (yield* state).showing }
+        }),
+      ),
+    )
+    expect(result).toEqual({ status: 204, after: null, late: 409, end: null })
+  })
+
   test("the card that's up is still up as it went up once yapd is asked to take down another, or none, so a request to take it down as it was shown still does", async () => {
     const result = await Effect.runPromise(
       Effect.scoped(
