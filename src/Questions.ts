@@ -55,7 +55,7 @@ export interface Said {
   /**
    * The options he was offered last, by their place in the part, when that
    * isn't all of them: the others, once he's turned down yapd's pick. A
-   * place, a letter or "all" counts among these, as he heard them.
+   * place or "all" counts among these, as he heard them.
    */
   readonly among?: ReadonlyArray<number> | undefined
 }
@@ -484,14 +484,23 @@ export const opens = (part: Said, heard: string) => {
   return part.options.some(({ label, said: name }) => [unmarked(label), name].some((written) => `${figures(gist(written))} `.startsWith(words)))
 }
 
-/** An option by its place: "the second one", "number two", "option B", "last". */
-const place = /^(the )?(?:(option|number|choice) )?(first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th|one|two|three|four|[1-4]|[a-d])(?: one| option)?$/
+/**
+ * An option by its place, said as one: "the second one", "last", "option
+ * two", "number 2" or "option B". Never a bare number or letter, like
+ * "three" to how many retries or "C" to which language, which may be what
+ * he means itself: the model tells.
+ */
+const place = /^(?:the )?(?:(first|second|third|fourth|last|latter|former|1st|2nd|3rd|4th)(?: one| option)?|(?:option|number|choice) (one|two|three|four|[1-4])|(?:option|choice) ([a-d]))$/
 
-const places: Readonly<Record<string, number>> = {
-  first: 0, former: 0, "1st": 0, one: 0, "1": 0, a: 0,
-  second: 1, "2nd": 1, two: 1, "2": 1, b: 1,
-  third: 2, "3rd": 2, three: 2, "3": 2, c: 2,
-  fourth: 3, "4th": 3, four: 3, "4": 3, d: 3,
+/** The places said in words, which say nothing else. */
+const placed: Readonly<Record<string, number>> = { first: 0, former: 0, "1st": 0, second: 1, "2nd": 1, third: 2, "3rd": 2, fourth: 3, "4th": 3 }
+
+/** The places by a number or a letter, only ever after "option", "number" or "choice". */
+const numbered: Readonly<Record<string, number>> = {
+  one: 0, "1": 0, a: 0,
+  two: 1, "2": 1, b: 1,
+  three: 2, "3": 2, c: 2,
+  four: 3, "4": 3, d: 3,
 }
 
 /** Words a place is said with, besides numbers and letters. */
@@ -533,11 +542,9 @@ const placeable = (part: Said) =>
 const byPlace = (part: Said, said: string) => {
   const found = place.exec(said)
   if (found === null || !placeable(part)) return undefined
-  const [, the, kind, which = ""] = found
-  // "The one" is no place at all.
-  if (kind === undefined && the !== undefined && which === "one") return undefined
+  const [, word, number, letter] = found
   const offered = offeredLast(part)
-  const at = which === "last" || which === "latter" ? offered.length - 1 : places[which]
+  const at = word === "last" || word === "latter" ? offered.length - 1 : word !== undefined ? placed[word] : numbered[number ?? letter ?? ""]
   return at === undefined ? undefined : offered[at]
 }
 
@@ -566,12 +573,13 @@ export const mentions = (part: Said, index: number, heard: string) => {
     const whole = figures(unled(kept(name)))
     return whole !== "" && ` ${said} `.includes(` ${whole} `)
   })
-  // Not by a letter, nor "one", which say other things too; and by its place among what he was offered last.
+  // By its place among what he was offered last, said as one, like "the second" or "option two": never a bare number or letter, which
+  // say other things too, nor "last", which may be the last he'd heard.
   const offered = offeredLast(part)
   const at = placeable(part) ? offered.indexOf(index) : -1
-  const placed = Object.entries(places).flatMap(([word, place]) => (at >= 0 && place === at && !/^(?:[a-d]|one)$/.test(word) ? [word] : []))
-  const last = at >= 0 && at === offered.length - 1 ? ["last", "latter"] : []
-  return named || [...placed, ...last].some((word) => words.includes(word))
+  if (at < 0) return named
+  const places = [...Object.entries(placed).flatMap(([word, place]) => (place === at ? [word] : [])), ...["option", "number", "choice"].map((kind) => `${kind} ${at + 1}`)]
+  return named || places.some((words) => ` ${said} `.includes(` ${words} `))
 }
 
 /** Going ahead, like "ship it", "go ahead" or "yes, proceed", which may as well name an option as take yapd's pick: the model tells. */

@@ -225,9 +225,10 @@ describe("Questions", () => {
       ["Number two.", 1],
       ["Option 4.", 3],
       ["Option D.", 3],
-      ["Four.", 3],
-      ["C.", 2],
       ["Last.", 3],
+      // A bare number or letter may be what he means itself, which the model tells.
+      ["Four.", undefined],
+      ["C.", undefined],
       ["Full history.", 2],
       // A "the" before it, or a "please" or "sir" after it, says nothing of which.
       ["The full history.", 2],
@@ -550,8 +551,9 @@ describe("Questions", () => {
     expect(["Four.", "4.", "2.", "4 workers.", "Eight workers."].map((heard) => pick(heard, spelled))).toEqual([undefined, undefined, undefined, picked(2), picked(3)])
     // And a number said in words goes by how it sounds, as in "v two" for v2.
     expect(pick("V two.", part("Which API version?", ["v1", "v2", "v3"]))).toEqual(picked(1))
-    // Named with no numbers, a number is a place, but "the blue one" is more than a name, and "one" in a name keeps places off.
-    expect(pick("Two.", part("Which colour?", ["Red", "Blue", "Green"]))).toEqual(picked(1))
+    // Named with no numbers, a number is a place only said as one, "the blue one" is more than a name, and "one" in a name keeps places off.
+    expect(pick("Two.", part("Which colour?", ["Red", "Blue", "Green"]))).toBeUndefined()
+    expect(pick("Option two.", part("Which colour?", ["Red", "Blue", "Green"]))).toEqual(picked(1))
     expect(pick("The blue one.", part("Which colour?", ["Red", "Blue", "Green"]))).toBeUndefined()
     expect(pick("Two.", part("Which colour?", ["Red", "Blue", "One more"]))).toBeUndefined()
   })
@@ -592,12 +594,41 @@ describe("Questions", () => {
     expect(Questions.pick(suites, "Unit and types.", { inFull: true, parts: 1 })).toEqual(picked(0, 2))
   })
 
-  test("after a no to yapd's pick, a place, a letter or 'all' counts among the others he was offered, never the pick he turned down", () => {
+  test("a bare number or letter is the model's to tell, since it may be his answer itself, like 'three' to how many: only a place said as one, like 'the second one' or 'option two', is a place", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    for (const [asked, labels, heard] of [
+      ["How many retries?", ["Once", "Twice", "Never"], "Three."],
+      ["How many retries?", ["None", "A few", "A lot"], "One."],
+      ["Which language should the bindings use?", ["Python", "Rust", "Go"], "C."],
+      ["How many days of logs should I keep?", ["A week", "A month", "Forever"], "Three."],
+      ["How many days of logs should I keep?", ["A week", "A month", "Forever"], "A."],
+      ["Which colour?", ["Red", "Blue", "Green"], "2."],
+      ["Which colour?", ["Red", "Blue", "Green"], "The two one."],
+    ] as const) {
+      expect([asked, heard, pick(part(asked, labels), heard)]).toEqual([asked, heard, undefined])
+    }
+    const colour = part("Which colour?", ["Red", "Blue", "Green"])
+    expect(["The second one.", "Second.", "Option two.", "Number 2.", "Option B.", "The third option.", "The former."].map((heard) => pick(colour, heard))).toEqual([
+      picked(1),
+      picked(1),
+      picked(1),
+      picked(1),
+      picked(1),
+      picked(2),
+      picked(0),
+    ])
+    // Nor does a bare number name yapd's pick, said over it before he heard it.
+    const retries = part("How many retries?", ["Once", "Twice", "Never (Recommended)"])
+    expect(["Three, I think.", "C, I think.", "The third one, I think.", "Option three, I think."].map((heard) => Questions.mentions(retries, 2, heard))).toEqual([false, false, true, true])
+  })
+
+  test("after a no to yapd's pick, a place counts among the others he was offered, never the pick he turned down", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     // As the assistant leans it once it's asked "Which one then, sir: Red or Green?".
     const colour = { ...part("Which colour?", ["Blue (Recommended)", "Red", "Green"]), recommended: Option.none<number>(), among: [1, 2] }
     const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
-    expect(["The first one.", "Option one.", "First.", "A.", "The second one.", "B.", "Last.", "Blue."].map((heard) => pick(colour, heard))).toEqual([
+    expect(["The first one.", "Option one.", "First.", "Option A.", "The second one.", "Option B.", "Last.", "Blue."].map((heard) => pick(colour, heard))).toEqual([
       picked(1),
       picked(1),
       picked(1),
@@ -607,8 +638,8 @@ describe("Questions", () => {
       picked(2),
       picked(0),
     ])
-    // A third place, or a letter past what he was offered, is no place at all.
-    expect([pick(colour, "The third one."), pick(colour, "C.")]).toEqual([undefined, undefined])
+    // A third place, or one past what he was offered, is no place at all, and a bare letter is the model's to tell.
+    expect([pick(colour, "The third one."), pick(colour, "Option C."), pick(colour, "A.")]).toEqual([undefined, undefined, undefined])
     // The model's answer only by a whole name.
     expect(Questions.resolve(colour, "Red")).toEqual(picked(1))
     expect(Questions.resolve(colour, "The first one.")).toEqual({ _tag: "Words", text: "The first one." })
