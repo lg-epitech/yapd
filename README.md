@@ -234,7 +234,7 @@ YAPD_STYLE="Talk like Jarvis from Iron Man: calm, precise, with a dry British wi
 
 The style applies to the summaries, to its answers when you interrupt, and to what it says about new work. It doesn't change what it passes on to the agent or the prompts it writes, and summaries stay a sentence or two.
 
-To choose what it says once you've asked for something, rather than the line written in your style, list your own, separated by `|`. It says a different one from last time, and renders them all ahead:
+To choose what it says once you've asked for something, when it passes a reply on, sends a message by voice or starts new work, rather than the line written in your style, list your own, separated by `|`. It says a different one from the last you heard, and from one about to be said, and renders them all ahead:
 
 ```sh
 YAPD_ON_IT="Right away, sir.|Very good, sir.|Consider it done, sir.|Very well, sir."

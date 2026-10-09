@@ -462,7 +462,7 @@ describe("Brain", () => {
       Hands.unsure({ kind: "undo", body: { _tag: "Cancel", runId: "run_7f3a9c2b" } }, lines, Option.some("Migrate Tezos Integration")),
       ...Persona.sayable(Persona.plain),
       Conversation.movedOn,
-      Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }),
+      Drafts.confirmation("", Either.getOrThrow(resolved), { thread: "t9", project: "trainer", directory: "/home/me/trainer", branch: null, model: "gpt-6-sol", worktree: false }, Persona.plain),
       Brain.speakable("I updated src/Brain.ts and the config in ~/.yapd/config.json, commit a1b2c3d4e5. The Codex agent is idle.", desk()),
       Brain.speakable("The Claude Code session finished the fix in the commit 9f3e2a1c, and a Claude Code agent pushed it. It's on the t3/jarvis-m1 branch.", desk()),
       Brain.speakable("It flagged wallet 0x5a0b54d5dc17e0aadc383d2db43b0a0d3e029c4c as unmatched, and/or skipped it.", desk()),

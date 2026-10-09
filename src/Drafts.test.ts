@@ -3,6 +3,7 @@ import { Effect, Either, Fiber, Option, type Scope, TestClock, TestContext } fro
 import * as Drafts from "./Drafts.ts"
 import { asking, type Catalog, LaunchError, list, type Request, type Started, serve } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
 import * as Remote from "./Remote.ts"
 import * as Research from "./Research.ts"
@@ -54,14 +55,14 @@ const decision = (overrides: Partial<Decision>): Decision => ({
   branch: "",
   why: "They named yapd.",
   prompt: "Fix the loader.",
-  spoken: "Started in yapd, on Fable, in a worktree.",
+  spoken: "In yapd, on Fable, in a worktree.",
   ...overrides,
 })
 
 /**
  * Runs new work against a writer that decides what the test says, and
  * launchers that record what they're asked to start, saying what came of each
- * request as whoever heard it would.
+ * request as whoever heard it would, with the persona's `lines`, or the plain ones.
  */
 const drafts = (
   decide: (material: Material) => Decision | undefined,
@@ -77,6 +78,7 @@ const drafts = (
     readonly dropped?: boolean
     /** Whether what's started is written down first, in a ledger of its own, and whether writing it down takes a second. */
     readonly ledger?: boolean | "slow"
+    readonly lines?: Persona.Lines
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -85,6 +87,8 @@ const drafts = (
     const asked: Array<Material> = []
     const researched: Array<{ readonly machine: string; readonly directory: string }> = []
     const catalogs: Array<string> = []
+    /** How many times a line for going ahead was picked. */
+    let picks = 0
     const launcher = (machine: string, catalog: Catalog) => ({
       catalog: Effect.sync(() => void catalogs.push(machine)).pipe(
         Effect.zipRight(machine === "rig" && options.rigDown === true ? Effect.fail(new LaunchError({ reason: "I can't reach rig." })) : Effect.succeed(catalog)),
@@ -149,6 +153,11 @@ const drafts = (
           ),
         prepare: Effect.void,
       }),
+      Effect.provideService(Persona.Persona, {
+        lines: Effect.succeed(options.lines ?? Persona.plain),
+        onIt: () => Effect.sync(() => (picks++, (options.lines ?? Persona.plain).onIt)),
+        said: () => Effect.void,
+      }),
     )
     let material: Material | undefined
     /** Says what came of it, and what came of reading the project first once that's done. */
@@ -199,6 +208,7 @@ const drafts = (
       said,
       ledger,
       spoken: () => said.map(({ spoken }) => spoken),
+      picks: () => picks,
       asked,
       researched,
       catalogs,
@@ -213,7 +223,7 @@ describe("Drafts", () => {
     const result = await run(
       Effect.gen(function* () {
         const { dictate, started, said } = yield* drafts(() =>
-          decision({ model: "opus-5.5", effort: "XHigh", worktree: false, branch: "release", spoken: "Started in yapd, on Opus, without a worktree." }),
+          decision({ model: "opus-5.5", effort: "XHigh", worktree: false, branch: "release", spoken: "In yapd, on Opus, without a worktree." }),
         )
         yield* dictate("In yapd, fix the loader, with Opus on extra high, no worktree, off the release branch.")
         return { started, said }
@@ -225,7 +235,7 @@ describe("Drafts", () => {
         request: { project: "/code/yapd", prompt: "Fix the loader.", model: "claude-opus-5-5", effort: "xhigh", worktree: false, baseBranch: "release" },
       },
     ])
-    expect(result.said).toEqual([{ spoken: "Started in yapd, on Opus, without a worktree.", came: "Started" }])
+    expect(result.said).toEqual([{ spoken: "On it. In yapd, on Opus, without a worktree.", came: "Started" }])
   })
 
   test("sends work to the machine the project is on, and to where it was worked on last when it's on several", () => {
@@ -272,7 +282,7 @@ describe("Drafts", () => {
         const { dictate, answer, started, spoken, asked } = yield* drafts(({ lines }) =>
           lines.length === 1
             ? decision({ action: "ask", project: "", prompt: "", spoken: "For the loader fix, is that yapd or std?" })
-            : decision({ project: "std", evidence: "std", spoken: "Started in std, on Fable, in a worktree." }),
+            : decision({ project: "std", evidence: "std", spoken: "In std, on Fable, in a worktree." }),
         )
         yield* dictate("Fix the loader.")
         const before = [...started]
@@ -282,7 +292,7 @@ describe("Drafts", () => {
     )
     expect(result.before).toEqual([])
     expect(result.started.map(({ request }) => request.project)).toEqual(["/code/std"])
-    expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?", "Started in std, on Fable, in a worktree."])
+    expect(result.spoken).toEqual(["For the loader fix, is that yapd or std?", "On it. In std, on Fable, in a worktree."])
     expect(result.lines).toEqual([
       { speaker: "user", text: "Fix the loader." },
       { speaker: "yapd", text: "For the loader fix, is that yapd or std?" },
@@ -295,7 +305,7 @@ describe("Drafts", () => {
       Effect.gen(function* () {
         const { dictate, started, said, researched } = yield* drafts(
           () => decision({ action: "research", project: "trainer", machine: "rig", prompt: "What the eval loader does.", spoken: "Looking through trainer first." }),
-          { written: { action: "start", why: "Read the loader.", prompt: "Make the eval loader stream.", spoken: "Started in trainer on rig, on Fable, in a worktree." } },
+          { written: { action: "start", why: "Read the loader.", prompt: "Make the eval loader stream.", spoken: "In trainer on rig, on Fable, in a worktree." } },
         )
         yield* dictate("In trainer, do the streaming thing for the eval loader.")
         return { started, researched, said }
@@ -304,7 +314,7 @@ describe("Drafts", () => {
     expect(result.researched).toEqual([{ machine: "rig", directory: "/home/me/trainer" }])
     expect(result.said).toEqual([
       { spoken: "Looking through trainer first.", came: "Looking" },
-      { spoken: "Started in trainer on rig, on Fable, in a worktree.", came: "Started" },
+      { spoken: "On it. In trainer on rig, on Fable, in a worktree.", came: "Started" },
     ])
     expect(result.started).toEqual([
       { machine: "rig", request: { project: "/home/me/trainer", prompt: "Make the eval loader stream.", model: "claude-fable-5-1", effort: "high", worktree: true } },
@@ -323,7 +333,7 @@ describe("Drafts", () => {
     )
     expect(result.research).toEqual([true, false])
     expect(result.started.map(({ request }) => request.prompt)).toEqual(["Fix the loader."])
-    expect(result.spoken).toEqual(["Looking through yapd first.", "Started in yapd, on Fable, in a worktree. I couldn't read through it first."])
+    expect(result.spoken).toEqual(["Looking through yapd first.", "On it. In yapd, on Fable, in a worktree. I couldn't read through it first."])
   })
 
   test("resolves the fallback decision again when reading the project fails", async () => {
@@ -339,7 +349,7 @@ describe("Drafts", () => {
                 effort: "XHigh",
                 worktree: false,
                 prompt: "Fix the loader in std.",
-                spoken: "Started in std, on Opus, without a worktree.",
+                spoken: "In std, on Opus, without a worktree.",
               }),
         )
         yield* dictate("In yapd, compare the loader with std and fix it.")
@@ -352,7 +362,7 @@ describe("Drafts", () => {
         request: { project: "/code/std", prompt: "Fix the loader in std.", model: "claude-opus-5-5", effort: "xhigh", worktree: false },
       },
     ])
-    expect(result.spoken).toBe("Started in std, on Opus, without a worktree. I couldn't read through it first.")
+    expect(result.spoken).toBe("On it. In std, on Opus, without a worktree. I couldn't read through it first.")
   })
 
   test.each([
@@ -383,25 +393,78 @@ describe("Drafts", () => {
       ),
     )
     const started: Started = { thread: "t", project: "trainer", directory: "/home/me/trainer", branch: "main", model: "claude-fable-5-1", worktree: true }
-    expect(Drafts.confirmation("Started in trainer, in a worktree.", resolved, started)).toBe("Started in trainer, in a worktree.")
-    expect(Drafts.confirmation("Started in trainer, in a worktree.", resolved, { ...started, worktree: false, warning: "It isn't in a worktree, since git wouldn't make one." })).toBe(
+    const lines = { onIt: "Right away, sir.", address: "sir" }
+    expect(Drafts.confirmation("In trainer, in a worktree.", resolved, started, lines)).toBe("Right away, sir. In trainer, in a worktree.")
+    expect(Drafts.confirmation("In trainer, in a worktree.", resolved, { ...started, worktree: false, warning: "It isn't in a worktree, since git wouldn't make one." }, lines)).toBe(
       "Started in trainer on rig, on Claude Fable 5.1, without a worktree. It isn't in a worktree, since git wouldn't make one.",
     )
-    expect(Drafts.confirmation("", resolved, started)).toBe("Started in trainer on rig, on Claude Fable 5.1, in a worktree.")
+    expect(Drafts.confirmation("", resolved, started, lines)).toBe("Started in trainer on rig, on Claude Fable 5.1, in a worktree.")
+  })
+
+  test("says his own line for going ahead once work starts, in front of the writer's words and in place of an \"On it\" it wrote anyway", async () => {
+    const said = (spoken: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, spoken: told, picks } = yield* drafts(() => decision({ evidence: "yapd", spoken }), {
+            lines: { ...Persona.plain, onIt: "Right away, sir.", address: "sir" },
+          })
+          yield* dictate("In yapd, fix the loader.")
+          return { said: told(), picks: picks() }
+        }),
+      )
+    expect(await said("In yapd, on Fable, in a worktree.")).toEqual({ said: ["Right away, sir. In yapd, on Fable, in a worktree."], picks: 1 })
+    expect(await said("On it, sir, in yapd, on Fable, in a worktree.")).toEqual({ said: ["Right away, sir. In yapd, on Fable, in a worktree."], picks: 1 })
+    // With only the plain facts said, no line is picked, so none is kept from coming up as if it were about to play.
+    expect(await said("On it.")).toEqual({ said: ["Started in yapd, on Claude Fable 5.1, in a worktree."], picks: 0 })
+  })
+
+  test("says the line for going ahead in front of the writer's words, in place of an \"On it\" it wrote anyway", () => {
+    const resolved = Either.getOrThrow(
+      Drafts.resolve(
+        [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") }, researcher: Research.unavailable("") }],
+        [{ machine: "rig", here: false, hosts: [], catalog: Option.some(rig) }],
+        decision({ project: "trainer", machine: "rig" }),
+      ),
+    )
+    const started: Started = { thread: "t", project: "trainer", directory: "/home/me/trainer", branch: "main", model: "claude-fable-5-1", worktree: true }
+    const lines = { onIt: "Right away, sir.", address: "sir" }
+    expect(Drafts.confirmation("On it, sir, in trainer on rig, on Fable, in a worktree.", resolved, started, lines)).toBe(
+      "Right away, sir. In trainer on rig, on Fable, in a worktree.",
+    )
+    // Nor how it addressed him, while the lines don't say how yet.
+    expect(Drafts.confirmation("On it, sir, in trainer on rig, on Fable, in a worktree.", resolved, started, { ...lines, address: "" })).toBe(
+      "Right away, sir. In trainer on rig, on Fable, in a worktree.",
+    )
+    // With nothing else, there are no words of its own, so it's the plain facts, which need no line in front.
+    expect(Drafts.confirmation("On it, sir.", resolved, started, lines)).toBe("Started in trainer on rig, on Claude Fable 5.1, in a worktree.")
+    // Writer's words that read just like the plain facts are still the writer's, so the line goes in front of them.
+    expect(Drafts.confirmation("Started in trainer on rig, on Claude Fable 5.1, in a worktree.", resolved, started, lines)).toBe(
+      "Right away, sir. Started in trainer on rig, on Claude Fable 5.1, in a worktree.",
+    )
+    // Whether it says where it is goes by the writer's words alone, never by a line of his that names a worktree.
+    expect(Drafts.confirmation("In trainer, on Fable.", resolved, started, { onIt: "I'll get the worktree sorted.", address: "" })).toBe(
+      "I'll get the worktree sorted. In trainer, on Fable. That's in a worktree.",
+    )
+    // Nor are words after an "On it" taken for how it addressed him, while the lines don't say how yet.
+    expect(Drafts.confirmation("On it, staging only. In trainer, in a worktree.", resolved, started, { ...lines, address: "" })).toBe(
+      "Right away, sir. Staging only. In trainer, in a worktree.",
+    )
+    // Without lines of his own, it's the written one, much as the writer used to put it.
+    expect(Drafts.confirmation("In trainer on rig, on Fable, in a worktree.", resolved, started, Persona.plain)).toBe("On it. In trainer on rig, on Fable, in a worktree.")
   })
 
   test("always says whether there's a worktree, and when it couldn't tell which the user wanted", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { dictate, started, spoken } = yield* drafts(() =>
-          decision({ project: "std", evidence: "std", worktreeFrom: "unclear", worktree: false, spoken: "Started in std, on Fable." }),
+          decision({ project: "std", evidence: "std", worktreeFrom: "unclear", worktree: false, spoken: "In std, on Fable." }),
         )
         yield* dictate("In std, reply with the single word OK and do nothing else on a work tree.")
         return { worktree: started[0]?.request.worktree, spoken: spoken() }
       }),
     )
     expect(result.worktree).toBe(false)
-    expect(result.spoken).toEqual(["Started in std, on Fable. That's without a worktree. I couldn't tell whether you wanted a worktree, so I went by your rules."])
+    expect(result.spoken).toEqual(["On it. In std, on Fable. That's without a worktree. I couldn't tell whether you wanted a worktree, so I went by your rules."])
   })
 
   test("asks rather than start in a project the user neither named nor pointed at", async () => {

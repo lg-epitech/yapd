@@ -86,7 +86,7 @@ const make = (says?: string, options: {
       ? Persona.Plain
       : Layer.succeed(Persona.Persona, {
           lines: Effect.succeed(Persona.plain),
-          onIt: Effect.succeed(Persona.plain.onIt),
+          onIt: () => Effect.succeed(Persona.plain.onIt),
           said: (line) => Effect.sync(() => void options.noted?.push(line)),
         }),
     Journal.memory,
@@ -320,6 +320,7 @@ const assisted = (
     const ledger = Ledger.fromStore(store)
     const drafts = yield* Drafts.make({ machines: [], rules: Effect.succeed(Option.none()), recent: Effect.succeed([]) }).pipe(
       Effect.provideService(Writer, { decide: () => Effect.never, research: () => Effect.never, prepare: Effect.void }),
+      Effect.provide(Persona.Plain),
     )
     const asked: Array<Brain.Situation> = []
     const show = yield* Show.make(threads.detail, () => Effect.void)

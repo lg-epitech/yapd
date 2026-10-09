@@ -45,6 +45,24 @@ const material = (overrides: Partial<Writer.Material> = {}): Writer.Material => 
 })
 
 describe("Writer", () => {
+  test("leaves the line for going ahead out of what's said once work starts, since yapd says one of its own in front", () => {
+    const destination: Writer.Destination = {
+      about: "the loader fix",
+      project: "yapd",
+      machine: "",
+      directory: "/code/yapd",
+      model: "claude-fable-5-1",
+      effort: "high",
+      worktree: true,
+      lookFor: "What the loader does.",
+    }
+    const start = `- For "start", what you say once the session has started, which comes after your usual line that it's in hand, so leave that out: the project, the model, and whether it's in a worktree, like "In yapd, on Fable, in a worktree." or "In yapd, on Fable, without a worktree."`
+    for (const prompt of [Writer.prompt(material(), Option.some("Call me sir.")), Writer.researchPrompt(material(), destination, Option.some("Call me sir."))]) {
+      expect(prompt).toContain(start)
+      expect(prompt).not.toMatch(/\bon it\b/i)
+    }
+  })
+
   test("gives the model the user's rules, what can start where, and what they dictated", () => {
     const prompt = Writer.prompt(material(), Option.none())
     expect(prompt).toContain("Their rules, as they wrote them:\nFable on high for hard bugs. No worktree for questions.")

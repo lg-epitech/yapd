@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Context, Deferred, Effect, Fiber, Layer, Option, Queue, Schema, type Scope, TestClock, TestContext } from "effect"
+import { ConfigProvider, Context, Deferred, Effect, Fiber, Layer, Option, Queue, Random, Schema, type Scope, TestClock, TestContext } from "effect"
 import { Audio, AudioError } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
@@ -14,7 +14,9 @@ import { Vad } from "./Vad.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
-import { Voice } from "./Voice.ts"
+import * as Settings from "./Settings.ts"
+import * as Store from "./Store.ts"
+import { Voice, Warmth } from "./Voice.ts"
 
 const update: Conversation.Update = {
   session: "s",
@@ -33,13 +35,22 @@ const update: Conversation.Update = {
  * as `result` says: sent, queued, or held back as the session has moved on. `render` renders what's said back, and
  * with `unplayable`, nothing but the update can be played, as when the audio helper goes down after it. With `afplay`,
  * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
+ * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
+ * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines.
  */
 const conversation = (
   said: ReadonlyArray<string>,
   sending = 0,
   deliveries: ReadonlyArray<Effect.Effect<void>> = [],
   result: "sent" | "queued" | "moved" = "sent",
-  given: { readonly render?: Context.Tag.Service<Voice>["render"]; readonly unplayable?: boolean; readonly afplay?: "plays" | "fails" } = {},
+  given: {
+    readonly render?: Context.Tag.Service<Voice>["render"]
+    readonly unplayable?: boolean
+    readonly afplay?: "plays" | "fails"
+    readonly lines?: Persona.Lines
+    readonly model?: Layer.Layer<Model>
+    readonly persona?: Context.Tag.Service<Persona.Persona>
+  } = {},
 ) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
@@ -52,12 +63,14 @@ const conversation = (
     const transcripts = [...said]
     let dispatches = 0
     let replies = 0
+    const lines = given.lines ?? Persona.plain
+    const persona = Layer.succeed(Persona.Persona, given.persona ?? {
+      lines: Effect.succeed(lines),
+      onIt: () => Effect.succeed(lines.onIt),
+      said: (line) => Effect.sync(() => void noted.push(line)),
+    })
     const layer = Layer.mergeAll(
-      Layer.succeed(Persona.Persona, {
-        lines: Effect.succeed(Persona.plain),
-        onIt: Effect.succeed(Persona.plain.onIt),
-        said: (line) => Effect.sync(() => void noted.push(line)),
-      }),
+      persona,
       Journal.memory,
       Layer.succeed(Audio, {
         play: (path) =>
@@ -80,17 +93,19 @@ const conversation = (
       // Each frame holds the probability that it's speech.
       Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),
       Layer.succeed(Transcriber, { transcribe: () => Effect.sync(() => transcripts.shift() ?? "") }),
-      Layer.succeed(Responder.Responder, {
-        respond: ({ heard: text }) =>
-          Effect.sync(() => heard.push(text)).pipe(
-            Effect.zipRight(Effect.sleep("5 seconds")),
-            Effect.as(
-              text.startsWith("Sam,")
-                ? { intent: "resume" as const, spoken: "", message: "" }
-                : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text },
-            ),
-          ),
-      }),
+      given.model === undefined
+        ? Layer.succeed(Responder.Responder, {
+            respond: ({ heard: text }) =>
+              Effect.sync(() => heard.push(text)).pipe(
+                Effect.zipRight(Effect.sleep("5 seconds")),
+                Effect.as(
+                  text.startsWith("Sam,")
+                    ? { intent: "resume" as const, spoken: "", message: "" }
+                    : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text },
+                ),
+              ),
+          })
+        : Responder.ProviderResponder.pipe(Layer.provide(Layer.merge(given.model, persona))),
       Layer.succeed(Relays, {
         send: (_, text) => Effect.suspend(() => deliveries[dispatches++] ?? Effect.sleep(`${sending} seconds`)).pipe(
           Effect.zipRight(Effect.sync(() => void sent.push(text))),
@@ -304,6 +319,28 @@ describe("Follow-ups", () => {
     expect(result).toEqual({ sent: ["Just merge it."], saying: ["On it."] })
   })
 
+  test("says a line of the persona's own in place of an \"On it\" the model wrote anyway, before whatever more it had to say", async () => {
+    const follow = (spoken: string, address = "sir") =>
+      scoped(
+        Effect.gen(function* () {
+          const { layer } = scripted([{ intent: "send", spoken, message: "Merge the staging branch." }])
+          const lines = { ...Persona.plain, onIt: "Right away, sir.", address }
+          const { fiber, sent, speak, wait, saying } = yield* conversation(["Merge it."], 0, [], "sent", { lines, model: layer })
+          yield* speak
+          yield* wait(20)
+          yield* Fiber.join(fiber)
+          return { sent, saying }
+        }),
+      )
+    expect(await follow("On it, sir.")).toEqual({ sent: ["Merge the staging branch."], saying: ["Right away, sir."] })
+    expect((await follow("On it, sir. I took that to mean the staging branch.")).saying).toEqual(["Right away, sir. I took that to mean the staging branch."])
+    // Addressing him too while the lines don't say how yet.
+    expect((await follow("On it, sir.", "")).saying).toEqual(["Right away, sir."])
+    expect((await follow("On it, sir. I took that to mean the staging branch.", "")).saying).toEqual(["Right away, sir. I took that to mean the staging branch."])
+    // Anything else it had to say is said as it is.
+    expect((await follow("I took that to mean the staging branch.")).saying).toEqual(["I took that to mean the staging branch."])
+  })
+
   test("tells the persona only the line said of a follow-up, never one for going ahead when it's queued or held back", async () => {
     const follow = (result: "sent" | "queued" | "moved") =>
       scoped(
@@ -379,6 +416,45 @@ describe("Follow-ups", () => {
     // Whatever says it later tells the persona, once it plays.
     expect(result.noted).toEqual([])
     expect(result.sending).toBe(false)
+  })
+
+  test("two replies passed on before either is said, like two said later, get different lines of his own, said without a repeat", async () => {
+    const mine = ["Right away, sir.", "Very good, sir.", "Consider it done, sir."]
+    const result = await scoped(
+      Effect.gen(function* () {
+        const persona = Context.get(
+          yield* Layer.build(
+            Persona.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.succeed(Warmth, { warm: () => Effect.void }),
+                  Layer.scoped(Settings.Settings, Effect.map(Store.make(":memory:"), Settings.fromStore)),
+                  Layer.succeed(Model, { ask: () => Effect.die("There's no style to write lines in") }),
+                ),
+              ),
+              Layer.provide(Layer.setConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_ON_IT", mine.join("|")]])))),
+            ),
+          ),
+          Persona.Persona,
+        )
+        const { fiber, converse, speak, wait, late } = yield* conversation(["Just merge it.", "Just deploy it."], 3, [], "sent", { persona })
+        // Each sent, then cut off by a dictation before it's said, so it's said later.
+        yield* speak
+        yield* wait(6)
+        yield* Fiber.interrupt(fiber)
+        yield* wait(3)
+        const again = yield* Effect.fork(converse(update))
+        yield* speak
+        yield* wait(6)
+        yield* Fiber.interrupt(again)
+        yield* wait(3)
+        // Then each plays in turn.
+        yield* Effect.forEach(late, persona.said)
+        return { late, next: yield* persona.onIt() }
+      }).pipe(Effect.withRandom(Random.fixed([0]))),
+    )
+    // Each picks the first it may, as both would without knowing of the other.
+    expect(result).toEqual({ late: ["Right away, sir.", "Very good, sir."], next: "Right away, sir." })
   })
 
   test("tracks pending deliveries by update", async () => {
@@ -562,7 +638,11 @@ describe("Responder", () => {
       Option.none(),
     )
     expect(prompt).toContain("Keep every request they made, in their order")
-    expect(prompt).toContain(`a few words that it's in hand, like "On it." or "Consider it done." Don't repeat back what they asked for`)
+    // Going ahead, yapd says a line of its own, so the model only adds what more there is, and is never taught to say "On it".
+    expect(prompt).toContain(
+      `- For "send", empty: you say your usual line that it's in hand. Only when there's more they must know than that, say just that, in a few words, like "I took that to mean the staging branch." Don't repeat back what they asked for`,
+    )
+    expect(prompt).not.toMatch(/\bon it\b/i)
   })
 
   test("doesn't send a reply that tells the agent to do nothing", () => {
@@ -638,6 +718,9 @@ describe("Condenser", () => {
     expect(Condenser.prompt("yapd", interruption.turn, Option.none())).toContain(Condenser.aloud)
     expect(Responder.prompt(interruption, Option.none())).toContain(Condenser.aloud)
     expect(Condenser.aloud).toContain("never about an agent or a session, or what you asked one to do")
+    // Never "On it", which yapd says in his own words, so nothing the model is told teaches it to write that.
+    expect(Condenser.aloud).toContain(`Talk about the work as yours, like "I've fixed the loader" or "we're nearly there", never`)
+    expect(Condenser.prompt("yapd", interruption.turn, Option.some("Call me sir."))).not.toMatch(/\bon it\b/i)
     expect(Condenser.aloud).toContain("Translate titles, headings and quotes too")
     expect(Condenser.aloud).toContain("a wallet, email or street address")
   })
