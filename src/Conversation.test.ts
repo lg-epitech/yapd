@@ -1630,6 +1630,49 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ answered: true, answers: ["Yapd."] })
   })
 
+  test("doesn't stop for a word of its own cut off by a look and heard as a stop, though no word it says starts like one", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const spoken = "Codex is resizing the storage volume for the database now, sir, and then it will restart the server once that's done."
+        // "Storage", cut off partway by a look, then heard whole.
+        const helper = yield* overHelper([[0.8, "Codex is resizing the stop"], [0.81, "rage volume for the database."]], {
+          spoken,
+          whole: [[0.8, 0.81], "Codex is resizing the storage volume for the database."],
+        })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, 36)
+        yield* helper.wait(1.1)
+        yield* helper.talk(0.81, 20)
+        yield* helper.wait(0.6)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play"], sent: [], replies: [] })
+  })
+
+  test("doesn't stop for a word of its own cut in two where its voice stopped getting in, and heard as a stop after", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const spoken = "Codex is resizing the storage volume for the database now, sir, and then it will restart the server once that's done."
+        // "Storage", cut in two as the echo cancellation learnt its voice, then heard whole.
+        const helper = yield* overHelper([[0.8, "Codex is resizing the Stoke."], [0.81, "Stop. Volume for the database."]], {
+          spoken,
+          whole: [[0.8, 0.81], "Codex is resizing the storage volume for the database."],
+        })
+        yield* helper.wait(2.7)
+        yield* helper.talk(0.8, 12)
+        yield* helper.wait(0.4)
+        yield* helper.talk(0.81, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play"], sent: [], replies: [] })
+  })
+
   test("can't ask a question without its words, which tell its own voice getting into the microphone from an answer", () => {
     // @ts-expect-error Without them, any of its voice that got through would be taken for him.
     const unspoken: Conversation.Question = { audio: "/tmp/question.wav", answer: () => Effect.succeed(Option.none()) }
