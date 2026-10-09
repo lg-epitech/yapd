@@ -291,8 +291,13 @@ const ends: Readonly<Partial<Record<string, Ended>>> = { completed: "finished", 
  * when it went in, since a later one may have run since.
  */
 const over = ({ intent, run, into }: T3Actions.Found, thread: T3Live.Thread, at: number): Ended | undefined => {
-  if (!Option.exists(intent, steeredIn)) return Option.getOrUndefined(Option.flatMap(run, ({ status }) => Option.fromNullable(ends[status])))
-  if (Option.isSome(into)) return T3Actions.going.includes(into.value.status) ? undefined : (ends[into.value.status] ?? "ended")
+  const ended = (status: string) => (T3Actions.going.includes(status) ? undefined : (ends[status] ?? "ended"))
+  if (!Option.exists(intent, steeredIn)) {
+    if (Option.isSome(run)) return ends[run.value.status]
+    // With nothing to say how it went in, as when T3 Code rolled its turn back and hid that turn's item, the run the message names is its turn.
+    return Option.isSome(into) ? ended(into.value.status) : undefined
+  }
+  if (Option.isSome(into)) return ended(into.value.status)
   const when = (iso: string | null) => (iso === null ? Number.NaN : Date.parse(iso))
   if (!(when(thread.latestRunCompletedAt) > at)) return undefined
   return when(thread.latestRunStartedAt) <= at ? (ends[thread.status] ?? "ended") : "ended"

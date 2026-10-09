@@ -59,7 +59,8 @@ const takes =
           return Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: `Target run ${active.id} is ${active.status} and cannot be steered.` }))
         }
         const queued = (payload.dispatchMode as { type: string }).type === "queue_after_active" || intent === "queued_turn" || into
-        bounded.messages.push({ id: messageId, role: "user", text: String(payload.text), createdAt: "now" })
+        const message = { id: messageId, role: "user", text: String(payload.text), createdAt: "now" }
+        bounded.messages.push(message)
         if (!going || queued) {
           // Behind a run a stop held in the queue, it's held too.
           const held = going && bounded.runs.some(({ status, queueHeld }) => status === "queued" && queueHeld === true)
@@ -71,7 +72,8 @@ const takes =
             ...(held ? { queueHeld: true } : {}),
           })
         }
-        // Each in the run T3 Code names on it: the turn of its own it started, or the one it was steered into.
+        // Each in the run T3 Code names on it, the message and its item: the run of its own it started or waits in, or the one it was steered into.
+        Object.assign(message, { runId: going && !queued ? active.id : bounded.runs.at(-1)?.id })
         if (!going || !queued) {
           bounded.turnItems.push({ type: "user_message", messageId, inputIntent: going ? "steer" : "turn_start", runId: going ? active.id : bounded.runs.at(-1)?.id })
         }
@@ -710,6 +712,38 @@ describe("Hands", () => {
     expect(await resent("running")).toEqual({ said: ["On it, sir.", "On it, sir: the Tezos migration."], noted: Option.some("sent") })
   })
 
+  test("a yes to sending again a message steered into a turn T3 Code rolled back since, which hides that turn's item, says it was rolled back, never that it's being worked on", async () => {
+    const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
+    const started = "2026-10-08T21:58:00.000Z"
+    /** Steered into the turn under way, its answer lost, then sent again once that turn is rolled back, with T3 Code's answer kept, or lost again. */
+    const resent = (again: "kept" | "lost") =>
+      run(
+        Effect.gen(function* () {
+          const { send, again: resend, answering, reads, bounded, becomes, dispatched } = yield* hands({
+            thread: thread(tezos.id, { latestRunId: "run-1", activeRunId: "run-1", activityRunStatus: "running", status: "running", latestRunStartedAt: started }),
+            runs: [{ id: "run-1", status: "running", ordinal: 1 }],
+          })
+          answering((payload, bounded) => Effect.zipRight(takes()(payload, bounded), Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me.", sent: true }))))
+          reads(false)
+          yield* send("u1", "Open a PR.")
+          // Rolled back, its run says so, and T3 Code no longer shows that turn's items, so only the message names the run it went into.
+          bounded.runs[0]!.status = "rolled_back"
+          bounded.turnItems.length = 0
+          becomes(thread(tezos.id, { latestRunId: "run-1", status: "rolled_back", latestRunStartedAt: started, latestRunCompletedAt: "2026-10-08T22:05:00.000Z" }))
+          reads(true)
+          answering(() => (again === "kept" ? Effect.succeed({ sequence: 7 }) : Effect.fail(new Server.Trouble({ reason: "T3 Code hung up on me again.", sent: true }))))
+          const outcome = yield* resend("yapd:u1:0")
+          return {
+            said: outcome._tag === "Done" ? Hands.done(message, outcome.how, lines, Option.none(), outcome) : outcome._tag,
+            ids: dispatched.map(({ commandId }) => commandId),
+          }
+        }),
+      )
+    for (const again of ["kept", "lost"] as const) {
+      expect(await resent(again)).toEqual({ said: "That went in, sir, but it's been rolled back since.", ids: ["yapd:u1:0", "yapd:u1:0"] })
+    }
+  })
+
   test("a yes to sending again a message whose answer is lost again, found in the thread, is said as it went in then, as when T3 Code answers for it", async () => {
     const message = { _tag: "Message", to: tezos, text: "", how: "now" } as const
     /** A message for now behind a turn getting going, its answer lost, then sent again once its own run is `own`, and that answer lost too. */
@@ -841,6 +875,7 @@ describe("Hands", () => {
     const unnamed = (status: string, others: Bounded["runs"] = []) => (bounded: Bounded) => {
       runs(status, ...others)(bounded)
       for (const item of bounded.turnItems) delete item.runId
+      for (const message of bounded.messages) delete (message as { runId?: string }).runId
     }
     expect(await resent("running", unnamed("completed"), ended("completed"))).toEqual(finished)
     expect(await resent("running", unnamed("failed"), ended("failed"))).toEqual(cut)

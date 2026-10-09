@@ -11,6 +11,8 @@ const Message = Schema.Struct({
   text: Schema.String,
   createdAt: Schema.String,
   streaming: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  /** The run whose turn it went into, as T3 Code names it on the message: its own, or the one under way it was steered into. */
+  runId: Schema.optional(Schema.NullOr(Schema.String)),
 })
 
 const Run = Schema.Struct({
@@ -241,9 +243,10 @@ export interface Found {
   /** The run it started, or waits in the queue to start, if there's one, and whether that queue is on hold. */
   readonly run: Option.Option<{ readonly id: string; readonly status: string; readonly held: boolean }>
   /**
-   * The run its turn item belongs to, when the read has it: for one steered
-   * into the turn under way, even from the queue, the run whose turn it went
-   * into, which T3 Code names on it, never the run it waited in.
+   * The run its turn item belongs to, when the read has it, or else the run
+   * the message itself names, as when T3 Code hides the item of a turn it
+   * rolled back: for one steered into the turn under way, even from the
+   * queue, the run whose turn it went into, never the run it waited in.
    */
   readonly into: Option.Option<{ readonly id: string; readonly status: string }>
   /** When T3 Code took it in, in ms by its own clock, when the thread shows the message itself. */
@@ -259,7 +262,7 @@ export const found = (projection: (typeof Bounded.Type)["projection"], messageId
   const message = projection.messages.find(({ id }) => id === messageId)
   if (run === undefined && item === undefined && message === undefined) return Option.none()
   const intent = item?.inputIntent
-  const into = Option.flatMap(Option.fromNullable(item?.runId), (runId) => Option.fromNullable(projection.runs.find(({ id }) => id === runId)))
+  const into = Option.flatMap(Option.fromNullable(item?.runId ?? message?.runId), (runId) => Option.fromNullable(projection.runs.find(({ id }) => id === runId)))
   return Option.some({
     // One with no turn item yet still has its run to say: one it started is a turn of its own, unless it waits in the queue or was taken out of it.
     intent:
