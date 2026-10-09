@@ -306,6 +306,10 @@ describe("Persona", () => {
     // Words of what's said past it stay, however short.
     expect(Persona.afterOnIt("On it. In yapd", Persona.plain)).toBe("In yapd")
     expect(Persona.afterOnIt("On it, I took that to mean staging.", Persona.plain)).toBe("I took that to mean staging.")
+    // Only the usual ways of addressing someone go: any other words after it are what was said.
+    expect(Persona.afterOnIt("On it, staging only.", Persona.plain)).toBe("Staging only.")
+    expect(Persona.afterOnIt("On it, tests first.", Persona.plain)).toBe("Tests first.")
+    expect(Persona.afterOnIt("On it, chief, staging only.", Persona.plain)).toBe("Staging only.")
     expect(Persona.afterOnIt("On it, in yapd.", Persona.plain)).toBe("In yapd.")
     expect(Persona.afterOnIt("On it, in yapd, on Fable.", Persona.plain)).toBe("In yapd, on Fable.")
     expect(Persona.afterOnIt("On it, on Fable.", sir)).toBe("On Fable.")
