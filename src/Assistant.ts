@@ -2604,8 +2604,6 @@ export const make = (options: {
             // Nothing in it, he wants to hear it again; words a form can't take, which of them it takes, with yapd's pick.
             case "Again":
               return yield* reask(said, "again")
-            case "Instead":
-              return yield* reask(said, "instead")
             case "Which":
               return yield* reask(said, "which")
             case "Skip":

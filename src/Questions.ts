@@ -101,8 +101,6 @@ export type Reply =
   | { readonly _tag: "Again" }
   /** He wants to know what the options mean. */
   | { readonly _tag: "More" }
-  /** A plain no to yapd's pick: which one then, of the others. */
-  | { readonly _tag: "Instead" }
   /** Words a form that takes only its options can't take: which of them, then. */
   | { readonly _tag: "Which" }
   /** He wants it put off. */

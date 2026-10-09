@@ -1287,9 +1287,6 @@ const settling = (open: Assistant.Open, heard: string, said: string, target: str
           return answers({ act: "again", how: "same" })
         case "More":
           return answers({ act: "again", how: "more" })
-        case "Instead":
-          // Once it's asked which one then, a no is never to yapd's pick again: what it's to is the model's to judge.
-          return open.asked === open.wording?.instead ? undefined : answers({ act: "again", how: "instead" })
         case "Which":
           // Once it's asked which of them, what his words are to is the model's to judge.
           return open.asked === open.wording?.which ? undefined : answers({ act: "again", how: "which" })

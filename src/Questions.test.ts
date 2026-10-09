@@ -525,6 +525,9 @@ describe("Questions", () => {
     ])
     const invoices = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
     expect(["Yes.", "Yes, all of them.", "No.", "Nope."].map((heard) => pick(invoices, heard))).toEqual([undefined, picked(0), picked(1), undefined])
+    // So no reply is a no to yapd's pick, to ask which one then: only the model, which tells what a no is to, asks that.
+    const toPick: [Extract<Questions.Reply, { readonly _tag: "Instead" }>] extends [never] ? true : false = true
+    expect(toPick).toBe(true)
     // A yes with words after it, or words to go ahead, are the model's however they start another option's name.
     for (const [labels, heard] of [
       [["Ship it now", "Hold it for QA (Recommended)"], "Ship it."],
