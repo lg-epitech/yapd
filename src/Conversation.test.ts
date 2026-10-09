@@ -65,7 +65,7 @@ const conversation = (said: ReadonlyArray<string>, sending = 0, deliveries: Read
             Effect.as(
               text.startsWith("Sam,")
                 ? { intent: "resume" as const, spoken: "", message: "" }
-                : { intent: "send" as const, spoken: "Okay.", message: text },
+                : { intent: "send" as const, spoken: text.startsWith("Just") ? "" : "Okay.", message: text },
             ),
           ),
       }),
@@ -265,6 +265,20 @@ describe("Follow-ups", () => {
       }),
     )
     expect(result).toEqual({ aside: [], saying: ["Okay."] })
+  })
+
+  test("says the persona's line for going ahead when the reply passed on says nothing of its own", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { fiber, sent, speak, wait, saying } = yield* conversation(["Just merge it."])
+        yield* speak
+        yield* wait(5)
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { sent, saying }
+      }),
+    )
+    expect(result).toEqual({ sent: ["Just merge it."], saying: ["On it."] })
   })
 
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {
@@ -612,9 +626,11 @@ describe("Language check", () => {
 
 describe("quick replies", () => {
   const reply = (heard: string, message = "The PR is up. Should I merge it?", needsYou = true, said?: string) =>
-    Responder.quick(
-      { project: "yapd", turn: { prompt: Option.none(), message }, needsYou, lines: said === undefined ? [] : [{ speaker: "yapd", text: said }], heard },
-      "On it, sir.",
+    Effect.runSync(
+      Responder.quick(
+        { project: "yapd", turn: { prompt: Option.none(), message }, needsYou, lines: said === undefined ? [] : [{ speaker: "yapd", text: said }], heard },
+        Effect.succeed("On it, sir."),
+      ),
     )
 
   test("goes ahead at once when the agent asked", () => {
@@ -634,19 +650,21 @@ describe("quick replies", () => {
     expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's…")).toBeUndefined()
     // Once it's been answered, another yes could mean anything.
     expect(
-      Responder.quick(
-        {
-          project: "yapd",
-          turn: { prompt: Option.none(), message: "The PR is up. Should I merge it?" },
-          needsYou: true,
-          lines: [
-            { speaker: "yapd", text: "The PR is up. Should I merge it?" },
-            { speaker: "user", text: "Yes." },
-            { speaker: "yapd", text: "On it, sir." },
-          ],
-          heard: "Yes.",
-        },
-        "On it, sir.",
+      Effect.runSync(
+        Responder.quick(
+          {
+            project: "yapd",
+            turn: { prompt: Option.none(), message: "The PR is up. Should I merge it?" },
+            needsYou: true,
+            lines: [
+              { speaker: "yapd", text: "The PR is up. Should I merge it?" },
+              { speaker: "user", text: "Yes." },
+              { speaker: "yapd", text: "On it, sir." },
+            ],
+            heard: "Yes.",
+          },
+          Effect.succeed("On it, sir."),
+        ),
       ),
     ).toBeUndefined()
     // Cut off before the question was heard.
@@ -658,6 +676,26 @@ describe("quick replies", () => {
     expect(reply("Okay, cool.", "The PR is up.", false)?.intent).toBe("dismiss")
     expect(reply("Skip it.")?.intent).toBe("dismiss")
     expect(reply("Merge the other one too.", "The PR is up.", false)).toBeUndefined()
+  })
+
+  test("takes a line for going ahead only when it's said, so the next one said is never the last one again", () => {
+    let taken = 0
+    const onIt = Effect.sync(() => (++taken % 2 === 0 ? "Very good, sir." : "Right away, sir."))
+    const heard = "The PR is up. Should I merge it?"
+    const reply = (said: string, message = heard) =>
+      Effect.runSync(
+        Responder.quick(
+          { project: "yapd", turn: { prompt: Option.none(), message }, needsYou: message === heard, lines: [{ speaker: "yapd", text: message }], heard: said },
+          onIt,
+        ),
+      )
+    expect(reply("Thanks.", "The PR is up.")?.intent).toBe("dismiss")
+    expect(reply("Yes, but rebase it first.")).toBeUndefined()
+    expect(reply("Enough.")?.intent).toBe("dismiss")
+    expect(taken).toBe(0)
+    expect(reply("Go ahead.")?.spoken).toBe("Right away, sir.")
+    expect(reply("Yes.")?.spoken).toBe("Very good, sir.")
+    expect(taken).toBe(2)
   })
 })
 

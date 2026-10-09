@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Schema, SubscriptionRef } from "effect"
+import { Context, Effect, Layer, Option, Random, Schema, SubscriptionRef, SynchronizedRef } from "effect"
 import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 import * as Settings from "./Settings.ts"
@@ -7,7 +7,8 @@ import { Warmth } from "./Voice.ts"
 // The few things yapd says without asking a model each time, like "On it."
 // once it has passed something on. Written once in the user's style, kept for
 // as long as the style stays the same, and rendered ahead, so they play the
-// moment they're needed.
+// moment they're needed. For "On it." he can give lines of his own instead,
+// a different one each time, since one line every time grows stale.
 
 export const Lines = Schema.Struct({
   /** Something the user said is on its way to the work. */
@@ -70,8 +71,44 @@ export class Persona extends Context.Tag("yapd/Persona")<
   {
     /** The lines as they are now: plain until the user's style has been written in. */
     readonly lines: Effect.Effect<Lines>
+    /** The line to say once he's asked for something, taken only when it's about to be said, since his own vary. */
+    readonly onIt: Effect.Effect<string>
   }
 >() {}
+
+/**
+ * His own lines for once he's asked for something, from YAPD_ON_IT, without
+ * any that ask, since he'd answer one yapd isn't waiting on.
+ */
+const ownLines = Effect.gen(function* () {
+  const lines = [...new Set(yield* Config.onIt)]
+  const asking = lines.filter((line) => line.includes("?"))
+  if (asking.length > 0) {
+    yield* Effect.logWarning(`Leaving out the lines in YAPD_ON_IT that ask something, since they'd be answered: ${asking.join(" | ")}`)
+  }
+  return lines.filter((line) => !line.includes("?"))
+})
+
+/**
+ * The lines with his own in place of the written "on it". Read for anything
+ * but saying it, like rendering ahead, his first one stands for them all.
+ */
+const owning = (own: ReadonlyArray<string>) => (lines: Lines): Lines => (own.length === 0 ? lines : { ...lines, onIt: own[0]! })
+
+/**
+ * One of his own lines, never the one said last time, so they vary. Each one
+ * taken is taken to be said, which is why reading the lines leaves it alone.
+ * Without his own, it's the line as it is now.
+ */
+const alternating = (own: ReadonlyArray<string>, lines: Effect.Effect<Lines>) =>
+  Effect.gen(function* () {
+    if (own.length === 0) return Effect.map(lines, ({ onIt }) => onIt)
+    const last = yield* SynchronizedRef.make<string | undefined>(undefined)
+    return SynchronizedRef.modifyEffect(last, (said) => {
+      const others = own.length === 1 ? own : own.filter((line) => line !== said)
+      return Effect.map(Random.nextIntBetween(0, others.length), (index) => [others[index]!, others[index]!] as const)
+    })
+  })
 
 export const prompt = (style: string) =>
   [
@@ -95,10 +132,15 @@ export const layer = Layer.scoped(
   Effect.gen(function* () {
     const style = yield* Config.style
     const warmth = yield* Warmth
+    const own = yield* ownLines
     const ref = yield* SubscriptionRef.make(plain)
+    const lines = Effect.map(SubscriptionRef.get(ref), owning(own))
+    const persona = { lines, onIt: yield* alternating(own, lines) }
+    // All of his own, so whichever comes up plays at once.
+    const warm = (lines: Lines) => warmth.warm([...sayable(owning(own)(lines)), ...own.slice(1)])
     if (Option.isNone(style)) {
-      yield* Effect.forkScoped(warmth.warm(sayable(plain)))
-      return { lines: SubscriptionRef.get(ref) }
+      yield* Effect.forkScoped(warm(plain))
+      return persona
     }
     const settings = yield* Settings.Settings
     const model = yield* Model
@@ -122,13 +164,13 @@ export const layer = Layer.scoped(
     // In the background, so nothing waits on it, and the plain lines stand in meanwhile.
     yield* written.pipe(
       Effect.tap((lines) => SubscriptionRef.set(ref, lines)),
-      Effect.flatMap((lines) => warmth.warm(sayable(lines))),
+      Effect.flatMap(warm),
       Effect.catchAll((error) => Effect.logWarning("Could not write my usual lines in your style, so they stay plain", error)),
       Effect.forkScoped,
     )
-    return { lines: SubscriptionRef.get(ref) }
+    return persona
   }),
 )
 
 /** The plain lines, for tests and for wherever there's no style. */
-export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain) })
+export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain), onIt: Effect.succeed(plain.onIt) })

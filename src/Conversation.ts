@@ -433,7 +433,9 @@ export const make = (options: {
         sending.set(update, mark)
         const lines = yield* persona.lines
         const fiber = yield* follow(update, reply.message).pipe(
-          Effect.map((result) => (result === "queued" ? lines.queued : reply.spoken || lines.onIt)),
+          Effect.flatMap((result) =>
+            result === "queued" ? Effect.succeed(lines.queued) : reply.spoken === "" ? persona.onIt : Effect.succeed(reply.spoken),
+          ),
           Effect.catchAll((error) =>
             Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
               Effect.tap(() => {

@@ -278,7 +278,7 @@ const assistant = (
                 )
               }),
           }),
-          Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines) }),
+          Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines), onIt: Effect.succeed(lines.onIt) }),
         ),
       ),
     )
