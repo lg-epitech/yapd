@@ -1876,4 +1876,42 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["Two things are running, sir.", "yapd. The PR is ready."])
     expect(result.stopped).toEqual(when === "over" ? ["Two things are running, sir."] : [])
   })
+
+  test.each([
+    ["a follow-up", "What's it waiting on?", "over"],
+    ["thanks", "Thanks.", "over"],
+    ["stop", "Stop.", "over"],
+    ["a follow-up", "What's it waiting on?", "right after"],
+  ])("what he missed that a catch-up answer told him, followed by %s said %s it, is heard only once it was said to the end", async (_, said, when) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, dictating, speak, played, journal } = yield* assisted(
+          (situation) => {
+            if (situation.utterance.via === "reply") return Brain.decision({ act: "answer", spoken: "A review, sir." })
+            // As the model is asked to: what he missed, from what he hasn't heard.
+            const told = situation.unheard.map(({ said }) => said).join(" ")
+            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+          },
+          { microphone: true, transcripts: [said] },
+        )
+        yield* finish("a", "The loader fix is ready.")
+        yield* wait(2)
+        // Turned off and on before it's read to the end, so he missed it.
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* dictating("What did I miss?")
+        yield* wait(when === "over" ? 3 : 11)
+        yield* speak
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        return { unheard: (yield* journal.unheard(0, 12)).map(({ said }) => said), played: [...played] }
+      }),
+    )
+    // Cut off, it's dealt with all the same: never said again.
+    expect(result.played).toEqual([
+      "yapd. The loader fix is ready.",
+      "You missed this: yapd. The loader fix is ready.",
+      ...(said === "What's it waiting on?" ? ["A review, sir."] : []),
+    ])
+    expect(result.unheard).toEqual(when === "over" ? ["yapd. The loader fix is ready."] : [])
+  })
 })

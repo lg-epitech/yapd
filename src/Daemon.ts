@@ -577,7 +577,7 @@ export const make = Effect.gen(function* () {
       yield* used
       if (question === undefined && followUp !== undefined) {
         let through = false
-        /** Once, as soon as it's said to the end, even with the microphone still open for a follow-up, or once it's followed up. */
+        /** Once, as soon as it's said to the end, even with the microphone still open for a follow-up. */
         const heard = Effect.suspend(() => {
           if (through) return Effect.void
           through = true
@@ -585,7 +585,10 @@ export const make = Effect.gen(function* () {
         }).pipe(Effect.uninterruptible)
         // Listened to like an update, so he can follow up what he asked about, which only one said to the end lingers for.
         yield* conversation.answer({ audio: played, saying, confirmed, followUp, through: heard })
-        return yield* heard
+        // Cut off by a follow-up, a thanks or a stop, it's dealt with, never said again, but not heard: what he missed that it
+        // was telling him, he didn't hear all of, so it's still his to catch up on, as when a dictation cuts it off.
+        if (!through) yield* Effect.uninterruptible(dealtWith)
+        return
       }
       if (question === undefined) {
         const playback = yield* audio.play(played)
