@@ -2,9 +2,9 @@
 
 A short list of what this branch changed and what yapd can do now. The commit log has the detail, including every fix that came out of review.
 
-Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until it comes back with nothing to fix, then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before its first migration, to `~/.yapd/yapd.before-jarvis.sqlite`, and again before the assistant went live, to `~/.yapd/yapd.before-m1.sqlite`.
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite` and `yapd.before-m2.sqlite`.
 
-Live on `dev` now: everything below except doing things to threads by voice (message, steer, stop, carry on), which is merged here and waits on its live check. Being built: showing what you ask for on screen.
+Live on `dev` now: everything below. Being built: an agent's questions read out and answered by voice, and showing what you ask for on screen.
 
 ## Talk to it (the shortcut)
 
@@ -38,3 +38,9 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 - Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
 - yapd's local API turns away anything a web page sends, so no site you visit can have it start work or talk to your threads.
+
+## Known, left for now
+
+- With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
+- After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.
+- With an older yapd on rig, a connection dropped while starting work there is said as "I can't reach rig" rather than "it may have started".
