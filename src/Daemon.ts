@@ -12,6 +12,7 @@ import * as Inbox from "./Inbox.ts"
 import { Journal } from "./Journal.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
+import { Persona } from "./Persona.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
@@ -55,6 +56,7 @@ export const make = Effect.gen(function* () {
   const condenser = yield* Condenser
   const voice = yield* Voice
   const audio = yield* Audio
+  const persona = yield* Persona
   const waiting = yield* Waiting
   const relays = yield* Relays
   const floor = yield* Floor.Floor
@@ -180,6 +182,8 @@ export const make = Effect.gen(function* () {
           spoken: introduce(update.project, spoken),
           at,
           stale: Effect.succeed(false),
+          // Only once it plays, so a line for going ahead dropped as yapd was turned off never counts as the last one he heard.
+          saying: persona.said(spoken),
         },
         readSince.get(update),
       ),

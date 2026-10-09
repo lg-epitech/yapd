@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Context, Deferred, Effect, Fiber, Layer, Option, Queue, Schema, type Scope, TestClock, TestContext } from "effect"
-import { Audio } from "./Audio.ts"
+import { Audio, AudioError } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
 import { cut, together, unfinished } from "./Conversation.ts"
@@ -13,6 +13,7 @@ import { clean, Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import * as Journal from "./Journal.ts"
 import * as Persona from "./Persona.ts"
+import { ProcessError } from "./Process.ts"
 import { Voice } from "./Voice.ts"
 
 const update: Conversation.Update = {
@@ -29,13 +30,15 @@ const update: Conversation.Update = {
 /**
  * Plays a whole conversation against a microphone the test talks into, with the provider taking five seconds to reply,
  * taking what's said to Sam for talk with someone else, the relay `sending` seconds to send, and follow-ups going out
- * as `result` says: sent, queued, or held back as the session has moved on.
+ * as `result` says: sent, queued, or held back as the session has moved on. `render` renders what's said back, and
+ * with `unplayable`, nothing but the update can be played, as when the audio helper goes down after it.
  */
 const conversation = (
   said: ReadonlyArray<string>,
   sending = 0,
   deliveries: ReadonlyArray<Effect.Effect<void>> = [],
   result: "sent" | "queued" | "moved" = "sent",
+  given: { readonly render?: Context.Tag.Service<Voice>["render"]; readonly unplayable?: boolean } = {},
 ) =>
   Effect.gen(function* () {
     const microphone = yield* Queue.unbounded<Float32Array>()
@@ -56,13 +59,15 @@ const conversation = (
       }),
       Journal.memory,
       Layer.succeed(Audio, {
-        play: () =>
-          Effect.succeed({
-            duration: 10,
-            finished: Effect.sleep("10 seconds"),
-            stop: Effect.succeed(2),
-            volume: () => Effect.void,
-          }),
+        play: (path) =>
+          given.unplayable === true && path !== update.audio
+            ? Effect.fail(new AudioError({ message: "The audio helper didn't start playing" }))
+            : Effect.succeed({
+                duration: 10,
+                finished: Effect.sleep("10 seconds"),
+                stop: Effect.succeed(2),
+                volume: () => Effect.void,
+              }),
         microphone: Effect.succeed(Option.some(microphone)),
         rest: Effect.void,
         warm: Effect.void,
@@ -86,7 +91,7 @@ const conversation = (
           Effect.zipRight(Effect.sync(() => void sent.push(text))),
         ),
       }),
-      Layer.succeed(Voice, { render: () => Effect.void }),
+      Layer.succeed(Voice, { render: given.render ?? (() => Effect.void) }),
     )
     const context = yield* Layer.build(layer)
     const made = yield* Conversation.make({
@@ -311,10 +316,30 @@ describe("Follow-ups", () => {
     expect(await follow("moved")).toEqual({ saying: [Conversation.movedOn], noted: [Conversation.movedOn] })
   })
 
+  test("tells the persona a line is said only once it plays, never when it can't be rendered or played, or a dictation cuts in first", async () => {
+    const follow = (given: Parameters<typeof conversation>[4], dictation = false) =>
+      scoped(
+        Effect.gen(function* () {
+          const { fiber, speak, wait, noted } = yield* conversation(["Just merge it."], 0, [], "sent", given)
+          yield* speak
+          yield* wait(5)
+          if (dictation) yield* Fiber.interrupt(fiber)
+          yield* wait(20)
+          return { exit: (yield* Fiber.await(fiber))._tag, noted }
+        }),
+      )
+    const failing = () => Effect.fail(new ProcessError({ command: "say", code: 1, stderr: "It couldn't render." }))
+    expect(await follow({ render: failing })).toEqual({ exit: "Failure", noted: [] })
+    expect(await follow({ unplayable: true })).toEqual({ exit: "Failure", noted: [] })
+    // As a dictation does, while it's still rendering.
+    expect(await follow({ render: () => Effect.sleep("10 seconds") }, true)).toEqual({ exit: "Failure", noted: [] })
+    expect(await follow({})).toEqual({ exit: "Success", noted: ["On it."] })
+  })
+
   test("sends what the user said even when the conversation is cut off meanwhile, and says so later", async () => {
     const result = await scoped(
       Effect.gen(function* () {
-        const { fiber, sent, late, speak, wait, sending } = yield* conversation(["Please merge it."], 3)
+        const { fiber, sent, late, noted, speak, wait, sending } = yield* conversation(["Please merge it."], 3)
         yield* speak
         // The reply is worked out, and on its way to the agent.
         yield* wait(6)
@@ -322,12 +347,14 @@ describe("Follow-ups", () => {
         // As a dictation does.
         yield* Fiber.interrupt(fiber)
         yield* wait(3)
-        return { during, sent, late, sending: yield* sending("s") }
+        return { during, sent, late, noted, sending: yield* sending("s") }
       }),
     )
     expect(result.during).toEqual({ sent: [], sending: true })
     expect(result.sent).toEqual(["Please merge it."])
     expect(result.late).toEqual(["Okay."])
+    // Whatever says it later tells the persona, once it plays.
+    expect(result.noted).toEqual([])
     expect(result.sending).toBe(false)
   })
 

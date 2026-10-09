@@ -130,7 +130,7 @@ export const make = (options: {
   readonly moved: (update: Update) => Effect.Effect<boolean>
   /** Delivers the follow-up, or queues it until the session can receive it, using its latest thread. */
   readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued", RelayError>
-  /** Says how a follow-up went when the update it answers was cut off before yapd could. */
+  /** Says how a follow-up went when the update it answers was cut off before yapd could, noting it with the persona once it plays. */
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
   /** Something was said over an update and taken in, which takes the place of whatever yapd asked before. */
   readonly replied: Effect.Effect<void>
@@ -444,8 +444,6 @@ export const make = (options: {
               Effect.as(error.reason),
             ),
           ),
-          // Noted once it's what will be said, now or later, so a line for going ahead picked for nothing never counts as the last one he heard.
-          Effect.tap(persona.said),
           Effect.ensuring(
             Effect.sync(() => {
               if (sending.get(update) === mark) sending.delete(update)
@@ -498,6 +496,8 @@ export const make = (options: {
 
           while (true) {
             const outcome: Outcome = yield* speak(path, from, missed < misses ? ear : Effect.succeed(undefined), {
+              // Noted only once it plays, so a line for going ahead that fails to render or play, or that a dictation cuts in before, never counts as the last one he heard.
+              begun: path === update.audio ? Effect.void : persona.said(text),
               through: path === update.audio ? through : Effect.void,
             })
             if (outcome._tag === "Finished") return
