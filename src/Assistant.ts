@@ -40,7 +40,6 @@ export type Asks =
   | {
       readonly _tag: "Approval"
       readonly requestId: string
-      readonly dangerous: boolean
       readonly decisions: ReadonlyArray<string>
       readonly inFull: boolean
     }
@@ -82,7 +81,7 @@ interface Heard {
 export interface Asking {
   readonly ref: Threads.Ref
   readonly asks: Exclude<Asks, { readonly _tag: "Agent" }>
-  /** As it's asked: "The Tezos migration wants to push the branch. Allow it, sir?" */
+  /** As it's asked: "The Tezos migration wants to push the branch. Say 'approve' if you want it, sir." */
   readonly asked: string
   /** What a yes does, after "whether to", or what it's about: "allow the Tezos migration to push the branch". */
   readonly about: string
@@ -1581,9 +1580,12 @@ export const make = (options: {
           return { _tag: "Undo", to, carry: decision.how === "carry" || stopped }
         case "decide": {
           if (Option.isNone(to) || asks?._tag !== "Approval") return undefined
-          // For the rest of the thread's work only when he said so, whatever the model took it for; never for always.
+          // Allowed only with "approve" in his words, however it came here, never a plain yes; for the rest of the thread's work only when
+          // he said so, whatever the model took it for; never for always.
+          const allowing = decision.how === "accept" || decision.how === "session"
+          if (allowing && !Brain.approving(heard)) return undefined
           const allowed: Hands.Decision | undefined =
-            decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(heard) ? "acceptForSession" : decision.how === "accept" || decision.how === "session" ? "accept" : undefined
+            decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(heard) ? "acceptForSession" : allowing ? "accept" : undefined
           return allowed === undefined ? undefined : { _tag: "Decide", to: to.value, requestId: asks.requestId, decision: allowed }
         }
         case "reply": {
@@ -2241,7 +2243,7 @@ export const make = (options: {
      * Allowing, turning down or answering what a thread waits on him for,
      * said with no question about it open: done as he says only for a
      * request he's heard asked, even one now behind something it asked
-     * since, and a risky one only with "approve". Otherwise what it waits on
+     * since, and an approval only with "approve". Otherwise what it waits on
      * is read back to him as its question, so his answer is to what he heard.
      * A question he's heard is answered from the part he'd got to, and once
      * he's answered every part, it's sent; until then, the next is asked. With
@@ -2254,9 +2256,10 @@ export const make = (options: {
         const pending = target.thread.pendingRuntimeRequest
         if (pending === null) return reply(Brain.dealtWith(said), thought.subject)
         const heard = Option.getOrUndefined(yield* meant(target.ref, pending.id, decision.act === "decide" ? "Approval" : "Question", thought.utterance))
-        const risky = heard?._tag === "Approval" && heard.dangerous && decision.how !== "decline" && !Brain.approving(thought.utterance.heard)
+        // Allowed only with "approve", whatever the model took his words for: a plain yes, however it's put, has it read back to him.
+        const unapproved = heard?._tag === "Approval" && decision.how !== "decline" && !Brain.approving(thought.utterance.heard)
         const hearing = decision.act === "reply" && decision.text.trim() === ""
-        if (heard?._tag === "Approval" && !risky) return yield* write(plan, thought, said, at, heard)
+        if (heard?._tag === "Approval" && !unapproved) return yield* write(plan, thought, said, at, heard)
         // Words a form that takes only its options can't take ask the part he'd got to once more, as over the question itself.
         const filled = heard?._tag === "Question" && !hearing ? fill(heard, decision.text, dictated) : undefined
         if (heard?._tag === "Question" && filled !== undefined) {
@@ -2305,7 +2308,7 @@ export const make = (options: {
               : heard?._tag === "Question"
                 ? "since it takes only its options"
                 : heard !== undefined
-                  ? "since a risky one needs him to say approve"
+                  ? "since only 'approve' allows one"
                   : "since he hasn't heard it asked"
         yield* Effect.logInfo(`Reading back what it waits on, ${why}`)
         const read = yield* opening(
@@ -2543,16 +2546,20 @@ export const make = (options: {
         const named = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         const elsewhere = requestOf(open) !== undefined && named !== undefined && !open.candidates.some((ref) => Threads.same(ref, named.ref))
         const answers = (decision.pending === "answers" || repeated) && decision.act !== "resume" && !elsewhere && !aside
-        // An approval is allowed only once he's heard all of it as it was last asked, even with "approve", since what it would run comes
-        // last; and a risky one only by the word its asking named, never a plain yes: otherwise it's asked once more, in full and naming
-        // the word for a risky one, then it's let go. A no needs neither.
+        // An approval is allowed only by the word its asking named, "approve" or "allow", never a plain yes, "sure", "OK", "go ahead" or
+        // "do it", however risky it looks and whatever the model took them for: he's told it needs an "approve", in the same words for any,
+        // and it's left waiting for him to say it. Even with "approve", only once he's heard all of it as it was last asked, since what it
+        // would run comes last: otherwise it's asked once more, in full, then it's let go. A no needs neither.
         const approval = open.asks?._tag === "Approval" ? open.asks : undefined
         const allowing = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline"
-        const unapproved = allowing && approval.dangerous && !Brain.approving(utterance.heard)
-        if (allowing && (unapproved || !heardBy(utterance, opened.whole))) {
+        if (allowing && !Brain.approving(utterance.heard)) {
+          yield* close(open, "dropped: not approved", utterance.id)
+          return reply(Brain.unapproved(said), decided.subject)
+        }
+        if (allowing && !heardBy(utterance, opened.whole)) {
           if ((asking?.asks ?? asks) < asks) return yield* reask(said)
-          yield* close(open, unapproved ? "dropped: not approved" : "dropped: not heard in full", utterance.id)
-          return reply(unapproved ? Brain.unapproved(said) : Brain.cutShort(said), decided.subject)
+          yield* close(open, "dropped: not heard in full", utterance.id)
+          return reply(Brain.cutShort(said), decided.subject)
         }
         const question = open.kind === "question" && answers && open.asks?._tag === "Question" ? open.asks : undefined
         // Put off, a thread's question comes back in ten minutes, from the part he'd got to.

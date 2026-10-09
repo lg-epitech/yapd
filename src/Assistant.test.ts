@@ -831,25 +831,68 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual(["The Tezos migration finished three days ago, sir."])
   })
 
-  test("yes to an approval heard in full allows it", async () => {
+  test("'approve' to an approval heard in full allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
         const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install --global netlify-cli") })
         yield* asked(made, cloud)
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         const steps = yield* made.ledger.steps(0)
         return { spoken: made.spoken(), dispatched: made.dispatched, steps: steps.map(({ kind, state }) => `${kind} ${state}`) }
       }),
     )
-    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?", "Approved, sir."])
+    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Say 'approve' if you want it, sir.", "Approved, sir."])
     expect(result.dispatched).toEqual([
       { commandId: expect.stringMatching(/^yapd:u/), threadId: cloud.id, type: "runtime-request.respond", requestId: "r1", decision: "accept" },
     ])
     expect(result.steps).toEqual(["decide sent"])
   })
 
-  test("a plain yes over an approval he hasn't heard to the end asks it again in full, and allows it only once he has", async () => {
+  test("a plain yes to an approval, harmless-looking or not, only gets that it needs an 'approve', with nothing sent, and 'approve' then allows it once", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    for (const command of ["git status", "git checkout -f main"]) {
+      const result = await run(
+        Effect.gen(function* () {
+          // The model, for what's said with nothing open, takes "approve" to allow what the thread waits on.
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+            others: [cloud],
+            items: approval("r1", command),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          const yes = { spoken: made.spoken().slice(1), dispatched: made.dispatched.length, open: Option.isSome(yield* made.open) }
+          yield* made.dictate("Approve.")
+          return { yes, spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+      expect([command, result]).toEqual([
+        command,
+        {
+          yes: { spoken: ["It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: 0, open: false },
+          spoken: ["Approved, sir: Cloud deployment discovery."],
+          dispatched: ["r1 accept"],
+        },
+      ])
+    }
+    // Nor does any other yes, however the model takes it.
+    for (const heard of ["Sure.", "OK.", "Go ahead.", "Do it.", "Yes, do it.", "Yeah, go for it."]) {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: approval("r1", "git status"),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), dispatched: made.dispatched.length }
+        }),
+      )
+      expect([heard, result]).toEqual([heard, { spoken: ["It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: 0 }])
+    }
+  })
+
+  test("'approve' over an approval he hasn't heard to the end asks it again in full, and allows it only once he has", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -858,29 +901,29 @@ describe("Assistant", () => {
         yield* asked(made, cloud)
         // Said over it, before the end.
         yield* made.cut()
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         const before = made.dispatched.length
         // Asked again, and heard to the end this time.
         yield* made.play()
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         // Another, cut off both times it's asked: it's left waiting, never allowed.
         const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(again)
         yield* asked(made, again)
         yield* made.cut()
-        yield* made.answer("Yeah.")
+        yield* made.answer("Approve it.")
         yield* made.cut()
-        yield* made.answer("Yes.")
+        yield* made.answer("Approved.")
         return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
       }),
     )
     expect(result.before).toBe(0)
     expect(result.spoken).toEqual([
-      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
-      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir?",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir? Only 'approve' will do.",
       "Approved, sir.",
-      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
-      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir?",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir? Only 'approve' will do.",
       "You stopped me before the end, so I've left it waiting for you in T3 Code, sir.",
     ])
     expect(result.dispatched).toEqual(["r1 accept"])
@@ -910,8 +953,8 @@ describe("Assistant", () => {
     )
     expect(result.before).toBe(0)
     expect(result.spoken).toEqual([
-      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
-      "Open Mina SSV2 Bug Tickets wants to run git push origin fee-tables. Allow it, sir?",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Open Mina SSV2 Bug Tickets wants to run git push origin fee-tables. Say 'approve' if you want it, sir.",
       "Approved, sir.",
     ])
     expect(result.dispatched).toEqual(["r2 accept"])
@@ -933,7 +976,7 @@ describe("Assistant", () => {
         return { again, spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
       }),
     )
-    const allow = "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?"
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir."
     const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
     expect(result.again).toEqual([allow, status, allow])
     expect(result.spoken).toEqual([allow, status, allow, status])
@@ -966,7 +1009,7 @@ describe("Assistant", () => {
     expect(result.spoken).toEqual([
       "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
       "The Tezos migration is comparing request formats, sir.",
-      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
     ])
     expect(result.open).toEqual(Option.some("approval"))
   })
@@ -988,8 +1031,8 @@ describe("Assistant", () => {
     )
     expect(result.soon).toBe(1)
     expect(result.spoken).toEqual([
-      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
-      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir?",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir? Only 'approve' will do.",
       "I didn't hear back about whether to allow Cloud deployment discovery to run npm install left-pad, so it's still waiting for you in T3 Code, sir.",
     ])
     expect(result.open).toEqual(Option.none())
@@ -1035,7 +1078,7 @@ describe("Assistant", () => {
         const again = made.questions().at(-1)!
         const stale = yield* again.stale
         yield* made.play(again)
-        yield* made.answer("Yes.", again)
+        yield* made.answer("Approve.", again)
         const kept = yield* made.journal.since(0, { kinds: ["notice"] })
         return {
           off,
@@ -1046,7 +1089,7 @@ describe("Assistant", () => {
         }
       }),
     )
-    const allow = "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?"
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir."
     expect(result.off).toEqual({ open: false, spoken: 1 })
     expect(result.stale).toBe(false)
     expect(result.spoken).toEqual([allow, allow, "Approved, sir."])
@@ -1068,7 +1111,7 @@ describe("Assistant", () => {
         const again = made.questions().at(-1)!
         yield* again.stale
         yield* made.play(again)
-        yield* made.answer("Yes.", again)
+        yield* made.answer("Approve.", again)
         return { spoken: made.spoken().at(-1), unheard: yield* unheard(made) }
       }),
     )
@@ -1084,7 +1127,7 @@ describe("Assistant", () => {
         const read = made.questions().at(-1)!
         yield* read.stale
         yield* made.play(read)
-        yield* made.answer("Yes.", read)
+        yield* made.answer("Approve.", read)
         return { spoken: made.spoken().at(-1), unheard: yield* unheard(made) }
       }),
     )
@@ -1114,24 +1157,21 @@ describe("Assistant", () => {
     const result = await run(
       Effect.gen(function* () {
         const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "git push --force origin main") })
-        const asking = yield* asked(made, cloud)
-        // A plain yes, twice: asked once more, naming the word, then let go.
-        yield* made.answer("Yes.")
+        yield* asked(made, cloud)
+        // A yes in other words than "approve": it needs the word, and it's left waiting.
         yield* made.answer("Yeah, go ahead.")
-        return { dangerous: asking.asks._tag === "Approval" && asking.asks.dangerous, spoken: made.spoken(), dispatched: made.dispatched.length, open: yield* made.open }
+        return { spoken: made.spoken(), dispatched: made.dispatched.length, open: yield* made.open }
       }),
     )
-    expect(result.dangerous).toBe(true)
     expect(result.spoken).toEqual([
       "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
-      "Shall I still allow Cloud deployment discovery to run git push --force origin main, sir? Only 'approve' will do.",
       "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
     ])
     expect(result.dispatched).toBe(0)
     expect(result.open).toEqual(Option.none())
   })
 
-  test("a forced checkout, or a switch that discards changes, needs 'approve' though the model says it's harmless, and a plain yes heard in full never allows it", async () => {
+  test("a forced checkout, or a switch that discards changes, is said to be what can't be undone though the model says it's harmless, and a plain yes heard in full never allows it, needs 'approve' though the model says it's harmless, and a plain yes heard in full never allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     for (const command of ["git checkout -f main", "git switch --discard-changes main"]) {
       const result = await run(
@@ -1140,14 +1180,12 @@ describe("Assistant", () => {
           const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", command) })
           yield* asked(made, cloud)
           yield* made.answer("Yes.")
-          yield* made.answer("Yes.")
           return { spoken: made.spoken(), dispatched: made.dispatched.length }
         }),
       )
       expect(result).toEqual({
         spoken: [
           `Cloud deployment discovery wants to run ${command}, which can't be undone, so say 'approve' if you want it, sir.`,
-          `Shall I still allow Cloud deployment discovery to run ${command}, sir? Only 'approve' will do.`,
           "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
         ],
         dispatched: 0,
@@ -1155,7 +1193,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("an approval is risky by all of what it would run, however long, and one whose command can't be read needs 'approve' too", async () => {
+  test("an approval is said to be what can't be undone by all of what it would run, however long, and one whose command can't be read says so, and one whose command can't be read needs 'approve' too", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     // Something harmless long enough to be cut short before what's risky, under T3 Code's own harmless words for it.
     const long = `echo '${"a".repeat(650)}'; rm -rf /tmp/example-data`
@@ -1169,27 +1207,23 @@ describe("Assistant", () => {
         const made = yield* assistant(unasked, undefined, { others: [cloud], items })
         yield* asked(made, cloud)
         yield* made.answer("Yes.")
-        yield* made.answer("Yes.")
         const unread = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(unread)
         yield* asked(made, unread)
-        yield* made.answer("Yes.")
         yield* made.answer("Approve.")
         return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
       }),
     )
     expect(result.spoken).toEqual([
       "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
-      "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
       "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
       "Cloud deployment discovery wants to run a maintenance check, but I couldn't read all of what it would run, so say 'approve' if you want it, sir.",
-      "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
       "Approved, sir.",
     ])
     expect(result.dispatched).toEqual(["r2 accept"])
   })
 
-  test("a tool's approval is risky by what it's given as the tool gets it, line breaks and all, and needs 'approve' when T3 Code sends only how that starts", async () => {
+  test("a tool's approval is said to be risky by what it's given as the tool gets it, line breaks and all, or not read in full when T3 Code sends only how that starts, and a yes never allows it as the tool gets it, line breaks and all, and needs 'approve' when T3 Code sends only how that starts", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     /** Asks for a tool given `input` to be allowed, under T3 Code's own harmless words for it, and says yes. */
     const allowing = (input: unknown) =>
@@ -1209,7 +1243,7 @@ describe("Assistant", () => {
     expect(await allowing({ command: "cd build\nrm -rf ~/work" })).toEqual({
       spoken: [
         "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
-        "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
       ],
       dispatched: [],
     })
@@ -1217,7 +1251,7 @@ describe("Assistant", () => {
     expect(await allowing({ summary: '{"command":"echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…', truncated: true })).toEqual({
       spoken: [
         "Cloud deployment discovery wants to run a maintenance check, but I couldn't read all of what it would run, so say 'approve' if you want it, sir.",
-        "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
       ],
       dispatched: [],
     })
@@ -1226,19 +1260,19 @@ describe("Assistant", () => {
       expect(await allowing(input)).toEqual({
         spoken: [
           "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
-          "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+  "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
         ],
         dispatched: [],
       })
     }
-    // Sent whole, with nothing risky in it, a yes will do.
+    // Sent whole, with nothing risky in it, it's asked plainly, and a yes still needs an "approve".
     expect(await allowing({ command: "cd build\nls" })).toEqual({
-      spoken: ["Cloud deployment discovery wants to run a maintenance check. Allow it, sir?", "Approved, sir."],
-      dispatched: ["r1 accept"],
+      spoken: ["Cloud deployment discovery wants to run a maintenance check. Say 'approve' if you want it, sir.", "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."],
+      dispatched: [],
     })
   })
 
-  test("an approval is risky by a command that goes on over a backslash onto the next line, and by a tool told to force, to overwrite or to delete all of a tree", async () => {
+  test("an approval is said to be risky by a command that goes on over a backslash onto the next line, and by a tool told to force, to overwrite or to delete all of a tree onto the next line, and by a tool told to force, to overwrite or to delete all of a tree", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     /** Asks for what `items` say it would run to be allowed, under T3 Code's own harmless words for it, and says yes. */
     const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
@@ -1259,7 +1293,7 @@ describe("Assistant", () => {
     const risky = {
       spoken: [
         "Cloud deployment discovery wants to push the branch, which can't be undone, so say 'approve' if you want it, sir.",
-        "Shall I still allow Cloud deployment discovery to push the branch, sir? Only 'approve' will do.",
+"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
       ],
       dispatched: [],
     }
@@ -1279,7 +1313,8 @@ describe("Assistant", () => {
     // A tool named for git's push or reset, told to force or to reset hard as a list of flags or a mode.
     expect(await allowing(tool("mcp__git__push", { remote: "origin", flags: ["-u", "--force"] }))).toEqual(risky)
     expect(await allowing(tool("mcp__git__reset", { mode: "hard", target: "HEAD~3" }))).toEqual(risky)
-    // Going on over lines with nothing risky in it, or told to take all of a tree it only lists or searches, whatever it looks for, a yes will do.
+    // Going on over lines with nothing risky in it, or told to take all of a tree it only lists or searches, whatever it looks for, it's asked
+    // plainly, and a yes still needs an "approve".
     for (const items of [
       approval("r1", "git push origin main \\\n  --follow-tags"),
       tool("mcp__fs__list_directory", { path: "src", recursive: true }),
@@ -1287,11 +1322,11 @@ describe("Assistant", () => {
       tool("mcp__search__grep", { pattern: "delete_user", path: "src", recursive: true }),
       tool("mcp__git__reset", { mode: "soft", target: "HEAD~1" }),
     ]) {
-      expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
+      expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Say 'approve' if you want it, sir.", "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] })
     }
   })
 
-  test("an approval is risky by the command in T3 Code's own words for it, never by the tool's name before it", async () => {
+  test("an approval is said to be risky by the command in T3 Code's own words for it, never by the tool's name before it for it, never by the tool's name before it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     /** Asks for what `items` say it would run to be allowed, in T3 Code's own words for it, and says yes. */
     const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
@@ -1303,7 +1338,8 @@ describe("Assistant", () => {
           return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
         }),
       )
-    // A search for what would be risky to run, and git only reading or writing it down, take a yes, as "Bash: grep 'rm' -r src".
+    // A search for what would be risky to run, and git only reading or writing it down, are asked plainly, as "Bash: grep 'rm' -r src", and a
+    // yes still needs an "approve".
     for (const command of [
       "grep 'rm' -r src",
       "git log --grep 'clean' -f",
@@ -1314,16 +1350,16 @@ describe("Assistant", () => {
       "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF\n)\"",
       "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF)\"",
     ]) {
-      expect(await allowing(approval("r1", command))).toEqual({ spoken: [`Cloud deployment discovery wants to run ${command}. Allow it, sir?`, "Approved, sir."], dispatched: ["r1 accept"] })
+      expect(await allowing(approval("r1", command))).toEqual({ spoken: [`Cloud deployment discovery wants to run ${command}. Say 'approve' if you want it, sir.`, "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] })
     }
     // A tool given a command apart from its words, as "mcp__shell__run: git", runs them with it, never on their own.
     const logging = [
       { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "mcp__shell__run: git", nativeItemRef: { nativeId: "tool-r1" } },
       { type: "dynamic_tool", status: "running", toolName: "mcp__shell__run", input: { command: "git", args: ["log", "--grep", "clean", "-f"] }, nativeItemRef: { nativeId: "tool-r1" } },
     ]
-    expect(await allowing(logging)).toEqual({ spoken: ["Cloud deployment discovery wants to run git. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
+    expect(await allowing(logging)).toEqual({ spoken: ["Cloud deployment discovery wants to run git. Say 'approve' if you want it, sir.", "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] })
     // A push forced by a flag among others, a hard reset with its flag after the rest, and what's run after a commit's message,
-    // however its heredoc is closed, need "approve".
+    // however its heredoc is closed, are said to be what can't be undone.
     for (const command of [
       "git push -uf origin main",
       "git reset -q HEAD~1 --hard",
@@ -1334,7 +1370,7 @@ describe("Assistant", () => {
       expect(await allowing(approval("r1", command))).toEqual({
         spoken: [
           `Cloud deployment discovery wants to run ${command}, which can't be undone, so say 'approve' if you want it, sir.`,
-          `Shall I still allow Cloud deployment discovery to run ${command}, sir? Only 'approve' will do.`,
+"It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
         ],
         dispatched: [],
       })
@@ -1390,7 +1426,7 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
-  test("a dangerous approval he heard and let go is allowed by dictation only with 'approve', and read back to him otherwise", async () => {
+  test("an approval he heard and let go is allowed by dictation only with 'approve', and read back to him otherwise, and read back to him otherwise", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1416,7 +1452,7 @@ describe("Assistant", () => {
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
-  test("an approval is allowed for the rest of its work only when he says so, whatever the model took his yes for", async () => {
+  test("an approval is allowed for the rest of its work only when he says so, whatever the model took his 'approve' for, whatever the model took his yes for", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1426,18 +1462,18 @@ describe("Assistant", () => {
           items,
         })
         yield* asked(made, cloud)
-        yield* made.answer("Yes, go on and let it.")
+        yield* made.answer("Yes, approve it and let it go on.")
         const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(again)
         yield* asked(made, again)
-        yield* made.answer("Yes, for the session.")
+        yield* made.answer("Yes, approve it for the session.")
         return made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`)
       }),
     )
     expect(result).toEqual(["r1 accept", "r2 acceptForSession"])
   })
 
-  test("an approval dictated before he's heard it asked is read back first, and only a yes to that allows it", async () => {
+  test("an approval dictated before he's heard it asked is read back first, and only an 'approve' to that allows it, and only a yes to that allows it", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1447,18 +1483,18 @@ describe("Assistant", () => {
         })
         yield* made.dictate("Approve the cloud deployment one.")
         const before = made.dispatched.length
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
       }),
     )
     expect(result.before).toBe(0)
-    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?", "Approved, sir."])
+    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Say 'approve' if you want it, sir.", "Approved, sir."])
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
   test("what he said before an approval was asked, or before its turn came to be said, never allows it, however late it's handed on", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
-    const allow = "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?"
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir."
     // A model that takes anything for a yes to it, as one might, seeing what waits on him.
     const yes = (situation: Brain.Situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" })
     const sent = (made: { readonly dispatched: ReadonlyArray<Record<string, unknown>> }) => made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`)
@@ -1470,7 +1506,7 @@ describe("Assistant", () => {
         yield* made.heard({ heard: "Approve the cloud deployment one.", via: "shortcut", at: now - 1000, voiced: 3, turns: 1 })
         yield* made.flush
         const before = { dispatched: sent(made), open: Option.isSome(yield* made.open) }
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         return { before, spoken: made.spoken(), dispatched: sent(made) }
       }),
     )
@@ -1484,7 +1520,7 @@ describe("Assistant", () => {
         const at = yield* TestClock.currentTimeMillis
         yield* made.wait(1)
         yield* made.play()
-        yield* made.heard({ heard: "Yes.", via: "shortcut", at, voiced: 1, turns: 1 })
+        yield* made.heard({ heard: "Approve.", via: "shortcut", at, voiced: 1, turns: 1 })
         yield* made.flush
         return { spoken: made.spoken(), open: Option.isSome(yield* made.open), dispatched: sent(made) }
       }),
@@ -1492,7 +1528,7 @@ describe("Assistant", () => {
     expect(waiting).toEqual({ spoken: [allow], open: true, dispatched: [] })
   })
 
-  test("an approval answered in T3 Code meanwhile is not said, and a late yes sends nothing and is told it's been dealt with", async () => {
+  test("an approval answered in T3 Code meanwhile is not said, and a late 'approve' sends nothing and is told it's been dealt with sends nothing and is told it's been dealt with", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1504,7 +1540,7 @@ describe("Assistant", () => {
         yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
         yield* made.settled("r1")
         const unsaid = yield* waiting.stale
-        // Another, heard this time, then answered there as he says yes to it: the yes sends nothing, and he's told why.
+        // Another, heard this time, then answered there as he approves it: the approve sends nothing, and he's told why.
         const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(again)
         yield* asked(made, again)
@@ -1512,14 +1548,14 @@ describe("Assistant", () => {
         const heard = made.questions().at(-1)!
         yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
         yield* made.settled("r2")
-        yield* made.answer("Yes.", heard)
-        // And one he says yes to just as it's answered there, before yapd hears of it: nothing goes, and he's told why.
+        yield* made.answer("Approve.", heard)
+        // And one he approves just as it's answered there, before yapd hears of it: nothing goes, and he's told why.
         const third = { ...cloud, pendingRuntimeRequest: { id: "r3", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(third)
         yield* asked(made, third)
         yield* made.play()
         yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         const noted = yield* made.journal.since(0, { kinds: ["action"] })
         return {
           unsaid,
@@ -1529,14 +1565,14 @@ describe("Assistant", () => {
         }
       }),
     )
-    const allow = "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?"
+    const allow = "Cloud deployment discovery wants to run npm install --global netlify-cli. Say 'approve' if you want it, sir."
     expect(result.unsaid).toBe(true)
     expect(result.spoken).toEqual([allow, allow, "That's already been dealt with, sir.", allow, "That's already been dealt with, sir."])
     expect(result.dispatched).toBe(0)
     expect(result.moot).toBe(1)
   })
 
-  test("a yes to an approval still waiting behind a newer one asked alongside it allows it, and the newer one is asked after", async () => {
+  test("'approve' to an approval still waiting behind a newer one asked alongside it allows it, and the newer one is asked after asked alongside it allows it, and the newer one is asked after", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1547,19 +1583,19 @@ describe("Assistant", () => {
         const both = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:17:30.000Z" } }
         yield* made.becomes(both)
         yield* asked(made, both)
-        yield* made.answer("Yes.", made.questions()[0])
+        yield* made.answer("Approve.", made.questions()[0])
         return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
       }),
     )
     expect(result.spoken).toEqual([
-      "Cloud deployment discovery wants to run npm install left-pad. Allow it, sir?",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
       "Approved, sir.",
-      "Cloud deployment discovery wants to run npm install right-pad. Allow it, sir?",
+      "Cloud deployment discovery wants to run npm install right-pad. Say 'approve' if you want it, sir.",
     ])
     expect(result.dispatched).toEqual(["r1 accept"])
   })
 
-  test("an approval he heard, now behind a question it asked since, is allowed by dictating it, and a risky one read back to him first", async () => {
+  test("an approval he heard, now behind a question it asked since, is allowed by dictating 'approve', and read back to him on a yes in other words, is allowed by dictating it, and a risky one read back to him first", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const question = { type: "user_input_request", status: "waiting", requestId: "q2", questions: [{ id: "net", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }] }
     // It asks something else alongside, which T3 Code's summary shows in its place, while the approval still waits.
@@ -1582,6 +1618,11 @@ describe("Assistant", () => {
         }),
       )
     expect(await allow("npm install left-pad", ["Approve the cloud deployment one."])).toEqual({ spoken: ["Approved, sir: Cloud deployment discovery."], dispatched: ["r1 accept"] })
+    // A yes in other words has it read back to him, however harmless it looks.
+    expect(await allow("npm install left-pad", ["Yes, let the cloud one go ahead.", "Approve."])).toEqual({
+      spoken: ["Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.", "Approved, sir."],
+      dispatched: ["r1 accept"],
+    })
     expect(await allow("git push --force origin main", ["Yes, let the cloud one go ahead.", "Approve."])).toEqual({
       spoken: [
         "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
@@ -1606,7 +1647,7 @@ describe("Assistant", () => {
         return { spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`), open: Option.map(yield* made.open, ({ asked }) => asked) }
       }),
     )
-    const newer = "Cloud deployment discovery wants to run npm install right-pad. Allow it, sir?"
+    const newer = "Cloud deployment discovery wants to run npm install right-pad. Say 'approve' if you want it, sir."
     expect(result.spoken).toEqual([newer])
     expect(result.open).toEqual(Option.some(newer))
     expect(result.dispatched).toEqual([])
@@ -6577,7 +6618,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("turned off while the thread is read before a yes to an approval goes once more, after the first never left yapd, nothing goes, and it stays as it was", async () => {
+  test("turned off while the thread is read before an 'approve' to an approval goes once more, after the first never left yapd, nothing goes, and it stays as it was goes once more, after the first never left yapd, nothing goes, and it stays as it was", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -6590,7 +6631,7 @@ describe("Assistant", () => {
           answer: () => (payload, bounded) => (lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." })) : takes(payload, bounded)),
         })
         yield* asked(made, cloud)
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         // It never left yapd, so it still waits on him; he says it again, and turns yapd off as the thread is read first.
         yield* made.becomes(cloud)
         lost = false
@@ -8249,7 +8290,7 @@ describe("Assistant", () => {
       await answering(onRig, card("q9", [colour]), "Let's do the red one I think.", (target) => Brain.decision({ act: "reply", target, text: "Red", pending: "answers" })),
     ).toEqual({ spoken: ["Red it is, sir."], sent: [{ requestId: "q9", answers: { [colour.id]: "Red" }, decision: undefined }], open: false })
     expect(
-      await answering(approving, approval("r9", "npm install left-pad"), "Sure, let it do that I suppose.", (target) =>
+      await answering(approving, approval("r9", "npm install left-pad"), "Approve that, I suppose.", (target) =>
         Brain.decision({ act: "decide", how: "accept", target, pending: "answers" }),
       ),
     ).toEqual({ spoken: ["Approved, sir."], sent: [{ requestId: "r9", answers: undefined, decision: "accept" }], open: false })
@@ -8331,7 +8372,7 @@ describe("Assistant", () => {
       await dictated(onRig, card("q9", [colour]), "Red.", "Red, for the fee table checks on rig.", (target) => Brain.decision({ act: "reply", target, text: "Red" })),
     ).toEqual({ spoken: ["Red it is, sir."], sent: 1, open: false })
     expect(
-      await dictated(approving, approval("r9", "npm install left-pad"), "Yes.", "Approve the fee table checks on rig.", (target) =>
+      await dictated(approving, approval("r9", "npm install left-pad"), "Approve.", "Approve the fee table checks on rig.", (target) =>
         Brain.decision({ act: "decide", how: "accept", target }),
       ),
     ).toEqual({ spoken: ["Approved, sir."], sent: 1, open: false })
@@ -8440,7 +8481,7 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.some(here))
   })
 
-  test("a yes to a rig approval given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
+  test("an 'approve' to a rig approval given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
     const asking = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
     const result = await run(
       Effect.gen(function* () {
@@ -8455,20 +8496,20 @@ describe("Assistant", () => {
         // Read back to him, as on his asking, and allowed as rig drops out.
         yield* asked(made, asking, "rig")
         seen = false
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         const sent = rig.length
         yield* made.wait(60)
         seen = true
         yield* made.wait(10)
         yield* made.wait(1)
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         return { spoken: made.spoken(), sent, decided: rig.map(({ requestId, decision }) => `${requestId} ${decision}`) }
       }),
     )
     expect(result.spoken).toEqual([
-      "Fee table checks on rig wants to run npm install left-pad. Allow it, sir?",
+      "Fee table checks on rig wants to run npm install left-pad. Say 'approve' if you want it, sir.",
       "I couldn't get your go-ahead to it, sir: I can't follow rig's threads right now. I'll ask you again once I can.",
-      "Shall I still allow Fee table checks on rig to run npm install left-pad, sir?",
+      "Shall I still allow Fee table checks on rig to run npm install left-pad, sir? Only 'approve' will do.",
       "Approved, sir.",
     ])
     expect(result.sent).toBe(0)
@@ -8544,7 +8585,7 @@ describe("Assistant", () => {
           yield* made.questions().at(-1)!.stale
           yield* made.play(made.questions().at(-1))
           seen = false
-          yield* made.answer("Yes.")
+          yield* made.answer("Approve.")
           yield* made.wait(60)
           seen = true
           yield* made.wait(10)
@@ -8552,18 +8593,18 @@ describe("Assistant", () => {
         }
         yield* made.questions().at(-1)!.stale
         yield* made.play(made.questions().at(-1))
-        yield* made.answer("Yes.")
+        yield* made.answer("Approve.")
         return { spoken: made.spoken(), decided: rig.map(({ requestId, decision }) => `${requestId} ${decision}`) }
       }),
     )
     const away = "I couldn't get your go-ahead to it, sir: I can't follow rig's threads right now. I'll ask you again once I can."
-    const still = "Shall I still allow Fee table checks on rig to run npm install left-pad, sir?"
+    const still = "Shall I still allow Fee table checks on rig to run npm install left-pad, sir? Only 'approve' will do."
     expect(result.spoken).toEqual([
-      "Fee table checks on rig wants to run npm install left-pad. Allow it, sir?",
+      "Fee table checks on rig wants to run npm install left-pad. Say 'approve' if you want it, sir.",
       away,
       still,
       away,
-      "Do you still want me to allow Fee table checks on rig to run npm install left-pad, sir?",
+      "Do you still want me to allow Fee table checks on rig to run npm install left-pad, sir? Say 'approve' if you do.",
       away,
       still,
       "Approved, sir.",

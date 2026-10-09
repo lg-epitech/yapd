@@ -237,10 +237,11 @@ const noted = (ref: Threads.Ref, project: string, request: Pick<T3Actions.Reques
 
 /**
  * What a thread waits on him to allow, worded from what the model made of
- * it, `what`, which follows the thread's name: asked, needing "approve" when
- * it's risky by the model's word or by all of what it would run, or when
- * that couldn't be read in full, and saying so. It's never brought up of
- * yapd's own accord, only read back when he brings it up himself.
+ * it, `what`, which follows the thread's name: asked, needing "approve"
+ * whatever it is, since a plain yes never allows one, and saying why it's
+ * worth a thought when it's risky by the model's word or by all of what it
+ * would run, or when that couldn't be read in full. It's never brought up
+ * of yapd's own accord, only read back when he brings it up himself.
  */
 export const asking = (
   input: {
@@ -258,26 +259,24 @@ export const asking = (
   // It follows the thread's name, so it starts as the rest of a sentence.
   const what = input.what.replace(/^(Wants|Asks|Needs|Has) /, (word) => word.toLowerCase())
   const sir = addressed(said)
-  // By all of what it would run, never what's cut short to be said, which can leave out the risky part, and that first, as a tool's name is.
+  // Said to be what can't be undone by all of what it would run, never what's cut short to be said, which can leave out the risky part, and
+  // that first, as a tool's name is. It only words it: any approval needs "approve".
   const risky = risk === "high" || Brain.dangerous(request.whole === undefined ? request.what : `${request.whole}\n${request.what}`)
-  // Not shown in full, what it would run could be anything, so it's taken for risky too.
+  // Not shown in full, what it would run could be anything, which is said too.
   const unread = request.whole === undefined
-  const dangerous = risky || unread
   const doing = /^wants to /i.test(what) ? what.replace(/^wants to /i, "") : undefined
   const about = doing === undefined ? `give ${called} your go-ahead` : `allow ${called} to ${doing}`
   const asked = risky
     ? `${capital(called)} ${what}, which can't be undone, so say 'approve' if you want it${sir}.`
     : unread
       ? `${capital(called)} ${what}, but I couldn't read all of what it would run, so say 'approve' if you want it${sir}.`
-      : `${capital(called)} ${what}. Allow it${sir}?`
-  const rewordings = dangerous
-    ? [`Shall I still ${about}${sir}? Only 'approve' will do.`, `Do you still want me to ${about}${sir}? Say 'approve' if you do.`]
-    : [`Shall I still ${about}${sir}?`, `Do you still want me to ${about}${sir}?`]
+      : `${capital(called)} ${what}. Say 'approve' if you want it${sir}.`
+  const rewordings = [`Shall I still ${about}${sir}? Only 'approve' will do.`, `Do you still want me to ${about}${sir}? Say 'approve' if you do.`]
   return {
     _tag: "Ask",
     asking: {
       ref,
-      asks: { _tag: "Approval", requestId: request.id, dangerous, decisions: request.decisions.map(({ decision }) => decision), inFull: false },
+      asks: { _tag: "Approval", requestId: request.id, decisions: request.decisions.map(({ decision }) => decision), inFull: false },
       asked,
       about,
       rewordings,

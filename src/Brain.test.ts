@@ -821,13 +821,19 @@ describe("Brain", () => {
     const asked = (text: string) => `${text}\nBash: ${text}`
     expect(risky.filter((text) => !Brain.dangerous(asked(text)))).toEqual([])
     expect(ordinary.filter((text) => Brain.dangerous(asked(text)))).toEqual([])
-    // The words that allow a risky one, and never one turned down in the same breath.
-    expect(["Approve.", "Yes, approve it.", "Allow it.", "Confirm.", "I approve."].filter((heard) => !Brain.approving(heard))).toEqual([])
+    // The words that allow any approval, and never one turned down in the same breath, nor a yes in other words.
+    expect(["Approve.", "Approve it.", "Approved.", "Yes, approve it.", "Allow it.", "Allow.", "Confirm.", "I approve."].filter((heard) => !Brain.approving(heard))).toEqual([])
     expect(
       [
         "Yes.",
         "Sure.",
+        "OK.",
+        "Okay.",
         "Go ahead.",
+        "Do it.",
+        "Yes, do it.",
+        "Yeah, go for it.",
+        "Sounds good.",
         "No, don't approve that.",
         "Never approve it.",
         "Do not allow it.",
@@ -1246,7 +1252,7 @@ describe("Brain", () => {
       thread: { agent: "claude", session: "s1", cwd: "/code/yapd", message: "The review came back clean.", origin: {} },
       at: now - 20_000,
     }
-    const asks: Assistant.Asks = { _tag: "Approval", requestId: "r1", dangerous: false, decisions: ["accept", "decline"], inFull: true }
+    const asks: Assistant.Asks = { _tag: "Approval", requestId: "r1", decisions: ["accept", "decline"], inFull: true }
     const told: Array<Assistant.Subject> = [
       { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) },
       { _tag: "Answer", said: "Nothing needs you right now, sir.", about: Option.none() },

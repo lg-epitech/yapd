@@ -360,17 +360,22 @@ export const dealtWith = (lines: Lines) => `That's already been dealt with${addr
 /** What's said instead of answering a thread that waits on a secret, which is only ever given in T3 Code. */
 export const secretly = (lines: Lines) => `That one needs T3 Code; I never take a secret by voice${addressed(lines)}.`
 
-/** What's said of a risky approval once a plain yes to it was asked about again, and wasn't "approve" either time. */
+/**
+ * What's said of an approval he said yes to in any words but "approve" or
+ * "allow", like a plain yes, "sure" or "go ahead": it needs the word, worded
+ * the same however risky it looks, and it's left waiting, his to approve.
+ */
 export const unapproved = (lines: Lines) => `It needs an 'approve', so I've left it waiting for you in T3 Code${addressed(lines)}.`
 
-/** What's said of an approval he said a plain yes over once it was asked again, before he'd heard all of it. */
+/** What's said of an approval he said "approve" over once it was asked again, before he'd heard all of it. */
 export const cutShort = (lines: Lines) => `You stopped me before the end, so I've left it waiting for you in T3 Code${addressed(lines)}.`
 
 /**
- * What makes what a thread wants to do risky enough to need "approve", in
- * its prompt or the command, change or tool it's for, whatever the model
- * made of it: deleting for good, forcing history, production and deploys,
- * and credentials. It never turns anything down: it only asks for the word.
+ * What makes what a thread wants to do risky enough to say it can't be
+ * undone, in its prompt or the command, change or tool it's for, whatever
+ * the model made of it: deleting for good, forcing history, production and
+ * deploys, and credentials. It only words the asking: every approval needs
+ * "approve" all the same, and it never turns anything down.
  * What a flag anywhere after a command's name makes risky is looked for a
  * command at a time, below, and no pattern here takes a word of any length
  * before what it looks for, like a "\w+" before "_token", which would take
@@ -889,7 +894,9 @@ const riskyToRun = (run: string) => risky.test(run) || commands(run).some((comma
  * to do, or one that deletes told to take all that's under what it's given,
  * which a search for "how to remove a recursive function" never is. T3 Code's
  * own words for it, like "Bash: grep 'rm' -r src", are read as their command,
- * and a commit's message, as Claude Code writes one, as words.
+ * and a commit's message, as Claude Code writes one, as words. It only words
+ * the asking, as what can't be undone: whatever it says, only "approve"
+ * allows what a thread waits on.
  */
 export const dangerous = (text: string) => {
   const command = continued(unmessaged(text.replace(summarized, "")))
@@ -908,13 +915,15 @@ export const dangerous = (text: string) => {
 }
 
 /**
- * Whether he allowed it in so many words, like "yes, approve it", "allow it"
- * or "confirm", and said nothing against it, like "wouldn't", "no" or "never",
- * however the apostrophe was written.
+ * Whether he allowed it in so many words, like "approve", "yes, approve it",
+ * "allow", "allow it" or "confirm", which is all that ever allows what a
+ * thread waits on, and said nothing against it, like "wouldn't", "no" or
+ * "never", however the apostrophe was written. A plain yes, "sure", "OK",
+ * "go ahead" or "do it" never does.
  */
 export const approving = (heard: string) => {
   const said = gist(heard.replace(/[’‘`]/g, "'"))
-  return /\b(approve[ds]?|allow (it|that)|confirm(ed)?)\b/.test(said) && !/n't\b|\b(not|never|no|nope|dont|cant|wont|wouldnt|shouldnt|couldnt|didnt)\b/.test(said)
+  return /\b(approve[ds]?|allow|confirm(ed)?)\b/.test(said) && !/n't\b|\b(not|never|no|nope|dont|cant|wont|wouldnt|shouldnt|couldnt|didnt)\b/.test(said)
 }
 
 /** "Say that again", with nothing said lately. */
@@ -1119,7 +1128,7 @@ const ordinals: ReadonlyArray<readonly [RegExp, (count: number) => number]> = [
   [/^(the )?former( one)?$/, () => 0],
 ]
 
-/** Allowing what a thread waits on him for in so many words, which a risky one needs: a plain yes won't do for that. */
+/** Allowing what a thread waits on him for in so many words, which every one needs: a plain yes never does. */
 const allows: ReadonlySet<string> = new Set([
   "approve", "approve it", "approve that", "approved", "i approve", "yes approve", "yes approve it", "yes i approve", "allow", "allow it",
   "allow that", "yes allow it", "confirm", "confirm it", "confirmed", "i confirm", "yes confirm",
@@ -1218,13 +1227,14 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
 
 /**
  * What answers what a thread waits on him for without the model: "approve",
- * a plain yes or a no to an approval, of which either yes only allows one
- * he's heard all of, and a plain yes only one that isn't risky, as the
- * assistant sees to, asking once more otherwise; or, to the part of a
- * question being asked, what his words plainly come to, as `Questions.pick`
- * has it: the options he picked, his own words, or what he wants done with
- * the question itself, like hearing it again, what its options mean, or
- * putting it off. Anything else is the model's to judge.
+ * a plain yes or a no to an approval, of which only "approve" allows one,
+ * and only one he's heard all of, as the assistant sees to, telling him a
+ * plain yes needs an "approve" and asking once more for one he hasn't heard
+ * all of; or, to the part of a question being asked, what his words plainly
+ * come to, as `Questions.pick` has it: the options he picked, his own words,
+ * or what he wants done with the question itself, like hearing it again,
+ * what its options mean, or putting it off. Anything else is the model's to
+ * judge.
  */
 const settling = (open: Assistant.Open, heard: string, said: string, target: string): Decision | undefined => {
   const { asks } = open
