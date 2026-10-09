@@ -589,10 +589,24 @@ describe("Telling yapd's own voice from the user's", () => {
     for (const heard of [
       "", "Thank you.", "- Verse.", "End of song.", "Thank you. Thank you.", "Okay.", "Thanks.", "Yeah.", "So,", "Hello?", "Mm-hmm.",
       "Uh-huh.", "Please subscribe.", "Thank you, bye.", "Thank you so much for watching.", "I'll see you next time.", "you you you",
-      "Subtitles by the Amara.org community", "Okay, thanks.", "Yeah, okay.", "Okay, okay. Yes.",
+      "Subtitles by the Amara.org community", "Okay, thanks.", "Yeah, okay.", "Okay, okay. Yes.", "Of course.", "Excuse me.",
+      "Good morning.", "What the hell?", "Jesus Christ.",
     ]) {
       expect([heard, theirs(heard, saying)]).toEqual([heard, false])
     }
+  })
+
+  test("takes its own voice for its own when Whisper writes its name as a word it knows, like \"yapped\" for \"yapd\"", () => {
+    for (const heard of ["Over in yapped.", "Over in Japan.", "Over in Yappy.", "Overin Yapti.", "Over in yapped, the tests pass."]) {
+      expect([heard, theirs(heard, saying)]).toEqual([heard, false])
+    }
+    const question = "Which one, sir: yapd or the docs site?"
+    for (const heard of ["Which one, sir? Yapped.", "Which one? Yapped.", "Which one, sir? Yap, or the dock site?"]) {
+      expect([heard, theirs(heard, question)]).toEqual([heard, false])
+    }
+    // His own words still are, said over it.
+    expect(theirs("Hold on, which PR was that?", saying)).toBe(true)
+    expect(theirs("Neither, start a new project.", question)).toBe(true)
   })
 
   test("takes what's mostly the words yapd was saying for its own voice, misheard or not", () => {
@@ -1389,6 +1403,46 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       }),
     )
     expect(result).toEqual({ stopped: ["play", "stop"], sent: ["Hold on."], replies: ["Hold on."] })
+  })
+
+  test("doesn't stop for its own voice with its name heard as a word Whisper knows, like \"yapped\", nor send or note it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapped."]])
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play"], transcribed: ["Over in yapped."], sent: [], replies: [] })
+  })
+
+  test("doesn't take a question's own voice with its name misheard for an answer, nor stop asking it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const helper = yield* overHelper([[0.8, "Which one, sir? Yapped."]], { duration: 3.5 })
+        yield* Fiber.interrupt(helper.fiber)
+        const asked = helper.commands.length
+        const asking = yield* Effect.fork(
+          helper.ask({
+            audio: "/tmp/question.wav",
+            spoken: "Which one, sir: yapd or the docs site?",
+            answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+          }),
+        )
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, 30)
+        yield* helper.quiet
+        const during = helper.commands.slice(asked)
+        yield* helper.wait(3)
+        yield* helper.finish
+        yield* helper.wait(9)
+        return { during, answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    expect(result).toEqual({ during: ["play"], answered: false, answers: [] })
   })
 })
 
