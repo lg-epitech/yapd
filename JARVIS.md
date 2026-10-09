@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite` and `yapd.before-m2.sqlite`.
 
-Live on `dev` now: everything below. Cards for "show me" appear once the menu bar app is rebuilt from this branch; until then yapd says the gist without them. Being built: an agent's questions read out and answered by voice.
+Live on `dev` now: everything below except rig. Cards for "show me" appear once the menu bar app is rebuilt from this branch; until then yapd says the gist without them. Being built: an agent's questions read out and answered by voice. Built, waiting on its first run with you: rig.
 
 ## Talk to it (the shortcut)
 
@@ -25,6 +25,10 @@ Live on `dev` now: everything below. Cards for "show me" appear once the menu ba
 - "Show me what's running", "show me that PR", "show me my usage" or "what I missed" puts a card in a panel under the menu bar icon as yapd says it; "hide that" takes it down, and "open that PR" opens it in your browser, https only. A thread waiting on a command that can't be read aloud gets its card with the answer, and "say that again" puts it back up.
 - The API gains `/cards`, `/threads` and `/journal` to read from.
 
+## Rig
+
+- Rig's threads count as much as this Mac's: the desk, "who needs me?", "what's running?", cards and messages or stops by voice cover both, each sent only to its own machine, through an SSH tunnel to rig's T3 Code whose token is fetched at startup and kept in memory only. While rig can't be reached, yapd says why the first time something needs rig, then only that it still can't see rig's threads, and this Mac's carry on regardless. Needs rig on a yapd with `yapd t3`.
+
 ## Faster
 
 - "Yes" or "go ahead" to an update that asked something, and "thanks" or "skip it", are handled without the model: about two seconds saved on the most common replies.
@@ -40,7 +44,7 @@ Live on `dev` now: everything below. Cards for "show me" appear once the menu ba
 - A live link to T3 Code's threads that reconnects and catches up on its own, and actions on threads (message, steer, stop, approve, answer, archive, rename, snooze, search, usage). Messages, stops and starts by voice go through them now.
 - Every message, stop and start is written down before it goes out, under ids that make T3 Code do it once however often it's sent. A restart only looks; it never sends. Turned off and on, nothing more goes out for what you said before.
 - `scripts/m2-probe.ts` checks those T3 Code receipts once, on a thread it starts for itself; it sends nothing without `--send`, and `--thread` repeats only the restart check, on a thread it started.
-- Groundwork, not switched on yet: an SSH tunnel to rig's T3 Code (token kept in memory only), and streaming plus first-sentence playback for faster speech.
+- Groundwork, not switched on yet: streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
 - yapd's local API turns away anything a web page sends, so no site you visit can have it start work or talk to your threads.
 
