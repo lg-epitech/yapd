@@ -371,6 +371,10 @@ describe("Brain", () => {
       'mcp__proxy__call {"tool":"remove_directory","path":"build"}',
       "mcp__fs__delete_file\npath\nbuild",
       "bin/rails runner 'User.delete_all'",
+      "rm 'a;b' -rf ~/work",
+      'rm "a|b" -rf ~/work',
+      "rm a\\;b -rf ~/work",
+      "git push origin 'a;b' --force",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -431,6 +435,8 @@ describe("Brain", () => {
       "mcp__search__grep\npattern\ndelete_user\npath\nsrc\nrecursive\ntrue",
       "mcp__search__grep\npattern\nrm\nrecursive\ntrue",
       "mcp__fs__list\npath\nsrc\nremove_duplicates\nfalse\nrecursive\ntrue",
+      "rm 'a;b' -f build.log",
+      'git commit -m "wip; tidy" && git push origin main',
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
@@ -459,7 +465,8 @@ describe("Brain", () => {
   test("what's risky is told in moments, however what it would run is written, up to as much of it as is looked through", () => {
     // As much as an approval is looked through for what's risky, written so that patterns take time growing with the square of its
     // length: a command going on over many lines, many names a flag could follow in one command, or among its flags, a long word, a
-    // name set to true with a long run of spaces and line breaks after it, many short commands, and a $' never closed or many of them.
+    // name set to true with a long run of spaces and line breaks after it, many short commands, a $' never closed or many of them, and
+    // separators that end no command, between quotes or after a backslash.
     const long = {
       "a push going on over lines": "push \\\n".repeat(3000),
       "an rm going on over lines": "rm \\\n".repeat(5000),
@@ -479,6 +486,8 @@ describe("Brain", () => {
       "many short commands": "rm;".repeat(6666),
       "a $' left open": `$'${"\\'".repeat(9999)}`,
       "many $'": "$'".repeat(10_000),
+      "separators between quotes": "'a;'".repeat(5000),
+      "separators after backslashes": "rm \\;".repeat(5000),
     }
     /** How long it takes to tell, the quickest of three, so a pause in between doesn't count. */
     const took = (text: string) =>

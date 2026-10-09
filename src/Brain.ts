@@ -555,6 +555,36 @@ const unquoted = (command: string) =>
     .replace(/\\([\s\S])/g, "$1")
     .replace(/\$?["']/g, "")
 
+/** What ends a command, below, outside quotes. */
+const ending = "\n;|&"
+
+/**
+ * What it would run with each line break, ";", "|" or "&" that's between
+ * quotes or after a backslash read as a space, as the shell reads it: part
+ * of a word, never the end of a command, so `rm 'a;b' -rf ~/work` still has
+ * its flag. It's read a character at a time, once, and looked through as
+ * well as what's written, where a quote never closed, which the shell would
+ * refuse, would hide all after it.
+ */
+const sealed = (text: string) => {
+  let quote = ""
+  let read = ""
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text.charAt(at)
+    if (char === "\\" && quote !== "'") {
+      // What a backslash keeps as it is, but between single quotes, where it's only itself.
+      const kept = text.charAt(at + 1)
+      read += kept !== "" && ending.includes(kept) ? "\\ " : `\\${kept}`
+      at += 1
+      continue
+    }
+    if (quote === "" && (char === "'" || char === '"')) quote = char === "'" && text.charAt(at - 1) === "$" ? "$'" : char
+    else if (quote !== "" && char === quote.at(-1)) quote = ""
+    read += quote !== "" && ending.includes(char) ? " " : char
+  }
+  return read
+}
+
 /**
  * A name set to true among what a tool is given, as its JSON writes it, or
  * as it's looked through, a name and its value a line each: how a tool is
@@ -607,8 +637,9 @@ const riskyToRun = (run: string) => risky.test(run) || commands(run).some((comma
  */
 export const dangerous = (text: string) => {
   const command = continued(text)
-  const quoteless = unquoted(command)
-  if (riskyToRun(command) || (quoteless !== command && riskyToRun(quoteless)) || forcing.test(text) || overwriting.test(text)) return true
+  const whole = sealed(command)
+  const read = new Set([command, unquoted(command), whole, unquoted(whole)])
+  if ([...read].some(riskyToRun) || forcing.test(text) || overwriting.test(text)) return true
   const does = whatItDoes(text)
   return does.some((what) => deletesForGood.test(what)) || (recursing.test(text) && does.some((what) => deletes.test(what)))
 }
