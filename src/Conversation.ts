@@ -147,20 +147,11 @@ const reach = 2
 /** What a look at what's been said so far heard, less its last word, which the audio may cut through, and Whisper hear as anything, even "stop". */
 const cutShort = (heard: string) => heard.split(/\s+/).filter((word) => word !== "").slice(0, -1).join(" ")
 
-/** What Whisper makes up of near-silence, or of a voice it can't make out, which nobody said: let go wherever it comes in what's heard, longest first. */
-const madeUp = [
-  ...hallucinated, "the end", "thank you very much", "thank you so much", "thanks for listening", "thank you for listening",
-  "thank you for your attention", "see you next time", "see you later", "see you soon", "see you in the next one", "see you guys",
-  "see you guys next time", "bye bye", "goodbye", "good night", "i'll be right back", "have a nice day", "have a good day",
-  "take care", "good luck", "welcome back", "let's get started", "i'm sorry", "oh my god", "you know what i mean", "bon appétit",
-  "peace out", "of course", "excuse me", "good morning", "good afternoon", "good evening", "what the hell", "jesus christ",
-].map(gist).sort((one, other) => other.length - one.length)
-
 /** Words only what Whisper makes up has, from the videos it learnt on, which give away the whole sentence they're in. */
-const tells: ReadonlySet<string> = new Set([
-  "watching", "subscribe", "subscribed", "video", "videos", "channel", "music", "song", "verse", "chorus", "applause", "laughter",
-  "subtitles", "captions", "amara", "transcription",
-])
+const giveaways: ReadonlySet<string> = new Set(["subscribe", "subscribed", "amara", "applause", "laughter", "verse", "chorus"])
+
+/** Words what Whisper makes up has, from the videos it learnt on, but that he may say too, like "Pause the video.": they give a sentence away only when it has nothing else of his. */
+const tells: ReadonlySet<string> = new Set(["watching", "video", "videos", "channel", "music", "song", "subtitles", "captions", "transcription"])
 
 /** Words Whisper makes up on their own, or that only fill a pause, so they say nothing of who said them. Not "yes", which answers yapd. */
 const fillers: ReadonlySet<string> = new Set([
@@ -371,19 +362,37 @@ const halted = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) =>
     words.some((_, start) => phrase.every((word, index) => words[start + index] === word) && phrase.some((word) => !says(word, yapd))),
   )
 
+/** What Whisper makes up of near-silence, or of a voice it can't make out, which nobody said, as a sentence of its own and without the fillers. */
+const madeUp: ReadonlySet<string> = new Set(
+  [
+    ...hallucinated, "the end", "end of song", "thank you very much", "thank you so much", "thanks for listening", "thank you for listening",
+    "thank you for your attention", "see you next time", "i'll see you next time", "see you later", "see you soon", "see you in the next one",
+    "i'll see you in the next one", "see you guys", "see you guys next time", "bye bye", "goodbye", "good night", "i'll be right back",
+    "have a nice day", "have a good day", "take care", "good luck", "welcome back", "let's get started", "i'm sorry", "oh my god",
+    "you know what i mean", "bon appétit", "peace out", "of course", "excuse me", "good morning", "good afternoon", "good evening",
+    "what the hell", "jesus christ",
+  ].map((phrase) => vocabulary(phrase).filter((word) => word.length > 1 && !fillers.has(word)).join(" ")),
+)
+
 /**
  * The words of what was heard as they're compared, less what Whisper makes
- * up, single letters, and the words that only fill a pause.
+ * up, single letters, and the words that only fill a pause. A sentence of
+ * what it makes up is let go only whole, so none of his goes with it.
  */
-const wordsOf = (heard: string) => {
+const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
   const said = heard
     // Sentences, but not the dot in "Amara.org".
     .split(/[.!?]+(?=\s|$)/)
-    .map((sentence) => vocabulary(sentence).join(" "))
-    .filter((sentence) => !sentence.split(" ").some((word) => tells.has(word)))
-    .flatMap((sentence) => madeUp.reduce((left, phrase) => ` ${left} `.replaceAll(` ${phrase} `, " ").trim(), sentence).split(" "))
-    // Single letters, like the "D" of "yap D", are as likely either's.
-    .filter((word) => word.length > 1 && !fillers.has(word))
+    .map(vocabulary)
+    .filter((sentence) => !sentence.some((word) => giveaways.has(word)))
+    .filter(
+      (sentence) =>
+        !sentence.some((word) => tells.has(word)) ||
+        !sentence.every((word) => tells.has(word) || fillers.has(word) || common.has(word) || word.length === 1 || yapd.includes(word)),
+    )
+    .map((sentence) => sentence.filter((word) => word.length > 1 && !fillers.has(word)))
+    .filter((sentence) => !madeUp.has(sentence.join(" ")))
+    .flat()
   // Whisper repeats itself on noise, so a word said again straight after counts once.
   return said.filter((word, index) => word !== said[index - 1])
 }
@@ -403,9 +412,9 @@ export type Whose = "echo" | "his" | "mixed"
  * otherwise.
  */
 export const whose = (heard: string, saying: string): Whose => {
-  const words = wordsOf(heard)
-  if (words.length === 0) return "echo"
   const yapd = vocabulary(saying)
+  const words = wordsOf(heard, yapd)
+  if (words.length === 0) return "echo"
   if (halted(words, yapd)) return "his"
   if (inTurn(words, yapd)) return "echo"
   if (curt.has(words.join(" "))) return "his"

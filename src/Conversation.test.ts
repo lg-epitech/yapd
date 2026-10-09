@@ -735,6 +735,17 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("Thank you.", "")).toBe("echo")
   })
 
+  test("takes a sentence of his for his, though it has a word or a phrase of what Whisper makes up in it", () => {
+    const line = "Codex finished the migration on yapd and all the tests pass now. Do you want me to open the pull request?"
+    for (const heard of ["Post it in the release channel.", "Pause the video.", "Is it watching the files?", "Turn the music down.", "Excuse me, what did it do?"]) {
+      expect([heard, whose(heard, line)]).toEqual([heard, "his"])
+    }
+    const long = `${saying} and the pull request is ready for review, so I can merge it`
+    for (const heard of ["Merge it, then post in the channel.", "I'm sorry, don't merge it."]) {
+      expect([heard, whose(heard, long)]).toEqual([heard, "mixed"])
+    }
+  })
+
   test("takes a stop or a wait yapd isn't saying for him, wherever it comes in what was heard, even with its own voice", () => {
     const line = "Codex finished the migration on yapd and all the tests pass now. Do you want me to open the pull request?"
     for (const heard of ["Hold on.", "Hold on, which tests?", "Wait, did it run the integration tests?"]) {
