@@ -100,6 +100,9 @@ export const enough: ReadonlySet<string> = new Set([
   "stop", "quiet", "be quiet", "shut up", "silence", "mute", "skip", "skip it", "next", "enough", "that's enough", "never mind",
 ])
 
+/** What Whisper writes for near-silence, which nobody said. */
+export const hallucinated: ReadonlySet<string> = new Set(["you", "thank you", "bye", "see you again", "kid", "thanks for watching"])
+
 /** Taking an update in. Said to one that asked something, they could be the answer, so the model judges those. */
 const noted = new Set([
   "thanks", "thank you", "thanks a lot", "cheers", "got it", "ok", "okay", "ok thanks", "okay thanks", "cool", "great", "good",

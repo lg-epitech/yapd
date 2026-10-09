@@ -6,7 +6,7 @@ import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
 import { Model } from "./Model.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
-import { agreed, enough, gist, type Line } from "./Responder.ts"
+import { agreed, enough, gist, hallucinated, type Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 
@@ -454,9 +454,6 @@ export const used = (usage: Option.Option<Threads.Usage>, heard: string, lines: 
 }
 
 // ---------------------------------------------------------------- fast paths
-
-/** What Whisper writes for near-silence, which nobody said. */
-const hallucinated: ReadonlySet<string> = new Set(["you", "thank you", "bye", "see you again", "kid", "thanks for watching"])
 
 /** Less than this voiced, a hallucination-like phrase is taken for one. */
 const faint = 0.4
