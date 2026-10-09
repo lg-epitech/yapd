@@ -647,11 +647,12 @@ const deletesForGood = /__(?:delete|destroy|drop|remove|purge|wipe)|\b(?:delete|
 
 /**
  * A tool's name, where T3Actions writes it: first, on a line of its own or
- * before the JSON it's given, like `mcp__fs__rm {"path": "x"}`. Any other
- * line is a name or a value among what it's given, like "remove_duplicates"
- * or a search for "delete_user", which only looks like one.
+ * before the JSON it's given, like `mcp__fs__rm {"path": "x"}`, with its
+ * server's before a "/" too, like `filesystem/delete_file`. Any other line
+ * is a name or a value among what it's given, like "remove_duplicates" or a
+ * search for "delete_user", which only looks like one.
  */
-const toolName = /^[\w.:-]+(?=[ \t]*(?:\{|\r?\n|$))/
+const toolName = /^[\w.:/-]+(?=[ \t]*(?:\{|\r?\n|$))/
 
 /**
  * T3 Code's own words for what a tool would do, when it has none better: the

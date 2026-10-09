@@ -403,6 +403,11 @@ describe("Brain", () => {
       "rimraf ~/work",
       "npx rimraf ~/work",
       "bunx rimraf --glob 'dist/**'",
+      "filesystem/delete_file\npath\nx",
+      'filesystem/delete_file {"path":"x"}',
+      "github/delete_repository\nrepo\nme/x",
+      "supabase/drop_table\nname\nusers",
+      "fs/rm\npath\nx\nrecursive\ntrue",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -479,6 +484,9 @@ describe("Brain", () => {
       "git branch --format='%(refname)' --delete old",
       "rm --dir empty",
       "git reset --help",
+      "filesystem/read_file\npath\ndelete_me.txt",
+      "filesystem/list_directory\npath\nsrc\nrecursive\ntrue",
+      "github/search_code\nq\ndelete_repository",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
