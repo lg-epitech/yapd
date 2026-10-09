@@ -1162,6 +1162,9 @@ export const unseen = (desk: Threads.Desk, lines: Pick<Lines, "address">) =>
     ? undefined
     : desk.away.map(({ reason }, index) => (index === 0 ? `${reason.replace(/\.$/, "")}${addressed(lines)}.` : reason)).join(" ")
 
+/** Whether what he said is only taking back what yapd just did, like "scratch that". */
+export const takesBack = (heard: string) => scratching.has(gist(heard))
+
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
 

@@ -1867,6 +1867,83 @@ describe("Assistant", () => {
     }
   })
 
+  test("a message taken as the answer to a part of a question still goes, with the rest left out, once he lets the rest go or leaves it unanswered", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const message = "Hold off on the deploy until I've checked the fees."
+    const telling = (lettingGo: (made: Effect.Effect.Success<ReturnType<typeof assistant>>) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: message, how: "now" }), undefined, {
+            others: [cloud],
+            items: card("q1", [colour, extras]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the cloud one: hold off on the deploy until I've checked the fees.")
+          const noted = made.spoken().at(-1)
+          yield* lettingGo(made)
+          const answers = answered(made.dispatched)
+          // Nothing's left of it to come back.
+          yield* made.wait(11 * 60)
+          return { noted, said: made.spoken().at(-1), answers, open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const went = {
+      noted: "Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?",
+      said: "Your message went as its answer, sir, with the rest of the question left out.",
+      answers: [{ [colour.id]: message }],
+      open: false,
+    }
+    for (const word of ["Never mind.", "Stop."]) expect([word, await telling((made) => made.answer(word))]).toEqual([word, went])
+    // Left unanswered, as it would be let go, it goes all the same, naming the thread, since it isn't said to anything he said.
+    const unanswered = await telling((made) =>
+      Effect.gen(function* () {
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+      }),
+    )
+    expect(unanswered).toEqual({ ...went, said: "Your message went to Cloud deployment discovery as its answer, sir, with the rest of the question left out." })
+    // Put off once too often, it goes too, rather than be let go with it.
+    const putOff = await telling((made) =>
+      Effect.gen(function* () {
+        yield* made.answer("Later.")
+        yield* made.wait(10 * 60)
+        yield* made.answer("Later.")
+      }),
+    )
+    expect(putOff).toEqual(went)
+    // Taken back as he hears what's asked after it, however the model takes that, it never goes, then or once the rest is let go: taken
+    // back on its own, it's withdrawn, and the question's asked again from the part it answered.
+    const back = "Here are the two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue."
+    for (const [taken, after] of [
+      ["undo", ["Withdrawn, sir.", back, "I'll leave that one, sir."]],
+      ["dismiss", ["I'll leave that one, sir."]],
+    ] as const) {
+      const scratched = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard === "Scratch that."
+                ? Brain.decision({ act: taken, target: handle(situation, cloud), pending: "answers" })
+                : Brain.decision({ act: "send", target: handle(situation, cloud), text: message, how: "now" }),
+            undefined,
+            { others: [cloud], items: card("q1", [colour, extras]) },
+          )
+          yield* asked(made, cloud)
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the cloud one: hold off on the deploy until I've checked the fees.")
+          yield* made.answer("Scratch that.")
+          if (Option.isSome(yield* made.open)) yield* made.answer("Never mind.")
+          yield* made.wait(11 * 60)
+          if (Option.isSome(yield* made.open)) yield* made.answer("Never mind.")
+          return { answers: answered(made.dispatched), after: made.spoken().slice(3) }
+        }),
+      )
+      expect([taken, scratched]).toEqual([taken, { answers: [], after: [...after] }])
+    }
+  })
+
   test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes, and the question is asked again after", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>
@@ -7722,6 +7799,53 @@ describe("Assistant", () => {
     expect(result.meanwhile).toEqual({ sent: 0, steps: 0 })
     expect(result.answers).toEqual([{ [colour.id]: "Red" }])
     expect(result.here).toEqual([])
+  })
+
+  test("a message taken as the answer to a part of a rig question, let go unanswered while rig is out of sight, is put by, never said to be dealt with, and goes once rig is back", async () => {
+    const message = "Hold off on the deploy until I've checked the fees."
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, onRig), text: message, how: "now" }), undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour, extras]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        yield* made.questions().at(-1)!.stale
+        yield* made.play()
+        yield* made.answer("Later.")
+        yield* made.dictate("Tell the rig one: hold off on the deploy until I've checked the fees.")
+        yield* made.play()
+        // The part after his message goes unanswered, asked once more, then rig drops out before it's let go.
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.play()
+        seen = false
+        yield* made.unanswered()
+        const meanwhile = rig.length
+        // Rig's back a few minutes later, and he lets the rest go.
+        yield* made.wait(180)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* made.play()
+        yield* made.answer("Never mind.")
+        return { spoken: made.spoken().slice(2), meanwhile, answers: answered(rig) }
+      }),
+    )
+    const last = "Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(result.spoken).toEqual([
+      `Noted, sir. And last: ${last}`,
+      `Back to Fee table checks on rig, sir: ${last}`,
+      "I couldn't get your message to it, sir: I can't follow rig's threads right now. I'll ask you again once I can.",
+      `Here's the last question on Fee table checks on rig, sir: ${last}`,
+      "Your message went as its answer, sir, with the rest of the question left out.",
+    ])
+    expect(result.meanwhile).toBe(0)
+    expect(result.answers).toEqual([{ [colour.id]: message }])
   })
 
   test("a rig question brought back a second time within ten minutes, after rig drops out twice, still names its thread", async () => {

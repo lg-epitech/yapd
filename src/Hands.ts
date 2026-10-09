@@ -34,7 +34,8 @@ export type Act =
    * Answers the thread's question, only `requestId`, the one he heard, by its
    * questions' ids, with the option he picked, said back, when he picked one;
    * `as` "message" when what he said was a message for the thread, which went
-   * as the answer, since the thread was waiting on it.
+   * as the answer, since the thread was waiting on it, and "left" when it went
+   * as the answer to a part once he let the rest of the question go.
    */
   | {
       readonly _tag: "Reply"
@@ -42,7 +43,7 @@ export type Act =
       readonly requestId: string
       readonly answers: Readonly<Record<string, string | ReadonlyArray<string>>>
       readonly said: Option.Option<string>
-      readonly as?: "answer" | "message"
+      readonly as?: "answer" | "message" | "left"
     }
 
 /** What an approval is answered with by voice: allowed, for the rest of the thread's work when he says so, or turned down. */
@@ -1463,6 +1464,10 @@ export const done = (
   }
   // A message that went as the answer to what the thread was waiting on, which he's told, since it's not what he asked for.
   if (act._tag === "Reply" && act.as === "message") return `${naming(lines.onIt, called)} It was waiting on a question, so that's its answer.`
+  // A message taken as the answer to a part of a question, which went once he let the rest of it go, maybe with no word of his.
+  if (act._tag === "Reply" && act.as === "left") {
+    return `Your message went ${Option.match(called, { onNone: () => "", onSome: (name) => `to ${name} ` })}as its answer${addressed(lines)}, with the rest of the question left out.`
+  }
   return naming(
     act._tag === "Stop"
       ? lines.stopped
@@ -1497,7 +1502,7 @@ export const goesAhead = (
   as: { readonly waiting?: Waiting; readonly stopped?: boolean | "ended"; readonly ended?: Ended } = {},
 ) =>
   act._tag === "Reply"
-    ? act.as === "message" || Option.isNone(act.said)
+    ? act.as === "message" || (act.as !== "left" && Option.isNone(act.said))
     : act._tag === "Message" && how !== "queued" && as.stopped !== true && as.ended === undefined && as.waiting === undefined
 
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
