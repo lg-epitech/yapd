@@ -1595,6 +1595,25 @@ describe("Assistant", () => {
       sent: [{ text: "Start with mainnet." }],
     })
     expect(await cut((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Start with mainnet." }))).toEqual({ spoken: [last], sent: [] })
+    // He answers the first part by dictation, and dictates again before the second is said: it's read to him, never answered.
+    const twice = await run(
+      Effect.gen(function* () {
+        let text = "Red"
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour, extras]),
+          waiting: true,
+        })
+        yield* asked(made, cloud)
+        yield* made.play()
+        yield* made.answer("Later.")
+        yield* made.dictate("Tell the cloud one red.")
+        text = "Alpha"
+        yield* made.dictate("And alpha for the extras.")
+        return { spoken: made.spoken().slice(-1), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(twice).toEqual({ spoken: [last], answers: [] })
   })
 
   test("a dictated answer to a thread's question answers the part he's at, a list one option a line, never the parts after, which are asked; one a form can't take asks that part again", async () => {
