@@ -66,8 +66,8 @@ final class Yapd {
           follow(status, connecting: first)
         }
       } catch {}
-      // Gone mid-line, yapd is no longer talking about its card, which fades as if it had finished.
-      panel.heard(speaking: false)
+      // Gone mid-line, its card fades as if yapd had finished, unless it's back first and still talking about it.
+      panel.away()
       following.away()
       state = nil
       try? await Task.sleep(for: .seconds(2))

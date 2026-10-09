@@ -69,6 +69,11 @@ final class Panel {
     fading.heard(speaking: speaking)
   }
 
+  /// yapd's state stopped coming in: a card it was talking about lingers, unless yapd is back and still talking about it first.
+  func away() {
+    fading.away()
+  }
+
   /// Takes the card away at once, like when yapd took it down.
   func hide() {
     fading.hidden()
