@@ -399,6 +399,17 @@ const flagged = (command: string, name: RegExp, flag: RegExp) => {
   return found
 }
 
+/**
+ * The flags a command is given after the first word that names it, like the
+ * "-d" and "-f" of "git branch -d old -f", as git takes a flag anywhere after
+ * its command's name: what's after a later name is after the first too.
+ */
+const flagsAfter = (command: string, name: RegExp) => {
+  const words = command.split(/\s+/)
+  const at = words.findIndex((word) => name.test(word))
+  return at === -1 ? [] : words.slice(at + 1).filter((word) => word.startsWith("-"))
+}
+
 /** The names below, so a command with none of them, like most, is passed over at once. */
 const flaggable = /rm|push|clean|branch|restore|gcloud|az|rsync/i
 
@@ -412,8 +423,11 @@ const riskyFlags: ReadonlyArray<(command: string) => boolean> = [
   // A push that forces, wherever the flag goes, or that deletes a branch, and a clean that forces, by "-f" or by name.
   (command) => after(command, /\bpush\b/i, /\s(?:-f\b|--force\b|\+\S|--delete\b|-d\b|:\S)/i),
   (command) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f|--force\b/iy) !== -1,
-  // Deleting a branch whatever it holds, as "-d" never does, which only a capital tells apart.
-  (command) => flagged(command, /(?:^|\W)branch$/, /-[a-zA-Z]*D\b|--delete\s+--force|--force\s+--delete/y) !== -1,
+  // Deleting a branch whatever it holds, as "-d" alone never does: "-D", or "-d" or "--delete" with "-f" or "--force", together or apart.
+  (command) => {
+    const given = flagsAfter(command, /(?:^|\W)branch$/)
+    return given.some((flag) => /^(?:-[a-zA-Z]*[dD]|--delete\b)/.test(flag)) && given.some((flag) => /^(?:-[a-zA-Z]*[fD]|--force\b)/.test(flag))
+  },
   // Restoring over changes: not only what's staged, after the last restore, or the working tree too, after the first.
   (command) => {
     const last = /^[\s\S]*\bgit\s+restore\b/i.exec(command)

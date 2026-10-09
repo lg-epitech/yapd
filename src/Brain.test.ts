@@ -341,6 +341,10 @@ describe("Brain", () => {
       "mcp__files__manage\noperation\nunlink\npath\nbuild\nrecursive\ntrue",
       "git clean --force",
       "git clean --force -d",
+      "git branch -d -f old",
+      "git branch -df old",
+      "git branch --delete -f old",
+      "git branch -f --delete old",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -376,6 +380,7 @@ describe("Brain", () => {
       "mcp__search__search\nquery\nhow to remove a recursive function\nrecursive\ntrue",
       'mcp__fetch__fetch {"url":"https://example.com","forceRefresh":true}',
       "git clean --dry-run -d",
+      "git branch --delete old -v",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
