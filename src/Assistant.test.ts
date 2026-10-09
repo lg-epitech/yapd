@@ -948,6 +948,44 @@ describe("Assistant", () => {
     })
   })
 
+  test("an approval is risky by a command that goes on over a backslash onto the next line, and by a tool told to force or to delete all of a tree", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    /** Asks for what `items` say it would run to be allowed, under T3 Code's own harmless words for it, and says yes. */
+    const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
+      run(
+        Effect.gen(function* () {
+          const harmless = items.map((item) => (item.type === "approval_request" ? { ...item, prompt: "push the branch" } : item))
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: harmless })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    /** A tool given `input`, waiting on his go-ahead. */
+    const tool = (toolName: string, input: unknown) => [
+      { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", nativeItemRef: { nativeId: "tool-r1" } },
+      { type: "dynamic_tool", status: "running", toolName, input, nativeItemRef: { nativeId: "tool-r1" } },
+    ]
+    const risky = {
+      spoken: [
+        "Cloud deployment discovery wants to push the branch, which can't be undone, so say 'approve' if you want it, sir.",
+        "Shall I still allow Cloud deployment discovery to push the branch, sir? Only 'approve' will do.",
+      ],
+      dispatched: [],
+    }
+    // The flag that makes it risky put on a line of its own, which the shell runs as one with the line before it.
+    for (const command of ["git push origin main \\\n  --force", "rm \\\n  -rf ~/work", "git branch \\\n  -D fee-tables"]) {
+      expect(await allowing(approval("r1", command))).toEqual(risky)
+    }
+    // A tool told to force, and one that deletes told to take all that's under what it's given, in so many words.
+    expect(await allowing(tool("mcp__git__git_push", { remote: "origin", branch: "main", force: true }))).toEqual(risky)
+    expect(await allowing(tool("mcp__fs__rm", { path: "~/work", recursive: true }))).toEqual(risky)
+    // Going on over lines with nothing risky in it, or told to take all of a tree it only lists, a yes will do.
+    for (const items of [approval("r1", "git push origin main \\\n  --follow-tags"), tool("mcp__fs__list_directory", { path: "src", recursive: true })]) {
+      expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
+    }
+  })
+
   test("'approve' allows a dangerous approval first time", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

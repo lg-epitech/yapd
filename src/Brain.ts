@@ -367,8 +367,41 @@ const risky = new RegExp(
 /** What's risky only as it's written, since a capital is what tells it apart: deleting a branch whatever it holds, as "-d" never does. */
 const forced = /\bbranch\s+(?:-\S+\s+)*(?:-[a-zA-Z]*D\b|--delete\s+--force|--force\s+--delete)/
 
-/** Whether what a thread wants to do is risky, by what it says it would run or change. */
-export const dangerous = (text: string) => risky.test(text) || forced.test(text)
+/**
+ * A command as the shell runs it: a line ended by a backslash goes on into
+ * the next, as one, where the patterns above stop at a line's end, as a
+ * command does, so a flag put on a line of its own would hide, and one that
+ * makes it harmless, like `--cached`, wouldn't count. A line break of its own
+ * still ends a command, as ";" does: run together, a `git rm --cached` on the
+ * next line would read as excusing an `rm -rf` before it.
+ */
+const continued = (text: string) => text.replace(/\\\r?\n[ \t]*/g, " ")
+
+/**
+ * A name set to true among what a tool is given, as its JSON writes it, or
+ * as it's looked through, a name and its value a line each: how a tool is
+ * told to do what a command's flags would.
+ */
+const setTo = (names: string) => new RegExp(String.raw`(?:^|[\n"])(?:${names})"?\s*(?::|\n)\s*"?(?:true|yes|1)\b`, "i")
+
+/** A tool told to force, as `git push --force` does. */
+const forcing = setTo(String.raw`force|forced|force[_-]?(?:push|delete)`)
+
+/** A tool told to take all that's under what it's given, which only matters to one that deletes. */
+const recursing = setTo("recursive|recursively|recurse")
+
+/** A tool that deletes, by its name or by what it's told to do, like `mcp__fs__rm` or `{"action": "delete"}`. */
+const deleting = /(?:\b|_)(?:rm|rmdir|unlink|delete|remove|erase|trash|destroy|purge|wipe)(?:\b|_)/i
+
+/**
+ * Whether what a thread wants to do is risky, by what it says it would run
+ * or change, as the shell would run it, or by what a tool is told to do in
+ * so many words.
+ */
+export const dangerous = (text: string) => {
+  const command = continued(text)
+  return risky.test(command) || forced.test(command) || forcing.test(text) || (recursing.test(text) && deleting.test(text))
+}
 
 /**
  * Whether he allowed it in so many words, like "yes, approve it", "allow it"

@@ -318,6 +318,16 @@ describe("Brain", () => {
       'mcp__github__delete_repository {"repo":"me/x"}',
       "mcp__linear__delete_issue {}",
       'drop_table {"name":"users"}',
+      "git push origin main \\\n  --force",
+      "rm \\\n  -rf ~/work",
+      "git push origin main \\\r\n  -f",
+      "git branch \\\n  -D old",
+      'mcp__git__git_push {"remote":"origin","force":true}',
+      "mcp__git__git_push\nremote\norigin\nforce\ntrue",
+      'mcp__github__update_ref {"ref":"heads/main","forcePush":"true"}',
+      'mcp__fs__rm {"path":"~/work","recursive":true}',
+      "mcp__fs__rm\npath\n~/work\nrecursive\ntrue",
+      'mcp__files__manage {"action":"delete","path":"build","recursive":true}',
     ]
     const ordinary = [
       "npm install left-pad",
@@ -340,6 +350,12 @@ describe("Brain", () => {
       "prisma migrate dev",
       "rsync -a src/ dst/",
       'mcp__linear__list_issues {"team":"core"}',
+      "git push origin main \\\n  --follow-tags",
+      "git rm -r \\\n  --cached node_modules",
+      'mcp__fs__list_directory {"path":"src","recursive":true}',
+      "mcp__fs__list_directory\npath\nsrc\nrecursive\ntrue",
+      'mcp__git__git_push {"remote":"origin","force":false}',
+      'mcp__fetch__fetch {"url":"https://example.com","forceRefresh":true}',
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
