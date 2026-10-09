@@ -20,7 +20,7 @@ import {
 import { Audio, AudioError, native } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
-import { between, cut, together, unfinished, whose } from "./Conversation.ts"
+import { between, cut, stopIn, together, unfinished, whose } from "./Conversation.ts"
 import { defaults } from "./Endpointer.ts"
 import { Relays } from "./Relay.ts"
 import * as Helper from "./Helper.ts"
@@ -670,35 +670,35 @@ describe("Answers", () => {
 describe("Telling yapd's own voice from the user's", () => {
   const saying = "Over in yapd, the tests pass now"
 
-  test("takes nothing, or what Whisper makes up, for its own voice", () => {
+  test("takes nothing, or what Whisper makes up, for unclear", () => {
     for (const heard of [
       "", "Thank you.", "- Verse.", "End of song.", "Thank you. Thank you.", "Okay.", "Thanks.", "So,", "Hello?", "Mm-hmm.", "Uh-huh.",
       "Please subscribe.", "Thank you, bye.", "Thank you so much for watching.", "I'll see you next time.", "you you you",
       "Subtitles by the Amara.org community", "Okay, thanks.", "Of course.", "Excuse me.", "Good morning.", "What the hell?", "Jesus Christ.",
     ]) {
-      expect([heard, whose(heard, saying)]).toEqual([heard, "echo"])
+      expect([heard, whose(heard, saying)]).toEqual([heard, "unclear"])
     }
   })
 
-  test("takes its own voice for its own when Whisper writes its name as a word it knows, like \"yapped\" for \"yapd\"", () => {
+  test("takes its own voice for unclear when Whisper writes its name as a word it knows, like \"yapped\" for \"yapd\"", () => {
     for (const heard of ["Over in yapped.", "Over in Japan.", "Over in Yappy.", "Overin Yapti.", "Over in yapped, the tests pass.", "In yapped.", "Over in your app."]) {
-      expect([heard, whose(heard, saying)]).toEqual([heard, "echo"])
+      expect([heard, whose(heard, saying)]).toEqual([heard, "unclear"])
     }
     const question = "Which one, sir: yapd or the docs site?"
     for (const heard of ["Which one, sir? Yapped.", "Which one? Yapped.", "Which one, sir? Yap, or the dock site?", "One, sir? Yapped."]) {
-      expect([heard, whose(heard, question)]).toEqual([heard, "echo"])
+      expect([heard, whose(heard, question)]).toEqual([heard, "unclear"])
     }
     // His own words still are his, said over it.
     expect(whose("Hold on, which PR was that?", saying)).toBe("his")
     expect(whose("Neither, start a new project.", question)).toBe("his")
   })
 
-  test("takes the words it says around its name for its own, with its name misheard as another word, or two of its words as two others", () => {
+  test("takes the words it says around its name for unclear, with its name misheard as another word, or two of its words as two others", () => {
     for (const heard of ["In Japan.", "In yacht.", "Japan, the."]) {
-      expect([heard, whose(heard, "In yapd, the tests pass now")]).toEqual([heard, "echo"])
+      expect([heard, whose(heard, "In yapd, the tests pass now")]).toEqual([heard, "unclear"])
     }
     for (const heard of ["Of Erin yapped.", "Of her in yapped.", "Over in Rennie app tests.", "In Rennie app tests."]) {
-      expect([heard, whose(heard, saying)]).toEqual([heard, "echo"])
+      expect([heard, whose(heard, saying)]).toEqual([heard, "unclear"])
     }
   })
 
@@ -709,54 +709,61 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("The other one.", "Over in rig, the migration is still running")).toBe("his")
     expect(whose("Over in production.", saying)).toBe("his")
     // As Whisper writes its name, said as it is.
-    expect(whose("Rick, it.", "the migration on rig, it wants")).toBe("echo")
+    expect(whose("Rick, it.", "the migration on rig, it wants")).toBe("unclear")
   })
 
-  test("takes its own voice for its own with its name written as two words or misheard, or a word of its put another way", () => {
+  test("takes its own voice for unclear with its name written as two words or misheard, or a word of its put another way", () => {
     for (const [heard, line] of [
       ["Over in your app, the tests pass now.", "Over in yapd, the tests pass now and the"],
       ["Over in your app, the tests", "Over in yapd, the tests pass now and the"],
+      ["Over in your", "Over in yapd, the tests pass now and the"],
       ["Over in Rennie app, the tests pass.", "Over in yapd, the tests pass now and the"],
       ["Codex failed on your app, the build broke.", "Codex failed on yapd, the build broke on the main branch"],
       ["Over in home lab, Claude finished the migration.", "Over in homelab, Claude finished the migration and the tests"],
       ["Over in back end, the tests pass.", "Over in backend, the tests pass now and the pull request"],
       ["Over in note book, the tests pass.", "Over in notebook, the tests pass now and the pull request"],
       ["Over in tea three code, Codex fixed the flaky login test.", "Over in t3code, Codex fixed the flaky login test and pushed"],
+      ["Over in T3 Code", "Over in t3code, Codex fixed the flaky login test and pushed"],
+      ["Over in my NAS", "Over in minas-sv2, Codex fixed the flaky login test and pushed"],
       ["Rick, the migration finished.", "Over in rig, the migration finished and the build is green"],
       ["Kodak's fixed the failing login test.", "Codex fixed the failing login test and pushed the branch, sir"],
       ["So the test is passed now.", "Over in yapd, the tests pass now and the"],
       ["The tests are passing now.", "Over in yapd, the tests pass now and the"],
     ] as const) {
-      expect([heard, whose(heard, line)]).toEqual([heard, "echo"])
+      expect([heard, whose(heard, line)]).toEqual([heard, "unclear"])
     }
-    // Words of his in its name's place, which don't sound like it.
-    expect(whose("Fix the tests.", "Over in yapd, the tests pass now and the")).toBe("mixed")
     expect(whose("Over in production, merge it.", "Over in yapd, the tests pass now and the")).toBe("his")
-    expect(whose("The tests are not passing now.", "Over in yapd, the tests pass now and the")).toBe("mixed")
   })
 
-  test("takes what yapd was saying for its own voice, misheard or not, even with a word misheard as its voice stops getting in", () => {
-    expect(whose("Over in yapd, the tests pass.", saying)).toBe("echo")
-    expect(whose("Over in yap D, the test pass.", saying)).toBe("echo")
-    expect(whose("Codecs finished the migrations.", "Codex finished the migration and")).toBe("echo")
-    expect(whose("Over and yeah the test past.", `${saying} and the pull request`)).toBe("echo")
-    expect(whose("Codecs. Yap.", "Codex on yapd")).toBe("echo")
-    expect(whose("Over in yapd, the tests pass. Now in the pool.", `${saying} and the pull request is ready`)).toBe("echo")
+  test("takes what yapd was saying for unclear, misheard or not, even with a word misheard as its voice stops getting in", () => {
+    expect(whose("Over in yapd, the tests pass.", saying)).toBe("unclear")
+    expect(whose("Over in yap D, the test pass.", saying)).toBe("unclear")
+    expect(whose("Codecs finished the migrations.", "Codex finished the migration and")).toBe("unclear")
+    expect(whose("Over and yeah the test past.", `${saying} and the pull request`)).toBe("unclear")
+    expect(whose("Codecs. Yap.", "Codex on yapd")).toBe("unclear")
+    expect(whose("Over in yapd, the tests pass. Now in the pool.", `${saying} and the pull request is ready`)).toBe("unclear")
     // Whisper says a word again on noise.
-    expect(whose("Over in yapd yapd, the tests pass.", saying)).toBe("echo")
+    expect(whose("Over in yapd yapd, the tests pass.", saying)).toBe("unclear")
+    // Nothing but words nearly anything has, in its order.
+    expect(whose("And the", `${saying} and the pull request`)).toBe("unclear")
   })
 
-  test("takes a stop yapd was saying for its own voice, even cut off partway through a longer word", () => {
-    expect(whose("Stop.", "I'll stop the tests now")).toBe("echo")
-    expect(whose("Next.", "The tests pass. Next, I'll open")).toBe("echo")
-    expect(whose("Stop.", "Codex on yapd stopped after the tests failed, sir.")).toBe("echo")
-    expect(whose("Codex on yapd stop.", "Codex on yapd stopped after the tests failed, sir.")).toBe("echo")
-    expect(whose("It's still wait", "The pull request is open and it's still waiting on CI.")).toBe("echo")
-    expect(whose("The agent skip", "The agent skipped the flaky test and pushed.")).toBe("echo")
-    expect(whose("Codex is stop", "Codex is stopping the server.")).toBe("echo")
+  test("takes a stop yapd was saying for unclear, even cut off partway through a longer word, or run into the next", () => {
+    expect(whose("Stop.", "I'll stop the tests now")).toBe("unclear")
+    expect(whose("Next.", "The tests pass. Next, I'll open")).toBe("unclear")
+    expect(whose("Stop.", "Codex on yapd stopped after the tests failed, sir.")).toBe("unclear")
+    expect(whose("Codex on yapd stop.", "Codex on yapd stopped after the tests failed, sir.")).toBe("unclear")
+    expect(whose("It's still wait", "The pull request is open and it's still waiting on CI.")).toBe("unclear")
+    expect(whose("The agent skip", "The agent skipped the flaky test and pushed.")).toBe("unclear")
+    expect(whose("Codex is stop", "Codex is stopping the server.")).toBe("unclear")
+    expect(whose("Codex is resizing the stop rage volume.", "Codex is resizing the storage volume for the database now")).toBe("unclear")
+    // His stop, all of it in line with its words, as its "skipped", or "stopped" as Whisper may write it.
+    expect(whose("Skip the tests.", "Codex skipped the tests and pushed")).toBe("unclear")
+    expect(whose("Stop it.", "Codex stopped the server")).toBe("unclear")
+    expect(whose("Wait, merge it.", "Codex is waiting on your approval")).toBe("unclear")
   })
 
-  test("takes words of the user's own for him, however common, and a word on its own, like \"Yes.\"", () => {
+  test("takes words of the user's own for his, however common, and a word on its own, like \"Yes.\"", () => {
     const line = "Codex finished the migration on yapd and all the tests pass now. Do you want me to open the pull request?"
     for (const heard of ["Not now.", "What did you do?", "Do it.", "Merge it.", "Yes.", "Yeah.", "No.", "Docs."]) {
       expect([heard, whose(heard, line)]).toEqual([heard, "his"])
@@ -765,12 +772,14 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("So, tell it to run the migration again.", `${saying} and the pull request is ready for review, so I can merge it`)).toBe("his")
     expect(whose("In production, merge it.", saying)).toBe("his")
     expect(whose("Yes.", "Send it again?")).toBe("his")
+    expect(whose("Yes, please.", "Send it again?")).toBe("his")
+    expect(whose("Which PR was that?", `${saying} and the pull request is ready`)).toBe("his")
     // Once yapd has stopped talking, none of it can be its voice, but what Whisper makes up still is nobody's.
     expect(whose("Docs.", "")).toBe("his")
-    expect(whose("Thank you.", "")).toBe("echo")
+    expect(whose("Thank you.", "")).toBe("unclear")
   })
 
-  test("takes everyday words of his for his, unless they're what yapd is saying, in order, or what Whisper makes up", () => {
+  test("takes everyday words of his for his, unless they're what yapd is saying, or two of them one after another as it says them", () => {
     const line = "Codex on yapd finished the migration, and all the tests pass"
     for (const heard of [
       "How did that go?", "Who is it?", "Where is it?", "Can you do it now?", "What did it do?", "Is that all?", "Who did that?", "Don't.", "Got it.",
@@ -782,14 +791,11 @@ describe("Telling yapd's own voice from the user's", () => {
     for (const heard of ["Don't do it.", "Go for it.", "Don't."]) {
       expect([heard, whose(heard, question)]).toEqual([heard, "his"])
     }
-    // A word of its, and words of his it isn't saying, "don't" above all, which turns what it says around.
-    expect(whose("Don't merge it.", question)).toBe("mixed")
-    expect(whose("The tests don't pass.", saying)).toBe("mixed")
-    // Not one after another as it says them.
-    expect(whose("Can you do it?", "Can the agent do it now")).toBe("his")
-    // Its own, with a common word Whisper puts in among its words.
-    expect(whose("And all the", line)).toBe("echo")
-    expect(whose("Over in yapd and the tests pass.", saying)).toBe("echo")
+    // Its words, in its order or not.
+    expect(whose("Can you do it?", "Can the agent do it now")).toBe("unclear")
+    expect(whose("Is it", "it is ready for review")).toBe("unclear")
+    expect(whose("And all the", line)).toBe("unclear")
+    expect(whose("Over in yapd and the tests pass.", saying)).toBe("unclear")
   })
 
   test("takes a sentence of his for his, though it has a word or a phrase of what Whisper makes up in it", () => {
@@ -797,71 +803,63 @@ describe("Telling yapd's own voice from the user's", () => {
     for (const heard of ["Post it in the release channel.", "Pause the video.", "Is it watching the files?", "Turn the music down.", "Excuse me, what did it do?"]) {
       expect([heard, whose(heard, line)]).toEqual([heard, "his"])
     }
-    const long = `${saying} and the pull request is ready for review, so I can merge it`
     for (const heard of ["Merge it, then post in the channel.", "I'm sorry, don't merge it."]) {
-      expect([heard, whose(heard, long)]).toEqual([heard, "mixed"])
+      expect([heard, whose(heard, `${saying} and the pull request is ready for review`)]).toEqual([heard, "his"])
     }
   })
 
-  test("takes a stop or a wait yapd isn't saying for him, wherever it comes in what he says", () => {
-    const line = "Codex finished the migration on yapd and all the tests pass now. Do you want me to open the pull request?"
-    for (const heard of ["Hold on.", "Hold on, which tests?", "Wait, did it run the integration tests?"]) {
-      expect([heard, whose(heard, line)]).toEqual([heard, "his"])
-    }
-    const long = `${saying} and the pull request is ready`
-    for (const heard of ["Stop.", "Thank you. Wait.", "Hold on, which PR was that?", "Wait, which pull request?"]) {
-      expect([heard, whose(heard, long)]).toEqual([heard, "his"])
-    }
-    expect(whose("Tell it to stop the migration.", "Claude is still running the migration, sir.")).toBe("his")
-    // Its longer word starts the same, but with more after it, it wasn't cut off there.
-    expect(whose("Stop now.", "Codex stopped the server")).toBe("his")
-    expect(whose("Wait, merge it.", "Codex is waiting on your approval")).toBe("his")
-  })
-
-  test("takes a stop or a wait yapd isn't saying, with nothing but its own voice before it or after, for some of each", () => {
-    const long = `${saying} and the pull request is ready`
+  test("takes words of his beside a word of its that not just anything has, or like one, for unclear, as they may be its voice", () => {
+    const long = `${saying} and the pull request is ready for review, so I can merge it`
     for (const heard of [
-      "Over in yapd, the tests pass. Stop.", "Over in yapd. Not now.", "Over in yapped. Not now.", "Over in yapd. No, wait.",
-      "Over in yapd, the tests skip this one.", "Over in yapd, the tests pass. Hold on, which PR was that?", "Tell it to wait. in yapd, the tests",
-      "Stop. in yapd, the tests",
+      "Over in yapd. Don't merge it until the review is done.", "Over in yapd, the tests pass now open a PR", "Over in yapd, the tests pass now which PR",
+      "Over in Japan, tell it to open a PR.", "Over in your app. Don't merge it.", "Tests pass, flaky build.", "The tests are flaky.",
+      "Merge it, then post in the channel.", "The tests failed.", "Is the pull request merged?", "Fix the tests.", "The tests are not passing now.",
     ]) {
-      expect([heard, whose(heard, long)]).toEqual([heard, "mixed"])
+      expect([heard, whose(heard, long)]).toEqual([heard, "unclear"])
     }
-    expect(whose("Over in t3code, wait a second.", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("mixed")
-    expect(whose("yapd's tests, hold on.", "yapd's tests are failing on the main branch")).toBe("mixed")
-    // His stop, and all of it in line with its words, as its "skipped", or "stopped" as Whisper may write it.
-    expect(whose("Skip the tests.", "Codex skipped the tests and pushed")).toBe("mixed")
-    expect(whose("Stop it.", "Codex stopped the server")).toBe("mixed")
+    expect(whose("Close the pull request.", "Codex opened the pull request, sir.")).toBe("unclear")
+    expect(whose("Send it again? Yes.", "Send it again?")).toBe("unclear")
+    expect(whose("Don't merge it.", "Shall I merge the pull request, sir?")).toBe("unclear")
+    expect(whose("Over in t3code, what failed?", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("unclear")
+    // A word of his only like one of its: the start of it, or a letter away.
+    expect(whose("Open it.", "Claude opened a pull request on the docs site")).toBe("unclear")
+    expect(whose("Approve.", "Codex is waiting on your approval to delete the branch")).toBe("unclear")
   })
 
-  test("takes what Whisper makes up of everyday words over yapd's for its own voice, unless it's said just so", () => {
+  test("takes a stop or a wait of his yapd isn't saying for a stop, though its own voice runs into it, and takes only that", () => {
+    const long = `${saying} and the pull request is ready`
+    for (const [heard, stop] of [
+      ["Over in yapd, the tests. Stop.", "Stop."], ["Over in yapd. Not now.", "Not now."], ["Over in yapped. Not now.", "Not now."],
+      ["Over in yapd. No, wait.", "Wait."], ["Over in yapd, the tests skip this one.", "Skip."], ["Over in yapd, the tests pass. Hold on, which PR was that?", "Hold on."],
+      ["Tell it to wait. in yapd, the tests", "Wait."], ["Stop. in yapd, the tests", "Stop."], ["Wait, which pull request?", "Wait."],
+      ["Over in yapd. Never mind.", "Never mind."], ["Over in yapd. That's enough.", "That's enough."], ["Over in yapd, hold on a second.", "Hold on."],
+    ] as const) {
+      expect([heard, whose(heard, long), stopIn(heard, long)]).toEqual([heard, "stop", stop])
+    }
+    expect(whose("Over in t3code, wait a second.", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("stop")
+    expect(stopIn("Over in t3code, wait a second.", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("Wait a second.")
+    expect(whose("yapd's tests, hold on.", "yapd's tests are failing on the main branch")).toBe("stop")
+    // His stop, with a word of its like it, but not the same, nor the start of one.
+    expect([whose("Wait.", "Codex wants your approval to delete the old branch."), stopIn("Wait.", "Codex wants your approval")]).toEqual(["stop", "Wait."])
+    expect(whose("Stop.", "Claude finished the first two steps of the plan.")).toBe("stop")
+    expect(stopIn("Not now.", "it wants to know which page you meant")).toBe("Not now.")
+    // Clearly his, it's all taken, stop and all.
+    expect(whose("Hold on, which PR was that?", long)).toBe("his")
+    expect(whose("Stop now.", "Codex stopped the server")).toBe("unclear")
+    expect(stopIn("Over in yapd, the tests pass.", long)).toBeUndefined()
+  })
+
+  test("takes what Whisper makes up of everyday words over yapd's for unclear, unless it's said just so", () => {
     const line = "Codex on yapd finished the migration, and all the tests pass"
     for (const heard of [
       "I'm going to go.", "Let's go.", "I'm sorry.", "I don't know.", "That's it.", "That's all.", "Come on.", "Here we go.",
       "I'll see you in the next one.", "See you guys.", "Thank you for your attention.", "I'll be right back.", "Have a nice day.",
       "Take care.", "Good luck.", "Welcome back.",
     ]) {
-      expect([heard, whose(heard, line)]).toEqual([heard, "echo"])
+      expect([heard, whose(heard, line)]).toEqual([heard, "unclear"])
     }
     for (const heard of ["Not now.", "Do it.", "What did you do?", "Which one?", "Go on."]) {
       expect([heard, whose(heard, line)]).toEqual([heard, "his"])
-    }
-  })
-
-  test("takes words of his with words of its that tell its voice for some of each", () => {
-    const long = `${saying} and the pull request is ready`
-    for (const heard of [
-      "Over in yapd. Don't merge it until the review is done.", "Over in yapd, the tests pass now open a PR", "Over in yapd, the tests pass now which PR",
-      "Over in Japan, tell it to open a PR.", "Over in your app. Don't merge it.", "Tests pass, flaky build.", "The tests are flaky.",
-    ]) {
-      expect([heard, whose(heard, long)]).toEqual([heard, "mixed"])
-    }
-    expect(whose("Close the pull request.", "Codex opened the pull request, sir.")).toBe("mixed")
-    expect(whose("Send it again? Yes.", "Send it again?")).toBe("mixed")
-    expect(whose("Over in t3code, what failed?", "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir.")).toBe("mixed")
-    // Its words, then one of his where its next word would be, unlike it.
-    for (const heard of ["The tests failed.", "The tests broke.", "Is the pull request merged?"]) {
-      expect([heard, whose(heard, long)]).toEqual([heard, "mixed"])
     }
   })
 
@@ -902,7 +900,8 @@ const misheard: ReadonlyArray<readonly [string, string, number]> = [
  * `whole` has for all of its values together, as when it hears a word the
  * test cut in two whole, taking `delays` seconds over the first few, or fails
  * with `failing`. What's said is taken as `intent`, which is to pass it on
- * unless it says otherwise, and what yapd says back is kept in `rendered`.
+ * unless it says otherwise, what's worked out from is kept in `responded`,
+ * and what yapd says back in `rendered`.
  */
 const overHelper = (
   words: ReadonlyArray<readonly [number, string]>,
@@ -927,7 +926,9 @@ const overHelper = (
     const plays: Array<number> = []
     const transcribed: Array<string> = []
     const sent: Array<string> = []
-    /** What yapd says back, like asking him to say it again, in order. */
+    /** What a reply was worked out from, in order. */
+    const responded: Array<string> = []
+    /** What yapd says back, in order. */
     const rendered: Array<string> = []
     const waits = [...(options.delays ?? [])]
     let interrupted = 0
@@ -1029,7 +1030,8 @@ const overHelper = (
       Layer.succeed(Responder.Responder, {
         respond: ({ heard }) => {
           const intent = options.intent ?? "send"
-          return Effect.sleep(`${options.responding ?? 0} seconds`).pipe(
+          return Effect.sync(() => void responded.push(heard)).pipe(
+            Effect.zipRight(Effect.sleep(`${options.responding ?? 0} seconds`)),
             Effect.as({ intent, spoken: intent === "send" ? "Okay." : "", message: intent === "send" ? heard : "" }),
           )
         },
@@ -1078,6 +1080,7 @@ const overHelper = (
       plays,
       transcribed,
       sent,
+      responded,
       rendered,
       interrupted: () => interrupted,
       talk,
@@ -1201,60 +1204,27 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toMatchObject({ sent: [], replies: [] })
   })
 
-  test("stops for the user talking on past them about a second in, rather than once he's finished, and passes on all he said as Whisper heard it whole", async () => {
+  test("carries on over the user talking on past them until he's finished, then passes on all he said as Whisper heard it whole", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const helper = yield* overHelper([[0.93, "Listen, Jarvis,"], [0.94, "I need to tell you something."]])
         yield* helper.wait(2.5)
         yield* helper.talk(0.93, 10)
         yield* helper.wait(1)
-        yield* helper.talk(0.94, 20)
-        const early = [...helper.commands]
-        yield* helper.talk(0.94, 15)
-        const later = [...helper.commands]
+        yield* helper.talk(0.94, 35)
+        // Looked at as he goes on, only for a stop of his.
+        const talking = [...helper.commands]
         yield* helper.talk(0.94, 30)
         yield* helper.quiet
-        return { early, later, sent: helper.sent, replies: yield* helper.replies }
+        return { talking, commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result.early).toEqual(["play"])
-    expect(result.later).toEqual(["play", "stop"])
+    expect(result.talking).toEqual(["play"])
+    expect(result.commands).toEqual(["play", "stop"])
     expect(result.sent).toEqual(["Listen, Jarvis, I need to tell you something."])
     expect(result.replies).toEqual(["Listen, Jarvis, I need to tell you something."])
   })
-  test("stops about a second into what the user runs on from its own voice, and asks him to say it again, rather than take any of it in", async () => {
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.95, "Which PR was that?"], [0.96, "Which PR was that?"]])
-        yield* helper.wait(1)
-        yield* helper.talk(0.8, 20)
-        yield* helper.wait(2.2)
-        // He starts before Silero has heard the end of yapd's voice.
-        yield* helper.talk(0, 5)
-        yield* helper.talk(0.95, 10)
-        const early = [...helper.commands]
-        yield* helper.talk(0.95, 15)
-        const later = [...helper.commands]
-        yield* helper.talk(0.95, 10)
-        yield* helper.quiet
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...helper.sent]
-        yield* helper.finish
-        yield* helper.talk(0.96, 20)
-        yield* helper.quiet
-        return { early, later, before, commands: helper.commands, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
-      }),
-    )
-    expect(result.early).toEqual(["play"])
-    // About a second into what he said, then asked to say it again.
-    expect(result.later).toEqual(["play", "stop"])
-    expect(result.commands.slice(0, 3)).toEqual(["play", "stop", "play"])
-    expect(result.rendered[0]).toBe(Persona.plain.misheard)
-    expect(result.before).toEqual([])
-    expect(result.sent).toEqual(["Which PR was that?"])
-    expect(result.replies).toEqual(["Which PR was that?"])
-  })
+
   test("doesn't take a stop yapd is saying itself, getting into the microphone, for the user", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -1464,11 +1434,11 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ answered: false, answers: [] })
   })
 
-  test("asks the user to say it all again when what's made out with what he said turns out its voice, rather than drop any of it", async () => {
+  test("takes what's his, and lets go of its voice heard after it while that's made out, rather than add it", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         // Whisper takes three seconds over what he said, while its voice gets in again.
-        const helper = yield* overHelper([[0.9, "Hold on."], [0.8, "the tests pass now and the pull request"], [0.91, "Hold on."]], { delays: [3] })
+        const helper = yield* overHelper([[0.9, "Hold on."], [0.8, "the tests pass now and the pull request"]], { delays: [3] })
         yield* helper.talk(0.9, 10)
         yield* helper.quiet
         yield* helper.wait(1)
@@ -1479,58 +1449,10 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.8, 3)
         yield* helper.quiet
         yield* helper.wait(1)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...helper.sent]
-        yield* helper.finish
-        yield* helper.talk(0.91, 10)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { stopped, before, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        return { stopped, responded: helper.responded, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({
-      stopped: ["play", "stop"],
-      before: [],
-      rendered: [Persona.plain.misheard, "Okay."],
-      sent: ["Hold on."],
-      replies: ["Hold on."],
-    })
-  })
-
-  test("asks the user to say it all again when the rest of what he says, after a pause, lines up with its words while the first is still being made out", async () => {
-    const said = "Tell it to stop the migration."
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        // Whisper takes two seconds over the first part.
-        const helper = yield* overHelper([[0.9, "Tell it to stop."], [0.8, "The migration."], [0.91, said]], {
-          delays: [2],
-          spoken: "Over in rig, the migration is still running and the build is green. It wants to know whether to deploy, sir.",
-        })
-        yield* helper.wait(0.8)
-        yield* helper.talk(0.9, 15)
-        yield* helper.quiet
-        yield* helper.wait(0.3)
-        yield* helper.talk(0.8, 12)
-        yield* helper.quiet
-        yield* helper.wait(2)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...helper.sent]
-        yield* helper.finish
-        yield* helper.talk(0.91, 20)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { before, commands: helper.commands.slice(0, 3), rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
-      }),
-    )
-    expect(result).toEqual({
-      before: [],
-      commands: ["play", "stop", "play"],
-      rendered: [Persona.plain.misheard, "Okay."],
-      sent: [said],
-      replies: [said],
-    })
+    expect(result).toEqual({ stopped: ["play", "stop"], responded: ["Hold on."], rendered: ["Okay."], sent: ["Hold on."], replies: ["Hold on."] })
   })
 
   test("lets go of its voice still coming in just after it stops for him, rather than adding it to what he said while it works out what to do", async () => {
@@ -1552,38 +1474,27 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ stopped: ["play", "stop"], sent: ["Tell it to open a PR."], replies: ["Tell it to open a PR."] })
   })
 
-  test("asks the user to say it all again when what he adds while it works out what to do runs on from the last of its voice", async () => {
+  test("adds what the user says as the last of its voice comes in, just after it stops for him, when that's clearly his", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
-        const helper = yield* overHelper(
-          [[0.9, "Tell it to open a PR."], [0.8, "the tests pass now"], [0.91, "and merge it"], [0.92, "Tell it to open a PR and merge it."]],
-          { responding: 2 },
-        )
+        const helper = yield* overHelper([[0.9, "Tell it to open a PR."], [0.91, "and merge it"]], { responding: 2 })
         yield* helper.wait(0.5)
         yield* helper.talk(0.9, 10)
         yield* helper.quiet
-        // The last of its voice, still coming in once it has stopped, and what he carries on with straight after.
-        yield* helper.talk(0.8, 6)
+        // What he carries on with straight after, as the last of its voice comes in.
         yield* helper.talk(0.91, 10)
         yield* helper.quiet
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...helper.sent]
-        yield* helper.finish
-        yield* helper.talk(0.92, 20)
-        yield* helper.quiet
         yield* helper.wait(3)
-        return { before, commands: helper.commands.slice(0, 3), rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
       }),
     )
     expect(result).toEqual({
-      before: [],
-      commands: ["play", "stop", "play"],
-      rendered: [Persona.plain.misheard, "Okay."],
-      sent: ["Tell it to open a PR and merge it."],
-      replies: ["Tell it to open a PR and merge it."],
+      commands: ["play", "stop"],
+      sent: ["Tell it to open a PR. and merge it"],
+      replies: ["Tell it to open a PR. and merge it"],
     })
   })
+
   test("doesn't stop for a word of its own cut off partway by a look at what's been said so far, like the \"stop\" of \"stopped\"", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -1608,31 +1519,27 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       replies: [],
     })
   })
-  test("passes on all the user says across the end of them, made out whole, with a \"hold on\" of his in it, though some of it is yapd's words", async () => {
+  test("takes only the \"hold on\" of his in what the user says across the end of them, made out whole, when some of the rest is yapd's words", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
-        const helper = yield* overHelper([[0.93, "Hold on, tell it to"], [0.94, "merge the pull request."]])
+        const helper = yield* overHelper([[0.93, "Hold on, tell it to"], [0.94, "merge the pull request."]], { intent: "dismiss" })
         yield* helper.wait(2.3)
         yield* helper.talk(0.93, 10)
         yield* helper.wait(1)
         yield* helper.talk(0.94, 30)
         yield* helper.quiet
         yield* helper.wait(4)
-        return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+        return { commands: helper.commands.slice(0, 2), responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({
-      commands: ["play", "stop"],
-      sent: ["Hold on, tell it to merge the pull request."],
-      replies: ["Hold on, tell it to merge the pull request."],
-    })
+    expect(result).toEqual({ commands: ["play", "stop"], responded: ["Hold on."], sent: [], replies: ["Hold on."] })
   })
 
   test("passes on all the user says across the end of them, though Whisper takes a while to make it out", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         // Whisper takes three seconds over what he said over them.
-        const helper = yield* overHelper([[0.93, "Hold on, tell it to"], [0.94, "merge the pull request."]], { delays: [3] })
+        const helper = yield* overHelper([[0.93, "Hold on, tell it to"], [0.94, "deploy to staging."]], { delays: [3] })
         yield* helper.wait(2.3)
         yield* helper.talk(0.93, 10)
         yield* helper.wait(1)
@@ -1642,7 +1549,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         return { sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({ sent: ["Hold on, tell it to merge the pull request."], replies: ["Hold on, tell it to merge the pull request."] })
+    expect(result).toEqual({ sent: ["Hold on, tell it to deploy to staging."], replies: ["Hold on, tell it to deploy to staging."] })
   })
 
   test("makes out what the user says across the end of them whole, as Whisper hears it", async () => {
@@ -1678,10 +1585,10 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ done: true, sent: [], replies: [] })
   })
 
-  test("doesn't add its own voice, paused as what the user said before is made out to be his, to what he said, but asks him to say it again", async () => {
+  test("doesn't add its own voice, paused as what the user said before is made out to be his, to what he said, but takes that on its own", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
-        const helper = yield* overHelper([[0.9, "Hold on."], [0.8, "the tests pass now and the pull request"], [0.91, "Hold on."]], { delays: [3] })
+        const helper = yield* overHelper([[0.9, "Hold on."], [0.8, "the tests pass now and the pull request"]], { delays: [3] })
         yield* helper.talk(0.9, 10)
         yield* helper.quiet
         yield* helper.wait(1)
@@ -1691,17 +1598,10 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         const stopped = [...helper.commands]
         yield* helper.quiet
         yield* helper.wait(1)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...helper.sent]
-        yield* helper.finish
-        yield* helper.talk(0.91, 10)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { stopped, before, sent: helper.sent, replies: yield* helper.replies }
+        return { stopped, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({ stopped: ["play", "stop"], before: [], sent: ["Hold on."], replies: ["Hold on."] })
+    expect(result).toEqual({ stopped: ["play", "stop"], sent: ["Hold on."], replies: ["Hold on."] })
   })
 
   test("doesn't stop for its own voice with its name heard as a word Whisper knows, like \"yapped\", nor send or note it", async () => {
@@ -1760,124 +1660,100 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ during: ["play"], answered: false, answers: [] })
   })
 
-  test("stops for a stop of the user's run straight on from its own voice, and asks him to say it again, rather than pass on its words with his", async () => {
-    const said = "Hold on, which PR was that?"
+  test("stops for a stop of the user's run straight on from its own voice, and takes only that, never its words", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
-        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, said], [0.91, said]])
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Hold on, which PR was that?"]], { intent: "dismiss" })
         yield* helper.talk(0.8, 15)
         yield* helper.talk(0.9, 15)
         yield* helper.quiet
         yield* helper.wait(1)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...helper.sent]
-        yield* helper.finish
-        yield* helper.talk(0.91, 15)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { before, commands: helper.commands.slice(0, 3), rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        const exit = yield* Fiber.poll(helper.fiber)
+        return { commands: helper.commands, done: Option.isSome(exit), responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({ before: [], commands: ["play", "stop", "play"], rendered: [Persona.plain.misheard, "Okay."], sent: [said], replies: [said] })
+    expect(result).toEqual({ commands: ["play", "stop"], done: true, responded: ["Hold on."], sent: [], replies: ["Hold on."] })
   })
-  test("stops for a few words the user talks straight on from its own voice with, in the same sentence, and asks him to say them again", async () => {
-    for (const said of ["open a PR", "which PR"]) {
+
+  test("doesn't stop for words the user talks straight on from its own voice with, or its own voice runs on after, taking none of them", async () => {
+    for (const [first, then] of [
+      [[0.8, "Over in yapd, the tests pass now"], [0.9, "open a PR"]],
+      [[0.8, "Over in yapd, the tests pass now"], [0.9, "which PR"]],
+      [[0.9, "Which PR was that?"], [0.8, "in yapd, the tests pass now"]],
+    ] as const) {
       const result = await overHelperScoped(
         Effect.gen(function* () {
-          // Whisper runs what he says on from its voice, without a full stop between.
-          const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass now"], [0.9, said], [0.91, said]], { live: true })
-          yield* helper.talk(0.8, 30)
-          yield* helper.talk(0.9, 20)
+          // Whisper runs what he says on from its voice, or its voice on from his, without a full stop between.
+          const helper = yield* overHelper([first, then], { live: true })
+          yield* helper.wait(0.3)
+          yield* helper.talk(first[0], 20)
+          yield* helper.talk(then[0], 30)
           yield* helper.quiet
           yield* helper.wait(1)
-          // Long enough for it to ask him once he's finished.
-          yield* helper.wait(2)
-          const before = [...helper.sent]
-          yield* helper.finish
-          yield* helper.talk(0.91, 20)
-          yield* helper.quiet
-          yield* helper.wait(1)
-          return { before, commands: helper.commands.slice(0, 3), sent: helper.sent, replies: yield* helper.replies }
+          return { commands: helper.commands, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
         }),
       )
-      expect([said, result]).toEqual([said, { before: [], commands: ["play", "stop", "play"], sent: [said], replies: [said] }])
+      expect([first[1], result]).toEqual([first[1], { commands: ["play"], rendered: [], sent: [], replies: [] }])
     }
   }, 30_000)
-  test("stops for the user's question about what it just said, and passes it on whole, though it ends in its words", async () => {
+
+  test("stops for the stop or wait in the user's question about what it just said, taking only that, as the rest is its words", async () => {
     // Made out once he's done, and, talking on, partway through and again once he's done.
-    for (const [at, said, frames] of [[1, "Wait, which pull request?", 20], [0.8, "Hold on, what about the tests?", 20], [0.5, "Hold on a second, what about the tests?", 45]] as const) {
+    for (const [at, said, frames, stop] of [
+      [1, "Wait, which pull request?", 20, "Wait."], [0.8, "Hold on, what about the tests?", 20, "Hold on."], [0.5, "Hold on a second, what about the tests?", 45, "Hold on."],
+    ] as const) {
       const result = await overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, said]], { live: true })
+          const helper = yield* overHelper([[0.9, said]], { live: true, intent: "dismiss" })
           yield* helper.wait(at)
           yield* helper.talk(0.9, frames)
           yield* helper.quiet
           yield* helper.wait(1)
-          return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+          return { commands: helper.commands.slice(0, 2), responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
         }),
       )
-      expect([said, result]).toEqual([said, { commands: ["play", "stop"], sent: [said], replies: [said] }])
+      expect([said, result]).toEqual([said, { commands: ["play", "stop"], responded: [stop], sent: [], replies: [stop] }])
     }
   }, 30_000)
 
-  test("stops for a stop of the user's that its own voice runs on into, and asks him to say it again, rather than pass on its words with his", async () => {
-    for (const said of ["Stop.", "Tell it to wait."]) {
+  test("stops for a stop of the user's that its own voice runs on into, and takes only that, never its words", async () => {
+    for (const [said, stop] of [["Stop.", "Stop."], ["Tell it to wait.", "Wait."]] as const) {
       const result = await overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, said], [0.8, "in yapd, the tests"], [0.91, said]])
+          const helper = yield* overHelper([[0.9, said], [0.8, "in yapd, the tests"]], { intent: "dismiss" })
           yield* helper.wait(0.3)
           yield* helper.talk(0.9, 12)
           yield* helper.wait(0.5)
           yield* helper.talk(0.8, 12)
           yield* helper.quiet
           yield* helper.wait(1)
-          // Long enough for it to ask him once he's finished.
-          yield* helper.wait(2)
-          const before = [...helper.sent]
-          yield* helper.finish
-          yield* helper.talk(0.91, 12)
-          yield* helper.quiet
-          yield* helper.wait(1)
-          return { before, commands: helper.commands.slice(0, 3), rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+          const exit = yield* Fiber.poll(helper.fiber)
+          return { commands: helper.commands, done: Option.isSome(exit), responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
         }),
       )
-      expect([said, result]).toEqual([
-        said,
-        { before: [], commands: ["play", "stop", "play"], rendered: [Persona.plain.misheard, "Okay."], sent: [said], replies: [said] },
-      ])
+      expect([said, result]).toEqual([said, { commands: ["play", "stop"], done: true, responded: [stop], sent: [], replies: [stop] }])
     }
   })
-  test("stops for the user about a second in though its own voice runs on after him, and asks him to say it again, a stop of his and all", async () => {
-    for (const said of ["Skip this one.", "Which PR was that?"]) {
-      const result = await overHelperScoped(
-        Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, said], [0.8, "in yapd, the tests pass now"], [0.91, said]])
-          yield* helper.wait(0.3)
-          yield* helper.talk(0.9, 15)
-          yield* helper.wait(0.5)
-          yield* helper.talk(0.8, 25)
-          const early = [...helper.commands]
-          yield* helper.talk(0.8, 15)
-          yield* helper.wait(1)
-          yield* helper.quiet
-          yield* helper.wait(1)
-          // Long enough for it to ask him once he's finished.
-          yield* helper.wait(2)
-          const before = [...helper.sent]
-          yield* helper.finish
-          yield* helper.talk(0.91, 15)
-          yield* helper.quiet
-          yield* helper.wait(1)
-          return { early, before, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
-        }),
-      )
-      expect([said, result]).toEqual([
-        said,
-        { early: ["play", "stop"], before: [], rendered: [Persona.plain.misheard, "Okay."], sent: [said], replies: [said] },
-      ])
-    }
+
+  test("stops about a second in for a stop of the user's heard in full though its own voice runs on after him, and takes only that", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Skip this one."], [0.8, "in yapd, the tests pass now"]], { intent: "dismiss" })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.9, 15)
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, 25)
+        const early = [...helper.commands]
+        yield* helper.talk(0.8, 15)
+        yield* helper.wait(1)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { early, responded: helper.responded, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ early: ["play", "stop"], responded: ["Skip."], rendered: [], sent: [], replies: ["Skip."] })
   })
+
   test("keeps the word that only fills a pause he starts with over them, when he talks on past them, as all of it is made out whole", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -1901,7 +1777,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     })
   })
 
-  test("asks the user to say his answer again when it runs on from the last of its question's voice, and takes that", async () => {
+  test("lets go of the user's answer when it runs on from the last of its question's voice, and takes it when he says it again", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const answers: Array<string> = []
@@ -1924,18 +1800,16 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.9, 12)
         yield* helper.quiet
         yield* helper.wait(1)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
         const before = [...answers]
-        yield* helper.finish
         yield* helper.talk(0.91, 12)
         yield* helper.quiet
         yield* helper.wait(1)
         return { before, rendered: helper.rendered, answered: yield* Fiber.join(asking), answers }
       }),
     )
-    expect(result).toEqual({ before: [], rendered: [Persona.plain.misheard], answered: true, answers: ["Yapd."] })
+    expect(result).toEqual({ before: [], rendered: [], answered: true, answers: ["Yapd."] })
   })
+
   test("takes a quick yes to a short question it asked over them, said as its voice fades, just as he said it", async () => {
     for (const said of ["Yes.", "Yeah.", "Yes, please."]) {
       const result = await overHelperScoped(
@@ -1965,7 +1839,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
-  test("asks the user to say his yes again when it runs on from the last of a short question's voice, and takes that", async () => {
+  test("lets go of the user's yes when it runs on from the last of a short question's voice, and takes it when he says it again", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const answers: Array<string> = []
@@ -1988,19 +1862,17 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.9, 12)
         yield* helper.quiet
         yield* helper.wait(1)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
         const before = [...answers]
-        yield* helper.finish
         yield* helper.talk(0.91, 12)
         yield* helper.quiet
         yield* helper.wait(1)
         return { before, rendered: helper.rendered, answered: yield* Fiber.join(asking), answers }
       }),
     )
-    expect(result).toEqual({ before: [], rendered: [Persona.plain.misheard], answered: true, answers: ["Yes."] })
+    expect(result).toEqual({ before: [], rendered: [], answered: true, answers: ["Yes."] })
   })
-  test("asks the user to say his reply again when it runs on from the last of a short line's voice, and passes that on", async () => {
+
+  test("lets go of the user's reply when it runs on from the last of a short line's voice, and passes it on when he says it again", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const helper = yield* overHelper([[0.8, "Codex opened the"], [0.82, "pull request."], [0.9, "Merge"], [0.91, "it."], [0.92, "Merge it."]], {
@@ -2017,19 +1889,17 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.91, 5)
         yield* helper.quiet
         yield* helper.wait(1)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
         const before = [...helper.sent]
-        yield* helper.finish
         yield* helper.talk(0.92, 12)
         yield* helper.quiet
         yield* helper.wait(1)
-        return { before, sent: helper.sent, replies: yield* helper.replies }
+        return { before, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({ before: [], sent: ["Merge it."], replies: ["Merge it."] })
+    expect(result).toEqual({ before: [], rendered: ["Okay."], sent: ["Merge it."], replies: ["Merge it."] })
   })
-  test("asks the user to say his answer again when it's one of the question's last words, begun over them and gone on past its voice, and takes that", async () => {
+
+  test("lets go of the user's answer when it's one of the question's last words, begun over them and gone on past its voice, and takes it when he says it again", async () => {
     for (const said of ["The docs site.", "Yapd."]) {
       const result = await overHelperScoped(
         Effect.gen(function* () {
@@ -2050,48 +1920,16 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           yield* helper.talk(0.9, 22)
           yield* helper.quiet
           yield* helper.wait(1)
-          // Long enough for it to ask him once he's finished.
-          yield* helper.wait(2)
           const before = [...answers]
-          yield* helper.finish
           yield* helper.talk(0.91, 12)
           yield* helper.quiet
           yield* helper.wait(1)
           return { before, rendered: helper.rendered, answered: yield* Fiber.join(asking), answers }
         }),
       )
-      expect([said, result]).toEqual([said, { before: [], rendered: [Persona.plain.misheard], answered: true, answers: [said] }])
+      expect([said, result]).toEqual([said, { before: [], rendered: [], answered: true, answers: [said] }])
     }
   }, 30_000)
-
-  test("asks the user to say it all again when what he adds after it stopped for him lines up with its words but goes on past its voice", async () => {
-    const said = "Tell it to stop the migration."
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        const helper = yield* overHelper([[0.9, "Tell it to stop."], [0.8, "The migration."], [0.91, said]], {
-          live: true,
-          spoken: "Over in rig, the migration is still running and the build is green. It wants to know whether to deploy, sir.",
-          responding: 2,
-        })
-        yield* helper.wait(0.8)
-        yield* helper.talk(0.9, 15)
-        yield* helper.quiet
-        const stopped = [...helper.commands]
-        // Begun as the last of its voice comes in, and gone on past it.
-        yield* helper.talk(0.8, 25)
-        yield* helper.quiet
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...helper.sent]
-        yield* helper.finish
-        yield* helper.talk(0.91, 20)
-        yield* helper.quiet
-        yield* helper.wait(3)
-        return { stopped, before, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
-      }),
-    )
-    expect(result).toEqual({ stopped: ["play", "stop"], before: [], rendered: [Persona.plain.misheard, "Okay."], sent: [said], replies: [said] })
-  })
 
   test("takes a quick answer to a question it asked over them when none of its voice comes in after", async () => {
     const result = await overHelperScoped(
@@ -2139,7 +1977,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ commands: ["play"], sent: [], replies: [] })
   })
 
-  test("asks the user to say it again when his words run on from its own voice, and passes on what he says then whole, never what was left of the first", async () => {
+  test("lets go of the user's words run on from its own voice, carrying on, and passes them on whole when he says them again after them", async () => {
     const said = "Don't merge it until the review is done."
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -2149,113 +1987,21 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.9, 40)
         yield* helper.quiet
         yield* helper.wait(1)
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const asked = { commands: [...helper.commands], rendered: [...helper.rendered], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
-        yield* helper.finish
+        const ignored = { commands: [...helper.commands], responded: [...helper.responded], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
+        // Past its first three seconds, as he says it again.
         yield* helper.talk(0.91, 40)
         yield* helper.quiet
         yield* helper.wait(1)
-        return { asked, transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+        return { ignored, transcribed: helper.transcribed, commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    // Stopped about a second in, then asked to say it again, with nothing taken in meanwhile.
-    expect(result.asked).toEqual({ commands: ["play", "stop", "play"], rendered: [Persona.plain.misheard], sent: [], replies: [] })
-    expect(result.transcribed.at(-2)).toBe(`Over in yapd. ${said}`)
+    // Looked at for a stop of his while he talked, then made out whole once he'd finished, and let go.
+    expect(result.ignored).toEqual({ commands: ["play"], responded: [], sent: [], replies: [] })
+    expect(result.transcribed.slice(0, 2)).toEqual([`Over in yapd. ${said}`, `Over in yapd. ${said}`])
     expect(result.transcribed.at(-1)).toBe(said)
+    expect(result.commands).toEqual(["play", "volume", "stop", "play"])
     expect(result.sent).toEqual([said])
     expect(result.replies).toEqual([said])
-  })
-
-  test("waits for the user to finish before asking him to say it again, taking nothing he goes on with after a pause for what he says again", async () => {
-    for (const [first, pause, rest] of [
-      ["Don't merge it", 0.3, "until the review is done."],
-      ["Don't merge it until the review is done.", 0.6, "And ping me when it's green."],
-    ] as const) {
-      const again = `${first} ${rest}`
-      const result = await overHelperScoped(
-        Effect.gen(function* () {
-          const helper = yield* overHelper([[0.8, "Over in yapd."], [0.9, first], [0.91, rest], [0.92, again]], { live: true })
-          yield* helper.wait(0.3)
-          yield* helper.talk(0.8, 12)
-          yield* helper.talk(0.9, 30)
-          yield* helper.quiet
-          yield* helper.wait(pause)
-          yield* helper.talk(0.91, 30)
-          yield* helper.quiet
-          const asking = [...helper.commands]
-          yield* helper.wait(2)
-          const asked = { commands: [...helper.commands], sent: [...helper.sent] }
-          yield* helper.finish
-          yield* helper.talk(0.92, 50)
-          yield* helper.quiet
-          yield* helper.wait(1)
-          return { asking, asked, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
-        }),
-      )
-      // Not asked over what he went on with, nor while he might still go on, and nothing taken in till he says it again.
-      expect([first, result]).toEqual([
-        first,
-        {
-          asking: ["play", "stop"],
-          asked: { commands: ["play", "stop", "play"], sent: [] },
-          rendered: [Persona.plain.misheard, "Okay."],
-          sent: [again],
-          replies: [again],
-        },
-      ])
-    }
-  }, 30_000)
-
-  test("asks the user to say it again once more when he goes on with what he was saying just as it asks, rather than take that for all he said", async () => {
-    const said = "Tell it to open the pull request."
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Tell it to open"], [0.95, "the pull request."], [0.96, said]])
-        yield* helper.talk(0.8, 15)
-        yield* helper.talk(0.9, 10)
-        yield* helper.quiet
-        // Just as it starts asking, too soon for him to have heard it.
-        yield* helper.wait(1.6)
-        yield* helper.talk(0.95, 15)
-        yield* helper.quiet
-        const before = [...helper.sent]
-        yield* helper.wait(2)
-        yield* helper.finish
-        yield* helper.talk(0.96, 20)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { before, commands: helper.commands.slice(0, 5), rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
-      }),
-    )
-    expect(result).toEqual({
-      before: [],
-      commands: ["play", "stop", "play", "stop", "play"],
-      rendered: [Persona.plain.misheard, Persona.plain.misheard, "Okay."],
-      sent: [said],
-      replies: [said],
-    })
-  })
-
-  test("ends a line that played to the end while what he said over it was made out, when he doesn't say it again, rather than say it twice", async () => {
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        // Whisper takes three seconds, by when the line has played to the end.
-        const helper = yield* overHelper([[0.9, "Codex is done. Merge it."]], { delays: [3], duration: 2, spoken: "Codex is done, sir." })
-        yield* helper.wait(1)
-        yield* helper.talk(0.9, 10)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        yield* helper.finish
-        yield* helper.wait(4)
-        yield* helper.finish
-        yield* helper.wait(4)
-        const done = yield* Fiber.poll(helper.fiber)
-        return { done: Option.isSome(done), plays: helper.plays, rendered: helper.rendered, sent: helper.sent }
-      }),
-    )
-    // The line, then asking him to say it again, and nothing more.
-    expect(result).toEqual({ done: true, plays: [0, 0], rendered: [Persona.plain.misheard], sent: [] })
   })
 
   test("makes out one look at a time, however long Whisper takes, and only one look at what's been said so far while it's under way", async () => {
@@ -2273,35 +2019,6 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     )
     // The first look so far, and all of it once that's done.
     expect(result).toEqual({ started: 1, looks: 2, commands: ["play"], sent: [] })
-  })
-
-  test("doesn't take its own voice asking him to say it again for what he says again", async () => {
-    const said = "Tell it to open a PR."
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        // Lines as short as asking him is, so where its words fall in it is known.
-        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, said], [0.85, Persona.plain.misheard], [0.91, said]], {
-          duration: 2,
-          spoken: "Over in yapd, the tests pass now, sir.",
-        })
-        yield* helper.talk(0.8, 15)
-        yield* helper.talk(0.9, 15)
-        yield* helper.quiet
-        yield* helper.wait(1.6)
-        // Its voice asking him gets into the microphone, which still hasn't learnt it.
-        yield* helper.wait(0.2)
-        yield* helper.talk(0.85, 12)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        const asking = [...helper.commands]
-        yield* helper.finish
-        yield* helper.talk(0.91, 15)
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { asking, rendered: helper.rendered, sent: helper.sent }
-      }),
-    )
-    expect(result).toEqual({ asking: ["play", "stop", "play"], rendered: [Persona.plain.misheard, "Okay."], sent: [said] })
   })
 
   test("picks up from before where the user began, not before what Whisper made up of its voice, when what's made out together wasn't meant for it", async () => {
@@ -2323,32 +2040,11 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ plays: [0, 0.5], sent: [] })
   })
 
-  test("picks up from before where the user began when he doesn't say it again, having taken in nothing", async () => {
+  test("picks up from before where the user began when what it stopped for a second in turns out unclear once it's made out whole", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
-        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Tell it to open a PR."]])
-        yield* helper.wait(2)
-        yield* helper.talk(0.8, 15)
-        yield* helper.talk(0.9, 15)
-        yield* helper.quiet
-        yield* helper.wait(2)
-        yield* helper.finish
-        // Long enough for him to have said it again.
-        yield* helper.wait(4)
-        return { commands: helper.commands, plays: helper.plays, sent: helper.sent, replies: yield* helper.replies }
-      }),
-    )
-    expect(result.commands.slice(0, 4)).toEqual(["play", "stop", "play", "play"])
-    // The update again, a second and a half before he began, two seconds in.
-    expect(result.plays).toEqual([0, 0, 0.5])
-    expect(result).toMatchObject({ sent: [], replies: [] })
-  })
-
-  test("picks up from before where the user began when what it stopped for a second in turns out all its own voice once it's made out whole", async () => {
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        // A look partway hears a word of his, which Whisper hears as its own once it has all of it.
-        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.81, "Merge it now"], [0.82, "and the"]], {
+        // A look partway hears a stop of his, which Whisper hears as its own voice once it has all of it.
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.81, "Stop the"], [0.82, "and the"]], {
           whole: [[0.8, 0.81, 0.82], "Over in yapd, the tests pass now and the pull request."],
           live: true,
         })
@@ -2359,15 +2055,15 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.82, 10)
         yield* helper.quiet
         yield* helper.wait(1)
-        return { stopped, commands: helper.commands, plays: helper.plays, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        return { stopped, commands: helper.commands, plays: helper.plays, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
     expect(result.stopped).toEqual(["play", "stop"])
-    // Again from a second and a half before he began, with nothing asked or taken in.
-    expect(result).toMatchObject({ commands: ["play", "stop", "play"], plays: [0, 0], rendered: [], sent: [], replies: [] })
+    // Again from a second and a half before he began, with nothing taken in.
+    expect(result).toMatchObject({ commands: ["play", "stop", "play"], plays: [0, 0], responded: [], sent: [], replies: [] })
   })
 
-  test("passes on what the user starts saying as it stops, whole, though it ends in its words, like \"Tell it to stop the migration.\"", async () => {
+  test("takes only the stop of his in what the user starts saying as it stops, when the rest is in its words, like \"Tell it to stop the migration.\"", async () => {
     const said = "Tell it to stop the migration."
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -2376,6 +2072,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           duration: 2.5,
           spoken: "Claude is still running the migration, sir.",
           whole: [[0.91, 0.92], said],
+          intent: "dismiss",
         })
         yield* helper.wait(2)
         yield* helper.talk(0.91, 16)
@@ -2383,32 +2080,85 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.92, 30)
         yield* helper.quiet
         yield* helper.wait(1)
-        return { commands: helper.commands.slice(0, 1), rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        return { responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({ commands: ["play"], rendered: ["Okay."], sent: [said], replies: [said] })
+    expect(result).toEqual({ responded: ["Stop."], sent: [], replies: ["Stop."] })
   })
 
-  test("stops for a stop or a wait over them, and acts on just what was said", async () => {
+  test("stops for a stop or a wait from its first word, and has the update dismissed on just what was said", async () => {
     for (const said of ["Stop.", "Hold on."]) {
       const result = await overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, said]], { intent: said === "Stop." ? "dismiss" : "send", live: true })
-          yield* helper.wait(0.8)
+          const helper = yield* overHelper([[0.9, said]], { intent: "dismiss", live: true })
           yield* helper.talk(0.9, 10)
+          // Still talking: it could be its own voice until he's finished and it's made out.
+          const talking = [...helper.commands]
           yield* helper.quiet
           yield* helper.wait(1)
           const exit = yield* Fiber.poll(helper.fiber)
-          return { commands: helper.commands.slice(0, 2), done: Option.isSome(exit), sent: helper.sent, replies: yield* helper.replies }
+          return {
+            talking,
+            commands: helper.commands,
+            done: Option.isSome(exit),
+            responded: helper.responded,
+            sent: helper.sent,
+            replies: yield* helper.replies,
+          }
         }),
       )
-      // A stop ends the update, and a wait is passed on as it's taken.
       expect([said, result]).toEqual([
         said,
-        { commands: ["play", "stop"], done: said === "Stop.", sent: said === "Stop." ? [] : [said], replies: [said] },
+        { talking: ["play"], commands: ["play", "stop"], done: true, responded: [said], sent: [], replies: [said] },
       ])
     }
   }, 30_000)
+
+  test("stops for a stop of the user's that its own voice runs into from its first word, acting on that alone", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests."], [0.9, "Stop."]], { intent: "dismiss", live: true })
+        yield* helper.wait(0.1)
+        yield* helper.talk(0.8, 20)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const exit = yield* Fiber.poll(helper.fiber)
+        return {
+          transcribed: helper.transcribed,
+          commands: helper.commands,
+          done: Option.isSome(exit),
+          responded: helper.responded,
+          sent: helper.sent,
+          replies: yield* helper.replies,
+        }
+      }),
+    )
+    expect(result).toEqual({
+      transcribed: ["Over in yapd, the tests. Stop."],
+      commands: ["play", "stop"],
+      done: true,
+      responded: ["Stop."],
+      sent: [],
+      replies: ["Stop."],
+    })
+  })
+
+  test("stops for what's clearly the user once he's finished, and acts on exactly what Whisper heard, though it's about what yapd is saying", async () => {
+    const said = "Which PR was that?"
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, said]], { live: true })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 20)
+        const talking = [...helper.commands]
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { talking, commands: helper.commands.slice(0, 2), responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ talking: ["play"], commands: ["play", "stop"], responded: [said], sent: [said], replies: [said] })
+  })
 
   test("stops for everyday words of his over them, and passes them on as he said them, though they're only words nearly anything has", async () => {
     for (const said of ["Why did it do that?", "Don't do it."]) {
@@ -2440,9 +2190,14 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ commands: ["play", "stop"], sent: ["Deploy it."], replies: ["Deploy it."] })
   })
 
-  test("doesn't stop for its own voice with its name written as two words, as a look at it about a second in sees it, nor ask him anything", async () => {
+  test("doesn't stop for its own voice with its name misheard or written in two, as a look at it about a second in sees it, nor once it's made out whole", async () => {
+    const t3code = "Over in t3code, Codex fixed the flaky login test and pushed the branch, sir. It wants to know whether to deploy."
     for (const [spoken, soFar, rest] of [
+      [long.spoken, "Over in yapped,", "the tests pass now."],
+      [long.spoken, "Over in your app", "the tests"],
       [long.spoken, "Over in your app, the tests", "pass now."],
+      [t3code, "Over in T3 Code", "Codex fixed the"],
+      [t3code.replace("t3code", "minas-sv2"), "Over in my NAS", "Codex fixed the"],
       ["Over in homelab, Claude finished the migration and the tests pass, sir. Shall I open the pull request?", "Over in home lab, Claude finished", "the migration."],
     ] as const) {
       const result = await overHelperScoped(
@@ -2453,12 +2208,15 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           yield* helper.talk(0.81, 15)
           yield* helper.quiet
           yield* helper.wait(1)
-          return { commands: helper.commands, looks: helper.transcribed.length, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+          return { commands: helper.commands, transcribed: helper.transcribed, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
         }),
       )
-      expect([soFar, result]).toEqual([soFar, { commands: ["play"], looks: 2, rendered: [], sent: [], replies: [] }])
+      expect([soFar, result]).toEqual([
+        soFar,
+        { commands: ["play"], transcribed: [soFar, `${soFar} ${rest}`], rendered: [], sent: [], replies: [] },
+      ])
     }
-  }, 30_000)
+  }, 60_000)
 
   test("passes on what the user says over them on either side of a pause, as he said it, like \"Don't... merge it yet.\"", async () => {
     const result = await overHelperScoped(
@@ -2579,12 +2337,12 @@ describe("Answers over their first words, while yapd's own voice can still get i
     }
   }, 30_000)
 
-  test("stops for a follow-up run on from its own voice over them, asks him to say it again, takes that for the follow-up, and leaves the answer unheard", async () => {
+  test("lets go of a follow-up run on from its own voice over them, carrying on, and takes it when he says it again after them, leaving the answer unheard", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const followUps: Array<string> = []
         const through: Array<string> = []
-        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Tell it to open a PR."], [0.91, "Tell it to open a PR."]])
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Tell it to open a PR."], [0.91, "Tell it to open a PR."]], { live: true })
         yield* Fiber.interrupt(helper.fiber)
         const asked = helper.commands.length
         const answering = yield* Effect.fork(helper.answer(answer(followUps, through)))
@@ -2592,33 +2350,30 @@ describe("Answers over their first words, while yapd's own voice can still get i
         // His words run straight on from its own voice getting through.
         yield* helper.talk(0.8, 15)
         yield* helper.talk(0.9, 15)
-        const talking = helper.commands.slice(asked)
         yield* helper.quiet
-        // Long enough for it to ask him once he's finished.
-        yield* helper.wait(2)
-        const before = [...followUps]
-        yield* helper.finish
+        yield* helper.wait(1)
+        const ignored = { commands: helper.commands.slice(asked), followUps: [...followUps] }
+        // Past its first three seconds, as he says it again.
+        yield* helper.wait(1)
         yield* helper.talk(0.91, 15)
         yield* helper.quiet
         const followed = yield* Fiber.join(answering)
         // Long past where it would have been said to the end.
         yield* helper.wait(20)
-        return { talking, before, commands: helper.commands.slice(asked), rendered: helper.rendered, followed, followUps, through }
+        return { ignored, commands: helper.commands.slice(asked), followed, followUps, through }
       }),
     )
-    // Still talking until it was made out to be him, and cut off then, so never heard to the end.
+    // Never stopped for what ran on from its voice, then cut off by what he said again, so never heard to the end.
     expect(result).toEqual({
-      talking: ["play"],
-      before: [],
-      commands: ["play", "stop", "play"],
-      rendered: [Persona.plain.misheard],
+      ignored: { commands: ["play"], followUps: [] },
+      commands: ["play", "volume", "stop"],
       followed: true,
       followUps: ["Tell it to open a PR."],
       through: [],
     })
   })
 
-  test("stops for a follow-up over them once Whisper has made out it's him, takes it just as he said it, and leaves the answer unheard", async () => {
+  test("stops for a follow-up over them once Whisper has made out it's clearly him, takes it just as he said it, and leaves the answer unheard", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const followUps: Array<string> = []
@@ -2638,6 +2393,7 @@ describe("Answers over their first words, while yapd's own voice can still get i
     )
     expect(result).toEqual({ talking: ["play"], commands: ["play", "stop"], followed: true, followUps: ["Tell it to open a PR."], through: [] })
   })
+
   test("has an answer heard when it's said to the end while a follow-up over them is still being made out, and takes that once it's him", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
