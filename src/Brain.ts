@@ -366,9 +366,6 @@ export const unapproved = (lines: Lines) => `It needs an 'approve', so I've left
 /** What's said of an approval he said a plain yes over once it was asked again, before he'd heard all of it. */
 export const cutShort = (lines: Lines) => `You stopped me before the end, so I've left it waiting for you in T3 Code${addressed(lines)}.`
 
-/** Flags before the ones that count, like "-v" in "rm -v -rf". */
-const flags = String.raw`(?:-\S+\s+)*`
-
 /**
  * What makes what a thread wants to do risky enough to need "approve", in
  * its prompt or the command, change or tool it's for, whatever the model
@@ -389,8 +386,7 @@ const risky = new RegExp(
     String.raw`--force-with-lease`,
     String.raw`git\s+filter-(?:branch|repo)`,
     String.raw`--no-verify`,
-    // Throwing away work not yet committed: changes checked out over, a stash dropped.
-    String.raw`\bgit\s+checkout\s+(?:${flags}--\s|\.(?:\s|$))`,
+    // Throwing away work not yet committed: a stash dropped; changes checked out or switched over are looked for below, a command at a time.
     String.raw`\bstash\s+(?:drop|clear)\b`,
     // Publishing, merging, and deleting what's hosted.
     String.raw`\b(?:npm|yarn|pnpm|bun|cargo|poetry)\s+publish\b`,
@@ -473,6 +469,17 @@ const flagged = (command: string, name: RegExp, flag: RegExp) => {
 }
 
 /**
+ * Whether git's subcommand that `name` says, after "git" and any of git's own
+ * options, like the "-C ~/work" of `git -C ~/work switch -f main`, has after
+ * it what `then` says, as `after` has it: only after "git", since another
+ * tool may have a subcommand of the same name, like home-manager's switch.
+ */
+const afterGit = (command: string, name: RegExp, then: RegExp) => {
+  const git = /\bgit\s/i.exec(command)
+  return git !== null && after(command.slice(git.index + git[0].length), name, then)
+}
+
+/**
  * The flags a command is given after the first word that names it, like the
  * "-d" and "-f" of "git branch -d old -f", as git takes a flag anywhere after
  * its command's name: what's after a later name is after the first too.
@@ -484,7 +491,7 @@ const flagsAfter = (command: string, name: RegExp) => {
 }
 
 /** The names below, so a command with none of them, like most, is passed over at once. */
-const flaggable = /rm|rimraf|push|reset|clean|branch|restore|gcloud|az|rsync/i
+const flaggable = /rm|rimraf|push|reset|clean|branch|restore|checkout|switch|gcloud|az|rsync/i
 
 /**
  * A long flag as git and GNU tools take it: whole, or cut short to any of its
@@ -508,6 +515,22 @@ const pushing = new RegExp(String.raw`\s(?:-[a-z\d]*[fd]|${["force", "delete", "
 
 /** A reset that throws away what isn't committed: "--hard", or cut short, like "--ha". */
 const hard = new RegExp(String.raw`\s${abbreviated("hard")}`, "i")
+
+/**
+ * A checkout over what isn't committed: forced, by a flag among others, like
+ * "-qf", or by name, like "--force" or "--for", or over files, named after
+ * "--" or starting with ".", as no branch's name can, like `git checkout HEAD
+ * -- src`, `git checkout .` or `git checkout main ./src`.
+ */
+const checkingOut = new RegExp(String.raw`\s(?:-[a-z]*f|${abbreviated("force")}|--\s+\S|\.)`, "i")
+
+/**
+ * A switch over what isn't committed: discarding it, as "--discard-changes"
+ * or cut short, like "--discard", or forced, by a flag among others, like
+ * "-qf", or by "--force", which is the same; never "--force-create", which
+ * only moves a branch, as `git branch -f` does.
+ */
+const switching = new RegExp(String.raw`\s(?:-[a-z]*f|${abbreviated("force")}(?!-)|${abbreviated("discard-changes")})`, "i")
 
 /** A branch's flag that deletes it, "-d" among others, "--delete" or "--del". */
 const deleteFlag = new RegExp(String.raw`^(?:-[a-zA-Z]*[dD]|${abbreviated("delete")})`)
@@ -541,6 +564,9 @@ const riskyFlags = {
     const last = /^[\s\S]*\bgit\s+restore\b/i.exec(command)
     return last !== null && (!/--staged/i.test(command.slice(last[0].length)) || after(command, /\bgit\s+restore\b/i, /--worktree/i))
   },
+  // Checking out over changes, forced or over files, and switching over them, discarding them or forced, wherever the flag goes.
+  checkout: (command: string) => afterGit(command, /(?:^|\s)checkout\b/i, checkingOut),
+  switch: (command: string) => afterGit(command, /(?:^|\s)switch\b/i, switching),
   // Deleting what's hosted, and mirroring with deletes.
   hosted: (command: string) => after(command, /\b(?:gcloud|az)\b/i, /\sdelete\b/i),
   rsync: (command: string) => after(command, /\brsync\b/i, /\s--delete/i),
@@ -557,6 +583,8 @@ const gitFlags = new Map([
   ["clean", riskyFlags.clean],
   ["branch", riskyFlags.branch],
   ["restore", riskyFlags.restore],
+  ["checkout", riskyFlags.checkout],
+  ["switch", riskyFlags.switch],
 ])
 
 /** Commands that never run what they're given, only look for it, like grep looking for "rm" through a folder with `-r`, or rg, ag and ack. */

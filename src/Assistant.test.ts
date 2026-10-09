@@ -1079,6 +1079,30 @@ describe("Assistant", () => {
     expect(result.open).toEqual(Option.none())
   })
 
+  test("a forced checkout, or a switch that discards changes, needs 'approve' though the model says it's harmless, and a plain yes heard in full never allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    for (const command of ["git checkout -f main", "git switch --discard-changes main"]) {
+      const result = await run(
+        Effect.gen(function* () {
+          // The model words it, and says it's low risk.
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", command) })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.length }
+        }),
+      )
+      expect(result).toEqual({
+        spoken: [
+          `Cloud deployment discovery wants to run ${command}, which can't be undone, so say 'approve' if you want it, sir.`,
+          `Shall I still allow Cloud deployment discovery to run ${command}, sir? Only 'approve' will do.`,
+          "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+        ],
+        dispatched: 0,
+      })
+    }
+  })
+
   test("an approval is risky by all of what it would run, however long, and one whose command can't be read needs 'approve' too", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     // Something harmless long enough to be cut short before what's risky, under T3 Code's own harmless words for it.

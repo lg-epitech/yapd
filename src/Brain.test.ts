@@ -843,6 +843,85 @@ describe("Brain", () => {
     expect(["Yes.", "Approve it, it's a session thing.", "Always."].some(Brain.forSession)).toBe(false)
   })
 
+  test("git that throws away work not yet committed, or what's pushed or stashed, is risky whatever the model made of it", () => {
+    const risky = [
+      // Checked out over changes: forced, by its flags together or apart, whole or cut short, or over the files named after "--" or ".".
+      "git checkout -f main",
+      "git checkout --force main",
+      "git checkout --for main",
+      "git checkout main -f",
+      "git checkout -qf main",
+      "git checkout -fb hotfix origin/main",
+      "git -C ~/work checkout -f main",
+      "git checkout -- src/a.ts",
+      "git checkout -q -- src/a.ts",
+      "git checkout HEAD -- src/a.ts",
+      "git checkout main -- .",
+      "git checkout .",
+      "git checkout main .",
+      "git checkout main ./src",
+      "git checkout .gitignore",
+      "git -C ~/work checkout -- .",
+      // Switched over changes: discarding them, whole or cut short, or forced.
+      "git switch --discard-changes main",
+      "git switch main --discard-changes",
+      "git switch --discard main",
+      "git switch -f main",
+      "git switch --force main",
+      "git switch -qf main",
+      "git -C ~/work switch -f main",
+      "ssh rig 'git switch -f main'",
+      // Restored, cleaned, reset, pushed, branches deleted and stashes dropped, as before.
+      "git restore src/a.ts",
+      "git restore --staged --worktree src/a.ts",
+      "git clean -f",
+      "git clean -fd",
+      "git clean -fdx",
+      "git clean -xdf",
+      "git clean -d -f",
+      "git reset --hard",
+      "git reset --hard HEAD~1",
+      "git push --force",
+      "git push -f origin main",
+      "git push --force-with-lease",
+      "git branch -D old",
+      "git stash drop",
+      "git stash clear",
+    ]
+    const ordinary = [
+      "git checkout main",
+      "git checkout -b fix-flaky",
+      "git checkout -b fix -t origin/fix",
+      "git checkout feature/fix-flaky",
+      "git checkout -",
+      "git checkout main --",
+      "git checkout --track origin/fix",
+      "git switch main",
+      "git switch -c fix-flaky",
+      "git switch -C fix",
+      "git switch --force-create fix",
+      "git switch --detach main",
+      "git switch -",
+      "git log --oneline -- src/checkout.ts",
+      'git commit -m "checkout -f"',
+      "git diff main -- .",
+      "home-manager switch -f home.nix",
+      "darwin-rebuild switch --flake .",
+      "git restore --staged src/a.ts",
+      "git clean -n",
+      "git clean -nd",
+      "git stash",
+      "git stash pop",
+      "git branch -d old",
+    ]
+    expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
+    expect(ordinary.filter(Brain.dangerous)).toEqual([])
+    // As an approval is read, with T3 Code's own words for it after.
+    const asked = (text: string) => `${text}\nBash: ${text}`
+    expect(risky.filter((text) => !Brain.dangerous(asked(text)))).toEqual([])
+    expect(ordinary.filter((text) => Brain.dangerous(asked(text)))).toEqual([])
+  })
+
   test("what's risky is told in moments, however what it would run is written, up to as much of it as is looked through", () => {
     // As much as an approval is looked through for what's risky, written so that patterns take time growing with the square of its
     // length: a command going on over many lines, many names a flag could follow in one command, or among its flags, a long word, a
@@ -857,6 +936,9 @@ describe("Brain", () => {
       "clean among clean's flags": `clean ${"-.clean ".repeat(2500)}`,
       "az after az": "az ".repeat(7000),
       "rsync after rsync": "rsync ".repeat(3500),
+      "checkout after checkout": `git ${"checkout ".repeat(2200)}`,
+      "switch after switch, a long word after them": `git ${"switch ".repeat(1400)}-${"a".repeat(10_000)}`,
+      "git after git": "git ".repeat(5000),
       "restore after restore, staged after them all": `${"git restore ".repeat(1700)}--staged`,
       "rm -r after rm -r, cached after them all": `${"rm -r ".repeat(3300)}--cached`,
       "a long word": "a".repeat(20_000),
