@@ -54,7 +54,7 @@ private final class Watched {
       },
       show: { card, talking in self.done.append(talking ? "show \(card.id)" : "show \(card.id) quietly") },
       hide: { self.done.append("hide") },
-      takeDown: { id in self.done.append("take down \(id)") },
+      takeDown: { down in self.done.append(down.shown.map { "take down \(down.id) shown \($0)" } ?? "take down \(down.id)") },
       putBack: { back in
         self.done.append(back.revision.map { "put back \(back.id) at \($0)" } ?? "put back \(back.id)")
         guard self.holdingBack else { return }
@@ -66,12 +66,13 @@ private final class Watched {
   }
 }
 
-/// What `/state` points at: a card put up a moment ago, `fresh`, or a while before.
-func pointing(_ id: String, fresh: Bool) -> Status.Showing {
+/// What `/state` points at: a card put up a moment ago, `fresh`, or a while before, at the `revision` it went up at, when yapd says.
+func pointing(_ id: String, fresh: Bool, revision: Int? = nil) -> Status.Showing {
   let format = ISO8601DateFormatter()
   format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
   let at = format.string(from: fresh ? Date() : Date(timeIntervalSinceNow: -3600))
-  return try! JSONDecoder().decode(Status.Showing.self, from: Data(#"{"id": "\#(id)", "at": "\#(at)"}"#.utf8))
+  let up = revision.map { #", "revision": \#($0)"# } ?? ""
+  return try! JSONDecoder().decode(Status.Showing.self, from: Data(#"{"id": "\#(id)", "at": "\#(at)"\#(up)}"#.utf8))
 }
 
 /// The panel puts up the card yapd points at once it's fetched, trying again when that fails, and checks what it shows against what yapd points at whenever it connects.
@@ -162,7 +163,7 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
       fetch: { id in .card(Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil)) },
       show: { card, _ in shown = card.id },
       hide: { shown = nil },
-      takeDown: { id in requests.append(id) },
+      takeDown: { down in requests.append(down.id) },
       putBack: { _ in },
       wait: { _ in }
     ))
@@ -325,7 +326,7 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
   }
 
   // Put away while yapd is still being asked to put it back up, that request is stopped, unless it's gone already, which yapd,
-  // asked to take it down since, turns away.
+  // asked to take it down since, turns away. Asked to take it down as it went back up, yapd takes it down if it did go back up.
   do {
     let watched = Watched()
     watched.holdingBack = true
@@ -337,8 +338,83 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
     watched.letGo()
     await following.settled()
     check(
-      watched.done == ["hide", "show c23 quietly", "put back c23 at 3", "take down c23", "stopped putting back c23"] && following.shown == nil,
+      watched.done == ["hide", "show c23 quietly", "put back c23 at 3", "take down c23 shown 4", "stopped putting back c23"] && following.shown == nil,
       "stops having yapd put back up a card put away meanwhile, not \(watched.done)"
+    )
+  }
+
+  // Closed, yapd is asked to take it down as it went up, at the revision its state said it went up at, not the one yapd is at
+  // since, nor at none.
+  do {
+    let watched = Watched()
+    let following = Following(watched.doing)
+    following.follow(pointing("c25", fresh: true, revision: 4), revision: 4, connecting: true)
+    await following.settled()
+    following.follow(pointing("c25", fresh: true, revision: 4), revision: 5, connecting: false)
+    following.closed("c25")
+    check(
+      watched.done == ["show c25", "take down c25 shown 4"] && following.since == 4,
+      "has yapd take down a card closed as it went up, not \(watched.done)"
+    )
+  }
+
+  // Closed, then shown again from the menu before its request to take it down got there: yapd is asked to take it down as it
+  // went up first, and to put it back up, at a revision its request, getting there late, leaves it up at. Closed again, before
+  // yapd's state says it's back up or after, it's asked to be taken down as it's up now.
+  for early in [true, false] {
+    let watched = Watched()
+    let following = Following(watched.doing)
+    following.follow(pointing("c26", fresh: true, revision: 7), revision: 7, connecting: true)
+    await following.settled()
+    following.closed("c26")
+    following.showAgain("c26") { watched.done.append("gone") }
+    await following.settled()
+    if !early {
+      // yapd put it back up, then was asked to take it down as it was up first, which leaves it up.
+      following.follow(pointing("c26", fresh: false, revision: 8), revision: 8, connecting: false)
+      following.follow(pointing("c26", fresh: false, revision: 8), revision: 9, connecting: false)
+      await following.settled()
+    }
+    let shown = following.shown
+    following.closed("c26")
+    check(
+      watched.done == ["show c26", "take down c26 shown 7", "show c26 quietly", "put back c26 at 7", "take down c26 shown 8"]
+        && watched.fetches == ["c26", "c26"] && shown == "c26",
+      "has yapd take down a card shown again as it's up again, \(early ? "before" : "once") yapd says so, not \(watched.done)"
+    )
+  }
+
+  // Put away, then put back up by another app before the request to take it down got there, which leaves it up: it's up anew,
+  // so the panel puts it up again, rather than leave yapd taking it to be on screen while it isn't.
+  do {
+    let watched = Watched()
+    let following = Following(watched.doing)
+    following.follow(pointing("c27", fresh: true, revision: 2), revision: 2, connecting: true)
+    await following.settled()
+    following.closed("c27")
+    following.follow(pointing("c27", fresh: true, revision: 3), revision: 3, connecting: false)
+    await following.settled()
+    following.follow(pointing("c27", fresh: true, revision: 3), revision: 4, connecting: false)
+    await following.settled()
+    check(
+      watched.done == ["show c27", "take down c27 shown 2", "show c27"] && following.shown == "c27" && following.since == 3,
+      "puts a card up again once yapd has it up anew, not \(watched.done)"
+    )
+  }
+
+  // The revision yapd put a card up at is read from its state, and sent with a card to take down; a yapd too old to tell sends
+  // none, and gets none back, as before.
+  do {
+    let read = [
+      #"{"id": "c28", "at": "2026-10-08T22:00:00.000Z", "revision": 6}"#,
+      #"{"id": "c28", "at": "2026-10-08T22:00:00.000Z"}"#,
+    ].map { try! JSONDecoder().decode(Status.Showing.self, from: Data($0.utf8)).revision }
+    let sent = [TakeDown(id: "c28", shown: 6), TakeDown(id: "c28", shown: nil)].map { down in
+      down.query.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
+    }
+    check(
+      read == [6, nil] && sent == ["id=c28&shown=6", "id=c28"],
+      "reads the revision yapd put a card up at and sends it back with a card to take down, not \(read) and \(sent)"
     )
   }
 

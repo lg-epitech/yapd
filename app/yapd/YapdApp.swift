@@ -26,7 +26,7 @@ final class Yapd {
         fetch: { id in await Yapd.fetch(id, from: api) },
         show: { card, talking in panel.show(card, talking: talking) },
         hide: { panel.hide() },
-        takeDown: { id in Yapd.send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },
+        takeDown: { down in Yapd.send("DELETE", "cards/current", query: down.query, to: api) },
         putBack: { back in await Yapd.sent("PUT", "cards/current", body: try? JSONEncoder().encode(back), to: api) },
         wait: { delay in try? await Task.sleep(for: delay) }
       )
