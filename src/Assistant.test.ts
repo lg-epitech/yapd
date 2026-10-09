@@ -2816,6 +2816,26 @@ describe("Assistant", () => {
     expect(await answering("Next.", "Alpha.")).toEqual({ asked: 0, spoken: [`Skipped, sir. ${last}`, "Alpha it is, sir."], answers: [{ [extras.id]: ["Alpha"] }] })
   })
 
+  test("'next' to a part with an option that starts with next asks which of them with more parts after it, and lets a lone part go, never skipping it as if taken", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const release = { id: "release", question: "Which release should this go in?", options: [{ label: "Next release (Recommended)" }, { label: "This release" }] }
+    const answering = (parts: ReadonlyArray<Record<string, unknown>>, ...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", parts) })
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const last = "And last: Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(await answering([release, extras], "Next.", "Next release.", "Alpha.")).toEqual({
+      spoken: ["Which one, sir: Next release or This release? I'd go with Next release.", `Next release, sir. ${last}`, "Alpha it is, sir."],
+      answers: [{ release: "Next release (Recommended)", [extras.id]: ["Alpha"] }],
+    })
+    expect(await answering([release], "Next.")).toEqual({ spoken: ["I'll leave that one, sir."], answers: [] })
+  })
+
   test("a plain no to a thread's question that takes any answer is sent as the answer, while 'stop' still lets it go", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "bump", question: "Should I also bump the version?" }] }]

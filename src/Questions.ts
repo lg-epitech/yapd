@@ -665,14 +665,14 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
  * "Ship it now", or to the question, as when the pick is a no; the option
  * that starts with yes or no, on a plain yes or no, which is otherwise the
  * model's when the question asks whether; his own words for "you decide"
- * or "none of those"; or what he
- * wants done with the question itself. `inFull` is whether he heard the
- * part through to yapd's pick, and `parts` how many it has. Undefined for
- * anything else, which is the model's to judge. Words like "stop", "skip" or
- * "later" are never taken for an option they're only a word of, and words
- * that let it go but start an option, like "leave it" to "Leave the
- * changelog", are the model's too, while "skip it" to a part with more
- * after it and "Skip the slow tests" asks which of them.
+ * or "none of those"; or what he wants done with the question itself.
+ * `inFull` is whether he heard the part through to yapd's pick, and
+ * `parts` how many it has. Undefined for anything else, which is the
+ * model's to judge. Words like "stop", "skip" or "later" are never taken
+ * for an option they're only a word of, and words that let it go but
+ * start an option, like "leave it" to "Leave the changelog", are the
+ * model's too, while "skip it" or "next" to a part with more after it and
+ * "Skip the slow tests" or "Next release" asks which of them.
  */
 export const pick = (part: Said, heard: string, asked: { readonly inFull: boolean; readonly parts: number }): Reply | undefined => {
   const said = gist(heard)
@@ -714,10 +714,10 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (repeating.has(said)) return { _tag: "Again" }
   if (explaining.has(said)) return { _tag: "More" }
   if (later.has(said)) return { _tag: "Later" }
-  // "Leave it" to "Leave the changelog", or "cancel" to "Cancel the deploy", may well be that option, which the model tells. Never words
-  // to stop talking, like "skip it" or "stop", which no agent gets, nor "never mind" or "forget it".
-  const lead = /^(?:leave|cancel|drop|skip|pass|move)\b/.exec(said)?.[0]
-  const leads = lead !== undefined && starting(lead) !== undefined
+  // "Leave it" to "Leave the changelog", "cancel" to "Cancel the deploy", or "next one" to "Next release", may well be that option, which
+  // the model tells. Never words to stop talking, like "skip it", "next" or "stop", which no agent gets, nor "never mind" or "forget it".
+  const lead = /^(?:leave|cancel|drop|skip|pass|move|next)\b/.exec(said)?.[0]
+  const leads = lead !== undefined && fitting(part, ({ said }) => new RegExp(`^${lead}\\b`, "i").test(said)).length > 0
   if ((leaving.has(said) || skipping.has(said)) && !enough.has(said) && leads) return undefined
   // "Skip it" to "Skip the slow tests", with more parts after it, may be that option too, and leaving the part out would sound as if it
   // was taken: he's asked which of them instead, since words to stop talking never go to the model.

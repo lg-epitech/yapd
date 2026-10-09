@@ -221,6 +221,13 @@ describe("Questions", () => {
     expect(going).toEqual(["Which", "Which", "Skip", "Leave", "Leave"])
     expect(Questions.pick(networks, "Skip it.", { inFull: true, parts: 2 })).toEqual({ _tag: "Skip" })
     expect(["Leave it.", "Cancel."].map((heard) => Questions.pick(networks, heard, { inFull: true, parts: 1 })?._tag)).toEqual(["Leave", "Leave"])
+    // "Next" to "Next release" is the same: which of them with more parts after it, never skipped; the model's when it's more than words to
+    // stop talking; and, like "skip it", let go with one part, never sending that option.
+    const release = part("Which release should this go in?", ["Next release (Recommended)", "This release"])
+    expect(["Next.", "Next one.", "Next question."].map((heard) => Questions.pick(release, heard, { inFull: true, parts: 2 })?._tag)).toEqual(["Which", undefined, undefined])
+    expect(["Next.", "Next one."].map((heard) => Questions.pick(release, heard, { inFull: true, parts: 1 })?._tag)).toEqual(["Leave", undefined])
+    const releases = part("Which release should this go in?", ["Next release (Recommended)", "Next sprint", "This release"])
+    expect(Questions.pick(releases, "Next.", { inFull: true, parts: 2 })).toEqual({ _tag: "Which" })
     expect(pick("Ghostnet, but only for the tests.")).toBeUndefined()
     expect(pick("Mainnet and Ghostnet.")).toBeUndefined()
     // A form that takes only its options asks which of them, rather than send words it can't take.
