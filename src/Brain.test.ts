@@ -632,9 +632,10 @@ describe("Brain", () => {
       _tag: "Question",
       id: "q1",
       questions: [
-        { id: "q", header: "", question: "Which network?", options: options.map((label) => ({ label, description: "" })), multiSelect: false, allowCustomAnswer: true },
-        ...(more ? [{ id: "r", header: "", question: "And which fee table?", options: [], multiSelect: false, allowCustomAnswer: true }] : []),
+        { id: "q", header: "", question: "Which network?", options: options.map((label) => ({ label, description: "" })), multiSelect: false, allowCustomAnswer: true, required: true },
+        ...(more ? [{ id: "r", header: "", question: "And which fee table?", options: [], multiSelect: false, allowCustomAnswer: true, required: true }] : []),
       ],
+      mode: "live",
     })
     const approve = (command: string): Asked => ({ _tag: "Approval", id: "r1", what: `Bash: ${command}`, kind: "command", decisions: [{ decision: "accept", label: "Allow" }], command })
     const asks = [

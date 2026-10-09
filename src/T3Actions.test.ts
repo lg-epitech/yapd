@@ -168,6 +168,22 @@ describe("T3Actions", () => {
     expect(typed("Keys", "Keep the API keys in the vault?", [{ label: "Yes", description: "Yes" }, { label: "No", description: "No" }])).toEqual(Option.some("Question"))
   })
 
+  test("a question's response mode and required parts are read from its card", () => {
+    const read = (card: object) =>
+      Option.match(T3Actions.request([{ ...question, ...card }], "r2"), {
+        onNone: () => undefined,
+        onSome: (found) => (found._tag === "Question" ? { mode: found.mode, required: found.questions.map(({ required }) => required) } : undefined),
+      })
+    // Claude's go straight to it, and every part needs an answer unless the card says otherwise.
+    expect(read({})).toEqual({ mode: "live", required: [true] })
+    // Codex's asked in its reply are answered as a message to the thread.
+    const parts = [
+      { id: "0", question: "Which network first?", required: true },
+      { id: "1", question: "Anything to skip?", required: false },
+    ]
+    expect(read({ responseMode: "message", questions: parts })).toEqual({ mode: "message", required: [true, false] })
+  })
+
   test("takes what he'd send for a secret when it looks like one, however the question it answers was worded", () => {
     for (const said of [
       "Four two seven one nine three.",

@@ -46,6 +46,8 @@ const Question = Schema.Struct({
   ),
   multiSelect: Schema.optionalWith(Schema.Boolean, { default: () => false }),
   allowCustomAnswer: Schema.optionalWith(Schema.Boolean, { default: () => true }),
+  /** Whether it needs an answer, which one answered as a message does for every part it needs. */
+  required: Schema.optionalWith(Schema.Boolean, { default: () => true }),
 })
 
 /** Why a run failed, as T3 Code classes it, like "usage_limit", and when the limit it hit resets, when it says. */
@@ -72,6 +74,8 @@ const Item = Schema.Struct({
   title: Schema.optional(Schema.NullOr(Schema.String)),
   options: Schema.optional(Schema.Array(Option_)),
   questions: Schema.optional(Schema.Array(Question)),
+  /** "message" for a question answered as a message to the thread, like one Codex asked in its reply, which outlives its run. */
+  responseMode: Schema.optional(Schema.String),
   input: Schema.optional(Schema.Unknown),
   toolName: Schema.optional(Schema.NullOr(Schema.String)),
   fileName: Schema.optional(Schema.String),
@@ -133,6 +137,8 @@ export type Request =
       readonly _tag: "Question"
       readonly id: string
       readonly questions: ReadonlyArray<typeof Question.Type>
+      /** How T3 Code takes the answer: "live", straight to the agent waiting on it, or "message", as a message to the thread, with every part it needs answered. */
+      readonly mode: "live" | "message"
     }
   /** A secret it asks for, like a key, which is only ever given in T3 Code. */
   | { readonly _tag: "Secret"; readonly id: string; readonly label: string }
@@ -374,7 +380,8 @@ export const request = (items: ReadonlyArray<unknown>, id: string): Option.Optio
     if (found.requestId !== id) continue
     if (found.type === "user_input_request" && found.questions !== undefined) {
       const named = credential(found.questions)
-      return Option.some(named === undefined ? { _tag: "Question", id, questions: found.questions } : { _tag: "Secret", id, label: named })
+      const mode = found.responseMode === "message" ? "message" : "live"
+      return Option.some(named === undefined ? { _tag: "Question", id, questions: found.questions, mode } : { _tag: "Secret", id, label: named })
     }
     if (found.type === "approval_request") {
       const runs = wouldRun(decoded, found)
