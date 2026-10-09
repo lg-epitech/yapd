@@ -252,6 +252,8 @@ const assistant = (
     readonly persona?: Context.Tag.Service<Persona.Persona>
     /** The persona's line for going ahead, in place of the written one. */
     readonly onIt?: string
+    /** Whether this Mac's threads can be seen, as they can unless the test says, like while T3 Code restarts here. */
+    readonly seen?: () => boolean
     /**
      * Rig, followed too: how its tunnel stands, and its threads, when they can
      * be seen, which `seen` says when it's down a while; with `dispatched`, a
@@ -309,10 +311,13 @@ const assistant = (
       machine: "Rosie",
       live: {
         view: Effect.sync(() =>
-          Option.some({
-            ...view,
-            threads: new Map([...view.threads, ...[...(given.others ?? []), ...appeared, ...changed.values()].map((other) => [other.id, other] as const)]),
-          }),
+          Option.filter(
+            Option.some({
+              ...view,
+              threads: new Map([...view.threads, ...[...(given.others ?? []), ...appeared, ...changed.values()].map((other) => [other.id, other] as const)]),
+            }),
+            () => given.seen?.() !== false,
+          ),
         ),
         changes: Stream.never,
       },
@@ -7420,5 +7425,113 @@ describe("Assistant", () => {
     expect(result.before).toBe(4)
     expect(result.answers).toEqual([{ [colour.id]: "Red" }])
     expect(result.open).toEqual(Option.some(here))
+  })
+
+  test("an answer to a rig question given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        let status: Tunnel.Status = { _tag: "Up" }
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.sync(() => status), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Rig's tunnel drops just before he answers.
+        seen = false
+        status = { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }
+        yield* made.answer("Red.")
+        const closed = (yield* made.journal.since(0, { kinds: ["action"] })).flatMap(({ detail }) => {
+          const open = (detail as { readonly open?: unknown }).open
+          return typeof open === "string" ? [open] : []
+        })
+        const meanwhile = { sent: rig.length, steps: (yield* made.ledger.steps(0)).length }
+        // Rig's back two minutes later, and he answers it again.
+        yield* made.wait(120)
+        seen = true
+        status = { _tag: "Up" }
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), closed, meanwhile, answers: answered(rig), here: made.dispatched }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I couldn't get your answer to it, sir: I can't reach rig right now. I'll ask you again once I can.",
+      "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red it is, sir.",
+    ])
+    expect(result.closed).toEqual(["dropped: out of sight"])
+    expect(result.meanwhile).toEqual({ sent: 0, steps: 0 })
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+    expect(result.here).toEqual([])
+  })
+
+  test("an answer to a question given while T3 Code restarts on this Mac is never sent nor said to be dealt with: he's told why, and it's asked again once T3 Code is back", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), seen: () => seen })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("Rosie"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "Rosie", "10 seconds"))
+        yield* made.flush
+        yield* asked(made, cloud)
+        seen = false
+        yield* made.answer("Red.")
+        const sent = made.dispatched.length
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        return { spoken: made.spoken(), sent, open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const here = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I couldn't get your answer to it, sir: T3 Code isn't running, so I can't see your threads. I'll ask you again once I can.",
+      here,
+    ])
+    expect(result.sent).toBe(0)
+    expect(result.open).toEqual(Option.some(here))
+  })
+
+  test("a yes to a rig approval given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
+    const asking = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [asking], seen: () => seen, dispatched: rig, items: approval("r9", "npm install left-pad") },
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Read back to him, as on his asking, and allowed as rig drops out.
+        yield* asked(made, asking, "rig")
+        seen = false
+        yield* made.answer("Yes.")
+        const sent = rig.length
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* made.answer("Yes.")
+        return { spoken: made.spoken(), sent, decided: rig.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Fee table checks on rig wants to run npm install left-pad. Allow it, sir?",
+      "I couldn't get your go-ahead to it, sir: I can't follow rig's threads right now. I'll ask you again once I can.",
+      "Shall I still allow Fee table checks on rig to run npm install left-pad, sir?",
+      "Approved, sir.",
+    ])
+    expect(result.sent).toBe(0)
+    expect(result.decided).toEqual(["r9 accept"])
   })
 })

@@ -1499,7 +1499,7 @@ export const goesAhead = (
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
 /** A reason as it's said after a colon: lowercase, unless it starts with "I" or a name like T3 Code. */
-const after = (reason: string) => (/^(I\b|I'|[A-Z][A-Z\d])/.test(reason) ? reason : `${reason.charAt(0).toLowerCase()}${reason.slice(1)}`)
+export const after = (reason: string) => (/^(I\b|I'|[A-Z][A-Z\d])/.test(reason) ? reason : `${reason.charAt(0).toLowerCase()}${reason.slice(1)}`)
 
 /** What's said when it didn't go, with why, and whether to send it again when it may. */
 export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: string }>, lines: Lines, called: Option.Option<string>) => {
