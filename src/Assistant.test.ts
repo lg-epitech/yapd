@@ -2079,6 +2079,28 @@ describe("Assistant", () => {
     expect(putOff.after).toBe(0)
   })
 
+  test("a message for now to a thread whose question was answered in T3 Code while it was worked out goes as a message, never as that question's answer", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    let answering: Effect.Effect<void> = Effect.void
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Use the staging database.", how: "now" }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour]),
+          deciding: Effect.suspend(() => answering),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        // He answers it in T3 Code once what he dictates is read, while the model works it out.
+        answering = made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.dictate("Tell the cloud one to use the staging database.")
+        return { spoken: made.spoken().slice(2), sent: made.dispatched.map(({ type, text }) => ({ type, text })) }
+      }),
+    )
+    expect(result.sent).toEqual([{ type: "message.dispatch", text: "Use the staging database." }])
+    expect(result.spoken).toEqual([expect.stringMatching(/^(On it|Right away|Very good)/)])
+  })
+
   test("a message for now to a thread whose question T3 Code takes as a message itself still goes as a message", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", responseMode: "message", questions: [{ ...colour, id: "0" }] }]
