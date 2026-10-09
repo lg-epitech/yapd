@@ -285,7 +285,7 @@ const unhooked = (message: string, runId: string, turns: number, current: Effect
   at: 0,
   key: `done:Rosie:${runId}`,
   turns,
-  run: { final: message, others: [], natives: ["native-loader"], startedAt: -60_000 },
+  run: { final: message, others: [], natives: ["native-loader"], previous: Option.none(), startedAt: -60_000 },
   current,
 })
 
@@ -1275,7 +1275,7 @@ describe("Daemon", () => {
           first = false
           yield* made.overtaken({ machine: "Rosie", id: "t-loader" })
           // T3 Code reads the run before with it, which ended on the same words.
-          const run2: Notices.Finished = { ...unhooked(words, "run-2", turns), run: { final: words, others: [words], natives: ["native-loader"], startedAt: 0 } }
+          const run2: Notices.Finished = { ...unhooked(words, "run-2", turns), run: { final: words, others: [words], natives: ["native-loader"], previous: Option.none(), startedAt: 0 } }
           yield* then(harness, run2)
           yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: words }, { project: "yapd", host: hostname() }, false)
           yield* wait(11)

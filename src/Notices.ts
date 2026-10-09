@@ -16,10 +16,11 @@ import * as Threads from "./Threads.ts"
 // as it's said, so it's said once, ever, whatever restarts or reconnects come
 // in between. A finished turn is left to its hook whenever one came, even one
 // that wasn't said, since only hooks know a turn the user was watching: a
-// Stop is the run's whose last words it has, and one whose words are no run's
-// that can be told is left to as if it were, since a turn said twice is worse
-// than one not said. An approval or a question is asked, for the user to
-// answer by voice; a secret is only told, since it's only ever given in T3 Code.
+// Stop is the run's whose last words it has, or, for a run that said nothing
+// to tell it by, whose when it came says, and one that can't be told either
+// way is left to as if it were, since a turn said twice is worse than one not
+// said. An approval or a question is asked, for the user to answer by voice;
+// a secret is only told, since it's only ever given in T3 Code.
 
 /** What a change to a thread may come to, before anything is read of it. */
 export type News =
@@ -70,6 +71,8 @@ const finishing = "10 seconds"
 const pending = 12 * 60 * 60_000
 /** How long before a run started its hook may have come and still be its. */
 const leeway = 1000
+/** How long after a run ended its Stop hook may still come, getting going and naming its project first. */
+const late = 5000
 /** How much of two last words, case and punctuation aside, one ending the other needs to be the same words, as T3 Code may keep only the end of them. */
 const ending = 24
 /** How long a limit whose reset nobody said is taken to hold: the shortest window a provider has. */
@@ -163,10 +166,23 @@ export const whose = (stop: Stop, run: Pick<T3Actions.Ran, "final" | "others">) 
  * turn said twice is worse than one not said. Never one with another run's
  * words, like the one before's come late, which matters for a run that fails
  * at once, since Claude has no Stop for that; nor one with no words, which
- * tells of nothing.
+ * tells of nothing. A run that said nothing, like one that failed at once,
+ * has no words to tell its Stop by, so it goes by when the Stops came: the
+ * run before went well, so had one coming as it ended, which takes a moment
+ * to get going, and when none had come by the time this one started, the
+ * first since, while it could still be that one's, is taken for it. Any other
+ * is still left to as if it were this one's.
  */
-export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "final" | "others">, startedAt: number) =>
-  stops.some((stop) => stop.message.trim() !== "" && stop.at >= startedAt - leeway && whose(stop, run) !== "another")
+export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "final" | "others" | "previous">, startedAt: number) => {
+  const since = startedAt - leeway
+  const theirs =
+    run.final !== ""
+      ? Option.none<Stop>()
+      : Option.flatMap(run.previous, (previous) =>
+          Option.filter(Option.fromNullable(stops.find((stop) => stop.at >= previous.startedAt - leeway)), (first) => first.at >= since && first.at <= previous.endedAt + late),
+        )
+  return stops.some((stop) => stop.message.trim() !== "" && stop.at >= since && whose(stop, run) !== "another" && !Option.exists(theirs, (taken) => taken === stop))
+}
 
 /** Whether a run was short enough that he was likely still looking at it, unless yapd sent what started it. */
 export const quick = (run: Pick<T3Actions.Ran, "startedAt" | "userMessageId">, ended: number, shortest: number) =>
@@ -345,7 +361,7 @@ export interface Finished {
   readonly at: number
   readonly key: string
   readonly turns: number
-  readonly run: Pick<T3Actions.Ran, "final" | "others" | "natives"> & { readonly startedAt: number }
+  readonly run: Pick<T3Actions.Ran, "final" | "others" | "natives" | "previous"> & { readonly startedAt: number }
   readonly current: Effect.Effect<boolean>
 }
 
@@ -509,7 +525,7 @@ export const make = (options: {
           at,
           key: key.done(ref.machine, runId),
           turns,
-          run: { final: run.value.final, others: run.value.others, natives, startedAt },
+          run: { final: run.value.final, others: run.value.others, natives, previous: run.value.previous, startedAt },
           current,
         })
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
