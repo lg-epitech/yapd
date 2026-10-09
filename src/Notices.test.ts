@@ -329,6 +329,89 @@ describe("Notices", () => {
     expect(result.some((line) => /^Open Mina SSV2 Bug Tickets hit Claude's limit, sir; it resets at \d/.test(line))).toBe(true)
   })
 
+  test("a run that said something before it failed, right after one that went well, is said when that one's late Stop has words T3 Code kept otherwise, and left to a Stop with its own", async () => {
+    // As above, but each failed run got a few words out first, which a Stop can't be told by when it has none: when the turn before's came
+    // still says it's that one's. The loader's run had a Stop hook with its own words, which tell it's that run's, whenever it came.
+    const failed = (id: string, title: string, kind: string) => thread(id, title, { status: "failed", latestRunId: "run-2", lastErrorClass: kind })
+    const tezos = failed("tezos", "Migrate Tezos Integration", "provider_error")
+    const mina = failed("mina", "Open Mina SSV2 Bug Tickets", "usage_limit")
+    const loader = failed("loader", "Fix the loader", "provider_error")
+    const queued = (session: string, kind: string, message: string, resetAt?: string) => ({
+      runs: [
+        { id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), completedAt: new Date(now - 3_050).toISOString() },
+        { id: "run-2", status: "failed", ordinal: 2, startedAt: new Date(now - 3_000).toISOString(), completedAt: new Date(now - 1_500).toISOString() },
+      ],
+      messages: [
+        { id: `a-${session}`, runId: "run-1", role: "assistant", text: "The fee table is in.", createdAt: minutes(1) },
+        { id: `b-${session}`, runId: "run-2", role: "assistant", text: "Let me look at the tickets first.", createdAt: minutes(0) },
+      ],
+      turnItems: [failure("run-2", kind, message, resetAt)],
+      sessions: [session],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, told } = yield* notices({
+          view: [tezos, mina, loader],
+          bounded: {
+            tezos: queued("s-tezos", "provider_error", "API Error: 500 Internal server error"),
+            mina: queued("s-mina", "usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z"),
+            loader: queued("s-loader", "provider_error", "API Error: 500 Internal server error"),
+          },
+          stops: new Map([
+            ["s-tezos", [{ at: now - 2_700, message: "Fee table: done and pushed to the branch." }]],
+            ["s-mina", [{ at: now - 2_700, message: "Fee table: done and pushed to the branch." }]],
+            ["s-loader", [{ at: now - 2_700, message: "Let me look at the tickets first." }]],
+          ]),
+        })
+        yield* hear(ended(tezos, "run-2"), ended(mina, "run-2"), ended(loader, "run-2"))
+        yield* wait(10)
+        return told
+      }),
+    )
+    expect(result).toHaveLength(2)
+    expect(result).toContain("Migrate Tezos Integration failed, sir: the model provider had an error.")
+    expect(result.some((line) => /^Open Mina SSV2 Bug Tickets hit Claude's limit, sir; it resets at \d/.test(line))).toBe(true)
+  })
+
+  test("a run that fails at once after another that did, right after one that went well, is said when that one's late Stop came after both started", async () => {
+    // Two messages were queued behind a turn that went well, and each failed at once, with no Stop of its own: the one Stop since, a moment
+    // getting going and with words T3 Code kept otherwise, is the turn before's, which the failed run between doesn't hide.
+    const failed = (id: string, title: string, kind: string) => thread(id, title, { status: "failed", latestRunId: "run-3", lastErrorClass: kind })
+    const tezos = failed("tezos", "Migrate Tezos Integration", "provider_error")
+    const mina = failed("mina", "Open Mina SSV2 Bug Tickets", "usage_limit")
+    const queued = (session: string, kind: string, message: string, resetAt?: string) => ({
+      runs: [
+        { id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), completedAt: new Date(now - 3_050).toISOString() },
+        { id: "run-2", status: "failed", ordinal: 2, startedAt: new Date(now - 3_000).toISOString(), completedAt: new Date(now - 2_950).toISOString() },
+        { id: "run-3", status: "failed", ordinal: 3, startedAt: new Date(now - 2_900).toISOString(), completedAt: new Date(now - 2_850).toISOString() },
+      ],
+      messages: [{ id: `a-${session}`, runId: "run-1", role: "assistant", text: "The fee table is in.", createdAt: minutes(0) }],
+      turnItems: [failure("run-2", kind, message, resetAt), failure("run-3", kind, message, resetAt)],
+      sessions: [session],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, told } = yield* notices({
+          view: [tezos, mina],
+          bounded: {
+            tezos: queued("s-tezos", "provider_error", "API Error: 500 Internal server error"),
+            mina: queued("s-mina", "usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z"),
+          },
+          stops: new Map([
+            ["s-tezos", [{ at: now - 2_700, message: "Fee table: done and pushed to the branch." }]],
+            ["s-mina", [{ at: now - 2_700, message: "Fee table: done and pushed to the branch." }]],
+          ]),
+        })
+        yield* hear(ended(tezos, "run-3"), ended(mina, "run-3"))
+        yield* wait(10)
+        return told
+      }),
+    )
+    expect(result).toHaveLength(2)
+    expect(result).toContain("Migrate Tezos Integration failed, sir: the model provider had an error.")
+    expect(result.some((line) => /^Open Mina SSV2 Bug Tickets hit Claude's limit, sir; it resets at \d/.test(line))).toBe(true)
+  })
+
   test("a short turn of yapd's right after the one before it is left to its own hook, however late or early that one's came", async () => {
     // yapd's message waited behind a turn that went well, and ran in a few seconds: its own Stop came after the earlier one's, which
     // came late for the Tezos thread, after it had started, and early for the loader, before the earlier run's checkpoint was taken.
