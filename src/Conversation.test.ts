@@ -875,6 +875,10 @@ describe("Telling yapd's own voice from the user's", () => {
     for (const heard of ["Don't wait for CI, merge it.", "No need to wait, merge it.", "Don't stop the deploy, the tests are fine."]) {
       expect([heard, stopIn(heard, `${long} for review, so I can merge it`), whose(heard, `${long} for review, so I can merge it`)]).toEqual([heard, undefined, "unclear"])
     }
+    // But one said after a sentence that ends turning something around is his.
+    for (const heard of ["Over in yapd. No, don't. Stop.", "Over in yapd. Don't. Stop.", "Over in yapd. Don't! Wait."]) {
+      expect([heard, whose(heard, long)]).toEqual([heard, "stop"])
+    }
     // His stop, with a word of its like it, but not the same, nor the start of one.
     expect([whose("Wait.", "Codex wants your approval to delete the old branch."), stopIn("Wait.", "Codex wants your approval")]).toEqual(["stop", "Wait."])
     expect(whose("Stop.", "Claude finished the first two steps of the plan.")).toBe("stop")

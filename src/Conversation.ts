@@ -463,10 +463,10 @@ const says = (word: string, yapd: ReadonlyArray<string>) =>
  * "storage", but not one beside a word of its as it is, like the "wait" of
  * "Over in yapd. Wait.", which "yapd" sounds like already.
  */
-const halted = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => haltAt(words, yapd)?.said
+const halted = (heard: Heard, yapd: ReadonlyArray<string>) => haltAt(heard, yapd)?.said
 
-/** The same, and which of `words` it is, from `start` up to `end`. */
-const haltAt = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
+/** The same, and which of its words it is, from `start` up to `end`. */
+const haltAt = ({ words, sentences }: Heard, yapd: ReadonlyArray<string>) => {
   const named = yapd.filter((word) => !common.has(word))
   const its = (at: number) =>
     says(words[at]!, yapd) ||
@@ -476,8 +476,9 @@ const haltAt = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
         named.some((spoken) => !alike(beside, spoken) && alike(side === 0 ? `${beside}${words[at]}` : `${words[at]}${beside}`, spoken)),
     )
   for (let start = 0; start < words.length; start++) {
-    // Not one he turns around, like the "stop" of "Don't stop the deploy." or the "wait" of "No need to wait.", though "No, wait." is one.
-    const before = words.slice(Math.max(0, start - 3), start)
+    // Not one he turns around, like the "stop" of "Don't stop the deploy." or the "wait" of "No need to wait.", though "No, wait." is one,
+    // and only in the same sentence, so the "stop" of "No, don't. Stop." is one too.
+    const before = words.slice(Math.max(0, start - 3), start).filter((_, index, { length }) => sentences[start - length + index] === sentences[start])
     if ((before.length > 0 && before.at(-1) !== "no" && negations.has(before.at(-1)!)) || before.join(" ") === "no need to") continue
     const found = halting.find(
       (phrase) => phrase.words.every((word, index) => words[start + index] === word) && phrase.words.some((_, index) => !its(start + index)),
@@ -504,7 +505,16 @@ const madeUp: ReadonlySet<string> = new Set(
  * up, single letters, and the words that only fill a pause. A sentence of
  * what it makes up is let go only whole, so none of his goes with it.
  */
-const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
+const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => heardIn(heard, yapd).words
+
+/** The words of what was heard, as `wordsOf` has them, and which sentence each is in, counting from the first. */
+interface Heard {
+  readonly words: ReadonlyArray<string>
+  readonly sentences: ReadonlyArray<number>
+}
+
+/** What was heard, as `Heard` has it. */
+const heardIn = (heard: string, yapd: ReadonlyArray<string>): Heard => {
   const said = heard
     // Sentences, but not the dot in "Amara.org".
     .split(/[.!?]+(?=\s|$)/)
@@ -517,9 +527,10 @@ const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
     )
     .map((sentence) => sentence.filter((word) => word.length > 1 && !fillers.has(word)))
     .filter((sentence) => !madeUp.has(sentence.join(" ")))
-    .flat()
+    .flatMap((sentence, index) => sentence.map((word) => ({ word, sentence: index })))
   // Whisper repeats itself on noise, so a word said again straight after counts once.
-  return said.filter((word, index) => word !== said[index - 1])
+  const kept = said.filter(({ word }, index) => word !== said[index - 1]?.word)
+  return { words: kept.map(({ word }) => word), sentences: kept.map(({ sentence }) => sentence) }
 }
 
 /** What's heard over yapd while its own voice can still get into the microphone comes to: a stop or a wait of his, all his, or unclear, which is let go. */
@@ -557,15 +568,15 @@ const clearly = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
  */
 export const whose = (heard: string, saying: string): Whose => {
   const yapd = vocabulary(saying)
-  const words = wordsOf(heard, yapd)
-  if (clearly(words, yapd)) return "his"
-  return halted(words, yapd) === undefined ? "unclear" : "stop"
+  const told = heardIn(heard, yapd)
+  if (clearly(told.words, yapd)) return "his"
+  return halted(told, yapd) === undefined ? "unclear" : "stop"
 }
 
 /** The stop or wait of his in what was heard over a line yapd was `saying`, as he'd say it on its own: none when there's none. */
 export const stopIn = (heard: string, saying: string) => {
   const yapd = vocabulary(saying)
-  return halted(wordsOf(heard, yapd), yapd)
+  return halted(heardIn(heard, yapd), yapd)
 }
 
 /**
@@ -605,8 +616,9 @@ interface Told {
  */
 const openEnded = (heard: string, saying: string) => {
   const yapd = vocabulary(saying)
-  const words = wordsOf(heard, yapd)
-  const stop = haltAt(words, yapd)
+  const told = heardIn(heard, yapd)
+  const { words } = told
+  const stop = haltAt(told, yapd)
   if (stop !== undefined && stop.end < words.length) return true
   const its = ours(words, yapd)
   return words.some(
