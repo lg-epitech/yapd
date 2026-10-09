@@ -140,6 +140,18 @@ const glance = Math.round(rate / frame)
 /** Seconds either side of the user talking that yapd's words are looked for in what he said, since where each falls in a line is only guessed. */
 const reach = 2
 
+/** The ends of what's made out where the audio may cut a word in two. */
+interface Cut {
+  readonly start?: boolean
+  readonly end?: boolean
+}
+
+/** What was heard, less a word at either end the audio cut through, which Whisper may hear as anything, even "stop". */
+const trimmed = (heard: string, cut: Cut) => {
+  const words = heard.split(/\s+/).filter((word) => word !== "")
+  return words.slice(cut.start === true ? 1 : 0, cut.end === true ? -1 : words.length).join(" ")
+}
+
 /** What Whisper makes up of near-silence, or of a voice it can't make out, which nobody said: let go wherever it comes in what's heard, longest first. */
 const madeUp = [
   ...hallucinated, "the end", "thank you very much", "thank you so much", "thanks for listening", "thank you for listening",
@@ -216,14 +228,14 @@ const apart = (one: string, other: string) => {
 }
 
 /**
- * Whether Whisper may have heard one word as the other: a letter or so apart,
- * like "codecs" for "Codex" or "yap" for "yapd", but never "on" for "in", nor
- * "wait" for "waiting".
+ * Whether Whisper may have heard a word yapd said as `heard`: a letter or so
+ * apart, like "codecs" for "Codex" or "yap" for "yapd", or the start of it,
+ * like "stop" for "stopped" cut off partway, but never "on" for "in".
  */
-const alike = (one: string, other: string) => {
-  const [first, second] = [stem(one), stem(other)]
+const alike = (heard: string, spoken: string) => {
+  const [first, second] = [stem(heard), stem(spoken)]
   const shorter = Math.min(first.length, second.length)
-  return first === second || (shorter >= 3 && apart(first, second) <= (shorter >= 6 ? 2 : 1))
+  return first === second || (shorter >= 3 && apart(first, second) <= (shorter >= 6 ? 2 : 1)) || (first.length >= 4 && second.startsWith(first))
 }
 
 /** Whether `words` are, one after another, words yapd says one after another. */
@@ -491,10 +503,13 @@ export const make = (options: {
         /**
          * Talk that began while yapd's own voice could still get into the
          * microphone, until it ends: how far into the line it began, whether
-         * yapd was still talking then, whether a look at it so far found it's
-         * him, and the look under way.
+         * yapd was still talking then, whether it's the rest of talk told apart
+         * from it, whether a look at it so far found it's him, and the look
+         * under way.
          */
-        let doubt: { readonly at: number; readonly over: boolean; his: boolean; looking: number | undefined } | undefined
+        let doubt:
+          | { readonly at: number; readonly over: boolean; readonly split: boolean; his: boolean; looking: number | undefined }
+          | undefined
         /** Talk that ended while some of it is still being made out, in the order it was said, so none of his is lost or put out of order. */
         const pending: Array<Talk> = []
         /** One look at a time, so Whisper never works on two at once. */
@@ -535,9 +550,10 @@ export const make = (options: {
         /**
          * Makes out what may have been yapd's own voice, begun `at` seconds into
          * the line, without holding up playing or listening, and passes on
-         * whether it was him. Returns the id it's passed on with.
+         * whether it was him, going only by the words the audio didn't `cut`
+         * through. Returns the id it's passed on with.
          */
-        const look = (audio: Float32Array, from: { readonly at: number; readonly over: boolean }) =>
+        const look = (audio: Float32Array, from: { readonly at: number; readonly over: boolean }, cut: Cut = {}) =>
           Effect.gen(function* () {
             const id = fresh()
             // Begun once yapd had stopped talking, none of what it said can be in it, so a word of his is enough.
@@ -545,9 +561,10 @@ export const make = (options: {
             yield* transcriber.transcribe(audio).pipe(
               Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
               whisper.withPermits(1),
-              Effect.flatMap((heard) =>
-                Queue.offer(signals, { _tag: "Looked", id, heard, his: theirs(heard, saying, from.over ? 2 : 1), some: theirs(heard, saying, 1) }),
-              ),
+              Effect.flatMap((heard) => {
+                const whole = trimmed(heard, cut)
+                return Queue.offer(signals, { _tag: "Looked", id, heard, his: theirs(whole, saying, from.over ? 2 : 1), some: theirs(whole, saying, 1) })
+              }),
               Effect.forkScoped,
             )
             return id
@@ -596,7 +613,7 @@ export const make = (options: {
               speaking = true
               yield* stopLingering
               // Over what may be its own voice, it carries on just as it was until it's made out that it isn't.
-              if (signal.echo) doubt = { at: yield* position, over: true, his: false, looking: undefined }
+              if (signal.echo) doubt = { at: yield* position, over: true, split: false, his: false, looking: undefined }
               else if (playing) yield* playback.volume(ducked)
               break
             case "Speech":
@@ -606,14 +623,15 @@ export const make = (options: {
             case "Partial":
               // One look at a time, while there's still something to stop for him.
               if (doubt === undefined || doubt.his || doubt.looking !== undefined || !playing) break
-              doubt.looking = yield* look(signal.audio, doubt)
+              // Cut off where he's got to, and where yapd's voice stopped getting in, if it has.
+              doubt.looking = yield* look(signal.audio, doubt, { start: doubt.split, end: true })
               break
             case "Cleared": {
               if (doubt === undefined) break
               // What was said until then is made out on its own, and what follows, which may still be its voice carrying on, apart from it.
               const before = doubt
               pending.push({
-                id: before.his ? fresh() : yield* look(signal.audio, before),
+                id: before.his ? fresh() : yield* look(signal.audio, before, { end: true }),
                 audio: signal.audio,
                 at: before.at,
                 carried: true,
@@ -622,7 +640,7 @@ export const make = (options: {
                 heard: undefined,
               })
               const at = yield* position
-              doubt = { at, over: playing && !completed, his: before.his, looking: undefined }
+              doubt = { at, over: playing && !completed, split: true, his: before.his, looking: undefined }
               break
             }
             case "Abandoned": {
@@ -642,7 +660,7 @@ export const make = (options: {
               doubt = undefined
               if (doubted !== undefined && !doubted.his) {
                 pending.push({
-                  id: yield* look(signal.audio, doubted),
+                  id: yield* look(signal.audio, doubted, { start: doubted.split }),
                   audio: signal.audio,
                   at: doubted.at,
                   carried: false,
