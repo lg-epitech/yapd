@@ -149,7 +149,6 @@ export const serve = Effect.gen(function* () {
   // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it. Each machine's once its own
   // T3 Code has, so one that's down holds up none of the rest, and this one's takes in what went to a machine yapd no longer follows.
   const followed = [{ machine, live }, ...others]
-  const elsewhere = (name: string) => others.some((other) => other.machine === name)
   yield* Effect.forEach(
     followed,
     ({ machine: name, live }) =>
@@ -157,7 +156,7 @@ export const serve = Effect.gen(function* () {
         live.view.pipe(
           Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
           Effect.timeoutFail({ duration: catchingUp, onTimeout: () => `${name === machine ? "T3 Code" : `${name}'s T3 Code`} didn't catch up in time` }),
-          Effect.zipRight(hands.reconcileOn((on) => (name === machine ? on === machine || !elsewhere(on) : on === name))),
+          Effect.zipRight(hands.reconcileOn(Hands.whose(name, machine, followed.map(({ machine }) => machine)))),
           Effect.flatMap(({ undelivered, unconfirmed, readying }) =>
             Effect.all(
               [Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered)), Effect.flatMap(readying, assistant.unconfirmed)],

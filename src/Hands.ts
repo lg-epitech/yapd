@@ -395,6 +395,15 @@ const settled = (row: Ledger.Row): Went => {
   }
 }
 
+/**
+ * Whose steps a restart looks at once `machine`'s T3 Code has caught up: its
+ * own, and, for this machine, `here`, those on machines yapd no longer
+ * follows too, which nothing else would look at. Never another followed
+ * machine's, which wait for it.
+ */
+export const whose = (machine: string, here: string, followed: ReadonlyArray<string>) => (on: string) =>
+  machine === here ? on === here || !followed.includes(on) : on === machine
+
 /** Hands that reach threads through `threads` and write each step in `ledger` first. */
 export const make = (options: {
   /** Where each thread is, what reaches its machine, and why it can't when it can't. */

@@ -2666,4 +2666,12 @@ describe("Hands on another machine", () => {
     )
     expect(result).toEqual({ here: ["yapd:u1:0"], waiting: Option.some("prepared"), there: ["yapd:u2:0"], sent: [] })
   })
+
+  test("each machine's restart looks at its own steps, and this one's at those on a machine no longer followed, never rig's", () => {
+    const followed = ["Rosie", "rig"]
+    const mine = Hands.whose("Rosie", "Rosie", followed)
+    const rigs = Hands.whose("rig", "Rosie", followed)
+    expect(["Rosie", "rig", "laptop"].map(mine)).toEqual([true, false, true])
+    expect(["Rosie", "rig", "laptop"].map(rigs)).toEqual([false, true, false])
+  })
 })
