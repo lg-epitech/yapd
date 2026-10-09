@@ -572,10 +572,12 @@ export const stopIn = (heard: string, saying: string) => {
  * Whether Whisper, hearing all of what was said over a line yapd was
  * `saying`, heard the words of a `stop` a look at some of it took for his as
  * something like them it took for its own, like its "step" for "stop", rather
- * than leave them out, as it can a short word over its voice.
+ * than leave them out, as it can a short word over its voice. Only by its
+ * words not just anything has, like the "hold" of "hold on", never the "on"
+ * of its "working on", nor anything of "not now".
  */
 const mistaken = (stop: string, heard: string, saying: string) => {
-  const stopping = vocabulary(stop)
+  const stopping = vocabulary(stop).filter((word) => !common.has(word))
   return wordsOf(heard, vocabulary(saying)).some((word) => stopping.some((said) => alike(word, said) || alike(said, word)))
 }
 

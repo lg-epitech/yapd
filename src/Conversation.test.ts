@@ -2098,6 +2098,38 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ stopped: ["play", "stop"], commands: ["play", "stop"], responded: ["Skip."], sent: [], replies: ["Skip."] })
   })
 
+  test("keeps to a stop of his it stopped for a second in, though all Whisper hears of it is a word nearly anything has, like the \"on\" of \"working on\"", async () => {
+    for (const [spoken, before, whole, stop] of [
+      [
+        "Over in homelab, the agent is working on the migration and the tests pass now, sir. Shall I open the pull request?",
+        "Over in homelab, the agent is",
+        "Over in homelab, the agent is working on the migration.",
+        "Hold on.",
+      ],
+      [long.spoken, "Over in yapd, the tests pass.", "Over in yapd, the tests pass now and the pull request.", "Not now."],
+    ] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          // A look partway hears a stop of his, which Whisper, hearing all of it, leaves out for its voice, with a word of it among its own.
+          const helper = yield* overHelper([[0.8, before], [0.81, `${stop.slice(0, -1)} the`], [0.82, "and the"]], {
+            spoken,
+            whole: [[0.8, 0.81, 0.82], whole],
+            live: true,
+            intent: "dismiss",
+          })
+          yield* helper.wait(1)
+          yield* helper.talk(0.8, 30)
+          yield* helper.talk(0.81, 10)
+          yield* helper.talk(0.82, 10)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { commands: helper.commands, plays: helper.plays, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([stop, result]).toEqual([stop, { commands: ["play", "stop"], plays: [0], responded: [stop], sent: [], replies: [stop] }])
+    }
+  })
+
   test("picks up from before where the user began when what it stopped for a second in turns out to be its own word once it's made out whole", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
