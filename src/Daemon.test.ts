@@ -129,6 +129,7 @@ const make = (says?: string, options: {
           }
         }),
       microphone: Effect.succeed(listening ? Option.some(microphone) : Option.none()),
+      echoing: Effect.succeed(false),
       rest: Effect.sync(() => void rests++),
       warm: Effect.sync(() => void warms++),
     }),

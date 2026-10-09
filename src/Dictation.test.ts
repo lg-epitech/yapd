@@ -86,6 +86,7 @@ const dictation = (
               }),
             microphone:
               options.microphone === false ? Effect.succeed(Option.none()) : Effect.map(PubSub.subscribe(microphone), Option.some),
+            echoing: Effect.succeed(false),
             rest: Effect.sync(() => {
               playing++
               open = false

@@ -52,11 +52,16 @@ export class Audio extends Context.Tag("yapd/Audio")<
     readonly play: (path: string, from?: number) => Effect.Effect<Playback, AudioError, Scope.Scope>
     /**
      * 32 ms frames of 16 kHz mono from the microphone while playing, with yapd's
-     * own voice cancelled out, so none over the first seconds it says after the
-     * microphone comes on, until that's learnt. None when there's no microphone
-     * to listen to.
+     * own voice cancelled out once that's learnt: see `echoing`. None when
+     * there's no microphone to listen to.
      */
     readonly microphone: Effect.Effect<Option.Option<Queue.Dequeue<Float32Array>>, never, Scope.Scope>
+    /**
+     * Whether yapd's own voice can still get into the microphone: it's talking,
+     * and hasn't said enough since the microphone came on for the echo
+     * cancellation to have learnt it, so what sounds like the user may be yapd.
+     */
+    readonly echoing: Effect.Effect<boolean>
     /** Turns the microphone off until the next update. */
     readonly rest: Effect.Effect<void>
     /**
@@ -127,6 +132,7 @@ export const AfplayAudio = Layer.effectContext(
         report(playing > 0, false)
       }),
       microphone: Effect.succeed(Option.none()),
+      echoing: Effect.succeed(false),
       rest: Effect.void,
       warm: Effect.void,
     }
@@ -290,12 +296,11 @@ export const native = (
       if (playingSince !== undefined) heard += now() - playingSince
       playingSince = undefined
     }
-    /** Whether yapd is talking while the echo cancellation is still learning its voice. */
-    const echoing = () => playingSince !== undefined && heard + now() - playingSince < learning
 
     const receive = (message: Helper.Message) => {
       if (message.kind === Helper.Kind.pcm) {
-        if (listening && frames !== undefined && !echoing()) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
+        // Even while yapd's own voice gets through, which whoever listens tells from the user by what's said.
+        if (listening && frames !== undefined) runSync(PubSub.publish(frames, new Float32Array(message.payload.buffer)))
         return
       }
       const event = decodeEvent(new TextDecoder().decode(message.payload))
@@ -535,6 +540,7 @@ export const native = (
       microphone: Effect.suspend(() =>
         listening && frames !== undefined ? Effect.map(PubSub.subscribe(frames), Option.some) : Effect.succeed(Option.none()),
       ),
+      echoing: Effect.sync(() => playingSince !== undefined && heard + now() - playingSince < learning),
       // Playing anything sets the helper up, so it plays a moment's silence. It isn't heard, and isn't waited for.
       warm: Effect.sync(() => {
         if (connection === undefined || listening || current !== undefined || warming !== undefined) return

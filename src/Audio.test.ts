@@ -19,6 +19,8 @@ const device = (delayPlaying = false, delayStopping = false) =>
     const sockets: Array<Socket<Helper.Decoder>> = []
     let connection: Socket<Helper.Decoder> | undefined
     let playing: string | undefined
+    /** Whether its engine is running, which starts a new voice processor, and says so, when it isn't. */
+    let running = false
     const closed = yield* Deferred.make<void>()
     yield* Effect.addFinalizer(() => Effect.sync(() => sockets.forEach((socket) => socket.terminate())))
     const send = (event: object) => connection?.write(Helper.encode(event))
@@ -41,16 +43,21 @@ const device = (delayPlaying = false, delayStopping = false) =>
                   runSync(Queue.offer(commands, command))
                   if (command.type === "play") {
                     playing = command.id
-                    send({ type: "active", listening: true })
+                    if (!running) send({ type: "active", listening: true })
+                    running = true
                     if (!delayPlaying) send({ type: "playing", id: playing, duration: 10 })
                   } else if (command.type === "stop" && !delayStopping) {
                     send({ type: "stopped", ...(playing === undefined ? {} : { id: playing, at: 1 }) })
                     playing = undefined
-                  } else if (command.type === "rest") playing = undefined
+                  } else if (command.type === "rest") {
+                    playing = undefined
+                    running = false
+                  }
                 }
               },
               close: () => {
                 playing = undefined
+                running = false
                 Deferred.unsafeDone(closed, Exit.void)
               },
             },
@@ -163,6 +170,36 @@ describe("Native audio", () => {
         yield* fake.frame(0.7)
         expect(yield* Queue.take(microphone.value)).toEqual(new Float32Array(512).fill(0.7))
         expect(yield* Queue.isShutdown(microphone.value)).toBe(false)
+      }),
+    ))
+
+  test("hears from yapd's first word, saying its own voice may be in that until it has played three seconds on a new voice processor", () =>
+    run(
+      Effect.gen(function* () {
+        const fake = yield* device()
+        const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)))
+        yield* fake.audio.play("/tmp/fake.wav")
+        const microphone = yield* fake.audio.microphone
+        if (Option.isNone(microphone)) return expect(Option.isSome(microphone)).toBe(true)
+        yield* fake.frame(0.5)
+        yield* flush
+        expect(yield* Queue.poll(microphone.value)).toEqual(Option.some(new Float32Array(512).fill(0.5)))
+        expect(yield* fake.audio.echoing).toBe(true)
+        yield* TestClock.adjust("2 seconds")
+        expect(yield* fake.audio.echoing).toBe(true)
+        yield* fake.finish
+        yield* flush
+        // Only what it plays teaches the echo cancellation its voice, however long the quiet after.
+        yield* TestClock.adjust("1 minute")
+        expect(yield* fake.audio.echoing).toBe(false)
+        yield* fake.audio.play("/tmp/next.wav")
+        expect(yield* fake.audio.echoing).toBe(true)
+        yield* TestClock.adjust("1 second")
+        expect(yield* fake.audio.echoing).toBe(false)
+        // Once it has rested, the next voice processor starts over.
+        yield* fake.audio.rest
+        yield* fake.audio.play("/tmp/after.wav")
+        expect(yield* fake.audio.echoing).toBe(true)
       }),
     ))
 

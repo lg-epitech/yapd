@@ -57,6 +57,14 @@ describe("Endpointer", () => {
     expect(events.at(-1)?.event._tag).toBe("Utterance")
   })
 
+  test("gives all the user has said so far while they're still talking, from just before the onset", () => {
+    const endpointer = new Endpointer()
+    expect(feed([...quiet(20), ...voiced(defaults.confirm + 1)], endpointer).map(({ event }) => event._tag)).toEqual(["Onset", "Speech"])
+    const audio = [...endpointer.soFar()]
+    expect(audio[0]).toBe(20 - defaults.lead)
+    expect(audio.at(-1)).toBe(20 + defaults.confirm)
+  })
+
   test("listens again after an utterance", () => {
     const endpointer = new Endpointer()
     feed([...voiced(10), ...quiet(defaults.silence)], endpointer)

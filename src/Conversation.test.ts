@@ -1,9 +1,26 @@
+import type { Socket } from "bun"
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Deferred, Effect, Fiber, Layer, Option, Queue, Random, Schema, type Scope, TestClock, TestContext } from "effect"
-import { Audio, AudioError } from "./Audio.ts"
+import {
+  Clock,
+  ConfigProvider,
+  Context,
+  Deferred,
+  Effect,
+  Fiber,
+  Layer,
+  Option,
+  Queue,
+  Random,
+  Runtime,
+  Schema,
+  type Scope,
+  TestClock,
+  TestContext,
+} from "effect"
+import { Audio, AudioError, native } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
-import { cut, together, unfinished } from "./Conversation.ts"
+import { between, cut, theirs, together, unfinished } from "./Conversation.ts"
 import { defaults } from "./Endpointer.ts"
 import { Relays } from "./Relay.ts"
 import * as Helper from "./Helper.ts"
@@ -87,6 +104,7 @@ const conversation = (
                 volume: () => Effect.void,
               }),
         microphone: Effect.succeed(Option.some(microphone)),
+        echoing: Effect.succeed(false),
         rest: Effect.void,
         warm: Effect.void,
       }),
@@ -561,6 +579,362 @@ describe("Questions", () => {
       }),
     )
     expect(unrelated).toEqual({ answered: false, answers: [] })
+  })
+})
+
+describe("Telling yapd's own voice from the user's", () => {
+  const saying = "Over in yapd, the tests pass now"
+
+  test("takes nothing, or what Whisper makes up, for nobody", () => {
+    expect(theirs("", saying)).toBe(0)
+    expect(theirs("Thank you.", saying)).toBe(0)
+    expect(theirs("- Verse.", saying)).toBe(0)
+    expect(theirs("End of song.", saying)).toBe(0)
+    expect(theirs("Thank you. Thank you.", saying)).toBe(0)
+  })
+
+  test("takes what's mostly the words yapd was saying for its own voice, misheard or not", () => {
+    expect(theirs("Over in yapd, the tests pass.", saying)).toBe(0)
+    expect(theirs("Over in yap D, the test pass.", saying)).toBe(0)
+    expect(theirs("Codecs finished the migrations.", "Codex finished the migration and")).toBe(0)
+    // As many of his as of yapd's could be either, so it's let go rather than cut yapd off.
+    expect(theirs("The tests are flaky.", saying)).toBe(0)
+  })
+
+  test("counts the user's own words otherwise, and a stop said over yapd or in its words is always his", () => {
+    expect(theirs("Hold on, which tests?", saying)).toBe(3)
+    expect(theirs("Over in yapd, the tests pass. Stop.", saying)).toBe(1)
+    expect(theirs("Stop.", "I'll stop the tests now")).toBe(1)
+    expect(theirs("Thank you. Wait.", saying)).toBe(1)
+  })
+
+  test("finds the words said around a time by where they fall in the line", () => {
+    const line = "one two three four five six seven eight nine ten"
+    expect(between(line, 10, 2, 5)).toBe("three four five")
+    expect(between(line, 10, -2, 2)).toBe("one two")
+    expect(between(line, 10, 8, 12)).toBe("nine ten")
+    expect(between(line, 0, 2, 5)).toBe(line)
+  })
+})
+
+/** An update long enough that where its words fall can be told from how far into it yapd is: two and a half a second, over ten seconds. */
+const long: Conversation.Update = {
+  ...update,
+  spoken: "Over in yapd, the tests pass now and the pull request is ready for review, so I can merge it whenever you say the word, sir.",
+}
+
+/**
+ * Reads `long` out over the helper protocol, with a fake helper that starts a
+ * new voice processor for the first line, as after yapd has rested, and says
+ * how far a line got when it's stopped by the clock. The test talks into its
+ * microphone with frames whose value is how likely each is speech, and the fake
+ * Whisper hears in what it's given the words `words` has for each value, in the
+ * order they're said, taking `delays` seconds over the first few.
+ */
+const overHelper = (words: ReadonlyArray<readonly [number, string]>, delays: ReadonlyArray<number> = []) =>
+  Effect.gen(function* () {
+    const runSync = Runtime.runSync(yield* Effect.runtime<never>())
+    const commands: Array<string> = []
+    const transcribed: Array<string> = []
+    const sent: Array<string> = []
+    const waits = [...delays]
+    let interrupted = 0
+    let connection: Socket<Helper.Decoder> | undefined
+    let running = false
+    let playing: { readonly id: string; readonly since: number } | undefined
+    /** What the socket hasn't taken yet, since it takes only so much at once. */
+    const unsent: Array<Uint8Array> = []
+    const drain = () => {
+      while (connection !== undefined && unsent.length > 0) {
+        const next = unsent[0]!
+        const written = connection.write(next)
+        if (written < next.length) {
+          unsent[0] = next.subarray(Math.max(0, written))
+          return
+        }
+        unsent.shift()
+      }
+    }
+    const write = (bytes: Uint8Array) => {
+      unsent.push(bytes)
+      if (unsent.length === 1) drain()
+    }
+    const send = (event: object) => write(Helper.encode(event))
+    const now = () => runSync(Clock.currentTimeMillis)
+    yield* Effect.addFinalizer(() => Effect.sync(() => connection?.terminate()))
+    const launch = (path: string) =>
+      Effect.tryPromise({
+        try: () =>
+          Bun.connect<Helper.Decoder>({
+            unix: path,
+            socket: {
+              open: (socket) => {
+                socket.data = new Helper.Decoder()
+                connection = socket
+                send({ type: "hello", permission: "authorized" })
+              },
+              data: (socket, data) => {
+                for (const message of socket.data.push(data)) {
+                  const command = JSON.parse(new TextDecoder().decode(message.payload)) as { readonly type: string; readonly id?: string }
+                  commands.push(command.type)
+                  if (command.type === "play") {
+                    if (!running) send({ type: "active", listening: true })
+                    running = true
+                    playing = { id: command.id ?? "", since: now() }
+                    send({ type: "playing", id: command.id, duration: 10 })
+                  } else if (command.type === "stop") {
+                    send({ type: "stopped", ...(playing === undefined ? {} : { id: playing.id, at: (now() - playing.since) / 1000 }) })
+                    playing = undefined
+                  } else if (command.type === "rest") {
+                    running = false
+                    playing = undefined
+                  }
+                }
+              },
+              drain,
+            },
+          }),
+        catch: (cause) => new Helper.HelperError({ message: "Could not connect the fake helper", cause }),
+      })
+    const device = yield* native(launch, () =>
+      Effect.succeed({ duration: 0, confirmed: false, finished: Effect.void, stop: Effect.succeed(0), volume: () => Effect.void }),
+    )
+    const layer = Layer.mergeAll(
+      Layer.succeed(Audio, Context.get(device, Audio)),
+      Layer.succeed(Persona.Persona, { lines: Effect.succeed(Persona.plain), onIt: () => Effect.succeed(Persona.plain.onIt), said: () => Effect.void }),
+      Journal.memory,
+      // Each frame holds the probability that it's speech.
+      Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),
+      Layer.succeed(Transcriber, {
+        transcribe: (audio) =>
+          Effect.gen(function* () {
+            const heard = words
+              .flatMap(([value, text]) => {
+                const at = audio.indexOf(Math.fround(value))
+                return at < 0 ? [] : [[at, text] as const]
+              })
+              .sort(([one], [other]) => one - other)
+              .map(([, text]) => text)
+              .join(" ")
+            transcribed.push(heard)
+            const delay = waits.shift() ?? 0
+            if (delay > 0) yield* Effect.sleep(`${delay} seconds`).pipe(Effect.onInterrupt(() => Effect.sync(() => void interrupted++)))
+            return heard
+          }),
+      }),
+      Layer.succeed(Responder.Responder, { respond: ({ heard }) => Effect.succeed({ intent: "send" as const, spoken: "Okay.", message: heard }) }),
+      Layer.succeed(Voice, { render: () => Effect.void }),
+    )
+    const context = yield* Layer.build(layer)
+    const made = yield* Conversation.make({
+      dir: "/tmp",
+      moved: () => Effect.succeed(false),
+      send: (_, message) => Effect.sync(() => void sent.push(message)).pipe(Effect.as("sent" as const)),
+      late: () => Effect.void,
+      replied: Effect.void,
+      saying: () => Effect.void,
+    }).pipe(Effect.provide(context))
+    // Lets the helper, the microphone and the fibers catch up on what the test did, since the clock only moves when told to.
+    const flush = Effect.promise(async () => {
+      while (unsent.length > 0) await new Promise((resolve) => setTimeout(resolve, 10))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    const talk = (value: number, count: number) =>
+      Effect.sync(() => {
+        const samples = new Float32Array(512).fill(value)
+        const message = new Uint8Array(5 + samples.byteLength)
+        message[0] = Helper.Kind.pcm
+        new DataView(message.buffer).setUint32(1, samples.byteLength)
+        message.set(new Uint8Array(samples.buffer), 5)
+        for (let frame = 0; frame < count; frame++) write(message)
+      }).pipe(Effect.zipRight(flush))
+    const fiber = yield* Effect.fork(made.converse(long))
+    yield* flush
+    yield* flush
+    return {
+      ...made,
+      fiber,
+      commands,
+      transcribed,
+      sent,
+      interrupted: () => interrupted,
+      talk,
+      quiet: talk(0, defaults.silence),
+      wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
+      finish: Effect.sync(() => {
+        if (playing !== undefined) send({ type: "finished", id: playing.id })
+        playing = undefined
+      }).pipe(Effect.zipRight(flush)),
+      replies: Effect.map(Effect.flatMap(Journal.Journal, (journal) => journal.since(0)), (entries) => entries.map(({ text }) => text)).pipe(
+        Effect.provide(context),
+      ),
+    }
+  })
+
+const overHelperScoped = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) =>
+  Effect.runPromise(
+    test.pipe(
+      Effect.scoped,
+      Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_SHORTCUT", "none"]]))),
+      Effect.provide(TestContext.TestContext),
+    ),
+  )
+
+describe("Over its first words, while yapd's own voice can still get into the microphone", () => {
+  test("carries on over its own voice getting through, sending and noting nothing", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."]])
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        const during = [...helper.commands]
+        yield* helper.wait(9)
+        yield* helper.finish
+        yield* helper.wait(3)
+        const exit = yield* Fiber.await(helper.fiber)
+        return { during, exit: exit._tag, transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    // Heard and made out, but never stopped for, nor even ducked.
+    expect(result.transcribed).toEqual(["Over in yapd, the tests pass."])
+    expect(result.during).toEqual(["play"])
+    expect(result).toMatchObject({ exit: "Success", sent: [], replies: [] })
+  })
+
+  test("lets go of what Whisper makes up of its voice", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Thank you."], [0.81, "- Verse."]])
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        yield* helper.talk(0.81, 10)
+        yield* helper.quiet
+        return { commands: helper.commands, transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play"], transcribed: ["Thank you.", "- Verse."], sent: [], replies: [] })
+  })
+
+  test("stops for the user once Whisper has made out it's him, and takes it like any interruption", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Hold on, merge it."]])
+        yield* helper.talk(0.9, 10)
+        // Still talking: it could be its own voice until it's made out.
+        const talking = [...helper.commands]
+        yield* helper.quiet
+        return { talking, commands: helper.commands, transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result.talking).toEqual(["play"])
+    expect(result.commands.slice(0, 2)).toEqual(["play", "stop"])
+    // Made out once, and that's what's taken in, said and noted.
+    expect(result.transcribed).toEqual(["Hold on, merge it."])
+    expect(result.sent).toEqual(["Hold on, merge it."])
+    expect(result.replies).toEqual(["Hold on, merge it."])
+  })
+
+  test("stops at once after them, without waiting on what's still being made out of talk over them, and loses none of either", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes five seconds over the first.
+        const helper = yield* overHelper([[0.91, "Hold on."], [0.92, "Merge it."]], [5])
+        yield* helper.talk(0.91, 10)
+        yield* helper.quiet
+        yield* helper.wait(3.5)
+        yield* helper.talk(0.92, defaults.confirm)
+        const stopped = [...helper.commands]
+        yield* helper.talk(0.92, 6)
+        yield* helper.quiet
+        const before = [...helper.sent]
+        yield* helper.wait(2)
+        return { stopped, before, transcribed: helper.transcribed, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result.stopped).toEqual(["play", "volume", "stop"])
+    expect(result.before).toEqual([])
+    // Each in the order he said it, heard together once the first was made out.
+    expect(result.transcribed).toEqual(["Hold on.", "Hold on. Merge it."])
+    expect(result.sent).toEqual(["Hold on. Merge it."])
+    expect(result.replies).toEqual(["Hold on. Merge it."])
+  })
+
+  test("doesn't stop when its own voice carries on past them, and lets it go once it ends", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "the tests pass now and the pull request"]])
+        yield* helper.wait(2.5)
+        yield* helper.talk(0.8, 10)
+        yield* helper.wait(1)
+        yield* helper.talk(0.8, 40)
+        yield* helper.quiet
+        return { commands: helper.commands, looks: helper.transcribed.length, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result.commands).toEqual(["play"])
+    // Looked at as it went on, and once more at the end.
+    expect(result.looks).toBeGreaterThan(1)
+    expect(result).toMatchObject({ sent: [], replies: [] })
+  })
+
+  test("stops for the user talking on past them about a second in, rather than once he's finished, and keeps what he said over them", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.93, "Hold on,"], [0.94, "I need to tell you something."]])
+        yield* helper.wait(2.5)
+        yield* helper.talk(0.93, 10)
+        yield* helper.wait(1)
+        yield* helper.talk(0.94, 20)
+        const early = [...helper.commands]
+        yield* helper.talk(0.94, 10)
+        const later = [...helper.commands]
+        yield* helper.talk(0.94, 30)
+        yield* helper.quiet
+        return { early, later, sent: helper.sent }
+      }),
+    )
+    expect(result.early).toEqual(["play"])
+    expect(result.later).toEqual(["play", "stop"])
+    expect(result.sent).toEqual(["Hold on, I need to tell you something."])
+  })
+
+  test("lets go of what it's making out when the update is cut off, like by a dictation", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Hold on, merge it."]], [5])
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* Fiber.interrupt(helper.fiber)
+        yield* helper.wait(5)
+        return { interrupted: helper.interrupted(), sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ interrupted: 1, sent: [], replies: [] })
+  })
+
+  test("doesn't take a question's own words getting through for an answer", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const helper = yield* overHelper([[0.8, "Which project is this for?"], [0.9, "The docs site."]])
+        yield* Fiber.interrupt(helper.fiber)
+        const asking = yield* Effect.fork(
+          helper.ask({
+            audio: "/tmp/question.wav",
+            spoken: "Which project is this for, sir: yapd, or the docs site? Say the name and I'll start it there right away.",
+            answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+          }),
+        )
+        yield* helper.wait(0)
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        const echoed = [...answers]
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        return { echoed, answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    expect(result).toEqual({ echoed: [], answered: true, answers: ["The docs site."] })
   })
 })
 

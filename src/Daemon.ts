@@ -548,11 +548,11 @@ export const make = Effect.gen(function* () {
   const words = (said: Inbox.Said) =>
     Effect.gen(function* () {
       const { instead } = said.notice
-      const own = { path: said.audio, used: Effect.void }
+      const own = { path: said.audio, spoken: said.notice.spoken, used: Effect.void }
       if (instead === undefined || !(yield* instead.when)) return own
       const path = join(dir, `${crypto.randomUUID()}${extension}`)
       return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
-        Effect.as({ path, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`), instead.used ?? Effect.void) }),
+        Effect.as({ path, spoken: instead.spoken, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`), instead.used ?? Effect.void) }),
         Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say "${instead.spoken}" instead`, error), own)),
       )
     })
@@ -570,7 +570,7 @@ export const make = Effect.gen(function* () {
       if (yield* said.notice.stale) return yield* dealtWith
       const saying = said.notice.saying ?? Effect.void
       const confirmed = said.notice.confirmed ?? Effect.void
-      const { path: played, used } = yield* words(said)
+      const { path: played, spoken, used } = yield* words(said)
       // Settled while its words were rendered, like a question closed by what he said meanwhile, it's dropped all the same.
       if (yield* said.notice.stale) return yield* dealtWith
       yield* used
@@ -586,7 +586,7 @@ export const make = Effect.gen(function* () {
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: played, saying, confirmed, answer }).pipe(
+      const answered = yield* conversation.ask({ audio: played, spoken, saying, confirmed, answer }).pipe(
         Effect.onError((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
         ),
