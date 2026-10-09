@@ -601,6 +601,13 @@ export const make = (options: {
     /** Whether a thread still waits on him for this request, as T3 Code last said, even behind a newer one. */
     const still = (ref: Threads.Ref, requestId: string) => threads.waiting(ref, requestId)
 
+    /** Takes every copy of a thread's request out of what's waiting to be asked, and gives them back. */
+    const dequeue = (requestId: string) => {
+      const queued = asked.filter(({ asking: waiting }) => waiting.asks.requestId === requestId)
+      if (queued.length > 0) asked.splice(0, asked.length, ...asked.filter(({ asking: waiting }) => waiting.asks.requestId !== requestId))
+      return queued
+    }
+
     /**
      * What's waiting to be asked that can be now: the first that's due, on a
      * machine whose threads can be seen. One on a machine whose can't, like
@@ -1800,6 +1807,9 @@ export const make = (options: {
         }
         const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted, asks)
         if (act === undefined) return reply(said.cantTell, thought.subject)
+        // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
+        // by while its machine's threads couldn't be seen, which its T3 Code may not show as answered just yet.
+        if (asks !== undefined && asks._tag !== "Agent" && (act._tag === "Decide" || act._tag === "Reply")) dequeue(asks.requestId)
         // Once it's begun, it's seen through and noted: turning yapd off meanwhile only stops what's said of it, and any step not written yet, like one after a look at the thread, or telling a turn it stopped (I8).
         const wanted = Effect.map(outdated(utterance.turns), (off) => !off)
         return yield* Effect.uninterruptibleMask((free) =>
@@ -1956,10 +1966,8 @@ export const make = (options: {
      * had its place taken, carries over.
      */
     const unqueued = (from: Queued): Queued => {
-      const { requestId } = from.asking.asks
-      const queued = asked.filter(({ asking: waiting }) => waiting.asks.requestId === requestId)
+      const queued = dequeue(from.asking.asks.requestId)
       if (queued.length === 0) return from
-      asked.splice(0, asked.length, ...asked.filter(({ asking: waiting }) => waiting.asks.requestId !== requestId))
       const most = (count: "snoozed" | "interrupted") => Math.max(from[count] ?? 0, ...queued.map((waiting) => waiting[count] ?? 0)) || undefined
       return { ...from, snoozed: most("snoozed"), interrupted: most("interrupted") }
     }
@@ -3068,8 +3076,7 @@ export const make = (options: {
       settled: (requestId) =>
         Effect.gen(function* () {
           known.delete(requestId)
-          const left = asked.filter(({ asking: queued }) => queued.asks.requestId !== requestId)
-          asked.splice(0, asked.length, ...left)
+          dequeue(requestId)
           if (asking === undefined || requestOf(asking.open) !== requestId) return
           // Being asked, or asked already: a late answer does nothing, and what's next is asked.
           const { open } = asking

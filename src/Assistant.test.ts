@@ -267,6 +267,8 @@ const assistant = (
       readonly dispatched?: Array<Record<string, unknown>>
       readonly items?: ReadonlyArray<Record<string, unknown>>
       readonly changes?: Stream.Stream<T3Live.Change>
+      /** Its view a moment behind its T3 Code, so a thread there still shows what it waited on just after that's answered. */
+      readonly behind?: boolean
     }
   } = {},
 ) =>
@@ -294,12 +296,12 @@ const assistant = (
     const rigChanged = new Map<string, T3Live.Thread>()
     /** As a machine's T3 Code answers a request, which the thread there then no longer waits on, as `known` had it before. */
     const answeringOn =
-      (since: Map<string, T3Live.Thread>, known: ReadonlyArray<T3Live.Thread>) =>
+      (since: Map<string, T3Live.Thread>, known: ReadonlyArray<T3Live.Thread>, behind = false) =>
       (): Answer =>
       (payload, bounded) =>
         Effect.zipRight(
           Effect.sync(() => {
-            if (payload.type !== "runtime-request.respond") return
+            if (behind || payload.type !== "runtime-request.respond") return
             const before = since.get(String(payload.threadId)) ?? known.find(({ id }) => id === payload.threadId)
             if (before !== undefined && before.pendingRuntimeRequest?.id === payload.requestId) since.set(before.id, { ...before, pendingRuntimeRequest: null })
           }),
@@ -343,7 +345,7 @@ const assistant = (
                 ? Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." }))
                 : rig.dispatched === undefined
                   ? Effect.never
-                  : transport(() => [], rig.dispatched, answeringOn(rigChanged, rig.threads), Effect.void, rig.items),
+                  : transport(() => [], rig.dispatched, answeringOn(rigChanged, rig.threads, rig.behind), Effect.void, rig.items),
             ),
             status: rig.status,
           },
@@ -7781,6 +7783,36 @@ describe("Assistant", () => {
         }),
       ),
     ).toEqual({ ...after, asked: 3 })
+  })
+
+  test("a rig question or approval put by while rig was out of sight, then answered by dictation, is never asked again after, even as rig's view catches up", async () => {
+    const approving = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    /** Asked and heard, answered over as rig drops out, so it's put by; rig's back, and he dictates his answer before it's asked again. */
+    const dictated = (of: T3Live.Thread, items: ReadonlyArray<Record<string, unknown>>, over: string, heard: string, decided: (handle: string) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const rig: Array<Record<string, unknown>> = []
+          const made = yield* assistant((situation) => decided(handle(situation, of)), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [of], seen: () => seen, dispatched: rig, items, behind: true },
+          })
+          yield* asked(made, of, "rig")
+          seen = false
+          yield* made.answer(over)
+          seen = true
+          yield* made.dictate(heard)
+          yield* made.wait(60)
+          return { spoken: made.spoken().slice(2), sent: rig.length, open: Option.isSome(yield* made.open) }
+        }),
+      )
+    expect(
+      await dictated(onRig, card("q9", [colour]), "Red.", "Red, for the fee table checks on rig.", (target) => Brain.decision({ act: "reply", target, text: "Red" })),
+    ).toEqual({ spoken: ["Red it is, sir."], sent: 1, open: false })
+    expect(
+      await dictated(approving, approval("r9", "npm install left-pad"), "Yes.", "Approve the fee table checks on rig.", (target) =>
+        Brain.decision({ act: "decide", how: "accept", target }),
+      ),
+    ).toEqual({ spoken: ["Approved, sir."], sent: 1, open: false })
   })
 
   test("an answer to a question given while T3 Code restarts on this Mac is never sent nor said to be dealt with: he's told why, and it's asked again once T3 Code is back", async () => {
