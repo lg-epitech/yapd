@@ -1832,6 +1832,39 @@ describe("Assistant", () => {
     expect(await telling("Use the devnet instead.")).toEqual({ spoken: [expect.stringMatching(/^(On it|Right away|Very good)/)], sent: [{ text: "Use the devnet instead." }] })
   })
 
+  test("a message for now to a thread waiting on a question in parts answers the part he'd got to, and the rest are asked before anything goes, never sent as skipped", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const telling = (leaving: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Use red.", how: "now" }), undefined, {
+            others: [cloud],
+            items: card("q1", [colour, extras]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(leaving)
+          yield* made.dictate("Tell the cloud one to use red.")
+          const between = answered(made.dispatched)
+          yield* made.answer("Alpha.")
+          const answers = answered(made.dispatched)
+          // Nothing's left of it to come back.
+          yield* made.wait(11 * 60)
+          return { between, spoken: made.spoken().slice(2), answers, open: Option.isSome(yield* made.open) }
+        }),
+      )
+    for (const leaving of ["Never mind.", "Later."]) {
+      expect([leaving, await telling(leaving)]).toEqual([
+        leaving,
+        {
+          between: [],
+          spoken: ["Red, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Alpha it is, sir."],
+          answers: [{ [colour.id]: "Red", [extras.id]: ["Alpha"] }],
+          open: false,
+        },
+      ])
+    }
+  })
+
   test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes, and the question is asked again after", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>

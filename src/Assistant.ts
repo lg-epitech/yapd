@@ -2125,10 +2125,12 @@ export const make = (options: {
      * steered into the turn meanwhile may sit unread, or end the question.
      * The part he'd got to is answered with it as with anything he'd answer
      * it with: an option it names goes as that option, as the form takes it.
-     * Never for one T3 Code takes as a message itself, nor a part he hadn't
-     * heard all of by the time he said it, like the next one cut off, which
-     * is asked after, nor a form that takes only its options, which can't
-     * take it: it goes as the message it is.
+     * Only the last part's answer sends it: with parts after it, those are
+     * asked first, as after a dictated answer. Never for one T3 Code takes
+     * as a message itself, nor a part he hadn't heard all of by the time he
+     * said it, like the next one cut off, which is asked after, nor a form
+     * that takes only its options, which can't take it: it goes as the
+     * message it is.
      */
     const answerFor = (plan: Brain.Plan, utterance: Pick<Utterance, "at" | "heard">) =>
       Effect.gen(function* () {
@@ -2147,7 +2149,12 @@ export const make = (options: {
       const { decision, target } = plan
       switch (decision.act) {
         case "send":
-          return Effect.flatMap(answerFor(plan, thought.utterance), (asks) => write(plan, thought, said, at, asks))
+          return Effect.flatMap(answerFor(plan, thought.utterance), (asks) =>
+            // Never sent with parts he's yet to hear left out, as if skipped: he's asked the next, as when he dictates an answer.
+            asks !== undefined && asks.part < asks.questions.length && Option.isSome(target)
+              ? unprompted({ ...plan, decision: { ...decision, act: "reply", text: decision.text.trim() || thought.utterance.heard } }, target.value, thought, said, at)
+              : write(plan, thought, said, at, asks),
+          )
         case "stop":
         case "undo":
           return write(plan, thought, said, at)
