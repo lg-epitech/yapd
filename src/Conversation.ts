@@ -279,6 +279,9 @@ const near = (heard: string, spoken: string) => {
 const vocabulary = (text: string) =>
   text.toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").split(/\s+/).filter((word) => gist(word) !== "")
 
+/** Whether Whisper may have written a word of yapd's, `spoken`, as `heard`: like it, or "and" for its "in", as it hears "Over in" as "Over and". */
+const heardAs = (heard: string, spoken: string) => alike(heard, spoken) || (heard === "and" && spoken === "in")
+
 /** Words heard, from `first` to `last`, taken for yapd's, from `start` to `end`. */
 interface Match {
   readonly first: number
@@ -304,7 +307,7 @@ const lined = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
     yapd.forEach((_, end) => {
       for (const first of [last, last - 1]) {
         for (const start of [end, end - 1]) {
-          if (first < 0 || start < 0 || !alike(words.slice(first, last + 1).join(""), yapd.slice(start, end + 1).join(""))) continue
+          if (first < 0 || start < 0 || !heardAs(words.slice(first, last + 1).join(""), yapd.slice(start, end + 1).join(""))) continue
           // Two heard for its only when it takes both, as for a name Whisper writes in two, like "home lab" for "homelab": not when
           // each is one of its already, nor one is its very word, so a word run on from one of its, like "yes" in "again, yes", isn't.
           if (first < last) {
@@ -484,22 +487,21 @@ const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
 export type Whose = "stop" | "his" | "unclear"
 
 /**
- * Whether `words` can only be his: none but those nearly anything has in
+ * Whether `words` can only be his: no two it says one after another, however
+ * common, like the "Over and" of "Over and yet." for "Over in yapd" or the
+ * "is this for" of a question of its, none but those nearly anything has in
  * line with what it was saying, its name misheard and all, nor, wherever it
  * comes, like a word of its: a letter or so apart, sounding like it, or the
  * start of it cut off. Nothing but words nearly anything has, they're his
- * only with some it isn't saying and no two it says one after another, like
- * "Not now." or "Why did it do that?", but not "Over in your".
+ * only with some it isn't saying, like "Not now." or "Why did it do that?",
+ * but not "Over in your".
  */
 const clearly = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   if (words.length === 0) return false
-  /** Whether a word heard is its word `at`. */
-  const said = (word: string, at: number) => at >= 0 && stem(word) === stem(yapd[at]!)
-  if (words.every((word) => common.has(word))) {
-    const unsaid = words.some((word) => !yapd.some((_, at) => said(word, at)))
-    const inOrder = words.some((word, index) => index > 0 && yapd.some((_, at) => said(word, at) && said(words[index - 1]!, at - 1)))
-    return unsaid && !inOrder
-  }
+  /** Whether a word heard is its word `at`, or "and" for its "in". */
+  const said = (word: string, at: number) => at >= 0 && (stem(word) === stem(yapd[at]!) || (word === "and" && yapd[at] === "in"))
+  if (words.some((word, index) => index > 0 && yapd.some((_, at) => said(word, at) && said(words[index - 1]!, at - 1)))) return false
+  if (words.every((word) => common.has(word))) return words.some((word) => !yapd.some((_, at) => said(word, at)))
   const its = ours(words, yapd)
   return words.every((word, index) => common.has(word) || !(its.has(index) || yapd.some((spoken) => alike(word, spoken))))
 }

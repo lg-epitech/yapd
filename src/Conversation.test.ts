@@ -707,7 +707,8 @@ describe("Telling yapd's own voice from the user's", () => {
       expect([heard, whose(heard, "the build is green. It wants to know whether to")]).toEqual([heard, "his"])
     }
     expect(whose("The other one.", "Over in rig, the migration is still running")).toBe("his")
-    expect(whose("Over in production.", saying)).toBe("his")
+    // But its own "Over in" goes before whatever its name is heard as, like "Over in rate." for "Over in rig".
+    expect(whose("Over in production.", saying)).toBe("unclear")
     // As Whisper writes its name, said as it is.
     expect(whose("Rick, it.", "the migration on rig, it wants")).toBe("unclear")
   })
@@ -732,7 +733,7 @@ describe("Telling yapd's own voice from the user's", () => {
     ] as const) {
       expect([heard, whose(heard, line)]).toEqual([heard, "unclear"])
     }
-    expect(whose("Over in production, merge it.", "Over in yapd, the tests pass now and the")).toBe("his")
+    expect(whose("Over in production, merge it.", "Over in yapd, the tests pass now and the")).toBe("unclear")
   })
 
   test("takes what yapd was saying for unclear, misheard or not, even with a word misheard as its voice stops getting in", () => {
@@ -746,6 +747,28 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("Over in yapd yapd, the tests pass.", saying)).toBe("unclear")
     // Nothing but words nearly anything has, in its order.
     expect(whose("And the", `${saying} and the pull request`)).toBe("unclear")
+  })
+
+  test("takes two words it says one after another for its voice, however common, with its name heard as anything after them", () => {
+    // As Whisper heard its voice getting in, with only it playing.
+    const u1 = "Over in yapd, the tests pass now and the PR is ready for review, sir."
+    const u2 = "Over in rig, Claude finished the migration and the build is green, sir."
+    const u4 = "Over in home lab, the agent stopped at the next step and is waiting on you, sir."
+    const q2 = "Which project is this for, sir? yapd or home lab?"
+    for (const [heard, line] of [
+      ["over and yet.", u1], ["over in the app.", u1], ["over and yeah.", u1], ["Over and her laugh", u4], ["Star Trek is this for sure.", q2],
+      // With words of his, it's as unclear, so none of its voice goes with them.
+      ["Merge it is this for sir. Yeah, don't have love", q2], ["over in rate. Tell it to open a PR.", u2],
+    ] as const) {
+      expect([heard, whose(heard, line)]).toEqual([heard, "unclear"])
+    }
+    // His stop among them is still his, on its own.
+    for (const [heard, line, stop] of [
+      ["Wait. Jack is this for sir.", q2, "Wait."], ["over and out. Never mind.", u1, "Never mind."], ["over and yeah. Hold on.", u1, "Hold on."],
+      ["over and out. Skip.", u1, "Skip."],
+    ] as const) {
+      expect([heard, whose(heard, line), stopIn(heard, line)]).toEqual([heard, "stop", stop])
+    }
   })
 
   test("takes a stop yapd was saying for unclear, even cut off partway through a longer word, or run into the next", () => {
