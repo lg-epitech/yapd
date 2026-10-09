@@ -37,7 +37,7 @@ Live on `dev` now: everything below. Rig's threads are followed, waiting on thei
 - Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message goes by voice or new work starts, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
-- You can interrupt from the first word of an update or an answer, not only after its first three seconds. Over those, while some of yapd's own voice still gets into the microphone, it keeps talking until Whisper makes out it's you (about a second after you stop, or a second in if you keep talking), then takes exactly what you said; if some of it was its own voice, it stops and asks you to say it again.
+- You can interrupt from the first word of an update or an answer, not only after its first three seconds. Over those, while some of yapd's own voice still gets into the microphone, it keeps talking until Whisper makes out it's you (about a second after you stop, or a second in if you keep talking), then takes exactly what you said; if some of it was its own voice, it stops, lets you finish and asks you to say it all again.
 - "Who needs me?" and usage need no model call; a status question takes one, against a minute or more in the reverted attempt.
 
 ## Under the hood
@@ -60,5 +60,6 @@ Live on `dev` now: everything below. Rig's threads are followed, waiting on thei
 - Catching up, if yapd has to ask "which one?" about your follow-up, the next "what did I miss?" may say "Nothing else." though an update is still unheard.
 - After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
 - Over yapd's first three seconds, its own voice heard as wholly other words, like "Oh, Rennie app." for "Over in yapd", can still stop it and be taken for yours. A transcription still running as those seconds end can let the start of its voice duck or stop it too.
-- Over those seconds, a "stop" or "wait" of yours is taken as Whisper heard it, with any of yapd's own words around it.
+- Over those seconds, a "stop" or "wait" of yours is taken as Whisper heard it with a word or two of yapd's own beside it, as in "Tell it to stop the migration."; with more of them, you're asked to say it again.
+- A "wait" on its own, said just as yapd says "waiting", is taken for its voice.
 - "Of course." or "okay" on its own, said straight over the end of a short question of yapd's, isn't taken for an answer: "yes" is.
