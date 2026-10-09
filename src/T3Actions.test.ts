@@ -97,6 +97,9 @@ describe("T3Actions", () => {
       Option.some(['Monitor {"command":"cd build\\nrm -rf ~/work","timeout":30}', "Monitor\ncommand\ncd build\nrm -rf ~/work\ntimeout\n30"]),
     )
     expect(tool({ summary: '{"command":"echo aaaa…', truncated: true })).toEqual(Option.some(['Monitor {"summary":"{\\"command\\":\\"echo aaaa…","truncated":true}', undefined]))
+    // A command given as a list of words is one line, as it runs, and an input sent as JSON in a string is read as what that holds.
+    expect(Option.map(tool({ args: ["git", "push", "origin", "main", "--force"] }), ([, whole]) => whole)).toEqual(Option.some("Monitor\nargs\ngit push origin main --force"))
+    expect(Option.map(tool('{"command":"cd build\\nrm -rf ~/work"}'), ([, whole]) => whole)).toEqual(Option.some("Monitor\ncommand\ncd build\nrm -rf ~/work"))
     // A secret goes by its own item's id, which is what the thread says it waits on.
     const secret = { type: "secret_request", id: "turn-item:secret-request:t1:deploy", status: "waiting", label: "Deploy key", reason: "To deploy", secretStatus: "pending" }
     expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(

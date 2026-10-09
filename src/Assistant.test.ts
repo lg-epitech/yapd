@@ -931,6 +931,16 @@ describe("Assistant", () => {
       ],
       dispatched: [],
     })
+    // A command given as a list of words, as it runs, and one sent as JSON in a string, as that holds it.
+    for (const input of [{ args: ["git", "push", "origin", "main", "--force"] }, '{"command":"cd build\\nrm -rf ~/work"}']) {
+      expect(await allowing(input)).toEqual({
+        spoken: [
+          "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
+          "Shall I still allow Cloud deployment discovery to run a maintenance check, sir? Only 'approve' will do.",
+        ],
+        dispatched: [],
+      })
+    }
     // Sent whole, with nothing risky in it, a yes will do.
     expect(await allowing({ command: "cd build\nls" })).toEqual({
       spoken: ["Cloud deployment discovery wants to run a maintenance check. Allow it, sir?", "Approved, sir."],

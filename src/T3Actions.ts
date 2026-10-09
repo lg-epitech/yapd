@@ -197,14 +197,20 @@ const checkable = 20_000
  */
 const cutShort = (input: unknown) => typeof input === "object" && input !== null && (input as { readonly truncated?: unknown }).truncated === true
 
+/** Text that's JSON itself, as what it holds. */
+const json = Schema.decodeUnknownOption(Schema.parseJson())
+
 /**
  * What a tool is given, as it gets it: each name and each value on a line of
  * its own, and its text as it is, where its JSON writes a line break as "\n"
- * run into the next word, which hides a command on a line of its own.
+ * run into the next word, which hides a command on a line of its own. Text
+ * that's JSON itself, like an input sent as one string, is read as what it
+ * holds, the same way, and a list of words, like a command and what it's
+ * given, is one line, as it runs, so a flag isn't cut off from its command.
  */
 const given = (value: unknown): ReadonlyArray<string> => {
-  if (typeof value === "string") return [value]
-  if (Array.isArray(value)) return value.flatMap(given)
+  if (typeof value === "string") return Option.match(/^\s*[[{]/.test(value) ? json(value) : Option.none(), { onNone: () => [value], onSome: given })
+  if (Array.isArray(value)) return value.every((item) => typeof item === "string") ? [value.join(" ")] : value.flatMap(given)
   if (typeof value === "object" && value !== null) return Object.entries(value).flatMap(([name, inner]) => [name, ...given(inner)])
   return value === undefined || value === null ? [] : [String(value)]
 }
