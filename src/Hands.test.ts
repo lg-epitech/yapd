@@ -2674,4 +2674,32 @@ describe("Hands on another machine", () => {
     expect(["Rosie", "rig", "laptop"].map(mine)).toEqual([true, false, true])
     expect(["Rosie", "rig", "laptop"].map(rigs)).toEqual([false, true, false])
   })
+
+  test("a restart looks at rig's steps once rig's T3 Code catches up, however long it's away, where this one's gives up after a while", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const looked: Array<string> = []
+        const hands = {
+          reconcileOn: (on: (machine: string) => boolean) =>
+            Effect.sync((): Hands.Reconciled => {
+              looked.push(...["Rosie", "rig"].filter(on))
+              return { undelivered: [], unconfirmed: [], readying: Effect.succeed([]) }
+            }),
+        }
+        let up = false
+        const view = Effect.sync(() => (up ? Option.some({}) : Option.none()))
+        const followed = ["Rosie", "rig"]
+        // Asked about once a minute, so an hour goes by quickly.
+        const rig = yield* Effect.fork(Hands.lookBack(hands, view, "rig", "Rosie", followed, "1 minute"))
+        const mine = yield* Effect.fork(Effect.flip(Hands.lookBack(hands, view, "Rosie", "Rosie", followed, "1 minute")))
+        // Rig asleep for an hour, and T3 Code here closed all along.
+        yield* TestClock.adjust("1 hour")
+        up = true
+        yield* TestClock.adjust("1 minute")
+        yield* Fiber.join(rig)
+        return { mine: yield* Fiber.join(mine), looked }
+      }),
+    )
+    expect(result).toEqual({ mine: "T3 Code didn't catch up in time", looked: ["rig"] })
+  })
 })

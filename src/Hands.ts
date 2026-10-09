@@ -1,4 +1,4 @@
-import { Clock, Context, Duration, Effect, Either, Option, Schema } from "effect"
+import { Clock, Context, Duration, Effect, Either, Option, Schedule, Schema } from "effect"
 import * as Brain from "./Brain.ts"
 import * as Launcher from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
@@ -403,6 +403,31 @@ const settled = (row: Ledger.Row): Went => {
  */
 export const whose = (machine: string, here: string, followed: ReadonlyArray<string>) => (on: string) =>
   machine === here ? on === here || !followed.includes(on) : on === machine
+
+/** How long a restart waits for this machine's T3 Code, almost always up, to catch up, before leaving its steps to the next restart. */
+const catchingUp = "15 minutes"
+
+/**
+ * A restart's look at `machine`'s steps, as `whose` says, once its T3 Code
+ * has caught up, which `view` tells. Another machine's waits as long as yapd
+ * runs: one asleep or out of reach for a while is ordinary, and what went to
+ * it would otherwise go unlooked at till the next restart, too old by then to
+ * offer again. Waiting holds up nothing, as each machine's looks on its own.
+ * Whether it has is asked `every` so often.
+ */
+export const lookBack = (
+  hands: Pick<Hands["Type"], "reconcileOn">,
+  view: Effect.Effect<Option.Option<unknown>>,
+  machine: string,
+  here: string,
+  followed: ReadonlyArray<string>,
+  every: Duration.DurationInput = "1 second",
+) =>
+  Effect.gen(function* () {
+    const caughtUp = Effect.repeat(view, { schedule: Schedule.spaced(every), until: Option.isSome })
+    yield* machine === here ? Effect.timeoutFail(caughtUp, { duration: catchingUp, onTimeout: () => "T3 Code didn't catch up in time" }) : caughtUp
+    return yield* hands.reconcileOn(whose(machine, here, followed))
+  })
 
 /** Hands that reach threads through `threads` and write each step in `ledger` first. */
 export const make = (options: {

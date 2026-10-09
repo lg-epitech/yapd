@@ -1,4 +1,4 @@
-import { Clock, Context, Effect, Layer, Logger, Option, Schedule, Stream } from "effect"
+import { Clock, Context, Effect, Layer, Logger, Option, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
@@ -84,8 +84,6 @@ const Relays = Layer.effect(
 const remembered = 365 * 24 * 60 * 60_000
 /** How long what yapd did to threads is kept. */
 const done = 90 * 24 * 60 * 60_000
-/** How long a restart waits for T3 Code to catch up to look at what never said what came of it, which the next restart looks at otherwise. */
-const catchingUp = "15 minutes"
 
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
@@ -153,17 +151,15 @@ export const serve = Effect.gen(function* () {
     followed,
     ({ machine: name, live }) =>
       Effect.forkScoped(
-        live.view.pipe(
-          Effect.repeat({ schedule: Schedule.spaced("1 second"), until: Option.isSome }),
-          Effect.timeoutFail({ duration: catchingUp, onTimeout: () => `${name === machine ? "T3 Code" : `${name}'s T3 Code`} didn't catch up in time` }),
-          Effect.zipRight(hands.reconcileOn(Hands.whose(name, machine, followed.map(({ machine }) => machine)))),
+        Hands.lookBack(hands, live.view, name, machine, followed.map(({ machine }) => machine)).pipe(
           Effect.flatMap(({ undelivered, unconfirmed, readying }) =>
             Effect.all(
               [Effect.zipRight(assistant.unconfirmed(unconfirmed), assistant.undelivered(undelivered)), Effect.flatMap(readying, assistant.unconfirmed)],
               { concurrency: "unbounded", discard: true },
             ),
           ),
-          Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent${name === machine ? "" : ` to ${name}`} before restarting: ${reason}`)),
+          // Only this machine's look ever gives up waiting.
+          Effect.catchAll((reason) => Effect.logInfo(`Not looking for what I sent before restarting: ${reason}`)),
         ),
       ),
     { discard: true },
