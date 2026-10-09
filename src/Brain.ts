@@ -413,25 +413,53 @@ const flagsAfter = (command: string, name: RegExp) => {
 /** The names below, so a command with none of them, like most, is passed over at once. */
 const flaggable = /rm|push|reset|clean|branch|restore|gcloud|az|rsync/i
 
+/**
+ * A long flag as git and GNU tools take it: whole, or cut short to any of its
+ * first letters, as they take one that starts no other of theirs, like
+ * "--rec" for rm's "--recursive" or "--h" for reset's "--hard".
+ */
+const abbreviated = (flag: string) => String.raw`--${flag.charAt(0)}${[...flag.slice(1)].map((letter) => `(?:${letter}`).join("")}${")?".repeat(flag.length - 1)}\b`
+
+/** Deleting all of a tree, by a flag among others, like "-rf", or by name, like "--recursive" or "--rec". */
+const recursive = new RegExp(String.raw`-[a-z]*r|${abbreviated("recursive")}`, "iy")
+
+/** Forcing, by a flag among others, like "-df", or by name, like "--force" or "--fo". */
+const forced = new RegExp(String.raw`-[a-z]*f|${abbreviated("force")}`, "iy")
+
+/**
+ * A push that forces, deletes a branch, or mirrors or prunes, which deletes
+ * what's only there, by a flag among others, like "-uf", or by name, like
+ * "--force" or "--del", or by what it pushes, like "+main" or ":old".
+ */
+const pushing = new RegExp(String.raw`\s(?:-[a-z\d]*[fd]|${["force", "delete", "mirror", "prune"].map(abbreviated).join("|")}|\+\S|:\S)`, "i")
+
+/** A reset that throws away what isn't committed: "--hard", or cut short, like "--ha". */
+const hard = new RegExp(String.raw`\s${abbreviated("hard")}`, "i")
+
+/** A branch's flag that deletes it, "-d" among others, "--delete" or "--del". */
+const deleteFlag = new RegExp(String.raw`^(?:-[a-zA-Z]*[dD]|${abbreviated("delete")})`)
+
+/** A branch's flag that deletes it whatever it holds: "-D", or "-f", "--force" or "--forc" with one that deletes it. */
+const forceFlag = new RegExp(String.raw`^(?:-[a-zA-Z]*[fD]|${abbreviated("force")})`)
+
 /** What a flag anywhere after a command's name makes risky, read a command at a time, under the git subcommand each is for. */
 const riskyFlags = {
   // Deleting a tree, forced or not, its flags together or apart, but not only from git's index, with `--cached` after the last that does.
   // The rm of git's own git-rm counts, never a flag that ends in it, like docker's `--rm`, which a flag of the command docker runs would follow.
   rm: (command: string) => {
-    const removing = flagged(command, /(?:^|[^\w-]|\bgit-)rm$/i, /-[a-z]*r|--recursive/iy)
+    const removing = flagged(command, /(?:^|[^\w-]|\bgit-)rm$/i, recursive)
     return removing !== -1 && !/--cached/i.test(command.slice(removing))
   },
-  // A push that forces, deletes a branch, or mirrors or prunes, which deletes what's only there, wherever the flag goes, together with
-  // others or apart, like "-uf", or by what it pushes, like "+main" or ":old".
-  push: (command: string) => after(command, /\bpush\b/i, /\s(?:-[a-z\d]*[fd]|--force\b|--delete\b|--mirror\b|--prune\b|\+\S|:\S)/i),
+  // A push that forces, deletes or mirrors, wherever the flag goes.
+  push: (command: string) => after(command, /\bpush\b/i, pushing),
   // A reset that throws away what isn't committed, wherever "--hard" goes, like `git reset HEAD~1 --hard`.
-  reset: (command: string) => after(command, /\breset\b/i, /\s--hard\b/i),
+  reset: (command: string) => after(command, /\breset\b/i, hard),
   // A clean that forces, by "-f" or by name.
-  clean: (command: string) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f|--force\b/iy) !== -1,
+  clean: (command: string) => flagged(command, /(?:^|\W)clean$/i, forced) !== -1,
   // Deleting a branch whatever it holds, as "-d" alone never does: "-D", or "-d" or "--delete" with "-f" or "--force", together or apart.
   branch: (command: string) => {
     const given = flagsAfter(command, /(?:^|\W)branch$/)
-    return given.some((flag) => /^(?:-[a-zA-Z]*[dD]|--delete\b)/.test(flag)) && given.some((flag) => /^(?:-[a-zA-Z]*[fD]|--force\b)/.test(flag))
+    return given.some((flag) => deleteFlag.test(flag)) && given.some((flag) => forceFlag.test(flag))
   },
   // Restoring over changes: not only what's staged, after the last restore, or the working tree too, after the first.
   restore: (command: string) => {

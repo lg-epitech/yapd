@@ -388,6 +388,18 @@ describe("Brain", () => {
       "git reset -q HEAD~1 --hard",
       "git -C ~/work reset -q --hard HEAD~2",
       "git submodule foreach 'git reset --hard'",
+      "rm --rec ~/work",
+      "rm --r -f ~/work",
+      "git clean --fo -d",
+      "git clean --f",
+      "git branch --del -f old",
+      "git branch -d --forc old",
+      "git push --forc origin main",
+      "git push origin --de old",
+      "git push --mir",
+      "git push --pru origin",
+      "git reset --ha",
+      "git reset --h HEAD~1",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -456,6 +468,11 @@ describe("Brain", () => {
       "git reset --soft HEAD~1",
       'git commit -m "git reset --hard was wrong"',
       "grep -rn 'reset --hard' docs",
+      "git push --dry-run origin main",
+      "git push --porcelain origin main",
+      "git branch --format='%(refname)' --delete old",
+      "rm --dir empty",
+      "git reset --help",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
