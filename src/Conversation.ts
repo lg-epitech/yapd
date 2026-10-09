@@ -30,8 +30,13 @@ type Signal =
   | Exclude<Endpointer.Event, { readonly _tag: "Onset" | "Utterance" }>
   /** Might be the user, or with `echo`, yapd's own voice getting into the microphone, as it can until the echo cancellation has learnt it. */
   | { readonly _tag: "Onset"; readonly echo: boolean }
-  /** They've finished. Begun just after yapd stopped talking, with the last of its voice still coming in, it's `fading`, since that's what it may be. */
-  | { readonly _tag: "Utterance"; readonly audio: Float32Array; readonly fading?: boolean }
+  /**
+   * They've finished. Begun just after yapd stopped talking, with the last of
+   * its voice still coming in, it's `fading`, since that's what it may be.
+   * Begun over its voice, and gone on as speech once the last of it had come
+   * in, it's `past` it, since some of it can only be the user.
+   */
+  | { readonly _tag: "Utterance"; readonly audio: Float32Array; readonly fading?: boolean; readonly past?: boolean }
   /** All the user has said so far of what may be yapd's own voice, passed on as it goes, so he needn't finish before yapd stops for him. */
   | { readonly _tag: "Partial"; readonly audio: Float32Array }
   /** The microphone stopped, like when the helper quits. */
@@ -91,6 +96,8 @@ interface Talk {
   /** Whose voice it was, unknown while it's being made out, and Whisper's words for it once they are. */
   whose: Whose | undefined
   heard: string | undefined
+  /** Whether it went on past the last of yapd's voice, so it can't all be that. */
+  readonly past: boolean
 }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
@@ -516,6 +523,9 @@ export const whose = (heard: string, saying: string): Whose => {
   return telling ? "mixed" : "his"
 }
 
+/** Whose voice talk was, going by Whisper's `words` for it, when it went on `past` the last of yapd's coming in: never all its, when there were words. */
+const beyond = (heard: Whose, words: string, past: boolean): Whose => (heard === "echo" && past && wordsOf(words, []).length > 0 ? "mixed" : heard)
+
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
 export interface Question {
   readonly audio: string
@@ -588,18 +598,28 @@ export const make = (options: {
         /** Whether what's being said began while yapd's own voice could still get into the microphone, or once it had stopped, with the last of it still coming in. */
         let unsure = false
         let fading = false
+        /** Whether, begun so, the last of yapd's voice has come in since, once it stopped, and speech has gone on past it. */
+        let faded = false
+        let past = false
         /** Frames of that since all of it was last passed on, once it's speech. */
         let since: number | undefined
         const reset = () => {
           unsure = false
           fading = false
+          faded = false
+          past = false
           since = undefined
         }
         yield* Stream.fromQueue(microphone.value).pipe(
           Stream.mapEffect((frame) =>
             Effect.gen(function* () {
               const echo = yield* audio.echo(frame)
-              const event = endpointer.push(frame, yield* detect.value(frame))
+              const probability = yield* detect.value(frame)
+              const event = endpointer.push(frame, probability)
+              if (unsure || fading) {
+                if (echo === "fading") faded = true
+                else if (echo === undefined && faded && probability >= Endpointer.defaults.on) past = true
+              }
               if (event === undefined) {
                 // Only while he talks, since a pause may be the end of what he said, which is then made out whole.
                 if (since === undefined || endpointer.pausing || ++since < glance) return undefined
@@ -612,14 +632,15 @@ export const make = (options: {
                   // while it talks: what begins as it stops is far likelier him answering than the last of its voice.
                   unsure = echo === "talking"
                   fading = echo === "fading"
+                  faded = fading
                   return { _tag: "Onset", echo: unsure } satisfies Signal
                 case "Speech":
                   since = unsure ? 0 : undefined
                   return event
                 case "Utterance": {
-                  const faded = fading
+                  const signal: Signal = { _tag: "Utterance", audio: event.audio, ...(fading ? { fading: true } : {}), ...(past ? { past: true } : {}) }
                   reset()
-                  return { _tag: "Utterance", audio: event.audio, ...(faded ? { fading: true } : {}) } satisfies Signal
+                  return signal
                 }
                 case "Abandoned":
                   reset()
@@ -878,12 +899,19 @@ export const make = (options: {
               doubt = undefined
               // All of it is made out once he's done, as Whisper hears it whole, whatever a look at some of it found.
               if (doubted !== undefined) {
-                pending.push({ id: yield* look(signal.audio, doubted.at), audio: signal.audio, at: doubted.at, whose: undefined, heard: undefined })
+                pending.push({
+                  id: yield* look(signal.audio, doubted.at),
+                  audio: signal.audio,
+                  at: doubted.at,
+                  whose: undefined,
+                  heard: undefined,
+                  past: signal.past === true,
+                })
                 break
               }
               if (pending.length === 0) return interrupted([{ audio: signal.audio }], false)
               // Said after what's still being made out, it waits for that, so what he said stays in order.
-              pending.push({ id: fresh(), audio: signal.audio, at: undefined, whose: "his", heard: undefined })
+              pending.push({ id: fresh(), audio: signal.audio, at: undefined, whose: "his", heard: undefined, past: false })
               const heard = heardOut()
               if (heard !== undefined) return heard
               break
@@ -899,16 +927,16 @@ export const make = (options: {
               }
               const looked = pending.find((talk) => talk.id === signal.id)
               if (looked === undefined) break
-              looked.whose = signal.whose
+              looked.whose = beyond(signal.whose, signal.heard, looked.past)
               looked.heard = signal.heard
               yield* Effect.logInfo(
-                signal.whose === "his"
+                looked.whose === "his"
                   ? `Heard: ${signal.heard}`
-                  : signal.whose === "mixed"
+                  : looked.whose === "mixed"
                     ? `Heard him over its own voice: ${signal.heard}`
                     : `Carried on over its own voice${signal.heard === "" ? "" : `: ${signal.heard}`}`,
               )
-              if (signal.whose !== "echo" && playing) yield* halt
+              if (looked.whose !== "echo" && playing) yield* halt
               const heard = heardOut()
               if (heard !== undefined) return heard
               // It was all yapd's own voice, so it's as if nothing had been said.
@@ -996,6 +1024,7 @@ export const make = (options: {
           let held: R | undefined
           let more: Float32Array | undefined
           let fading = false
+          let past = false
           waiting: while (true) {
             const signal = yield* (speaking || carryingOn)
               ? Queue.take(ear.signals).pipe(
@@ -1026,6 +1055,7 @@ export const make = (options: {
               case "Utterance":
                 more = signal.audio
                 fading = signal.fading === true
+                past = signal.past === true
                 break waiting
               case "Deaf":
                 speaking = false
@@ -1044,7 +1074,7 @@ export const make = (options: {
           if (more === undefined) continue
           const after = yield* transcribe(more)
           // Begun as the last of its voice was still coming in, it may be just that, or some of it.
-          const kind = fading ? whose(after, last) : "his"
+          const kind = fading ? beyond(whose(after, last), after, past) : "his"
           if (kind === "mixed") {
             yield* Effect.logInfo(`Heard him over the last of its own voice: ${after}`)
             return undefined

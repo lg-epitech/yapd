@@ -1949,6 +1949,66 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     )
     expect(result).toEqual({ before: [], sent: ["Merge it."], replies: ["Merge it."] })
   })
+  test("asks the user to say his answer again when it's one of the question's last words, begun over them and gone on past its voice, and takes that", async () => {
+    for (const said of ["The docs site.", "Yapd."]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const answers: Array<string> = []
+          const helper = yield* overHelper([[0.9, said], [0.91, said]], { duration: 3 })
+          yield* Fiber.interrupt(helper.fiber)
+          const asking = yield* Effect.fork(
+            helper.ask({
+              audio: "/tmp/question.wav",
+              spoken: "Which one, sir: yapd or the docs site?",
+              answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+            }),
+          )
+          // Begun as it ends, and gone on past the last of its voice.
+          yield* helper.wait(2.8)
+          yield* helper.talk(0.9, 6)
+          yield* helper.finish
+          yield* helper.talk(0.9, 22)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          const before = [...answers]
+          yield* helper.finish
+          yield* helper.talk(0.91, 12)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { before, rendered: helper.rendered, answered: yield* Fiber.join(asking), answers }
+        }),
+      )
+      expect([said, result]).toEqual([said, { before: [], rendered: [Persona.plain.misheard], answered: true, answers: [said] }])
+    }
+  }, 30_000)
+
+  test("asks the user to say it all again when what he adds after it stopped for him lines up with its words but goes on past its voice", async () => {
+    const said = "Tell it to stop the migration."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Tell it to stop."], [0.8, "The migration."], [0.91, said]], {
+          live: true,
+          spoken: "Over in rig, the migration is still running and the build is green. It wants to know whether to deploy, sir.",
+          responding: 2,
+        })
+        yield* helper.wait(0.8)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        const stopped = [...helper.commands]
+        // Begun as the last of its voice comes in, and gone on past it.
+        yield* helper.talk(0.8, 25)
+        yield* helper.quiet
+        const before = [...helper.sent]
+        yield* helper.finish
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { stopped, before, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ stopped: ["play", "stop"], before: [], rendered: [Persona.plain.misheard, "Okay."], sent: [said], replies: [said] })
+  })
+
   test("takes a quick answer to a question it asked over them when none of its voice comes in after", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
