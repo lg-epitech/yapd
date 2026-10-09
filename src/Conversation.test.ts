@@ -589,7 +589,7 @@ describe("Telling yapd's own voice from the user's", () => {
     for (const heard of [
       "", "Thank you.", "- Verse.", "End of song.", "Thank you. Thank you.", "Okay.", "Thanks.", "Yeah.", "So,", "Hello?", "Mm-hmm.",
       "Uh-huh.", "Please subscribe.", "Thank you, bye.", "Thank you so much for watching.", "I'll see you next time.", "you you you",
-      "Subtitles by the Amara.org community",
+      "Subtitles by the Amara.org community", "Okay, thanks.", "Yeah, okay.", "Okay, okay. Yes.",
     ]) {
       expect([heard, theirs(heard, saying)]).toEqual([heard, false])
     }
@@ -600,6 +600,8 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(theirs("Over in yap D, the test pass.", saying)).toBe(false)
     expect(theirs("Codecs finished the migrations.", "Codex finished the migration and")).toBe(false)
     expect(theirs("Over and yeah the test past.", `${saying} and the pull request`)).toBe(false)
+    // Where nothing else tells.
+    expect(theirs("Codecs. Yap.", "Codex on yapd")).toBe(false)
     // As many of his as of yapd's could be either, so it's let go rather than cut yapd off.
     expect(theirs("Tests pass, flaky build.", saying)).toBe(false)
   })
@@ -1350,6 +1352,43 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       }),
     )
     expect(result).toEqual({ commands: ["play", "stop"], transcribed: ["Not", "now.", "Not now."], sent: ["Not now."], replies: ["Not now."] })
+  })
+
+  test("ends a line that finished while what turns out to be its own voice was still being made out, once it's let go", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes longer than the line has left.
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."]], { delays: [5], duration: 2, spoken: "Over in yapd, the tests pass." })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        yield* helper.wait(1.5)
+        yield* helper.finish
+        for (let second = 0; second < 10; second++) yield* helper.wait(1)
+        const done = yield* Fiber.poll(helper.fiber)
+        return { done: Option.isSome(done), sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ done: true, sent: [], replies: [] })
+  })
+
+  test("doesn't add its own voice, paused as what the user said before is made out to be his, to what he said", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Hold on."], [0.8, "the tests pass now and the pull request"]], { delays: [3] })
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        yield* helper.talk(0.8, 10)
+        yield* helper.talk(0, 5)
+        yield* helper.wait(2)
+        const stopped = [...helper.commands]
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { stopped, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ stopped: ["play", "stop"], sent: ["Hold on."], replies: ["Hold on."] })
   })
 })
 
