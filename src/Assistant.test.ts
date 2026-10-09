@@ -2247,6 +2247,37 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a question that gave way waits, once due, for the one asked in its place to be done with, never cutting in while that one is being heard", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const fees = thread(mina.id, mina.title, "connectors", {
+      activeRunId: "run-4",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:17:30.000Z" },
+      updatedAt: "2026-10-01T02:17:30.000Z",
+    })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud, fees], items: [...card("q1", [colour]), ...card("q2", [network])] })
+        yield* asked(made, cloud)
+        yield* made.unanswered()
+        yield* made.wait(5)
+        yield* asked(made, fees)
+        // Its minute is up while he still has the other to answer.
+        yield* made.wait(60)
+        const due = made.spoken().length
+        yield* made.answer("Ghostnet.")
+        return { due, spoken: made.spoken().slice(1) }
+      }),
+    )
+    expect(result.due).toBe(2)
+    expect(result.spoken).toEqual([
+      "A question on Open Mina SSV2 Bug Tickets, sir: Which network first? Mainnet or Ghostnet?",
+      "Ghostnet it is, sir.",
+      "Back to Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+    ])
+  })
+
   test("a question cut off before he heard it all is asked again, and let go with a word the third time", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(

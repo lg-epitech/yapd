@@ -2285,7 +2285,8 @@ export const make = (options: {
     /** Asks the soonest of what's put off once it's due, unless it's set to already. */
     const wake = (now: number) =>
       Effect.gen(function* () {
-        const soonest = Math.min(...asked.flatMap(({ notBefore }) => (notBefore === undefined ? [] : [notBefore])))
+        // Not for what's due already, which waits for what's asked now to be done with, rather than wake for it over and over.
+        const soonest = Math.min(...asked.flatMap(({ notBefore }) => (notBefore === undefined || notBefore <= now ? [] : [notBefore])))
         if (!Number.isFinite(soonest) || (waking !== undefined && waking.at <= soonest)) return
         if (waking !== undefined) yield* Fiber.interruptFork(waking.fiber)
         const fiber = yield* Effect.sleep(Math.max(0, soonest - now)).pipe(
