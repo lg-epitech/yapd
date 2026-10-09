@@ -597,15 +597,18 @@ export const mentions = (part: Said, index: number, heard: string) => {
   return [...own, ...placed, ...last].some((word) => words.has(word))
 }
 
-/** Plain yeses. */
-const yeses: ReadonlySet<string> = new Set([...agreed].filter((said) => !/\bboth\b/.test(said)))
+/** Going ahead, like "ship it", "go ahead" or "yes, proceed", which may as well name an option as take yapd's pick: the model tells. */
+const ahead: ReadonlySet<string> = new Set([...agreed].filter((said) => !/\bboth\b/.test(said)))
+
+/** Plain yeses, which say nothing of any option: the only agreeing words that take yapd's pick without the model. */
+const yeses: ReadonlySet<string> = new Set(["yes", "yeah", "yep", "yup", "sure", "absolutely", "of course", "yes of course", "yes yes", "yeah yeah"])
 
 /** Agreeing, besides a plain yes, which is as much a yes to what the question asks as to yapd's pick, like "OK" to "OK to merge now?". */
 const assenting: ReadonlySet<string> = new Set(["sounds good", "ok", "okay", "fine", "that's fine", "agreed"])
 
 /** Taking yapd's pick by pointing at it, which is never a yes to what the question asks. */
 const taking: ReadonlySet<string> = new Set([
-  "go with that", "go with it", "that one", "your pick", "go with your pick", "the recommended one", "recommended", "what you recommend",
+  "your pick", "go with your pick", "the recommended one", "recommended", "what you recommend",
   "go with what you recommend", "whatever you recommend", "the one you recommend", "your recommendation", "go with your recommendation",
 ])
 
@@ -671,7 +674,7 @@ const whether = (part: Said) => {
  * that" to "Cancel the deploy", may only drop the question: the model tells.
  */
 const steers = (said: string) =>
-  Brain.takesBack(said) || [yeses, assenting, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
+  Brain.takesBack(said) || [ahead, yeses, assenting, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
 
 /** Words to stop yapd talking, put it off, skip it or hear it again: an option named so, like "Stop" or "Later", is only that once he's heard it offered. */
 const hushing = (said: string) => [repeating, later, skipping, leaving].some((phrases) => phrases.has(said))
@@ -764,7 +767,9 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (yes !== undefined) return picked([yes])
   const no = noes.has(said) ? starting("no") : undefined
   if (no !== undefined) return picked([no])
-  const assents = yeses.has(said) || assenting.has(said)
+  // Anything else that agrees, like "OK", "fine", "ship it" or "go with that", may be to another option, or to what the question asks
+  // rather than to yapd's pick, which only the model can tell.
+  const assents = yeses.has(said)
   const agreeing = assents || taking.has(said)
   // "Ship it" to "Ship it now", heard in full or not, may well be that option rather than a yes to yapd's pick: which is the model's to tell.
   if (agreeing && elsewhere(part, said, recommended)) return undefined

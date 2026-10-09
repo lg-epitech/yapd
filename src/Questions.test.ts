@@ -179,7 +179,8 @@ describe("Questions", () => {
       ["The full history one.", 2],
       ["Shadow.", 3],
       ["Yes.", 1],
-      ["Sounds good.", 1],
+      // Agreeing past a plain yes is the model's to tell.
+      ["Sounds good.", undefined],
       ["Go with what you recommend.", 1],
       ["Your pick.", 1],
       ["You decide.", 1],
@@ -306,15 +307,15 @@ describe("Questions", () => {
     // "Okay" is "OK" as Whisper writes it either way, so it's the option by that name.
     expect(pick(["OK", "Wait (Recommended)"], "Okay.")).toEqual(picked(0))
     expect(pick(["Okay", "Wait (Recommended)"], "OK.")).toEqual(picked(0))
-    // Words only the pick starts with, or that start none, still take it.
-    expect(pick(["Ship it now (Recommended)", "Hold it for QA"], "Ship it.")).toEqual(picked(0))
-    expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "Sounds good.")).toEqual(picked(1))
+    // Going ahead or agreeing past a plain yes is the model's to tell, even where only the pick could be meant; what points at the pick takes it.
+    expect(pick(["Ship it now (Recommended)", "Hold it for QA"], "Ship it.")).toEqual(undefined)
+    expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "Sounds good.")).toEqual(undefined)
     expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "The recommended one.")).toEqual(picked(1))
-    expect(pick(["Go with the old name", "Rename it (Recommended)"], "Yes, go ahead.")).toEqual(picked(1))
-    expect(pick(["Merge now (Recommended)", "Wait for CI"], "Yes, merge it.")).toEqual(picked(0))
-    // A plain yes to a pick that holds back takes it, as do words to go ahead to one that goes on.
-    expect(["Yes.", "Sounds good.", "Your pick."].map((heard) => pick(["Pause (Recommended)", "Continue the migration"], heard))).toEqual([picked(0), picked(0), picked(0)])
-    expect(["Go on.", "Proceed."].map((heard) => pick(["Keep going (Recommended)", "Stop the run"], heard))).toEqual([picked(0), picked(0)])
+    expect(pick(["Go with the old name", "Rename it (Recommended)"], "Yes, go ahead.")).toEqual(undefined)
+    expect(pick(["Merge now (Recommended)", "Wait for CI"], "Yes, merge it.")).toEqual(undefined)
+    // A plain yes to a pick that holds back takes it, as does pointing at it; going ahead, to any pick, is the model's.
+    expect(["Yes.", "Sounds good.", "Your pick."].map((heard) => pick(["Pause (Recommended)", "Continue the migration"], heard))).toEqual([picked(0), undefined, picked(0)])
+    expect(["Go on.", "Proceed."].map((heard) => pick(["Keep going (Recommended)", "Stop the run"], heard))).toEqual([undefined, undefined])
   })
 
   test("a plain yes when yapd's pick is a no, or a yes or no to a question it answers when no option is either, is the model's to tell", () => {
@@ -364,10 +365,10 @@ describe("Questions", () => {
       expect([asked, heard, pick(part(asked, labels), heard)]).toEqual([asked, heard, undefined])
     }
     expect(pick(part("Should I deploy?", ["No, wait (Recommended)", "Yes, now"]), "Sure.")).toEqual(picked(1))
-    // What only points at yapd's pick still takes it.
-    expect(["Your pick.", "Go with that.", "The recommended one.", "What you recommend."].map((heard) => pick(cache, heard))).toEqual([picked(0), picked(0), picked(0), picked(0)])
-    // As does an okay to a question that asks which.
-    expect(["OK.", "Fine.", "Sounds good."].map((heard) => pick(part("Which colour should the test use?", ["Red", "Blue (Recommended)"]), heard))).toEqual([picked(1), picked(1), picked(1)])
+    // What only points at yapd's pick still takes it; "go with that" may point at the option said last, which the model tells.
+    expect(["Your pick.", "Go with that.", "The recommended one.", "What you recommend."].map((heard) => pick(cache, heard))).toEqual([picked(0), undefined, picked(0), picked(0)])
+    // An okay is the model's to tell, even to a question that asks which.
+    expect(["OK.", "Fine.", "Sounds good."].map((heard) => pick(part("Which colour should the test use?", ["Red", "Blue (Recommended)"]), heard))).toEqual([undefined, undefined, undefined])
     // A question that asks which, or names its options, takes a yes as yapd's pick, and a no as which one then, as before.
     const colour = part("Which colour should the test use?", ["Red", "Blue (Recommended)"])
     expect([pick(colour, "Yes."), pick(colour, "No.")]).toEqual([picked(1), { _tag: "Instead" }])
