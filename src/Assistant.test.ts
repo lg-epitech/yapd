@@ -2908,11 +2908,11 @@ describe("Assistant", () => {
       )
       expect(result).toEqual({ spoken: [`${label} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: label }] })
     }
-    // Close to an option's name but not it, words to stop the run are that option's, by words only it has, or the model's to tell.
-    for (const [labels, heard, model] of [
-      [["Cancel", "Retry the deploy (Recommended)"], "Cancel the run.", 1],
-      [["Stop the run and revert", "Keep going (Recommended)"], "Stop the run.", 0],
-      [["Interrupt and retry", "Wait it out (Recommended)"], "Interrupt the run.", 1],
+    // Close to an option's name but not it, words to stop the run are the model's to tell, as is all but the revert of "Stop the run and revert".
+    for (const [labels, heard] of [
+      [["Cancel", "Retry the deploy (Recommended)"], "Cancel the run."],
+      [["Stop the run and revert", "Keep going (Recommended)"], "Stop the run."],
+      [["Interrupt and retry", "Wait it out (Recommended)"], "Interrupt the run."],
     ] as const) {
       const [named] = labels
       const question = { id: "next", question: "The benchmark run is taking two hours. Should I cancel the run?", options: labels.map((label) => ({ label })) }
@@ -2927,7 +2927,7 @@ describe("Assistant", () => {
           return { asked: made.seen.length, spoken: made.spoken().slice(1), sent: made.dispatched.map(({ type }) => type), answers: answered(made.dispatched) }
         }),
       )
-      expect([heard, result]).toEqual([heard, { asked: model, spoken: [`${named} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: named }] }])
+      expect([heard, result]).toEqual([heard, { asked: 1, spoken: [`${named} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: named }] }])
     }
   })
 
@@ -2973,6 +2973,42 @@ describe("Assistant", () => {
     }
     // "Okay" to an option called OK is that option, by its name, with no model.
     expect(await answering(["OK", "Wait (Recommended)"], "Okay.", "Wait (Recommended)")).toEqual({ asked: 0, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
+  })
+
+  test("words that are only part of an option's name, and leave out or add what turns it around, like 'not' or 'skip', are the model's to tell, never sending that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "next", question: "What should I do with the branch?", options: labels.map((label) => ({ label })) }
+          // The model, only for what isn't plain, takes his words as he said them, which are no option.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: heard, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    // He heard both, and wants the opposite of the one his words are part of, or turns around the one they're all of.
+    for (const [labels, heard] of [
+      [["Open a draft pull request (Recommended)", "Do not merge now"], "Merge now."],
+      [["Do not merge", "Wait for CI"], "Merge."],
+      [["Merge now", "Wait for CI"], "Don't merge."],
+      [["Merge now", "Do not merge"], "Merge it."],
+    ] as const) {
+      expect([heard, await answering(labels, heard)]).toEqual([heard, { asked: 1, spoken: ["On it, sir."], answers: [{ next: heard }] }])
+    }
+    // An option named in full is plain, with no model, whatever turns it.
+    for (const [labels, heard, named] of [
+      [["Red", "Blue"], "Blue.", "Blue"],
+      [["Keep it", "Don't keep it"], "Keep it.", "Keep it"],
+      [["Run tests", "Skip tests"], "Skip tests.", "Skip tests"],
+      [["Add tests", "No tests"], "No tests.", "No tests"],
+    ] as const) {
+      expect([heard, await answering(labels, heard)]).toEqual([heard, { asked: 0, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
+    }
   })
 
   test("a plain yes to a question whose pick is a no, or a yes or no to one it answers with no option either, is the model's to tell, so yes and no never send the same", async () => {

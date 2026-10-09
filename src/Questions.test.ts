@@ -260,6 +260,57 @@ describe("Questions", () => {
     expect(pick(part("What should I do with the last commit?", ["Keep it (Recommended)", "Scratch that"]), "Scratch that.")).toEqual({ _tag: "Picked", options: [1] })
   })
 
+  test("words that are only part of an option's name, and leave out or add what turns it around, like 'not', 'skip' or 'instead of', are the model's to tell, never that option", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const pick = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("What should I do with the branch?", labels), heard, { inFull: true, parts: 1 })
+    for (const [labels, heard] of [
+      // He heard both, and wants the opposite of the one his words are part of.
+      [["Open a draft pull request (Recommended)", "Do not merge now"], "Merge now."],
+      [["Do not merge", "Wait for CI"], "Merge."],
+      [["Skip tests", "Merge now"], "Tests."],
+      [["Merge now", "Don’t run the tests"], "The tests."],
+      [["Squash instead of rebasing", "Rebase now"], "Rebasing."],
+      [["Squash rather than rebase", "Merge"], "Rebase."],
+      [["Revert the migration", "Fix forward"], "The migration."],
+      [["Keep the cache", "Rebuild it"], "The cache."],
+      [["Merge now (Recommended)", "Wait for CI"], "For CI."],
+      // Or turns around one his words are all of.
+      [["Merge now", "Wait for CI"], "Don't merge."],
+      [["Merge now", "Do not merge"], "Merge it."],
+    ] as const) {
+      expect([heard, pick(labels, heard)]).toEqual([heard, undefined])
+    }
+    // An option named in full is plain, whatever turns it, and so is part of one that turns the same way, written any way.
+    expect(pick(["Red", "Blue"], "Blue.")).toEqual(picked(1))
+    expect(pick(["Keep it", "Don't keep it"], "Keep it.")).toEqual(picked(0))
+    expect(pick(["Keep it", "Don't keep it"], "Don’t keep it.")).toEqual(picked(1))
+    expect(pick(["Run tests", "Skip tests"], "Skip tests.")).toEqual(picked(1))
+    expect(pick(["Run tests", "Skip tests"], "Skip the tests.")).toEqual(picked(1))
+    expect(pick(["Add tests", "No tests"], "No tests.")).toEqual(picked(1))
+    expect(pick(["Merge now", "Do not merge now"], "Do not merge.")).toEqual(picked(1))
+    expect(pick(["Open a draft pull request (Recommended)", "Do not merge now"], "The draft one.")).toEqual(picked(0))
+    expect(pick(["Cannot reproduce", "Fixed"], "Can not reproduce.")).toEqual(picked(0))
+    // The model's answer, or his words dictated to the thread, are his own words then, never that option.
+    const merge = part("What should I do with the branch?", ["Open a draft pull request (Recommended)", "Do not merge now"])
+    expect(Questions.resolve(merge, "Merge now")).toEqual({ _tag: "Words", text: "Merge now" })
+    expect(Questions.resolve(merge, "Do not merge now")).toEqual(picked(1))
+    // Nor do they name it, as what he said over yapd's pick before he heard it: a word of its name turned around, or a place said with a no.
+    const waiting = part("What should I do with the branch?", ["Merge now (Recommended)", "Wait for CI"])
+    expect(["Merge now, I think.", "Don't merge, I think.", "The first one.", "Not the first one."].map((heard) => Questions.mentions(waiting, 0, heard))).toEqual([
+      true,
+      false,
+      true,
+      false,
+    ])
+    expect(["Wait, I think.", "CI, I think."].map((heard) => Questions.mentions(waiting, 1, heard))).toEqual([true, false])
+    // Of several, each piece is held to the same, and so is what's left of all but some.
+    const checks = part("Which checks should run?", ["Lint", "Tests", "Skip docs"], { multiSelect: true })
+    const several = (heard: string) => Questions.pick(checks, heard, { inFull: true, parts: 1 })
+    expect(["Lint and docs.", "All but docs.", "Lint and skip docs.", "All but skip docs."].map(several)).toEqual([undefined, undefined, picked(0, 2), picked(0, 1)])
+    expect(Questions.resolve(checks, "Lint\nDocs")).toEqual({ _tag: "Words", text: "Lint\nDocs" })
+    expect(Questions.pick(part("Which checks should run?", ["No", "Docs", "Tests"], { multiSelect: true }), "No docs.", { inFull: true, parts: 1 })).toBeUndefined()
+  })
+
   test("a yes or an okay that starts another option's name, or has its words, is the model's to tell, never yapd's pick", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const pick = (options: ReadonlyArray<string>, heard: string, inFull = true) => Questions.pick(part("What now?", options), heard, { inFull, parts: 1 })

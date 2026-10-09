@@ -286,10 +286,11 @@ describe("Brain", () => {
     expect(named(["Close it", "Keep it open (Recommended)"], "Close it.", { showing: "Migrate Tezos Integration" })).toEqual(answer("Close it"))
     expect(named(["Repeat it", "Move on (Recommended)"], "Repeat it.")).toEqual(answer("Repeat it"))
     expect(named(["Show me what you said", "Carry on (Recommended)"], "Show me what you said.")).toEqual(answer("Show me what you said"))
-    // One that only starts like them, like "Cancel the deploy" or "Cancel", may be what they're to, which the model tells: never stopping the run.
+    // One that only starts like them, like "Cancel the deploy" or "Cancel", or does more, like "Stop the run and revert", may be what they're
+    // to, which the model tells: never stopping the run.
     expect(named(["Cancel the deploy", "Retry the deploy (Recommended)"], "Cancel the run.")).toBeUndefined()
     expect(named(["Cancel", "Retry the deploy (Recommended)"], "Cancel the run.")).toBeUndefined()
-    expect(named(["Stop the run and revert", "Keep going (Recommended)"], "Stop the run.")).toEqual(answer("Stop the run and revert"))
+    expect(named(["Stop the run and revert", "Keep going (Recommended)"], "Stop the run.")).toBeUndefined()
     // Options nothing like them still let those words stop the run, as do they while he's hearing of another thread.
     expect(named(["Skip the deploy", "Retry the deploy (Recommended)"], "Cancel the run.")?.act).toBe("stop")
     const other: Assistant.Subject = { _tag: "Answer", said: "It's waiting on you to allow a command.", about: Option.some(ref(std)) }
