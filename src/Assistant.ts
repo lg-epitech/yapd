@@ -1882,37 +1882,43 @@ export const make = (options: {
       })
 
     /**
-     * His answer to what a thread waits on him for, given while its machine's
-     * threads can't be seen, like rig's while it can't be reached or this
-     * Mac's while T3 Code restarts: none of it goes, and he's told why, never
-     * that it's been dealt with, which can't be known then. It still waits on
-     * him, so it's put by, to be asked from the part he'd got to once they
-     * can be seen again. None while they can be, when his answer goes as ever.
+     * The thread his answer to what it waits on him for goes to, as it is
+     * now, before the question is closed: on the desk what he said was worked
+     * out against, or read again when it wasn't on it, like rig's while its
+     * threads couldn't be seen then, back since; none once it's gone. Given
+     * while its machine's threads can't be seen, like rig's while it can't be
+     * reached or this Mac's while T3 Code restarts, none of it goes, and he's
+     * told why, never that it's been dealt with, which can't be known then.
+     * It still waits on him, so it's put by, to be asked from the part he'd
+     * got to once they can be seen again.
      */
-    const unreachable = (open: Open, decision: Brain.Decision, utterance: Utterance, said: Lines) =>
+    const reaching = (open: Open, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
-        const machine = open.candidates[0]?.machine
-        const why = machine === undefined ? Option.none<string>() : yield* threads.unseen(machine)
-        if (Option.isNone(why)) return Option.none<Outcome>()
-        yield* Effect.logInfo(`Not answering it, since ${machine}'s threads can't be seen right now`)
+        const { decision, utterance, situation } = thought
+        const ref = open.candidates[0]
+        if (ref === undefined) return Either.right(Option.none<Threads.Listed>())
+        const why = yield* threads.unseen(ref.machine)
+        if (Option.isNone(why)) {
+          const listed = situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))
+          const now = listed ?? (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
+          return Either.right(Option.fromNullable(now))
+        }
+        yield* Effect.logInfo(`Not answering it, since ${ref.machine}'s threads can't be seen right now`)
         yield* close(open, "dropped: out of sight", utterance.id)
         const yours = open.kind === "approval" ? (decision.how === "decline" ? "your no" : "your go-ahead") : "your answer"
-        return Option.some(regarding(`I couldn't get ${yours} to it${addressed(said)}: ${Hands.after(why.value)} I'll ask you again once I can.`, askedAbout(open)))
+        return Either.left(regarding(`I couldn't get ${yours} to it${addressed(said)}: ${Hands.after(why.value)} I'll ask you again once I can.`, askedAbout(open)))
       })
 
     /**
      * His answer to what a thread waits on him for, as the question open
-     * asked it: about that thread and the very request he heard, whatever the
-     * model took it for. Something else instead is done in its place, which
-     * leaves the request waiting in T3 Code.
+     * asked it: about that thread, `target` as `reaching` found it, and the
+     * very request he heard, whatever the model took it for. Something else
+     * instead is done in its place, which leaves the request waiting in T3 Code.
      */
-    const settle = (open: Open, thought: Thought, said: Lines) =>
+    const settle = (open: Open, target: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
         const { decision, situation } = thought
         if (decision.act !== (open.kind === "approval" ? "decide" : "reply")) return yield* follow(Brain.check(decision, situation, said), thought, said)
-        const target = Option.fromNullable(open.candidates[0]).pipe(
-          Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
-        )
         if (Option.isNone(target)) return reply(Brain.dealtWith(said), thought.subject)
         return yield* write({ decision: { ...decision, target: target.value.handle }, target }, thought, said, { step: 0, twice: false }, open.asks)
       })
@@ -1977,19 +1983,16 @@ export const make = (options: {
 
     /**
      * His answer to the part of a thread's question being asked, about that
-     * thread and the very request he heard, whatever the model took it for:
-     * kept until the last part, then all of it sent at once. Each part but
-     * the last is acknowledged as the next is asked, as what comes of what he
-     * said, so it's said next; every part skipped, nothing's sent.
+     * thread, `target` as `reaching` found it, and the very request he heard,
+     * whatever the model took it for: kept until the last part, then all of
+     * it sent at once. Each part but the last is acknowledged as the next is
+     * asked, as what comes of what he said, so it's said next; every part
+     * skipped, nothing's sent.
      */
-    const answering = (open: Open, from: Queued | undefined, answer: Questions.Answer, thought: Thought, said: Lines) =>
+    const answering = (open: Open, from: Queued | undefined, answer: Questions.Answer, target: Option.Option<Threads.Listed>, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
-        const { situation } = thought
         if (open.asks?._tag !== "Question") return reply(said.cantTell, thought.subject)
         const asks = open.asks
-        const target = Option.fromNullable(open.candidates[0]).pipe(
-          Option.flatMap((ref) => Option.fromNullable(situation.desk.threads.find((listed) => Threads.same(listed.ref, ref)))),
-        )
         if (Option.isNone(target)) return reply(Brain.dealtWith(said), thought.subject)
         const question = asks.questions[asks.part]
         if (question === undefined) return reply(said.cantTell, thought.subject)
@@ -2377,17 +2380,18 @@ export const make = (options: {
           }
           if (answer?._tag === "Picked" || answer?._tag === "Words" || answer?._tag === "Skip") {
             const { from } = opened
-            const away = yield* unreachable(open, decision, utterance, said)
-            if (Option.isSome(away)) return away.value
+            const target = yield* reaching(open, decided, said)
+            if (Either.isLeft(target)) return target.left
             yield* close(open, "answered", utterance.id)
-            return yield* answering(open, from, answer, decided, said)
+            return yield* answering(open, from, answer, target.right, decided, said)
           }
         }
         // Nor is an approval allowed or turned down, nor his answer to a question taken as it is, while its machine's threads can't be seen.
-        if (answers && decision.act === (open.kind === "approval" ? "decide" : open.kind === "question" ? "reply" : undefined)) {
-          const away = yield* unreachable(open, decision, utterance, said)
-          if (Option.isSome(away)) return away.value
-        }
+        const target =
+          answers && decision.act === (open.kind === "approval" ? "decide" : open.kind === "question" ? "reply" : undefined)
+            ? yield* reaching(open, decided, said)
+            : Either.right(Option.none<Threads.Listed>())
+        if (Either.isLeft(target)) return target.left
         // A thread's question is settled here only by letting it go: anything else, like a message to its thread that can't go as its
         // answer, leaves it waiting in T3 Code, so it's asked again after, unless that dealt with it.
         const settles = answers && (open.kind !== "question" || decision.act === "dismiss")
@@ -2402,7 +2406,7 @@ export const make = (options: {
           return yield* onward(decided, unfinished(left, open.decision.rest, said), Option.none(), 1, said)
         }
         if (open.kind === "project") return yield* project(open, decided, said)
-        if (open.kind === "approval" || open.kind === "question") return yield* settle(open, decided, said)
+        if (open.kind === "approval" || open.kind === "question") return yield* settle(open, target.right, decided, said)
         // Said again, rather than heard as an answer, like "yes, but once it's done", it's a plain yes.
         if (open.kind !== "which") return yield* agreeing(open, decision.pending === "answers" ? decided : { ...decided, decision: same }, said)
         const picked = filled(decision, open)

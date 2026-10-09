@@ -7701,6 +7701,36 @@ describe("Assistant", () => {
     expect(result.answers).toEqual([{ [colour.id]: "Red" }])
   })
 
+  test("an answer to a rig question or approval given while rig is out of sight, back as the model works it out, goes to rig, never said to be dealt with", async () => {
+    const approving = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    /** Asked and heard, then rig drops out, and he answers in words only the model makes out, which rig is back by the end of. */
+    const answering = (of: T3Live.Thread, items: ReadonlyArray<Record<string, unknown>>, heard: string, decided: (handle: string) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const rig: Array<Record<string, unknown>> = []
+          const made = yield* assistant((situation) => decided(handle(situation, of)), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [of], seen: () => seen, dispatched: rig, items },
+            deciding: Effect.sync(() => {
+              seen = true
+            }),
+          })
+          yield* asked(made, of, "rig")
+          seen = false
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), sent: rig.map(({ requestId, answers, decision }) => ({ requestId, answers, decision })), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    expect(
+      await answering(onRig, card("q9", [colour]), "Let's do the red one I think.", (target) => Brain.decision({ act: "reply", target, text: "Red", pending: "answers" })),
+    ).toEqual({ spoken: ["Red it is, sir."], sent: [{ requestId: "q9", answers: { [colour.id]: "Red" }, decision: undefined }], open: false })
+    expect(
+      await answering(approving, approval("r9", "npm install left-pad"), "Sure, let it do that I suppose.", (target) =>
+        Brain.decision({ act: "decide", how: "accept", target, pending: "answers" }),
+      ),
+    ).toEqual({ spoken: ["Approved, sir."], sent: [{ requestId: "r9", answers: undefined, decision: "accept" }], open: false })
+  })
+
   test("an answer to a question given while T3 Code restarts on this Mac is never sent nor said to be dealt with: he's told why, and it's asked again once T3 Code is back", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
