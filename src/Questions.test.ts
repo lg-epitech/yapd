@@ -623,6 +623,14 @@ describe("Questions", () => {
     expect(["Three, I think.", "C, I think.", "The third one, I think.", "Option three, I think."].map((heard) => Questions.mentions(retries, 2, heard))).toEqual([false, false, true, true])
   })
 
+  test("'the last one' said before he'd heard them all is the model's to tell, since the last he heard may not be the last there is", () => {
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    const branch = part("What should I do with the branch?", ["Rebase", "Merge", "Squash", "Delete the branch"])
+    const pick = (heard: string, inFull: boolean) => Questions.pick(branch, heard, { inFull, parts: 1 })
+    expect(["The last one.", "Last.", "The latter.", "The second one."].map((heard) => pick(heard, false))).toEqual([undefined, undefined, undefined, picked(1)])
+    expect(["The last one.", "The latter."].map((heard) => pick(heard, true))).toEqual([picked(3), picked(3)])
+  })
+
   test("after a no to yapd's pick, a place counts among the others he was offered, never the pick he turned down", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     // As the assistant leans it once it's asked "Which one then, sir: Red or Green?".

@@ -538,13 +538,20 @@ const placeable = (part: Said) =>
     }),
   )
 
-/** An option by its place among what he was offered last, when a place can only be one: after a no to yapd's pick, "the first one" is the first of the others. */
-const byPlace = (part: Said, said: string) => {
+/**
+ * An option by its place among what he was offered last, when a place can
+ * only be one: after a no to yapd's pick, "the first one" is the first of
+ * the others. "The last one" only once he's heard them all, `inFull`, since
+ * cut off before then, the last he heard may not be the last there is.
+ */
+const byPlace = (part: Said, said: string, inFull: boolean) => {
   const found = place.exec(said)
   if (found === null || !placeable(part)) return undefined
   const [, word, number, letter] = found
   const offered = offeredLast(part)
-  const at = word === "last" || word === "latter" ? offered.length - 1 : word !== undefined ? placed[word] : numbered[number ?? letter ?? ""]
+  const last = word === "last" || word === "latter"
+  if (last && !inFull) return undefined
+  const at = last ? offered.length - 1 : word !== undefined ? placed[word] : numbered[number ?? letter ?? ""]
   return at === undefined ? undefined : offered[at]
 }
 
@@ -721,7 +728,7 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   // A form that takes only its options asks which of them instead.
   const words = (text: string): Reply => (part.ownWords ? { _tag: "Words", text } : { _tag: "Which" })
   if (!steers(said)) {
-    const placed = byPlace(part, said)
+    const placed = byPlace(part, said, asked.inFull)
     if (placed !== undefined) return picked([placed])
     const several = part.several ? (wholes(part, said) ?? listed(part, heard)) : undefined
     return several === undefined ? undefined : picked(several)
