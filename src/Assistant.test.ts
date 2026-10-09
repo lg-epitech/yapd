@@ -496,6 +496,32 @@ const asked = (made: { readonly compose: (of: T3Live.Thread) => Effect.Effect<Op
 /** No model: what's said to what a thread waits on is settled without it, or not at all. */
 const unasked = () => undefined
 
+/** What T3 Code keeps of a question a thread waits on, in its parts. */
+const card = (requestId: string, questions: ReadonlyArray<Record<string, unknown>>) => [{ type: "user_input_request", status: "waiting", requestId, questions }]
+
+/** A part as Claude asks it, by its question, with what each option means and the one it recommends. */
+const colour = {
+  id: "Which colour should the test use?",
+  header: "Colour",
+  question: "Which colour should the test use?",
+  options: [
+    { label: "Red", description: "A red test." },
+    { label: "Blue (Recommended)", description: "A blue test." },
+  ],
+}
+
+/** A part he can pick several of. */
+const extras = {
+  id: "Which test extras should run?",
+  header: "Extras",
+  question: "Which test extras should run?",
+  options: [{ label: "Alpha" }, { label: "Beta" }, { label: "Gamma" }],
+  multiSelect: true,
+}
+
+/** What's sent in answer to the questions threads asked. */
+const answered = (dispatched: ReadonlyArray<Record<string, unknown>>) => dispatched.filter(({ type }) => type === "runtime-request.respond").map(({ answers }) => answers)
+
 describe("Assistant", () => {
   test("status on MiNAS SV2 is answered about the Mina tickets first time, with no question", async () => {
     const result = await run(
@@ -1199,7 +1225,7 @@ describe("Assistant", () => {
     expect(waiting).toEqual({ spoken: [allow], open: true, dispatched: [] })
   })
 
-  test("an approval answered in T3 Code meanwhile is not said, and a late yes does nothing", async () => {
+  test("an approval answered in T3 Code meanwhile is not said, and a late yes sends nothing and is told it's been dealt with", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(
       Effect.gen(function* () {
@@ -1211,7 +1237,7 @@ describe("Assistant", () => {
         yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
         yield* made.settled("r1")
         const unsaid = yield* waiting.stale
-        // Another, heard this time, then answered there as he says yes to it: the yes does nothing.
+        // Another, heard this time, then answered there as he says yes to it: the yes sends nothing, and he's told why.
         const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(again)
         yield* asked(made, again)
@@ -1220,7 +1246,7 @@ describe("Assistant", () => {
         yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
         yield* made.settled("r2")
         yield* made.answer("Yes.", heard)
-        // And one he says yes to just as it's answered there, before yapd hears of it: nothing goes, and nothing's said.
+        // And one he says yes to just as it's answered there, before yapd hears of it: nothing goes, and he's told why.
         const third = { ...cloud, pendingRuntimeRequest: { id: "r3", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
         yield* made.becomes(third)
         yield* asked(made, third)
@@ -1236,12 +1262,9 @@ describe("Assistant", () => {
         }
       }),
     )
+    const allow = "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?"
     expect(result.unsaid).toBe(true)
-    expect(result.spoken).toEqual([
-      "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?",
-      "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?",
-      "Cloud deployment discovery wants to run npm install --global netlify-cli. Allow it, sir?",
-    ])
+    expect(result.spoken).toEqual([allow, allow, "That's already been dealt with, sir.", allow, "That's already been dealt with, sir."])
     expect(result.dispatched).toBe(0)
     expect(result.moot).toBe(1)
   })
@@ -1361,6 +1384,90 @@ describe("Assistant", () => {
     expect(await asking([part("Which network first?", [{ label: "Mainnet" }, { label: "Ghostnet" }]), part("Which fee table?"), part("Should I file the bugs?"), part("Anything else?")])).toEqual([
       "Four questions on Cloud deployment discovery, sir. First: Which network first? Mainnet or Ghostnet?",
     ])
+  })
+
+  test("a question he heard, closed by talk over an update, 'who needs me' or a failed model call, is asked again after, and let go with a word the third time", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        // Kept under its key as its turn came.
+        yield* made.questions().at(-1)!.stale
+        // He says something over an update read after it, asks who needs him, then something the model can't be asked about.
+        yield* made.replied
+        yield* made.flush
+        yield* made.dictate("Who needs me?")
+        yield* made.dictate("What's the status on the Mina tickets?")
+        return { spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+      "Cloud deployment discovery asked you something, sir.",
+      `Again, sir: ${line}`,
+      "I couldn't work that out just now, sir. What you said is in my log.",
+      "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+    ])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("an answer to a question dealt with in T3 Code meanwhile is told so, and nothing is sent", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: [...card("q1", [colour]), ...card("q2", [colour])] })
+        yield* asked(made, cloud)
+        const question = made.questions().at(-1)!
+        // Answered in T3 Code as he answers it: yapd heard of it first, then not yet.
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("q1")
+        yield* made.answer("Red.", question)
+        const again = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.length }
+      }),
+    )
+    const asking = "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([asking, "That's already been dealt with, sir.", asking, "That's already been dealt with, sir."])
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("a question cut off before he heard it all is asked again, and let go with a word the third time", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        for (const _ of [1, 2, 3]) {
+          // Its turn comes, and he talks over it before the end.
+          const question = made.questions().at(-1)!
+          yield* question.stale
+          yield* made.cut(question)
+          yield* made.dictate("What's the status on Mina?")
+        }
+        return { spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      status,
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+      status,
+      `Again, sir: ${line}`,
+      status,
+      "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+    ])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
   })
 
   test("'stop', 'skip', 'cancel' or 'enough' over a question lets it go, never picking an option it's a word of, which only its name in full picks", async () => {

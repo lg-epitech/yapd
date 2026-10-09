@@ -70,6 +70,8 @@ export interface Wording {
   readonly more: string
   /** After a plain no to yapd's pick: which one then, of the others. */
   readonly instead: string
+  /** After he skipped it, when T3 Code needs an answer to it: asked once more, saying so. */
+  readonly needed: string
   /** When it's let go unanswered: it still waits for him, and he can ask for it. */
   readonly letGo: string
   /** What its options are called, as written and as said, for speech recognition to know them. */
@@ -341,6 +343,7 @@ export const worded = (input: { readonly called: string; readonly parts: Readonl
         here,
         more: explained(part, sir),
         instead: otherwise(part, sir),
+        needed: `That one needs an answer${sir}: ${line}`,
         letGo: `I'll leave the question on ${called} for now${sir}; ask me for it when you're ready.`,
         terms: [...new Set(names.filter((name) => name !== ""))],
       }
