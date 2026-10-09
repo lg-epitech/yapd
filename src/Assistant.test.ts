@@ -1527,6 +1527,34 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a message for now to a thread waiting on a question he heard goes as the option it names, as the form takes it, and as a message when the form takes only its options", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = {
+      id: "network",
+      question: "Which network first?",
+      options: [
+        { label: "Mainnet", value: "main" },
+        { label: "Ghostnet", value: "ghost" },
+      ],
+      allowCustomAnswer: false,
+    }
+    const telling = (text: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text, how: "now" }), undefined, { others: [cloud], items: card("q1", [network]) })
+          yield* asked(made, cloud)
+          yield* made.answer("Never mind.")
+          yield* made.dictate(`Tell the cloud one: ${text}`)
+          return {
+            spoken: made.spoken().slice(2),
+            sent: made.dispatched.map(({ type, answers, text }) => (type === "runtime-request.respond" ? { answers } : { text })),
+          }
+        }),
+      )
+    expect(await telling("Mainnet.")).toEqual({ spoken: ["On it, sir. It was waiting on a question, so that's its answer."], sent: [{ answers: { network: "main" } }] })
+    expect(await telling("Use the devnet instead.")).toEqual({ spoken: [expect.stringMatching(/^(On it|Right away|Very good)/)], sent: [{ text: "Use the devnet instead." }] })
+  })
+
   test("a part of a thread's question is answered only by what he said once he'd heard it: what he dictated before it was asked, or once it was cut off, never goes as its answer", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const last = "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?"

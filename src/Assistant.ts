@@ -1232,10 +1232,9 @@ export const make = (options: {
         case "send": {
           if (Option.isNone(to)) return undefined
           const text = decision.text.trim() || heard
-          // To a thread waiting on a question he's heard, it goes as the answer to the part he'd got to, in his words.
+          // To a thread waiting on a question he's heard, it goes as the answer to the part he'd got to, as `answerFor` filled it in.
           if (asks?._tag === "Question") {
-            const question = asks.questions[asks.part]
-            const replied = question === undefined ? undefined : replying({ ...asks, collected: { ...asks.collected, [question.id]: { _tag: "Words", text } } })
+            const replied = replying(asks)
             return replied === undefined ? undefined : { _tag: "Reply", to: to.value, requestId: asks.requestId, answers: replied.answers, said: Option.none(), as: "message" }
           }
           return { _tag: "Message", to: to.value, text, how: when(decision.how) }
@@ -1775,18 +1774,23 @@ export const make = (options: {
      * What a message for now goes as instead, to a thread waiting on a
      * question he's heard and it still waits on: its answer, since a message
      * steered into the turn meanwhile may sit unread, or end the question.
+     * The part he'd got to is answered with it as with anything he'd answer
+     * it with: an option it names goes as that option, as the form takes it.
      * Never for one T3 Code takes as a message itself, nor a part he hadn't
      * heard all of by the time he said it, like the next one cut off, which
-     * is asked after.
+     * is asked after, nor a form that takes only its options, which can't
+     * take it: it goes as the message it is.
      */
-    const answerFor = (plan: Brain.Plan, utterance: Pick<Utterance, "at">) =>
+    const answerFor = (plan: Brain.Plan, utterance: Pick<Utterance, "at" | "heard">) =>
       Effect.gen(function* () {
         const { decision, target } = plan
         if (Option.isNone(target) || when(decision.how) !== "now") return undefined
         const pending = target.value.thread.pendingRuntimeRequest
         const heard = pending === null ? undefined : known.get(pending.id)
         if (heard?.asks._tag !== "Question" || heard.asks.mode !== "live" || !Threads.same(heard.ref, target.value.ref) || !heardBy(utterance, heard.through)) return undefined
-        return (yield* still(heard.ref, heard.asks.requestId)) ? heard.asks : undefined
+        const answered = fill(heard.asks, decision.text.trim() || utterance.heard)
+        if (answered === undefined) return undefined
+        return (yield* still(heard.ref, heard.asks.requestId)) ? answered.asks : undefined
       })
 
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
