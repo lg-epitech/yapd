@@ -97,25 +97,42 @@ describe("T3Actions", () => {
     expect(idle.sent).toEqual([])
   })
 
-  test("finds a message it sent by its id, how it went in, and the run it waits in, held or not", async () => {
+  test("finds a message it sent by its id, how it went in, the run it waits in, held or not, and the run whose turn it went into", async () => {
     const queued = projection({
       runs: [
         { id: "run-2", status: "running", ordinal: 2, userMessageId: "m-2" },
         { id: "run-3", status: "queued", ordinal: 3, userMessageId: "m-3" },
         { id: "run-5", status: "queued", ordinal: 5, userMessageId: "m-5", queueHeld: true },
+        // Taken out of the queue into the turn under way, which cancels the run it waited in.
+        { id: "run-6", status: "cancelled", ordinal: 6, userMessageId: "m-6" },
       ],
       messages: [{ id: "m-2", role: "user", text: "Fix it.", createdAt: "a" }],
-      turnItems: [{ type: "user_message", messageId: "m-4", inputIntent: "steer", status: "completed" }],
+      turnItems: [
+        { type: "user_message", messageId: "m-4", inputIntent: "steer", status: "completed", runId: "run-2" },
+        { type: "user_message", messageId: "m-6", inputIntent: "promoted_queued_to_steer", status: "completed", runId: "run-2" },
+        // Steered into a run the read doesn't have.
+        { type: "user_message", messageId: "m-7", inputIntent: "steer", status: "completed", runId: "run-1-gone" },
+      ],
     })
     const { actions } = transport(queued)
     const found = (messageId: string) =>
-      Effect.runPromise(Effect.map(actions.message("t1", messageId), Option.map(({ intent, run }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run) }))))
-    expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued", held: false } }))
+      Effect.runPromise(
+        Effect.map(
+          actions.message("t1", messageId),
+          Option.map(({ intent, run, into }) => ({ intent: Option.getOrNull(intent), run: Option.getOrNull(run), into: Option.getOrNull(into) })),
+        ),
+      )
+    expect(await found("m-3")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-3", status: "queued", held: false }, into: null }))
     // In a queue a stop put on hold.
-    expect(await found("m-5")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-5", status: "queued", held: true } }))
-    expect(await found("m-4")).toEqual(Option.some({ intent: "steer", run: null }))
+    expect(await found("m-5")).toEqual(Option.some({ intent: "queued_turn", run: { id: "run-5", status: "queued", held: true }, into: null }))
+    // Steered in, even from the queue, it's in the turn T3 Code names on it, never the run it waited in.
+    expect(await found("m-4")).toEqual(Option.some({ intent: "steer", run: null, into: { id: "run-2", status: "running" } }))
+    expect(await found("m-6")).toEqual(
+      Option.some({ intent: "promoted_queued_to_steer", run: { id: "run-6", status: "cancelled", held: false }, into: { id: "run-2", status: "running" } }),
+    )
+    expect(await found("m-7")).toEqual(Option.some({ intent: "steer", run: null, into: null }))
     // A run it started that has no turn item yet, as right after it went in: a turn of its own.
-    expect(await found("m-2")).toEqual(Option.some({ intent: "turn_start", run: { id: "run-2", status: "running", held: false } }))
+    expect(await found("m-2")).toEqual(Option.some({ intent: "turn_start", run: { id: "run-2", status: "running", held: false }, into: null }))
     expect(await Effect.runPromise(actions.has("t1", "m-9"))).toBe(false)
   })
 
