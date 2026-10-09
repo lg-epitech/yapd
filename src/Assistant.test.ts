@@ -1835,7 +1835,7 @@ describe("Assistant", () => {
     expect(await answering(["Red", "Blue (Recommended)"], "Yes.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
   })
 
-  test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes, and which uses up an ask", async () => {
+  test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes, uses up an ask, and is never asked twice in the same words", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (heard: ReadonlyArray<string>, unanswered = false) =>
       run(
@@ -1854,6 +1854,9 @@ describe("Assistant", () => {
     const which = "Which one, sir: Red or Blue? I'd go with Blue."
     expect(await answering(["Purple, please.", "Yes."])).toEqual({ spoken: [which, "Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }], open: false })
     expect(await answering(["None of those.", "Red."])).toEqual({ spoken: [which, "Red it is, sir."], answers: [{ [colour.id]: "Red" }], open: false })
+    // Off them again, it isn't asked in the same words twice: it's let go with its line, and waits in T3 Code.
+    const leave = "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."
+    expect(await answering(["Purple, please.", "Purple, I said."])).toEqual({ spoken: [which, leave], answers: [], open: false })
     // Asked which of them, it's been asked twice: left unanswered then, it's let go with its line rather than asked a third time.
     expect(await answering(["Purple, please."], true)).toEqual({
       spoken: [which, "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."],

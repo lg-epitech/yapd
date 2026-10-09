@@ -842,12 +842,18 @@ export const make = (options: {
         asking.due = undefined
         if (repeat !== undefined) yield* Fiber.interruptFork(repeat)
         const { wording } = open
+        // Asked which one, which of them, or for a part it needs already, the same words again would only get the same answer, and no
+        // question is asked twice in the same words: it's let go instead. What its options mean is said as often as he asks.
         const asked =
           wording === undefined
             ? Brain.reworded(open, before, said)
-            : how === "more" || how === "instead" || how === "which" || how === "needed"
-              ? wording[how]
-              : Brain.reworded({ ...open, rewordings: how === "again" ? wording.again : wording.still }, before, said)
+            : how === "more"
+              ? wording.more
+              : how === "instead" || how === "which" || how === "needed"
+                ? open.asked === wording[how]
+                  ? undefined
+                  : wording[how]
+                : Brain.reworded({ ...open, rewordings: how === "again" ? wording.again : wording.still }, before, said)
         if (asked === undefined) {
           yield* close(open, "dropped: asked enough")
           const left = wording === undefined ? reply(said.leaving, { _tag: "Nothing" }) : regarding(wording.letGo, askedAbout(open))
