@@ -116,6 +116,12 @@ const misses = 3
 const hesitation = "3 seconds"
 /** How long the user can keep adding to what they said, since talk that goes on longer is more likely a TV. */
 const rambling = 60_000
+/**
+ * Seconds the user is left to go on before he's asked to say again what he
+ * said over yapd's own voice, and how far into asking that what he says is
+ * still more of the same, since he can't have heard it yet.
+ */
+const gathering = 1.5
 
 /** Words a sentence hardly ever ends on. */
 const dangling = /\b(and|or|but|to|the|a|an|of|for|with|my|your|if|when|because)[.,]?$/i
@@ -1159,6 +1165,39 @@ export const make = (options: {
       )
 
     /**
+     * Waits for the user to finish before he's asked to say again what he said
+     * over yapd's own voice: until he's been quiet a moment, or for longer
+     * when he `trailing` off, letting go of all he goes on with meanwhile,
+     * which is more of what he's asked to say again.
+     */
+    const gather = (ear: Ear, trailing: boolean) =>
+      Effect.gen(function* () {
+        let speaking = false
+        let quiet: Duration.DurationInput = trailing ? hesitation : `${gathering} seconds`
+        while (!ear.deaf) {
+          const signal = yield* Queue.take(ear.signals).pipe(Effect.timeoutOption(speaking ? patience : quiet))
+          if (Option.isNone(signal)) return
+          switch (signal.value._tag) {
+            case "Onset":
+              speaking = true
+              break
+            case "Abandoned":
+              speaking = false
+              break
+            case "Utterance":
+              speaking = false
+              quiet = `${gathering} seconds`
+              yield* Effect.logInfo("Let go of what he went on with, to ask him to say it all again")
+              break
+            case "Deaf":
+              return
+            default:
+              break
+          }
+        }
+      })
+
+    /**
      * Asks the user to say again what he said over yapd's own voice, in the
      * persona's words for not catching something, and listens: what he says
      * over it or right after, or none when he says nothing, or it can't be said.
@@ -1181,18 +1220,23 @@ export const make = (options: {
      * Takes in what the user said over a line, word for word as Whisper heard
      * it, and works out a reply to it, as `settle` does. When some of it was
      * yapd's own voice getting into the microphone with his, none of it is
-     * taken in: he's asked to say it again, and what he says then is taken in
-     * its place, as if he'd said it over the line. None when nothing came of
-     * what he said, or he didn't say it again.
+     * taken in: once he's finished, he's asked to say it again, and what he
+     * says then is taken in its place, as if he'd said it over the line. None
+     * when nothing came of what he said, or he didn't say it again.
      */
     const takeIn = <R>(outcome: Interrupted, respond: (heard: string, voiced: number) => Effect.Effect<R>) =>
       Effect.gen(function* () {
         let said = outcome
+        let asked = 0
         while (true) {
           if (said.mixed) {
+            // Asked that often, it's more likely a TV than him.
+            if (asked++ >= misses) return undefined
+            yield* gather(said.ear, unfinished(said.said.map((piece) => piece.heard ?? "").join(" ").trim()))
             const again = yield* reask(said.ear)
             if (again === undefined) return undefined
-            said = again
+            // Begun before he can have heard it, it's more of what he was saying, so he's asked again once he's done.
+            said = again.at < Math.min(gathering, again.duration) ? { ...again, mixed: true } : again
             continue
           }
           const first = yield* hear(said.said)

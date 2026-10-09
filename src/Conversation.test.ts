@@ -1230,6 +1230,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         const later = [...helper.commands]
         yield* helper.talk(0.95, 10)
         yield* helper.quiet
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
         yield* helper.talk(0.96, 20)
@@ -1470,6 +1472,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.8, 3)
         yield* helper.quiet
         yield* helper.wait(1)
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
         yield* helper.talk(0.91, 10)
@@ -1502,6 +1506,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.wait(0.3)
         yield* helper.talk(0.8, 12)
         yield* helper.quiet
+        yield* helper.wait(2)
+        // Long enough for it to ask him once he's finished.
         yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
@@ -1553,6 +1559,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.8, 6)
         yield* helper.talk(0.91, 10)
         yield* helper.quiet
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
         yield* helper.talk(0.92, 20)
@@ -1676,6 +1684,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         const stopped = [...helper.commands]
         yield* helper.quiet
         yield* helper.wait(1)
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
         yield* helper.talk(0.91, 10)
@@ -1752,6 +1762,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.9, 15)
         yield* helper.quiet
         yield* helper.wait(1)
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
         yield* helper.talk(0.91, 15)
@@ -1772,6 +1784,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           yield* helper.talk(0.9, 20)
           yield* helper.quiet
           yield* helper.wait(1)
+          // Long enough for it to ask him once he's finished.
+          yield* helper.wait(2)
           const before = [...helper.sent]
           yield* helper.finish
           yield* helper.talk(0.91, 20)
@@ -1811,6 +1825,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           yield* helper.talk(0.8, 12)
           yield* helper.quiet
           yield* helper.wait(1)
+          // Long enough for it to ask him once he's finished.
+          yield* helper.wait(2)
           const before = [...helper.sent]
           yield* helper.finish
           yield* helper.talk(0.91, 12)
@@ -1839,6 +1855,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           yield* helper.wait(1)
           yield* helper.quiet
           yield* helper.wait(1)
+          // Long enough for it to ask him once he's finished.
+          yield* helper.wait(2)
           const before = [...helper.sent]
           yield* helper.finish
           yield* helper.talk(0.91, 15)
@@ -1899,6 +1917,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.9, 12)
         yield* helper.quiet
         yield* helper.wait(1)
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...answers]
         yield* helper.finish
         yield* helper.talk(0.91, 12)
@@ -1961,6 +1981,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.9, 12)
         yield* helper.quiet
         yield* helper.wait(1)
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...answers]
         yield* helper.finish
         yield* helper.talk(0.91, 12)
@@ -1988,6 +2010,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.91, 5)
         yield* helper.quiet
         yield* helper.wait(1)
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
         yield* helper.talk(0.92, 12)
@@ -2019,6 +2043,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           yield* helper.talk(0.9, 22)
           yield* helper.quiet
           yield* helper.wait(1)
+          // Long enough for it to ask him once he's finished.
+          yield* helper.wait(2)
           const before = [...answers]
           yield* helper.finish
           yield* helper.talk(0.91, 12)
@@ -2047,6 +2073,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         // Begun as the last of its voice comes in, and gone on past it.
         yield* helper.talk(0.8, 25)
         yield* helper.quiet
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...helper.sent]
         yield* helper.finish
         yield* helper.talk(0.91, 20)
@@ -2114,6 +2142,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.9, 40)
         yield* helper.quiet
         yield* helper.wait(1)
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const asked = { commands: [...helper.commands], rendered: [...helper.rendered], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
         yield* helper.finish
         yield* helper.talk(0.91, 40)
@@ -2130,6 +2160,76 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result.replies).toEqual([said])
   })
 
+  test("waits for the user to finish before asking him to say it again, taking nothing he goes on with after a pause for what he says again", async () => {
+    for (const [first, pause, rest] of [
+      ["Don't merge it", 0.3, "until the review is done."],
+      ["Don't merge it until the review is done.", 0.6, "And ping me when it's green."],
+    ] as const) {
+      const again = `${first} ${rest}`
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.8, "Over in yapd."], [0.9, first], [0.91, rest], [0.92, again]], { live: true })
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 12)
+          yield* helper.talk(0.9, 30)
+          yield* helper.quiet
+          yield* helper.wait(pause)
+          yield* helper.talk(0.91, 30)
+          yield* helper.quiet
+          const asking = [...helper.commands]
+          yield* helper.wait(2)
+          const asked = { commands: [...helper.commands], sent: [...helper.sent] }
+          yield* helper.finish
+          yield* helper.talk(0.92, 50)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { asking, asked, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      // Not asked over what he went on with, nor while he might still go on, and nothing taken in till he says it again.
+      expect([first, result]).toEqual([
+        first,
+        {
+          asking: ["play", "stop"],
+          asked: { commands: ["play", "stop", "play"], sent: [] },
+          rendered: [Persona.plain.misheard, "Okay."],
+          sent: [again],
+          replies: [again],
+        },
+      ])
+    }
+  }, 30_000)
+
+  test("asks the user to say it again once more when he goes on with what he was saying just as it asks, rather than take that for all he said", async () => {
+    const said = "Tell it to open the pull request."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Tell it to open"], [0.95, "the pull request."], [0.96, said]])
+        yield* helper.talk(0.8, 15)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        // Just as it starts asking, too soon for him to have heard it.
+        yield* helper.wait(1.6)
+        yield* helper.talk(0.95, 15)
+        yield* helper.quiet
+        const before = [...helper.sent]
+        yield* helper.wait(2)
+        yield* helper.finish
+        yield* helper.talk(0.96, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { before, commands: helper.commands.slice(0, 5), rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({
+      before: [],
+      commands: ["play", "stop", "play", "stop", "play"],
+      rendered: [Persona.plain.misheard, Persona.plain.misheard, "Okay."],
+      sent: [said],
+      replies: [said],
+    })
+  })
+
   test("picks up from before where the user began when he doesn't say it again, having taken in nothing", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -2138,7 +2238,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0.8, 15)
         yield* helper.talk(0.9, 15)
         yield* helper.quiet
-        yield* helper.wait(1)
+        yield* helper.wait(2)
         yield* helper.finish
         // Long enough for him to have said it again.
         yield* helper.wait(4)
@@ -2401,6 +2501,8 @@ describe("Answers over their first words, while yapd's own voice can still get i
         yield* helper.talk(0.9, 15)
         const talking = helper.commands.slice(asked)
         yield* helper.quiet
+        // Long enough for it to ask him once he's finished.
+        yield* helper.wait(2)
         const before = [...followUps]
         yield* helper.finish
         yield* helper.talk(0.91, 15)
