@@ -268,6 +268,12 @@ describe("Questions", () => {
       [["Do it again", "Mark it skipped (Recommended)"], "Yes, do it."],
       [["Do it again", "Mark it skipped (Recommended)"], "OK, do it."],
       [["Do it again", "Mark it skipped (Recommended)"], "Yeah, do it."],
+      // A word of his that another option has, wherever it is in its name, may be to that option, however he agrees.
+      [["Wait for CI (Recommended)", "Merge now"], "Yes, merge it."],
+      [["Wait for CI (Recommended)", "Squash and merge"], "Merge it."],
+      [["Wait for CI (Recommended)", "Squash and merge"], "Yes, merge it."],
+      [["Hold for QA (Recommended)", "Tag and ship"], "Ship it."],
+      [["Hold for QA (Recommended)", "Tag and ship"], "Yes, ship it."],
     ] as const) {
       expect([heard, pick(options, heard)]).toEqual([heard, undefined])
       // Cut off before yapd's pick, it may be that option all the same.
@@ -281,6 +287,7 @@ describe("Questions", () => {
     expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "Sounds good.")).toEqual(picked(1))
     expect(pick(["Ship it now", "Hold it for QA (Recommended)"], "The recommended one.")).toEqual(picked(1))
     expect(pick(["Go with the old name", "Rename it (Recommended)"], "Yes, go ahead.")).toEqual(picked(1))
+    expect(pick(["Merge now (Recommended)", "Wait for CI"], "Yes, merge it.")).toEqual(picked(0))
   })
 
   test("a plain yes when yapd's pick is a no, or a yes or no to a question it answers when no option is either, is the model's to tell", () => {
