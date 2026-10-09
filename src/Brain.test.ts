@@ -408,6 +408,9 @@ describe("Brain", () => {
       "github/delete_repository\nrepo\nme/x",
       "supabase/drop_table\nname\nusers",
       "fs/rm\npath\nx\nrecursive\ntrue",
+      "deleteFile\npath\nx",
+      "fsRemoveDirectory\npath\nx",
+      'mcp__files__manage {"action":"deleteAll","path":"build"}',
     ]
     const ordinary = [
       "npm install left-pad",
@@ -486,7 +489,9 @@ describe("Brain", () => {
       "git reset --help",
       "filesystem/read_file\npath\ndelete_me.txt",
       "filesystem/list_directory\npath\nsrc\nrecursive\ntrue",
+      "readFile\npath\nsrc/deleteFile.ts",
       "github/search_code\nq\ndelete_repository",
+      "undeleteFile\npath\nx",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])

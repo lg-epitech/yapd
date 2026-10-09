@@ -645,6 +645,9 @@ const deletes = /(?:\b|_)(?:rm|rmdir|unlink|delete|remove|erase|trash|destroy|pu
 /** A name that says it deletes for good, by itself, like delete_repository or mcp__github__delete_repository. */
 const deletesForGood = /__(?:delete|destroy|drop|remove|purge|wipe)|\b(?:delete|destroy|drop|remove|purge|wipe)_\w/i
 
+/** The same written in camel case, by its capitals, like deleteFile or fsRemoveDirectory. */
+const deletesForGoodCamel = /(?:^|[^a-zA-Z])(?:delete|destroy|drop|remove|purge|wipe)[A-Z]|(?:Delete|Destroy|Drop|Remove|Purge|Wipe)[A-Z]/
+
 /**
  * A tool's name, where T3Actions writes it: first, on a line of its own or
  * before the JSON it's given, like `mcp__fs__rm {"path": "x"}`, with its
@@ -685,7 +688,7 @@ export const dangerous = (text: string) => {
   const read = new Set([command, unquoted(command), whole, unquoted(whole)])
   if ([...read].some(riskyToRun) || forcing.test(text) || overwriting.test(text)) return true
   const does = whatItDoes(text)
-  return does.some((what) => deletesForGood.test(what)) || (recursing.test(text) && does.some((what) => deletes.test(what)))
+  return does.some((what) => deletesForGood.test(what) || deletesForGoodCamel.test(what)) || (recursing.test(text) && does.some((what) => deletes.test(what)))
 }
 
 /**
