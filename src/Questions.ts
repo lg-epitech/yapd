@@ -665,8 +665,13 @@ const whether = (part: Said) => {
   return last.endsWith("?") && !/\bor\b/i.test(last) && !asksWhich.test(last)
 }
 
-/** Whether it answers how it's asked rather than which option, which then only an option's name in full picks. */
-const steers = (said: string) => [yeses, assenting, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
+/**
+ * Whether it answers how it's asked rather than which option, which then only
+ * an option's name in full picks. Taking back what he just said, like "cancel
+ * that" to "Cancel the deploy", may only drop the question: the model tells.
+ */
+const steers = (said: string) =>
+  Brain.takesBack(said) || [yeses, assenting, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
 
 /** Words to stop yapd talking, put it off, skip it or hear it again: an option named so, like "Stop" or "Later", is only that once he's heard it offered. */
 const hushing = (said: string) => [repeating, later, skipping, leaving].some((phrases) => phrases.has(said))

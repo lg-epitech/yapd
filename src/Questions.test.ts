@@ -243,6 +243,15 @@ describe("Questions", () => {
     expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Which" })
   })
 
+  test("taking back what he said, like 'cancel that', is the model's to tell, never an option it's a word of", () => {
+    const pick = (asked: Questions.Said, heard: string) => Questions.pick(asked, heard, { inFull: true, parts: 1 })
+    const deploy = part("The deploy failed. What now?", ["Retry (Recommended)", "Cancel the deploy"])
+    expect(["Cancel that.", "Scratch that.", "Cancel."].map((heard) => pick(deploy, heard))).toEqual([undefined, undefined, undefined])
+    expect(pick(part("The migration failed halfway. What now?", ["Retry (Recommended)", "Undo the migration"]), "Undo that.")).toBeUndefined()
+    // Only an option named just so takes it.
+    expect(pick(part("What should I do with the last commit?", ["Keep it (Recommended)", "Scratch that"]), "Scratch that.")).toEqual({ _tag: "Picked", options: [1] })
+  })
+
   test("a yes or an okay that starts another option's name, or has its words, is the model's to tell, never yapd's pick", () => {
     const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
     const pick = (options: ReadonlyArray<string>, heard: string, inFull = true) => Questions.pick(part("What now?", options), heard, { inFull, parts: 1 })

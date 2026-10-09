@@ -2853,6 +2853,27 @@ describe("Assistant", () => {
     expect(await answering(deploy, "Cancel.", "Cancel the deploy")).toEqual({ asked: 1, spoken: ["Cancel the deploy it is, sir."], answers: [{ deploy: "Cancel the deploy" }] })
   })
 
+  test("'cancel that' over a question with an option that starts with cancel is the model's to tell, never sending that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const deploy = { id: "deploy", question: "The deploy failed. What now?", options: [{ label: "Retry (Recommended)" }, { label: "Cancel the deploy" }] }
+    const answering = (heard: string, decided: (situation: Brain.Situation) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(decided, undefined, { others: [cloud], items: card("q1", [deploy]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    // He may only have meant to drop the question.
+    expect(await answering("Cancel that.", () => Brain.decision({ act: "dismiss", pending: "answers" }))).toEqual({ asked: 1, spoken: ["I'll leave that one, sir."], answers: [] })
+    expect(await answering("Scratch that.", (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Cancel the deploy", pending: "answers" }))).toEqual({
+      asked: 1,
+      spoken: ["Cancel the deploy it is, sir."],
+      answers: [{ deploy: "Cancel the deploy" }],
+    })
+  })
+
   test("an option named like stopping the run answers its question, never interrupting the turn that asked it", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     for (const label of ["Cancel the run", "Stop the run"]) {
