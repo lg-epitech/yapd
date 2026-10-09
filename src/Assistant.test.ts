@@ -1728,6 +1728,42 @@ describe("Assistant", () => {
     ])
   })
 
+  test("an answer in his own words, or a message that went as one, takes turns with his own going-ahead lines, while a picked option is said back", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        let decided = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Ghostnet, but only for the tests.", pending: "answers" })
+        const made = yield* assistant((situation) => decided(situation), undefined, {
+          others: [cloud],
+          items: [...card("q1", [network]), ...card("q2", [network]), ...card("q3", [network])],
+          onIt: "Very good, sir.",
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Ghostnet, but only for the tests.")
+        const next = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(next)
+        yield* asked(made, next)
+        yield* made.answer("Never mind.")
+        decided = (situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" })
+        yield* made.dictate("Tell the cloud one to start with mainnet.")
+        const last = { ...cloud, pendingRuntimeRequest: { id: "q3", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(last)
+        yield* asked(made, last)
+        yield* made.answer("Mainnet.")
+        return { spoken: made.spoken().filter((line) => !line.startsWith("A question on")), noted: made.noted }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Very good, sir.",
+      "I'll leave that one, sir.",
+      "Very good, sir. It was waiting on a question, so that's its answer.",
+      "Mainnet it is, sir.",
+    ])
+    // Each noted as the one he heard last, once it plays.
+    expect(result.noted).toEqual(["Very good, sir.", "Very good, sir."])
+  })
+
   test("a message for now to a thread waiting on a question he heard goes as the option it names, as the form takes it, and as a message when the form takes only its options", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const network = {

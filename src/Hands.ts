@@ -1483,13 +1483,18 @@ export const done = (
  * Whether what's said once it's done is the line for going ahead, which he
  * can have lines of his own for, a different one each time: for a message
  * that went in as asked, not one that waits, was told to a turn stopped for
- * it, or whose turn has ended since.
+ * it, or whose turn has ended since; and for an answer to a thread's question
+ * that isn't said back as the option he picked, like one in his own words or
+ * a message that went as its answer.
  */
 export const goesAhead = (
   act: Act,
   how: Ledger.How,
   as: { readonly waiting?: Waiting; readonly stopped?: boolean | "ended"; readonly ended?: Ended } = {},
-) => act._tag === "Message" && how !== "queued" && as.stopped !== true && as.ended === undefined && as.waiting === undefined
+) =>
+  act._tag === "Reply"
+    ? act.as === "message" || Option.isNone(act.said)
+    : act._tag === "Message" && how !== "queued" && as.stopped !== true && as.ended === undefined && as.waiting === undefined
 
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
