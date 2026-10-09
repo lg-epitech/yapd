@@ -216,6 +216,16 @@ describe("Brain", () => {
     expect(shown).toContain(`When OPEN asks a thread's question, a no is its answer, never "dismiss"`)
   })
 
+  test("words a form that takes only its options can't take ask which of them without the model once, and after that are the model's to judge", () => {
+    const { open, desk: shown } = questionOpen(0)
+    const wording = open.wording!
+    const form: Assistant.Open = { ...open, wording: { ...wording, part: { ...wording.part, ownWords: false } } }
+    const decided = (asked: string) =>
+      Brain.fast(situation("None of those.", { open: Option.some({ ...form, asked }), desk: shown, subject: { _tag: "Answer", said: asked, about: Option.some(ref(tezos)) } }), lines)
+    expect(decided(form.asked)).toMatchObject({ act: "again", how: "which", pending: "answers" })
+    expect(decided(wording.which)).toBeUndefined()
+  })
+
   test("'what's the question' and 'what are the options' are worked out without the model", () => {
     const decided = (heard: string, part: number) => {
       const { open, desk: shown } = questionOpen(part)

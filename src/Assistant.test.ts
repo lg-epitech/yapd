@@ -1835,9 +1835,9 @@ describe("Assistant", () => {
     expect(await answering(["Red", "Blue (Recommended)"], "Yes.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
   })
 
-  test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes", async () => {
+  test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes, and which uses up an ask", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
-    const answering = (...heard: ReadonlyArray<string>) =>
+    const answering = (heard: ReadonlyArray<string>, unanswered = false) =>
       run(
         Effect.gen(function* () {
           // The model, for what isn't plain, has his words as they are.
@@ -1847,12 +1847,19 @@ describe("Assistant", () => {
           })
           yield* asked(made, cloud)
           for (const words of heard) yield* made.answer(words)
-          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+          if (unanswered) yield* made.unanswered()
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open) }
         }),
       )
     const which = "Which one, sir: Red or Blue? I'd go with Blue."
-    expect(await answering("Purple, please.", "Yes.")).toEqual({ spoken: [which, "Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
-    expect(await answering("None of those.", "Red.")).toEqual({ spoken: [which, "Red it is, sir."], answers: [{ [colour.id]: "Red" }] })
+    expect(await answering(["Purple, please.", "Yes."])).toEqual({ spoken: [which, "Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }], open: false })
+    expect(await answering(["None of those.", "Red."])).toEqual({ spoken: [which, "Red it is, sir."], answers: [{ [colour.id]: "Red" }], open: false })
+    // Asked which of them, it's been asked twice: left unanswered then, it's let go with its line rather than asked a third time.
+    expect(await answering(["Purple, please."], true)).toEqual({
+      spoken: [which, "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."],
+      answers: [],
+      open: false,
+    })
   })
 
   test("after which one then, a yes is to what he heard last: yapd's pick once it's said again, and a second no is the model's to judge, never yapd's pick", async () => {
