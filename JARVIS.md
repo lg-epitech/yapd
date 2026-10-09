@@ -22,7 +22,7 @@ Live on `dev` now: everything below except doing things to threads by voice (mes
 
 ## Needs you (built, waiting on review and its live check)
 
-- Approvals and questions are asked once and answered by voice ("… Allow it, sir?" "Yes." "Approved."), a risky one only with "approve", judged by all of what it would run, as is one whose command it can't read in full. Nothing you said before you heard the question answers it. Failures, usage limits and finished work from agents without hooks are said once, and a finished turn from its hook or from T3 Code, never both. Secrets are never taken by voice, nor kept when you say one.
+- An agent's question is read out as it comes, in its own words, a part at a time, with the option it recommends said as yapd's pick ("I'd go with Blue."). Answer with an option, a few, "yes" to the pick, or your own words, which it gets as you said them; "what are the options?", "later" and "what's the question?" work too. Approvals are no longer announced, since your agents run with full access: "who needs me?" still lists them, and you can approve one by voice, a risky one only with "approve". Nothing you said before you heard a question answers it. Failures, usage limits and finished work from agents without hooks are said once, and a finished turn from its hook or from T3 Code, never both. Secrets are never taken by voice, nor kept when you say one.
 - Updates are tied to their T3 Code thread, so "tell it to…" after one goes into that thread.
 
 ## Faster
