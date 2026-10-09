@@ -42,7 +42,7 @@ private final class Faded {
     let faded = Faded()
     let fading = Fading(faded.doing)
     let following = Following(Following.Doing(
-      fetch: { id in Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil) },
+      fetch: { id in .card(Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil)) },
       show: { _, talking in fading.shown(talking: talking) },
       hide: { fading.hidden() },
       takeDown: { _ in },

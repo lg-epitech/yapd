@@ -6,6 +6,8 @@ import Foundation
 private final class Watched {
   /// How many fetches fail before one doesn't.
   var failing: Int
+  /// Whether yapd says it no longer has a card fetched, once none fail.
+  var missing: Bool
   /// A card whose fetch waits until it's let go, as one that's slow to come back.
   var holding: String?
   var fetches: [String] = []
@@ -14,8 +16,9 @@ private final class Watched {
   /// The fetch of the card held, once it's started.
   private var held: CheckedContinuation<Void, Never>?
 
-  init(failing: Int = 0, holding: String? = nil) {
+  init(failing: Int = 0, missing: Bool = false, holding: String? = nil) {
     self.failing = failing
+    self.missing = missing
     self.holding = holding
   }
 
@@ -37,9 +40,10 @@ private final class Watched {
         if id == self.holding { await withCheckedContinuation { self.held = $0 } }
         guard self.failing == 0 else {
           self.failing -= 1
-          return nil
+          return .failed
         }
-        return Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: "One running.")
+        if self.missing { return .missing }
+        return .card(Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: "One running."))
       },
       show: { card, talking in self.done.append(talking ? "show \(card.id)" : "show \(card.id) quietly") },
       hide: { self.done.append("hide") },
@@ -143,7 +147,7 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
     var requests: [String] = []
     var shown: String?
     let following = Following(Following.Doing(
-      fetch: { id in Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil) },
+      fetch: { id in .card(Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil)) },
       show: { card, _ in shown = card.id },
       hide: { shown = nil },
       takeDown: { id in requests.append(id) },
@@ -188,11 +192,42 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
 
   // Gone from yapd, there's nothing to show again.
   do {
-    let watched = Watched(failing: 1)
+    let watched = Watched(missing: true)
     let following = Following(watched.doing)
     following.showAgain("c12") { watched.done.append("gone") }
     await following.settled()
     check(watched.done == ["gone"] && following.shown == nil, "shows nothing again of a card yapd no longer has, not \(watched.done)")
+  }
+
+  // Fetching it failed, as while yapd is slow or restarting: nothing shows, it isn't taken for gone, and asked for again once
+  // yapd is back, it shows.
+  do {
+    let watched = Watched(failing: 1)
+    let following = Following(watched.doing)
+    following.showAgain("c19") { watched.done.append("gone") }
+    await following.settled()
+    let failed = watched.done
+    following.showAgain("c19") { watched.done.append("gone") }
+    await following.settled()
+    check(
+      failed == [] && watched.done == ["show c19 quietly", "put back c19"] && following.shown == "c19",
+      "shows a card again once yapd is back, having kept it after failing to fetch it, not \(failed) then \(watched.done)"
+    )
+  }
+
+  // What yapd answers when a card is fetched: the card, or that it no longer has it only when it says so, with a 404; anything
+  // else, it may well still have it.
+  do {
+    let card = Card(id: "c20", kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil)
+    let body = try! JSONEncoder().encode(["id": "c20", "kind": "said", "title": "What I said", "markdown": "### I said\n\nOne running."])
+    let answered = { (status: Int, body: Data) in
+      Fetched(body, HTTPURLResponse(url: URL(string: "http://127.0.0.1:4747/cards/c20")!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+    }
+    let fetched = [answered(200, body), answered(404, Data()), answered(503, Data()), answered(500, body), answered(200, Data("{".utf8))]
+    check(
+      fetched == [.card(card), .missing, .failed, .failed, .failed],
+      "reads yapd's answers as the card, missing, then failed three times, not \(fetched)"
+    )
   }
 
   // yapd puts up another before the card shown again is fetched: the other stays up, and yapd keeps pointing at it.
