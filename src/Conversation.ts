@@ -72,6 +72,8 @@ interface Ear {
 interface Piece {
   readonly audio: Float32Array
   readonly heard?: string
+  /** The stop or wait of his in it, as far as it was made out. */
+  readonly stop?: string
 }
 
 /** How a line went: played out, or talked over, with what the user said. */
@@ -165,6 +167,13 @@ export const cut = (text: string, fraction: number) => {
   const words = text.split(/\s+/)
   return `${words.slice(0, Math.max(1, Math.round(words.length * fraction))).join(" ")}…`
 }
+
+/**
+ * Seconds the last of yapd's voice can go on coming in once it stops: the
+ * half second the audio has it, and a little more for the voice detector to
+ * let go of it. What's begun then and lasts longer has more in it than that.
+ */
+const trail = 0.75
 
 /** Frames of what may be yapd's own voice between each look at all of it so far, while it goes on, for a stop of his: about a second. */
 const glance = Math.round(rate / frame)
@@ -1067,7 +1076,7 @@ export const make = (options: {
           // Then it picks up from before where he began, as when what he said wasn't meant for it.
           if (taken.length === 0) return cut && !completed && !speaking ? interrupted([], from(talks)) : undefined
           return interrupted(
-            taken.map((talk): Piece => ({ audio: talk.audio, heard: talk.told?.taken ?? "" })),
+            taken.map((talk): Piece => ({ audio: talk.audio, heard: talk.told?.taken ?? "", ...(talk.told?.stop === undefined ? {} : { stop: talk.told.stop }) })),
             from(taken),
             // As after a stop of his taken out of more, which yapd stopped for.
             after !== undefined || taken.some((talk) => talk.told?.open !== undefined),
@@ -1225,7 +1234,10 @@ export const make = (options: {
      * last of yapd's voice is still coming in, just after it stopped, is told
      * apart by what it was saying `last`, as over its first seconds: all of it
      * added when it's clearly theirs, only a stop or wait of theirs, and none
-     * when it's unclear. When what they said can't stand on its own, `open`,
+     * when it's unclear, unless there's more of it than the last of its voice
+     * could be, so it can't be told apart from that: then all they said comes
+     * to the stop or wait of theirs in it, or before it, `stop`, and none is
+     * taken without one. When what they said can't stand on its own, `open`,
      * all they go on with before the reply is the rest of it, of which only a
      * stop or wait of theirs is added.
      */
@@ -1237,11 +1249,13 @@ export const make = (options: {
       respond: (heard: string, voiced: number) => Effect.Effect<R>,
       last = "",
       open = false,
+      stop?: string,
     ) =>
       Effect.gen(function* () {
         const until = (yield* Clock.currentTimeMillis) + rambling
         let heard = first
         let speech = voiced(audio)
+        let stopped = stop
         while (true) {
           const replying = unfinished(heard) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech)) : respond(heard, speech)
           if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, reply: yield* replying }
@@ -1306,11 +1320,24 @@ export const make = (options: {
           // Gone on with after what can't stand on its own, it's the rest of that. Begun as the last of its voice was still coming in,
           // it may be just that, or some of it.
           const { whose: told, taken: after } = open ? taking(said, last, "stop") : fading ? taking(said, last, "whole") : { whose: "his", taken: said }
+          if (!open && fading && told !== "his" && voiced(more) > trail) {
+            const kept = stopped ?? (told === "stop" ? after : undefined)
+            yield* Effect.logInfo(
+              `${kept === undefined ? "Let go of all he said" : `Took only his stop, ${kept}, of all he said`}, as what he went on with has more than the last of its own voice, which it can't be told from: ${said}`,
+            )
+            if (kept === undefined) return undefined
+            heard = kept
+            stopped = kept
+            continue
+          }
           if (told === "unclear") {
             if (said !== "") yield* Effect.logInfo(`Let go of ${open ? "what he went on with, as the rest of what can't stand on its own" : "what may be the last of its own voice"}: ${said}`)
             continue
           }
-          if (told === "stop") yield* Effect.logInfo(`Heard him stop it over the last of its own voice, taking only that: ${after}`)
+          if (told === "stop") {
+            yield* Effect.logInfo(`Heard him stop it over the last of its own voice, taking only that: ${after}`)
+            stopped ??= after
+          }
           heard = together(heard, after)
           // Only what added words, since speech Whisper made nothing of isn't in what was heard.
           if (after !== "") speech += voiced(more)
@@ -1387,7 +1414,8 @@ export const make = (options: {
     const heardOver = <R>(outcome: Interrupted, respond: (heard: string, voiced: number) => Effect.Effect<R>) =>
       Effect.gen(function* () {
         const first = yield* hear(outcome.said)
-        return first === "" ? undefined : yield* settle(outcome.ear, first, outcome.audio, transcribe, respond, outcome.last, outcome.open)
+        const stop = outcome.said.find((piece) => piece.stop !== undefined)?.stop
+        return first === "" ? undefined : yield* settle(outcome.ear, first, outcome.audio, transcribe, respond, outcome.last, outcome.open, stop)
       })
 
     /**
