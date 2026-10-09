@@ -443,12 +443,19 @@ const anything = (heard: string, saying: string) => {
   return wordsOf(heard, true).some((word) => !among(word, yapd))
 }
 
-/** Whether a sentence heard is nobody's: only what Whisper makes up, or what yapd was saying, as near as Whisper heard it, without a stop of his. */
+/**
+ * Whether a sentence heard is nobody's: only what Whisper makes up, or what
+ * yapd was saying, as near as Whisper heard it, without a stop of his, nor
+ * two words or more at either end that aren't its, which may be his, run on
+ * from its voice or into it, and are left to what's taken out a word at a time.
+ */
 const nobodys = (sentence: string, yapd: ReadonlyArray<string>) => {
   const filled = wordsOf(sentence, true)
   if (filled.length === 0) return true
   const words = filled.filter((word) => !fillers.has(word))
-  return words.length > 0 && !halted(words, words.filter((word) => !among(word, yapd))) && echoes(words, yapd)
+  if (words.length === 0 || halted(words, words.filter((word) => !among(word, yapd))) || !echoes(words, yapd)) return false
+  const { its } = ours(words, yapd)
+  return Math.min(...its) < 2 && words.length - 1 - Math.max(...its) < 2
 }
 
 /** A word heard as it's matched, or none for one that says nothing of who said it: a letter, a "sir", or a word that only fills a pause. */

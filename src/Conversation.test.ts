@@ -767,6 +767,9 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(unechoed("Hold on in yap D the tests", saying)).toBe("Hold on")
     expect(unechoed("Over in Japan the tests hold on which PR", saying)).toBe("hold on which PR")
     expect(unechoed("Thank you. Over in yapd. Stop.", saying)).toBe("Stop.")
+    // A few words of his run on from it in the same sentence, or into it.
+    expect(unechoed("Over in yapd, the tests pass now open a PR", saying)).toBe("open a PR")
+    expect(unechoed("Open a PR over in yapd, the tests pass now", saying)).toBe("Open a PR")
     // A stop of his is never taken for one of its words misheard.
     expect(unechoed("Over in yapd, stop the tests.", saying)).toBe("stop")
     // A word of its here and there in what he says is his.
@@ -1626,6 +1629,23 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     )
     expect(result).toEqual({ commands: ["play", "stop"], sent: ["Hold on, which PR was that?"], replies: ["Hold on, which PR was that?"] })
   })
+
+  test("stops for a few words the user talks straight on from its own voice with, in the same sentence, and passes on only his", async () => {
+    for (const said of ["open a PR", "which PR"]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          // Whisper runs what he says on from its voice, without a full stop between.
+          const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass now"], [0.9, said]], { live: true })
+          yield* helper.talk(0.8, 30)
+          yield* helper.talk(0.9, 20)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([said, result]).toEqual([said, { commands: ["play", "stop"], sent: [said], replies: [said] }])
+    }
+  }, 30_000)
 
   test("passes on only what the user said before its own voice ran on into it", async () => {
     for (const said of ["Stop.", "Tell it to wait."]) {
