@@ -219,4 +219,21 @@ describe("Threads on several machines", () => {
     expect(found).toEqual([{ ref: { machine: "Rosie", id: "tests" }, snippet: "the std tests" }])
     expect(asked.toSorted()).toEqual(["Rosie: search std tests", "rig: search std tests"])
   })
+
+  test("names this machine when its T3 Code isn't running while rig's threads can be seen, since rig's are his threads too", async () => {
+    const away = await Effect.gen(function* () {
+      yield* TestClock.setTime(now)
+      const store = yield* Store.make(":memory:")
+      const threads = yield* Threads.make({
+        machine: "Rosie",
+        live: live(Option.none()),
+        actions: Option.some(machine("Rosie", [])),
+        others: [{ machine: "rig", live: live(Option.some(viewing(thread("std", "Add the std fee test", "2026-10-08T20:00:00.000Z")))), actions: machine("rig", []), status: Effect.succeed({ _tag: "Up" }) }],
+        journal: Journal.fromStore(store),
+        store,
+      })
+      return (yield* threads.desk(Option.none(), [], 30)).away
+    }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext), Effect.runPromise)
+    expect(away).toEqual([{ machine: "Rosie", reason: "T3 Code isn't running on Rosie, so I can't see its threads." }])
+  })
 })

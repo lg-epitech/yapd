@@ -464,8 +464,15 @@ export const make = (options: {
         here: true,
         live: options.live,
         actions: options.actions,
+        // Named when another machine's threads can be seen, since they're his threads too.
         unseen: Effect.succeed(
-          Option.isNone(options.actions) ? "I need a T3 Code token to see your threads." : "T3 Code isn't running, so I can't see your threads.",
+          options.others.length === 0
+            ? Option.isNone(options.actions)
+              ? "I need a T3 Code token to see your threads."
+              : "T3 Code isn't running, so I can't see your threads."
+            : Option.isNone(options.actions)
+              ? `I need a T3 Code token to see ${machine}'s threads.`
+              : `T3 Code isn't running on ${machine}, so I can't see its threads.`,
         ),
       },
       ...options.others.map(
