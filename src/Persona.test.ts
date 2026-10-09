@@ -229,6 +229,16 @@ describe("Persona", () => {
       }).pipe(Effect.withRandom(Random.fixed([0]))),
     )
     expect(picked).toEqual([own[1]!, own[0]!, own[1]!])
+    // Picks that never play don't push out the one he heard last: with four, it stays clear of that one after three of them.
+    const four = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") })
+    const unplayed = Effect.runSync(
+      Effect.gen(function* () {
+        yield* four.persona.said(own[0]!)
+        yield* Effect.replicateEffect(four.persona.onIt(), 3)
+        return yield* four.persona.onIt()
+      }).pipe(Effect.withRandom(Random.fixed([0]))),
+    )
+    expect(unplayed).not.toBe(own[0]!)
     // With one of his own, it's said by every reply, however many pick it before it plays.
     const one = await persona(undefined, jarvis, { YAPD_ON_IT: own[0]! })
     expect(Effect.runSync(Effect.all([one.persona.onIt(), one.persona.onIt(), one.persona.onIt(own[0])]))).toEqual([own[0]!, own[0]!, own[0]!])

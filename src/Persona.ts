@@ -164,8 +164,11 @@ const alternating = (own: ReadonlyArray<string>, lines: Effect.Effect<Lines>) =>
               // All at once, so two replies picking together can't both miss what the other picked.
               return yield* Ref.modify(recent, (recent) => {
                 const kept = recent.filter(({ heard, at }) => heard || now - at < playing)
-                // The same line twice in one breath stands out more than one heard a while ago, so with too few to avoid them all, it's `besides` that's avoided first, then the latest.
-                const avoided = [besides, ...kept.map(({ line }) => line).toReversed()]
+                const waiting = kept.filter(({ heard }) => !heard).map(({ line }) => line).toReversed()
+                // With too few to avoid them all, what's avoided longest is what's likeliest to be heard just before: `besides`, said in the
+                // same breath, then the latest picked, which plays next unless it's dropped, then the one he heard last, then older picks,
+                // any of which may never play.
+                const avoided = [besides, ...waiting.slice(0, 1), ...kept.filter(({ heard }) => heard).map(({ line }) => line), ...waiting.slice(1)]
                 const others = avoided
                   .map((_, index) => own.filter((line) => !avoided.slice(0, avoided.length - index).includes(line)))
                   .find((lines) => lines.length > 0) ?? own
