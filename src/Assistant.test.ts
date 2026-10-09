@@ -7848,6 +7848,48 @@ describe("Assistant", () => {
     expect(result.answers).toEqual([{ [colour.id]: message }])
   })
 
+  test("a message taken as the answer to a part of a rig question, let go by his word or put off once too often as rig drops out, is said to be his message that didn't go, never his answer", async () => {
+    const message = "Hold off on the deploy until I've checked the fees."
+    /** His message is taken as the answer to the first part, then he lets the rest go as `lettingGo` has it, rig dropping out as `drop` does. */
+    const telling = (lettingGo: (made: Effect.Effect.Success<ReturnType<typeof assistant>>, drop: Effect.Effect<void>) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const rig: Array<Record<string, unknown>> = []
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, onRig), text: message, how: "now" }), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour, extras]) },
+          })
+          yield* asked(made, onRig, "rig")
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the rig one: hold off on the deploy until I've checked the fees.")
+          const noted = made.spoken().at(-1)
+          yield* lettingGo(
+            made,
+            Effect.sync(() => {
+              seen = false
+            }),
+          )
+          return { noted, said: made.spoken().at(-1), sent: rig.length }
+        }),
+      )
+    const away = {
+      noted: "Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?",
+      said: "I couldn't get your message to it, sir: I can't follow rig's threads right now. I'll ask you again once I can.",
+      sent: 0,
+    }
+    expect(await telling((made, drop) => Effect.zipRight(drop, Effect.asVoid(made.answer("Never mind."))))).toEqual(away)
+    expect(
+      await telling((made, drop) =>
+        Effect.gen(function* () {
+          yield* made.answer("Later.")
+          yield* made.wait(10 * 60)
+          yield* drop
+          yield* made.answer("Later.")
+        }),
+      ),
+    ).toEqual(away)
+  })
+
   test("a rig question brought back a second time within ten minutes, after rig drops out twice, still names its thread", async () => {
     const result = await run(
       Effect.gen(function* () {

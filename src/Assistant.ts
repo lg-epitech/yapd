@@ -1988,9 +1988,11 @@ export const make = (options: {
      * reached or this Mac's while T3 Code restarts, none of it goes, and he's
      * told why, never that it's been dealt with, which can't be known then.
      * It still waits on him, so it's put by, to be asked from the part he'd
-     * got to once they can be seen again.
+     * got to once they can be seen again. `message` when what goes is a
+     * message he dictated to its thread, as he lets the rest of it go, which
+     * is what he's told didn't.
      */
-    const reaching = (open: Open, thought: Thought, said: Lines) =>
+    const reaching = (open: Open, thought: Thought, said: Lines, message = false) =>
       Effect.gen(function* () {
         const { decision, utterance, situation } = thought
         const ref = open.candidates[0]
@@ -2003,7 +2005,7 @@ export const make = (options: {
         }
         yield* Effect.logInfo(`Not answering it, since ${ref.machine}'s threads can't be seen right now`)
         yield* close(open, "dropped: out of sight", utterance.id)
-        const yours = open.kind === "approval" ? (decision.how === "decline" ? "your no" : "your go-ahead") : "your answer"
+        const yours = message ? "your message" : open.kind === "approval" ? (decision.how === "decline" ? "your no" : "your go-ahead") : "your answer"
         return Either.left(regarding(`I couldn't get ${yours} to it${addressed(said)}: ${Hands.after(why.value)} ${onceBack}`, askedAbout(open)))
       })
 
@@ -2060,7 +2062,7 @@ export const make = (options: {
     /** As `parting` has it, let go by his word: the question open closed as answered, or put by while its machine's threads can't be seen. */
     const bidden = (open: Open, left: QuestionAsks, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
-        const target = yield* reaching(open, thought, said)
+        const target = yield* reaching(open, thought, said, true)
         if (Either.isLeft(target)) return target.left
         yield* close(open, "answered", thought.utterance.id)
         return yield* parting(target.right, left, thought, said)
