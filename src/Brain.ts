@@ -700,7 +700,9 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
 
   const machine = choice.machine.trim().toLowerCase()
   const away = desk.away.find((away) => away.machine.toLowerCase() === machine)
-  if (machine !== "" && away !== undefined && (Option.isNone(target) || target.value.ref.machine.toLowerCase() === machine)) {
+  // A write he meant for a machine it can't see is never sent to a thread elsewhere: that machine is most likely only down
+  // for now, and what he meant to tell a thread there would go to one on another machine.
+  if (machine !== "" && away !== undefined && (Option.isNone(target) || target.value.ref.machine.toLowerCase() === machine || writes.has(choice.act))) {
     return { _tag: "Say", spoken: `${away.reason.replace(/\.$/, "")}${addressed(lines)}.` }
   }
   const candidates = [
@@ -726,7 +728,7 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       },
     }
   }
-  // A machine that can't be seen may be what the work is about, so a thread he plainly meant isn't turned down for it.
+  // A machine that can't be seen may be what the work is about, so a thread he plainly meant is still read or shown for it.
   const trusted = away !== undefined && choice.sure === "high"
   if (machine !== "" && Option.isSome(target) && target.value.ref.machine.toLowerCase() !== machine && !trusted) {
     const there = desk.threads.filter(({ ref }) => ref.machine.toLowerCase() === machine)

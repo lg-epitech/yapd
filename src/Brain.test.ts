@@ -293,6 +293,18 @@ describe("Brain", () => {
     expect(rig(Brain.decision({ act: "look", machine: "rig" }))).toEqual({ _tag: "Say", spoken: "I can't see rig's threads yet, sir." })
   })
 
+  test("something to tell a thread on a machine that can't be seen is never sent to one here, however sure, only told why", () => {
+    const rig = (decided: Brain.Decision) => Brain.check(decided, situation("Tell the integration thread on rig to run the tests"), lines)
+    for (const act of ["send", "stop", "undo"] as const) {
+      expect(rig(Brain.decision({ act, target: "t2", machine: "rig", sure: "high", text: "Run the tests." }))).toEqual({
+        _tag: "Say",
+        spoken: "I can't see rig's threads yet, sir.",
+      })
+    }
+    // Here by name, it goes ahead as before.
+    expect(rig(Brain.decision({ act: "send", target: "t2", machine: "Rosie", sure: "high", text: "Run the tests." }))._tag).toBe("Do")
+  })
+
   test("only a limit or whose it is makes \"how much is left\" a usage question", () => {
     const usage: Option.Option<Threads.Usage> = Option.some({ at: now, providers: [{ provider: "Claude", windows: [] }, { provider: "Codex", windows: [] }] })
     const usageAsked = (heard: string) => Brain.fast(situation(heard, { usage }), lines)?.act === "answer"
