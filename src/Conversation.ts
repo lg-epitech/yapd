@@ -32,6 +32,12 @@ type Signal =
   | { readonly _tag: "Onset"; readonly echo: boolean }
   /** All the user has said so far of what may be yapd's own voice, passed on as it goes, so he needn't finish before it's told apart. */
   | { readonly _tag: "Partial"; readonly audio: Float32Array }
+  /**
+   * yapd's own voice stopped getting into the microphone partway through what
+   * may be it, as the echo cancellation learnt it or yapd stopped: what was
+   * said until then, made out on its own. What follows is passed on without it.
+   */
+  | { readonly _tag: "Cleared"; readonly audio: Float32Array }
   /** The microphone stopped, like when the helper quits. */
   | { readonly _tag: "Deaf" }
   /** The rest carry the id of what sent them, so one that's no longer waited on is let go. */
@@ -41,8 +47,8 @@ type Signal =
   | { readonly _tag: "Lingered"; readonly id: number }
   /** The reply is whatever the one who asked for it works out: what to do about an update, or an answer to a question. */
   | { readonly _tag: "Replied"; readonly id: number; readonly reply: unknown }
-  /** What was made of what may have been yapd's own voice: the words, and whether they were his. */
-  | { readonly _tag: "Looked"; readonly id: number; readonly heard: string; readonly his: boolean }
+  /** What was made of what may have been yapd's own voice: the words, whether they were his, and whether any were, if too few to tell on their own. */
+  | { readonly _tag: "Looked"; readonly id: number; readonly heard: string; readonly his: boolean; readonly some: boolean }
 
 /**
  * The microphone for a whole update, so nothing the user says is missed
@@ -72,8 +78,11 @@ interface Talk {
   /** What passes on what was made of it, when it had to be. */
   readonly id: number
   readonly audio: Float32Array
-  /** Whether it was him, unknown while it's being made out. */
+  /** Whether he carried on in the talk after it, which was told apart from it as yapd's voice stopped getting into the microphone. */
+  readonly carried: boolean
+  /** Whether it was him, unknown while it's being made out, and whether any of it was, too little to tell on its own. */
   his: boolean | undefined
+  some: boolean | undefined
   heard: string | undefined
 }
 
@@ -297,14 +306,30 @@ export const make = (options: {
         let unsure = false
         /** Frames of that since all of it was last passed on, once it's speech. */
         let since: number | undefined
+        /** Samples of that said before yapd's voice stopped getting into the microphone, once it has, which are made out apart from the rest. */
+        let cleared: number | undefined
+        const reset = () => {
+          unsure = false
+          since = undefined
+          cleared = undefined
+        }
         yield* Stream.fromQueue(microphone.value).pipe(
           Stream.mapEffect((frame) =>
             Effect.gen(function* () {
               const event = endpointer.push(frame, yield* detect.value(frame))
               if (event === undefined) {
-                if (since === undefined || ++since < glance) return undefined
+                // Only while he talks, since a pause may be the end of what he said, which is then made out whole.
+                if (since === undefined || endpointer.pausing) return undefined
+                // From here it can only be him, or its voice carrying on, so that's told apart from what came before.
+                if (cleared === undefined && !(yield* audio.echoing)) {
+                  const said = endpointer.soFar()
+                  cleared = said.length - frame.length
+                  since = 0
+                  return { _tag: "Cleared", audio: said.subarray(0, cleared) } satisfies Signal
+                }
+                if (++since < glance) return undefined
                 since = 0
-                return { _tag: "Partial", audio: endpointer.soFar() } satisfies Signal
+                return { _tag: "Partial", audio: endpointer.soFar().subarray(cleared ?? 0) } satisfies Signal
               }
               switch (event._tag) {
                 case "Onset":
@@ -314,9 +339,13 @@ export const make = (options: {
                 case "Speech":
                   since = unsure ? 0 : undefined
                   return event
-                default:
-                  unsure = false
-                  since = undefined
+                case "Utterance": {
+                  const start = cleared ?? 0
+                  reset()
+                  return start === 0 ? event : ({ _tag: "Utterance", audio: event.audio.subarray(start) } satisfies Signal)
+                }
+                case "Abandoned":
+                  reset()
                   return event
               }
             }),
@@ -436,10 +465,11 @@ export const make = (options: {
         let stoppedAt: number | undefined
         /**
          * Talk that began while yapd's own voice could still get into the
-         * microphone, until it ends: how far into the line it began, whether a
-         * look at it so far found it's him, and the look under way.
+         * microphone, until it ends: how far into the line it began, whether
+         * yapd was still talking then, whether a look at it so far found it's
+         * him, and the look under way.
          */
-        let doubt: { readonly at: number; his: boolean; looking: number | undefined } | undefined
+        let doubt: { readonly at: number; readonly over: boolean; his: boolean; looking: number | undefined } | undefined
         /** Talk that ended while some of it is still being made out, in the order it was said, so none of his is lost or put out of order. */
         const pending: Array<Talk> = []
         /** One look at a time, so Whisper never works on two at once. */
@@ -482,14 +512,17 @@ export const make = (options: {
          * the line, without holding up playing or listening, and passes on
          * whether it was him. Returns the id it's passed on with.
          */
-        const look = (audio: Float32Array, at: number) =>
+        const look = (audio: Float32Array, from: { readonly at: number; readonly over: boolean }) =>
           Effect.gen(function* () {
             const id = fresh()
-            const saying = between(line.text, playback.duration, at - reach, (yield* position) + reach)
+            // Begun once yapd had stopped talking, none of what it said can be in it, so a word of his is enough.
+            const saying = from.over ? between(line.text, playback.duration, from.at - reach, (yield* position) + reach) : ""
             yield* transcriber.transcribe(audio).pipe(
               Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
               whisper.withPermits(1),
-              Effect.flatMap((heard) => Queue.offer(signals, { _tag: "Looked", id, heard, his: theirs(heard, saying) })),
+              Effect.flatMap((heard) =>
+                Queue.offer(signals, { _tag: "Looked", id, heard, his: theirs(heard, saying, from.over ? 2 : 1), some: theirs(heard, saying, 1) }),
+              ),
               Effect.forkScoped,
             )
             return id
@@ -510,7 +543,11 @@ export const make = (options: {
         const heardOut = () => {
           if (pending.some((talk) => talk.his === undefined)) return undefined
           if (speaking && !deaf && pending.some((talk) => talk.his === true)) return undefined
-          const his = pending.splice(0).filter((talk) => talk.his === true)
+          // What he's carrying on with decides whether a word or so before it was his.
+          if (!deaf && pending.at(-1)?.carried === true) return undefined
+          const talks = pending.splice(0)
+          // A word or so of his just before what he carried on with goes with it, though too little to tell on its own.
+          const his = talks.filter((talk, index) => talk.his === true || (talk.some === true && talk.carried && talks[index + 1]?.his === true))
           if (his.length === 0) return undefined
           // Each made out on its own, unless there's more than one, which Whisper then hears together.
           return his.length === 1 ? interrupted(his[0]!.audio, his[0]!.heard) : interrupted(Endpointer.concat(his.map((talk) => talk.audio)), undefined)
@@ -530,7 +567,7 @@ export const make = (options: {
               speaking = true
               yield* stopLingering
               // Over what may be its own voice, it carries on just as it was until it's made out that it isn't.
-              if (signal.echo) doubt = { at: yield* position, his: false, looking: undefined }
+              if (signal.echo) doubt = { at: yield* position, over: true, his: false, looking: undefined }
               else if (playing) yield* playback.volume(ducked)
               break
             case "Speech":
@@ -540,8 +577,24 @@ export const make = (options: {
             case "Partial":
               // One look at a time, while there's still something to stop for him.
               if (doubt === undefined || doubt.his || doubt.looking !== undefined || !playing) break
-              doubt.looking = yield* look(signal.audio, doubt.at)
+              doubt.looking = yield* look(signal.audio, doubt)
               break
+            case "Cleared": {
+              if (doubt === undefined) break
+              // What was said until then is made out on its own, and what follows, which may still be its voice carrying on, apart from it.
+              const before = doubt
+              pending.push({
+                id: before.his ? fresh() : yield* look(signal.audio, before),
+                audio: signal.audio,
+                carried: true,
+                his: before.his ? true : undefined,
+                some: before.his ? true : undefined,
+                heard: undefined,
+              })
+              const at = yield* position
+              doubt = { at, over: playing && !completed, his: before.his, looking: undefined }
+              break
+            }
             case "Abandoned": {
               speaking = false
               const doubted = doubt !== undefined
@@ -558,12 +611,19 @@ export const make = (options: {
               const doubted = doubt
               doubt = undefined
               if (doubted !== undefined && !doubted.his) {
-                pending.push({ id: yield* look(signal.audio, doubted.at), audio: signal.audio, his: undefined, heard: undefined })
+                pending.push({
+                  id: yield* look(signal.audio, doubted),
+                  audio: signal.audio,
+                  carried: false,
+                  his: undefined,
+                  some: undefined,
+                  heard: undefined,
+                })
                 break
               }
               if (pending.length === 0) return interrupted(signal.audio, undefined)
               // Said after what's still being made out, it waits for that, so what he said stays in order.
-              pending.push({ id: fresh(), audio: signal.audio, his: true, heard: undefined })
+              pending.push({ id: fresh(), audio: signal.audio, carried: false, his: true, some: true, heard: undefined })
               const heard = heardOut()
               if (heard !== undefined) return heard
               break
@@ -580,6 +640,7 @@ export const make = (options: {
               const looked = pending.find((talk) => talk.id === signal.id)
               if (looked === undefined) break
               looked.his = signal.his
+              looked.some = signal.some
               looked.heard = signal.heard
               yield* Effect.logInfo(signal.his ? `Heard: ${signal.heard}` : `Carried on over its own voice${signal.heard === "" ? "" : `: ${signal.heard}`}`)
               if (signal.his && playing) yield* halt
@@ -704,6 +765,7 @@ export const make = (options: {
               case "Broke":
               case "Lingered":
               case "Partial":
+              case "Cleared":
               case "Looked":
                 break
             }

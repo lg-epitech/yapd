@@ -101,6 +101,11 @@ export class Endpointer {
     return concat(this.frames)
   }
 
+  /** Whether the user has gone quiet partway through, which may be the end of what they said. */
+  get pausing(): boolean {
+    return this.phase === "speech" && this.quiet > 0
+  }
+
   private reset() {
     this.phase = "quiet"
     this.frames = []

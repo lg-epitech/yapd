@@ -65,6 +65,18 @@ describe("Endpointer", () => {
     expect(audio.at(-1)).toBe(20 + defaults.confirm)
   })
 
+  test("says when the user has gone quiet partway through, until they go on", () => {
+    const endpointer = new Endpointer()
+    feed([...quiet(3), ...voiced(defaults.confirm)], endpointer)
+    expect(endpointer.pausing).toBe(false)
+    feed(quiet(2), endpointer)
+    expect(endpointer.pausing).toBe(true)
+    feed(voiced(1), endpointer)
+    expect(endpointer.pausing).toBe(false)
+    feed(quiet(defaults.silence), endpointer)
+    expect(endpointer.pausing).toBe(false)
+  })
+
   test("listens again after an utterance", () => {
     const endpointer = new Endpointer()
     feed([...voiced(10), ...quiet(defaults.silence)], endpointer)

@@ -928,22 +928,67 @@ describe("Over its first words, while yapd's own voice can still get into the mi
   test("stops for the user talking on past them about a second in, rather than once he's finished, and keeps what he said over them", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
-        const helper = yield* overHelper([[0.93, "Hold on,"], [0.94, "I need to tell you something."]])
+        // Too little over them to tell on its own.
+        const helper = yield* overHelper([[0.93, "Listen,"], [0.94, "I need to tell you something."]])
         yield* helper.wait(2.5)
         yield* helper.talk(0.93, 10)
         yield* helper.wait(1)
         yield* helper.talk(0.94, 20)
         const early = [...helper.commands]
-        yield* helper.talk(0.94, 10)
+        yield* helper.talk(0.94, 15)
         const later = [...helper.commands]
         yield* helper.talk(0.94, 30)
         yield* helper.quiet
-        return { early, later, sent: helper.sent }
+        return { early, later, sent: helper.sent, replies: yield* helper.replies }
       }),
     )
     expect(result.early).toEqual(["play"])
     expect(result.later).toEqual(["play", "stop"])
+    expect(result.sent).toEqual(["Listen, I need to tell you something."])
+    expect(result.replies).toEqual(["Listen, I need to tell you something."])
+  })
+
+  test("stops as soon as what the user said over them is made out, when he talks on past them", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.93, "Hold on,"], [0.94, "I need to tell you something."]])
+        yield* helper.wait(2.5)
+        yield* helper.talk(0.93, 10)
+        yield* helper.wait(1)
+        yield* helper.talk(0.94, 5)
+        const early = [...helper.commands]
+        yield* helper.talk(0.94, 30)
+        yield* helper.quiet
+        return { early, sent: helper.sent }
+      }),
+    )
+    expect(result.early).toEqual(["play", "stop"])
     expect(result.sent).toEqual(["Hold on, I need to tell you something."])
+  })
+
+  test("tells the user talking after them from its own voice running on into what he says, and passes on only his", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.95, "Hold on, which PR was that?"]])
+        yield* helper.wait(1)
+        yield* helper.talk(0.8, 20)
+        yield* helper.wait(2.2)
+        // He starts before Silero has heard the end of yapd's voice.
+        yield* helper.talk(0, 5)
+        yield* helper.talk(0.95, 20)
+        const early = [...helper.commands]
+        yield* helper.talk(0.95, 15)
+        const later = [...helper.commands]
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        return { early, later, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result.early).toEqual(["play"])
+    // About a second into what he said.
+    expect(result.later).toEqual(["play", "stop"])
+    expect(result.sent).toEqual(["Hold on, which PR was that?"])
+    expect(result.replies).toEqual(["Hold on, which PR was that?"])
   })
 
   test("doesn't take a stop yapd is saying itself, getting into the microphone, for the user", async () => {
@@ -1023,29 +1068,39 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ interrupted: 1, sent: [], replies: [] })
   })
 
-  test("doesn't take a question's own words getting through for an answer", async () => {
+  test("doesn't take a question's own words getting through for an answer, but takes one he carries on with once it's asked", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const answers: Array<string> = []
-        const helper = yield* overHelper([[0.8, "Which project is this for?"], [0.9, "The docs site."]])
+        const helper = yield* overHelper([[0.8, "Which one, sir?"], [0.85, "Or the docs site?"], [0.9, "The docs site."]], { duration: 3.5 })
         yield* Fiber.interrupt(helper.fiber)
         const asking = yield* Effect.fork(
           helper.ask({
             audio: "/tmp/question.wav",
-            spoken: "Which project is this for, sir: yapd, or the docs site? Say the name and I'll start it there right away.",
+            spoken: "Which one, sir: yapd or the docs site?",
             answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
           }),
         )
-        yield* helper.wait(0)
+        yield* helper.wait(0.5)
         yield* helper.talk(0.8, 10)
         yield* helper.quiet
+        yield* helper.wait(2)
+        yield* helper.talk(0.85, 10)
         const echoed = [...answers]
+        yield* helper.wait(1)
+        yield* helper.finish
         yield* helper.talk(0.9, 10)
         yield* helper.quiet
-        return { echoed, answered: yield* Fiber.join(asking), answers }
+        return { echoed, answered: yield* Fiber.join(asking), answers, transcribed: helper.transcribed }
       }),
     )
-    expect(result).toEqual({ echoed: [], answered: true, answers: ["The docs site."] })
+    // Each made out once, and only what he said after the question passed on.
+    expect(result).toEqual({
+      echoed: [],
+      answered: true,
+      answers: ["The docs site."],
+      transcribed: ["Which one, sir?", "Or the docs site?", "The docs site."],
+    })
   })
 })
 
