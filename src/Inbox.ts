@@ -57,7 +57,7 @@ export interface Notice {
    * end: never when it can't be played or breaks off before that's known.
    */
   readonly confirmed?: Effect.Effect<void>
-  /** Run once it's been said to the end, or answered or followed up, which is when the user has heard all of it: never when it's cut off, dropped or can't be said. */
+  /** Run once it's been said to the end, or for a question, answered, which is when the user has heard all of it: never when it's cut off, even by a follow-up, dropped or can't be said. */
   readonly heard?: Effect.Effect<void>
   /**
    * Run once it's done with, said or not, like gone stale, dropped or never
