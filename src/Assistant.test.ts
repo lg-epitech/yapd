@@ -2973,8 +2973,12 @@ describe("Assistant", () => {
       ["OK to merge now?", ["Not yet (Recommended)", "Merge now"], "OK.", "Merge now"],
       ["Is it fine to drop the old table?", ["Keep it for now (Recommended)", "Drop it"], "Fine.", "Drop it"],
       ["Should I deploy?", ["No, wait (Recommended)", "Yes, now"], "OK.", "Yes, now"],
+      // However the question is followed, it's still one a yes or no answers.
+      ["Should I run the migration now? It locks the table for an hour.", ["Skip it for now (Recommended)", "Do it now"], "Yes.", "Do it now"],
+      ["Should I run the migration now? It locks the table for an hour.", ["Skip it for now (Recommended)", "Do it now"], "No.", "Skip it for now (Recommended)"],
     ] as const) {
-      expect([heard, await answering(question, labels, heard, text)]).toEqual([heard, { asked: 1, spoken: [expect.stringMatching(/^A question/), `${text} it is, sir.`], answers: [{ part: text }] }])
+      const said = text.replace(" (Recommended)", "")
+      expect([heard, await answering(question, labels, heard, text)]).toEqual([heard, { asked: 1, spoken: [expect.stringMatching(/^A question/), `${said} it is, sir.`], answers: [{ part: text }] }])
     }
   })
 

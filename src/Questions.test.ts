@@ -324,9 +324,15 @@ describe("Questions", () => {
       "Proceed with the migration?",
       "Keep the old config?",
       "So, should I do it now?",
+      // Or followed by a remark.
+      "Should I run the migration now? It locks the table for an hour.",
     ]) {
       expect([asked, pick(part(asked, ["Do it", "Skip it for now (Recommended)"]), "Yes.")]).toEqual([asked, undefined])
     }
+    expect(["Yes.", "No."].map((heard) => pick(part("Should I run the migration now? It locks the table for an hour.", ["Skip it for now (Recommended)", "Do it now"]), heard))).toEqual([
+      undefined,
+      undefined,
+    ])
     expect(pick(part("Want me to add tests?", ["Add unit tests", "Skip tests (Recommended)"]), "Yes.")).toBeUndefined()
     // So is an okay, which is as much a yes to the question as to yapd's pick.
     for (const [asked, labels, heard] of [
@@ -351,6 +357,7 @@ describe("Questions", () => {
     expect([pick(colour, "Yes."), pick(colour, "No.")]).toEqual([picked(1), { _tag: "Instead" }])
     expect(pick(part("Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
     expect(pick(part("The test needs a colour. So, which one should it use?", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
+    expect(pick(part("Which colour should the test use? Blue matches the theme.", ["Red", "Blue (Recommended)"]), "Yes.")).toEqual(picked(1))
     // An option that is a yes or a no is still what a yes or no picks.
     const invoices = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
     expect([pick(invoices, "Yes."), pick(invoices, "No.")]).toEqual([picked(0), picked(1)])

@@ -654,13 +654,14 @@ const leaving: ReadonlySet<string> = new Set([
 const asksWhich = /^(?:which|what(?! about)|what's|how(?! about)|where|when|who|whom|whose|why)\b/i
 
 /**
- * Whether a plain yes or no answers the part's question itself, by its last
- * sentence, however it's put: "Should I keep the cache?", "Is caching still
+ * Whether a plain yes or no answers the part's question itself, by the last
+ * sentence that asks, whatever follows it, like "It locks the table for an
+ * hour.", however it's put: "Should I keep the cache?", "Is caching still
  * needed?", "Ready to merge?" or "Keep the old config?". Never one that asks
  * which, nor one that names two things, like "Red or Blue".
  */
 const whether = (part: Said) => {
-  const last = (part.question.split(/(?<=[.!?:])\s+/).at(-1) ?? "").replace(/^(?:so|and|then|now|also)\b,?\s*/i, "")
+  const last = (part.question.split(/(?<=[.!?:])\s+/).findLast((sentence) => sentence.endsWith("?")) ?? "").replace(/^(?:so|and|then|now|also)\b,?\s*/i, "")
   return last.endsWith("?") && !/\bor\b/i.test(last) && !asksWhich.test(last)
 }
 
