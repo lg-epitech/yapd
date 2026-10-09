@@ -742,6 +742,8 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(whose("Over and yeah the test past.", `${saying} and the pull request`)).toBe("echo")
     expect(whose("Codecs. Yap.", "Codex on yapd")).toBe("echo")
     expect(whose("Over in yapd, the tests pass. Now in the pool.", `${saying} and the pull request is ready`)).toBe("echo")
+    // Whisper says a word again on noise.
+    expect(whose("Over in yapd yapd, the tests pass.", saying)).toBe("echo")
   })
 
   test("takes a stop yapd was saying for its own voice, even cut off partway through a longer word", () => {
@@ -2249,6 +2251,71 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     )
     // The line, then asking him to say it again, and nothing more.
     expect(result).toEqual({ done: true, plays: [0, 0], rendered: [Persona.plain.misheard], sent: [] })
+  })
+
+  test("makes out one look at a time, however long Whisper takes, and only one look at what's been said so far while it's under way", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass now and the pull request"]], { live: true, delays: [3, 3, 3, 3] })
+        yield* helper.wait(0.3)
+        // Long enough for a look about a second in, and another a second later.
+        yield* helper.talk(0.8, 80)
+        yield* helper.quiet
+        const started = helper.transcribed.length
+        yield* helper.wait(8)
+        return { started, looks: helper.transcribed.length, commands: helper.commands, sent: helper.sent }
+      }),
+    )
+    // The first look so far, and all of it once that's done.
+    expect(result).toEqual({ started: 1, looks: 2, commands: ["play"], sent: [] })
+  })
+
+  test("doesn't take its own voice asking him to say it again for what he says again", async () => {
+    const said = "Tell it to open a PR."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Lines as short as asking him is, so where its words fall in it is known.
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, said], [0.85, Persona.plain.misheard], [0.91, said]], {
+          duration: 2,
+          spoken: "Over in yapd, the tests pass now, sir.",
+        })
+        yield* helper.talk(0.8, 15)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.wait(1.6)
+        // Its voice asking him gets into the microphone, which still hasn't learnt it.
+        yield* helper.wait(0.2)
+        yield* helper.talk(0.85, 12)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const asking = [...helper.commands]
+        yield* helper.finish
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { asking, rendered: helper.rendered, sent: helper.sent }
+      }),
+    )
+    expect(result).toEqual({ asking: ["play", "stop", "play"], rendered: [Persona.plain.misheard, "Okay."], sent: [said] })
+  })
+
+  test("picks up from before where the user began, not before what Whisper made up of its voice, when what's made out together wasn't meant for it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes three seconds over what it makes up.
+        const helper = yield* overHelper([[0.8, "Thank you."], [0.9, "Hold on, merge it."]], { intent: "resume", delays: [3] })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        yield* helper.wait(1.5)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(2)
+        return { plays: helper.plays, sent: helper.sent }
+      }),
+    )
+    // A second and a half before he began, two seconds in.
+    expect(result).toEqual({ plays: [0, 0.5], sent: [] })
   })
 
   test("picks up from before where the user began when he doesn't say it again, having taken in nothing", async () => {
