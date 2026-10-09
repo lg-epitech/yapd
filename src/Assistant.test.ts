@@ -983,8 +983,12 @@ describe("Assistant", () => {
     // Told to force with a lease, which still overwrites, and a command given apart from its words, which runs as one line.
     expect(await allowing(tool("mcp__git__git_push", { remote: "origin", branch: "main", force_with_lease: true }))).toEqual(risky)
     expect(await allowing(tool("mcp__shell__run", { command: "rm", args: ["-rf", "~/work"] }))).toEqual(risky)
-    // Going on over lines with nothing risky in it, or told to take all of a tree it only lists, a yes will do.
-    for (const items of [approval("r1", "git push origin main \\\n  --follow-tags"), tool("mcp__fs__list_directory", { path: "src", recursive: true })]) {
+    // Going on over lines with nothing risky in it, or told to take all of a tree it only lists or searches, whatever it looks for, a yes will do.
+    for (const items of [
+      approval("r1", "git push origin main \\\n  --follow-tags"),
+      tool("mcp__fs__list_directory", { path: "src", recursive: true }),
+      tool("mcp__search__search", { query: "how to remove a recursive function", recursive: true }),
+    ]) {
       expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Allow it, sir?", "Approved, sir."], dispatched: ["r1 accept"] })
     }
   })

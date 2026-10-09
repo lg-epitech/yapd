@@ -337,6 +337,8 @@ describe("Brain", () => {
       'mcp__fs__rm {"path":"~/work","recursive":true}',
       "mcp__fs__rm\npath\n~/work\nrecursive\ntrue",
       'mcp__files__manage {"action":"delete","path":"build","recursive":true}',
+      'mcp__files__manage {"type": "remove", "path": "build", "recursive": true}',
+      "mcp__files__manage\noperation\nunlink\npath\nbuild\nrecursive\ntrue",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -368,6 +370,8 @@ describe("Brain", () => {
       "mcp__fs__list_directory\npath\nsrc\nrecursive\ntrue",
       'mcp__git__git_push {"remote":"origin","force":false}',
       'mcp__git__git_push {"remote":"origin","force_with_lease":false}',
+      'mcp__search__search {"query":"how to remove a recursive function","recursive":true}',
+      "mcp__search__search\nquery\nhow to remove a recursive function\nrecursive\ntrue",
       'mcp__fetch__fetch {"url":"https://example.com","forceRefresh":true}',
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])

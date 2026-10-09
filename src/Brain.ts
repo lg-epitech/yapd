@@ -401,8 +401,22 @@ const forcing = setTo(String.raw`force|forced|force[_-]?(?:push|delete|with[_-]?
 /** A tool told to take all that's under what it's given, which only matters to one that deletes. */
 const recursing = setTo("recursive|recursively|recurse")
 
-/** A tool that deletes, by its name or by what it's told to do, like `mcp__fs__rm` or `{"action": "delete"}`. */
-const deleting = /(?:\b|_)(?:rm|rmdir|unlink|delete|remove|erase|trash|destroy|purge|wipe)(?:\b|_)/i
+/** A word that names deleting, like the "rm" of `mcp__fs__rm` or the "delete" of `{"action": "delete"}`. */
+const deletes = /(?:\b|_)(?:rm|rmdir|unlink|delete|remove|erase|trash|destroy|purge|wipe)(?:\b|_)/i
+
+/** A tool's name, as a line of its own or before the JSON it's given, like `mcp__fs__rm {"path": "x"}`. */
+const toolName = /^[\w.:-]+(?=[ \t]*(?:\{|$))/gm
+
+/** What a tool is told to do, under a name like "action" or "command", as its JSON writes it or a line each. */
+const toldTo = /(?:^|")(?:action|operation|op|method|command|mode|type)"?(?:\s*:\s*"|[ \t]*\r?\n)([^"\n]*)/gim
+
+/**
+ * Whether a tool deletes, by its name or by what it's told to do, never by
+ * any other words it's given, like what a search looks for, which can be
+ * "how to remove a recursive function".
+ */
+const deleting = (text: string) =>
+  [...text.matchAll(toolName)].some(([name]) => deletes.test(name)) || [...text.matchAll(toldTo)].some(([, what]) => deletes.test(what ?? ""))
 
 /**
  * Whether what a thread wants to do is risky, by what it says it would run
@@ -411,7 +425,7 @@ const deleting = /(?:\b|_)(?:rm|rmdir|unlink|delete|remove|erase|trash|destroy|p
  */
 export const dangerous = (text: string) => {
   const command = continued(text)
-  return [command, unquoted(command)].some((run) => risky.test(run) || forced.test(run)) || forcing.test(text) || (recursing.test(text) && deleting.test(text))
+  return [command, unquoted(command)].some((run) => risky.test(run) || forced.test(run)) || forcing.test(text) || (recursing.test(text) && deleting(text))
 }
 
 /**
