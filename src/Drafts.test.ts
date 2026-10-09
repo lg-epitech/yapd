@@ -393,6 +393,10 @@ describe("Drafts", () => {
     expect(Drafts.confirmation("On it, sir, in trainer on rig, on Fable, in a worktree.", resolved, started, lines)).toBe(
       "Right away, sir. In trainer on rig, on Fable, in a worktree.",
     )
+    // Nor how it addressed him, while the lines don't say how yet.
+    expect(Drafts.confirmation("On it, sir, in trainer on rig, on Fable, in a worktree.", resolved, started, { ...lines, address: "" })).toBe(
+      "Right away, sir. In trainer on rig, on Fable, in a worktree.",
+    )
     // With nothing else, there are no words of its own, so it's the plain facts, which need no line in front.
     expect(Drafts.confirmation("On it, sir.", resolved, started, lines)).toBe("Started in trainer on rig, on Claude Fable 5.1, in a worktree.")
     // Without lines of his own, it's the written one, much as the writer used to put it.

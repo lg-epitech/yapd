@@ -320,11 +320,11 @@ describe("Follow-ups", () => {
   })
 
   test("says a line of the persona's own in place of an \"On it\" the model wrote anyway, before whatever more it had to say", async () => {
-    const follow = (spoken: string) =>
+    const follow = (spoken: string, address = "sir") =>
       scoped(
         Effect.gen(function* () {
           const { layer } = scripted([{ intent: "send", spoken, message: "Merge the staging branch." }])
-          const lines = { ...Persona.plain, onIt: "Right away, sir.", address: "sir" }
+          const lines = { ...Persona.plain, onIt: "Right away, sir.", address }
           const { fiber, sent, speak, wait, saying } = yield* conversation(["Merge it."], 0, [], "sent", { lines, model: layer })
           yield* speak
           yield* wait(20)
@@ -334,6 +334,9 @@ describe("Follow-ups", () => {
       )
     expect(await follow("On it, sir.")).toEqual({ sent: ["Merge the staging branch."], saying: ["Right away, sir."] })
     expect((await follow("On it, sir. I took that to mean the staging branch.")).saying).toEqual(["Right away, sir. I took that to mean the staging branch."])
+    // Addressing him too while the lines don't say how yet.
+    expect((await follow("On it, sir.", "")).saying).toEqual(["Right away, sir."])
+    expect((await follow("On it, sir. I took that to mean the staging branch.", "")).saying).toEqual(["Right away, sir. I took that to mean the staging branch."])
     // Anything else it had to say is said as it is.
     expect((await follow("I took that to mean the staging branch.")).saying).toEqual(["I took that to mean the staging branch."])
   })

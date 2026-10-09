@@ -45,13 +45,22 @@ export const sayable = (lines: Lines) => [lines.onIt, lines.queued, lines.mishea
 export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
 
 /**
+ * How he may be addressed when the lines don't say yet, as when they're still
+ * being written in his style, or couldn't be: a word or two that ends the
+ * sentence, like "sir" in "On it, sir.", or one set off by a comma, like in
+ * "On it, boss, in yapd.". Never a place, like "in yapd", nor more words of
+ * a sentence, like "I took" in "On it, I took that to mean staging.".
+ */
+const someone = String.raw`(?!(?:,\s*|\s+)(?:in|on|at|to|for|from|with|without|into|by|the|a|an)\b)(?:(?:,\s*|\s+)[\p{L}'’]+(?:\s+[\p{L}'’]+)?(?=\s*(?:[.!?…]|$))|,\s*[\p{L}'’]+(?=\s*,))`
+
+/**
  * What's said past an "On it" it starts with, addressing him or not, which a
  * model may still write where yapd says a line of its own for going ahead:
  * "On it, sir, in yapd." is "In yapd.", and "On it, sir." is nothing.
  */
 export const afterOnIt = (spoken: string, lines: Pick<Lines, "address">) => {
   const address = lines.address.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const onIt = new RegExp(`^on it${address === "" ? "" : `(?:,?\\s*${address})?`}(?![\\p{L}\\p{N}])[\\s\\p{P}]*`, "iu")
+  const onIt = new RegExp(`^on it(?:${address === "" ? someone : `,?\\s*${address}`})?(?![\\p{L}\\p{N}])[\\s\\p{P}]*`, "iu")
   const said = spoken.trim()
   const rest = said.replace(onIt, "")
   return rest === said ? said : `${rest.charAt(0).toUpperCase()}${rest.slice(1)}`

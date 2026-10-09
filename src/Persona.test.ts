@@ -286,7 +286,21 @@ describe("Persona", () => {
     expect(Persona.afterOnIt("On it, sir, in yapd, on Fable, in a worktree.", sir)).toBe("In yapd, on Fable, in a worktree.")
     expect(Persona.afterOnIt("On it, in yapd, on Fable, without a worktree.", Persona.plain)).toBe("In yapd, on Fable, without a worktree.")
     expect(Persona.afterOnIt("On it — I took that to mean the staging branch.", sir)).toBe("I took that to mean the staging branch.")
+    // Addressing him while the lines don't say how yet, since they're still being written, or couldn't be.
+    expect(Persona.afterOnIt("On it, sir.", Persona.plain)).toBe("")
+    expect(Persona.afterOnIt("on it sir!", Persona.plain)).toBe("")
+    expect(Persona.afterOnIt("On it, my lord.", Persona.plain)).toBe("")
+    expect(Persona.afterOnIt("On it, sir, in yapd, on Fable", Persona.plain)).toBe("In yapd, on Fable")
+    expect(Persona.afterOnIt("On it, boss, in yapd.", Persona.plain)).toBe("In yapd.")
+    expect(Persona.afterOnIt("On it, ma'am. I took that to mean staging.", Persona.plain)).toBe("I took that to mean staging.")
+    // Words of what's said past it stay, however short.
+    expect(Persona.afterOnIt("On it. In yapd", Persona.plain)).toBe("In yapd")
+    expect(Persona.afterOnIt("On it, I took that to mean staging.", Persona.plain)).toBe("I took that to mean staging.")
+    expect(Persona.afterOnIt("On it, in yapd.", Persona.plain)).toBe("In yapd.")
+    expect(Persona.afterOnIt("On it, in yapd, on Fable.", Persona.plain)).toBe("In yapd, on Fable.")
+    expect(Persona.afterOnIt("On it, on Fable.", sir)).toBe("On Fable.")
     // Anything else is as it was.
+    expect(Persona.afterOnIt("On itself, sir, it's fine.", Persona.plain)).toBe("On itself, sir, it's fine.")
     expect(Persona.afterOnIt("On items like that, sir, I'd wait.", sir)).toBe("On items like that, sir, I'd wait.")
     expect(Persona.afterOnIt(" Consider it done, sir. ", sir)).toBe("Consider it done, sir.")
     expect(Persona.afterOnIt("yapd's on it, sir.", sir)).toBe("yapd's on it, sir.")
