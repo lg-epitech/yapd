@@ -2749,6 +2749,27 @@ describe("Assistant", () => {
       )
       expect(result).toEqual({ spoken: [`${label} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: label }] })
     }
+    // Close to an option's name but not it, words to stop the run are that option's, by words only it has, or the model's to tell.
+    for (const [labels, heard, model] of [
+      [["Cancel", "Retry the deploy (Recommended)"], "Cancel the run.", 1],
+      [["Stop the run and revert", "Keep going (Recommended)"], "Stop the run.", 0],
+      [["Interrupt and retry", "Wait it out (Recommended)"], "Interrupt the run.", 1],
+    ] as const) {
+      const [named] = labels
+      const question = { id: "next", question: "The benchmark run is taking two hours. Should I cancel the run?", options: labels.map((label) => ({ label })) }
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: named, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), sent: made.dispatched.map(({ type }) => type), answers: answered(made.dispatched) }
+        }),
+      )
+      expect([heard, result]).toEqual([heard, { asked: model, spoken: [`${named} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: named }] }])
+    }
   })
 
   test("a yes or an okay that starts another option's name is the model's to tell, which may take it for that option, never sending yapd's pick in its place", async () => {

@@ -1286,7 +1286,17 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   const on = focused(situation)
   // With nothing open, what's asked is what the thread he's on about asks him, when it asks him something: it's read to him again.
   if (Option.isNone(open) && questioning.has(said)) return Option.isSome(on) && on.value.state === "question" ? decision({ act: "reply", target: on.value.handle }) : undefined
-  if (stopping.has(said) && Option.isSome(on) && stoppable(on.value)) {
+  // Over the question of the thread he's on about, words to stop its run may be to an option that starts like them, like "cancel the run"
+  // to "Cancel" or "stop the run" to "Stop the run and revert": the model tells, never interrupting the turn that asked it.
+  const optioned = Option.exists(
+    open,
+    (question) =>
+      question.asks?._tag === "Question" &&
+      question.wording !== undefined &&
+      Option.exists(on, (listed) => question.candidates.some((ref) => Threads.same(ref, listed.ref))) &&
+      Questions.opens(question.wording.part, said.split(" ")[0] ?? ""),
+  )
+  if (stopping.has(said) && Option.isSome(on) && stoppable(on.value) && !optioned) {
     return decision({ act: "stop", target: on.value.handle, pending: replacing })
   }
   // With a question open, "cancel that" is a no to it.

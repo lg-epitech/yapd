@@ -441,6 +441,9 @@ const byName = (part: Said, said: string) => one(named(part, said))
 /** Whether what he said is one option's name in full, marks and all, as compared, or by how it sounds, like "Cancel the run". */
 export const names = (part: Said, heard: string) => exactly(part, heard) !== undefined || byName(part, gist(heard)) !== undefined
 
+/** Whether an option's name starts with these words, as written or as said, like "Cancel the deploy" with "cancel". */
+export const opens = (part: Said, heard: string) => gist(heard) !== "" && opening(part, gist(heard)).length > 0
+
 /**
  * Whether the options are named with numbers, like "2 workers" or "Node 20":
  * then a number he says is the one in a name, never a place.
