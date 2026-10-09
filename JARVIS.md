@@ -61,3 +61,7 @@ Live on `dev` now: everything below except rig and "Needs you". Cards for "show 
 - "Show Last Card" just after closing a card can come to nothing if the close reaches yapd after it: choose it again.
 - A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.
 - Rig's hooks aren't tied to their thread yet, so "tell it to…" after one of rig's updates goes the way hooks always have.
+- A question from rig that comes due while rig can't be reached waits until rig is back. If yapd restarts first, it isn't brought back by itself: ask "who needs me?".
+- Showing or hiding a card while an agent's question waits on you asks it again straight away, and the third time in a row lets it go: ask for it when you're ready.
+- For Yes and No options you hear "No it is, sir.", which can sound as if yapd is turning you down.
+- If T3 Code is slow to hand over a question as it arrives, you're only told one is waiting; "what's the question?" reads it to you.
