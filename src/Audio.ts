@@ -32,6 +32,12 @@ export class AudioError extends Data.TaggedError("AudioError")<{ readonly messag
 export interface Playback {
   /** In seconds. */
   readonly duration: number
+  /**
+   * Whether it's known to be playing, as the audio helper says once it
+   * starts. afplay can't say, so with it that's only known once `finished`
+   * succeeds, since it may never have started at all.
+   */
+  readonly confirmed: boolean
   /** Completes once it has played to the end. */
   readonly finished: Effect.Effect<void, AudioError>
   /** Stops it and returns how far it got, in seconds. */
@@ -97,6 +103,7 @@ const afplay = (playing: (count: 1 | -1) => void) => (path: string) =>
     const fiber = yield* Effect.forkScoped(run(["afplay", path]).pipe(Effect.ensuring(Effect.sync(() => playing(-1)))))
     return {
       duration: 0,
+      confirmed: false,
       finished: Fiber.join(fiber).pipe(
         Effect.asVoid,
         Effect.mapError((cause) => new AudioError({ message: "Could not play", cause })),
@@ -504,6 +511,7 @@ export const native = (
             const deadline = Duration.seconds(Math.max(0, playback.duration - from) + 10)
             return {
               duration: playback.duration,
+              confirmed: true,
               finished: Deferred.await(playback.finished).pipe(
                 Effect.timeoutFail({ duration: deadline, onTimeout: () => new AudioError({ message: "Playback never finished" }) }),
               ),

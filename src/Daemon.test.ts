@@ -47,6 +47,10 @@ const make = (says?: string, options: {
   readonly breaks?: Readonly<Record<string, number>>
   /** Lines that can't be played at all, as when the audio helper is down. */
   readonly unplayable?: ReadonlyArray<string>
+  /** Plays like afplay, which can't say it's playing, so that's known only once it has played to the end. */
+  readonly afplay?: boolean
+  /** Where the lines the persona is told are being said go, in order. */
+  readonly noted?: Array<string>
   readonly send?: (thread: Thread, text: string, handle: Handle, nextEvent: (...prefixes: ReadonlyArray<string>) => Effect.Effect<string>) => Effect.Effect<void, RelayError>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
@@ -74,7 +78,13 @@ const make = (says?: string, options: {
   let rests = 0
   let warms = 0
   const layer = Layer.mergeAll(
-    Persona.Plain,
+    options.noted === undefined
+      ? Persona.Plain
+      : Layer.succeed(Persona.Persona, {
+          lines: Effect.succeed(Persona.plain),
+          onIt: Effect.succeed(Persona.plain.onIt),
+          said: (line) => Effect.sync(() => void options.noted?.push(line)),
+        }),
     Journal.memory,
     Layer.succeed(Condenser, {
       condense: (_, turn) => Effect.sync(() => {
@@ -99,6 +109,7 @@ const make = (says?: string, options: {
           const breaks = options.breaks?.[text]
           return {
             duration: 10,
+            confirmed: options.afplay !== true,
             finished:
               breaks === undefined
                 ? Effect.sleep("10 seconds").pipe(
@@ -542,6 +553,71 @@ describe("Daemon", () => {
     expect(result.sent).toEqual(["a sent: Merge it."])
     // The update isn't read again: it was answered.
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. Okay, passed on."])
+  })
+
+  test("tells the persona of a reply's line said later only once it plays, never when yapd was turned off meanwhile", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const noted: Array<string> = []
+        const { finish, speak, wait, dictate } = yield* make("Merge it.", { noted })
+        yield* finish("a", "The PR is ready.", true)
+        yield* speak
+        // On its way to the agent, which takes three seconds.
+        yield* wait(1)
+        const dictation = yield* dictate
+        yield* wait(3)
+        const during = [...noted]
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(0)
+        yield* wait(11)
+        return { during, noted }
+      }),
+    )
+    expect(result).toEqual({ during: [], noted: ["Okay, passed on."] })
+    const off = await run(
+      Effect.gen(function* () {
+        const noted: Array<string> = []
+        const { finish, speak, wait, power, played } = yield* make("Merge it.", { noted })
+        yield* finish("a", "The PR is ready.")
+        yield* speak
+        yield* wait(1)
+        yield* power(false)
+        yield* power(true)
+        yield* wait(3)
+        yield* wait(30)
+        return { played: [...played], noted }
+      }),
+    )
+    expect(off).toEqual({ played: ["yapd. The PR is ready."], noted: [] })
+  })
+
+  test("with afplay, tells the persona of a reply's line said later only once it has played to the end, never when afplay can't play it", async () => {
+    const follow = (breaks: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const noted: Array<string> = []
+          const { finish, speak, wait, dictate, played } = yield* make("Merge it.", {
+            noted,
+            afplay: true,
+            ...(breaks ? { breaks: { "yapd. Okay, passed on.": 1 } } : {}),
+          })
+          yield* finish("a", "The PR is ready.", true)
+          yield* speak
+          yield* wait(1)
+          const dictation = yield* dictate
+          yield* wait(3)
+          yield* Scope.close(dictation, Exit.void)
+          yield* wait(0)
+          // The line is playing.
+          yield* wait(5)
+          const during = [...noted]
+          yield* wait(20)
+          return { played, during, noted }
+        }),
+      )
+    const played = ["yapd. The PR is ready.", "yapd. Okay, passed on."]
+    expect(await follow(true)).toEqual({ played, during: [], noted: [] })
+    expect(await follow(false)).toEqual({ played, during: [], noted: ["Okay, passed on."] })
   })
 
   test.each([false, true])("keeps a fast follow-up answer that arrives before delivery returns, with a prompt hook: %s", async (promptHook) => {

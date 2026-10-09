@@ -232,6 +232,14 @@ YAPD_STYLE="Talk like Jarvis from Iron Man: calm, precise, with a dry British wi
 
 The style applies to the summaries, to its answers when you interrupt, and to what it says about new work. It doesn't change what it passes on to the agent or the prompts it writes, and summaries stay a sentence or two.
 
+To choose what it says once you've asked for something, rather than the line written in your style, list your own, separated by `|`. It says a different one from last time, and renders them all ahead:
+
+```sh
+YAPD_ON_IT="Right away, sir.|Very good, sir.|Consider it done, sir.|Very well, sir."
+```
+
+A line that asks something is left out, since you'd answer it.
+
 ## Quick turns
 
 yapd skips turns that finish in under 20 seconds, since you were probably watching. Set `YAPD_MIN_SECONDS` in `~/.yapd/.env` to change the cutoff, or to `0` to hear every turn.
