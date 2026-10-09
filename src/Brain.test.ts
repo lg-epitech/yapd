@@ -268,6 +268,30 @@ describe("Brain", () => {
     expect(about(mina)).toBeUndefined()
   })
 
+  test("an option named like stopping the run, taking a card down or hearing it again is that option, said over its question, with no model", () => {
+    const { open, desk: shown } = questionOpen(0)
+    const named = (labels: ReadonlyArray<string>, heard: string, overrides: Partial<Brain.Situation> = {}) => {
+      const asked: Questions.Question = { id: "next", header: "", question: "The deploy run keeps failing. What now?", options: labels.map((label) => ({ label, description: "" })), multiSelect: false, allowCustomAnswer: true, required: true }
+      const worded = Questions.worded({ called: "Migrate Tezos Integration", parts: [Questions.said(asked, Questions.sayQuestion(asked.question))], lines })
+      if (worded._tag !== "Ask") throw new Error("Only told")
+      const wording = worded.parts[0]!
+      const asking: Assistant.Open = { ...open, asked: wording.first, asks: { _tag: "Question", requestId: "q1", questions: [asked], mode: "live", part: 0, collected: {}, inFull: true }, wording }
+      const subject: Assistant.Subject = { _tag: "Answer", said: asking.asked, about: Option.some(ref(tezos)) }
+      const made = Brain.fast(situation(heard, { open: Option.some(asking), desk: shown, subject, ...overrides }), lines)
+      return made === undefined ? undefined : { act: made.act, text: made.text, pending: made.pending }
+    }
+    const answer = (text: string) => ({ act: "reply" as const, text, pending: "answers" as const })
+    expect(named(["Cancel the run", "Retry the deploy (Recommended)"], "Cancel the run.")).toEqual(answer("Cancel the run"))
+    expect(named(["Stop the run", "Retry the deploy (Recommended)"], "Stop the run.")).toEqual(answer("Stop the run"))
+    expect(named(["Close it", "Keep it open (Recommended)"], "Close it.", { showing: "Migrate Tezos Integration" })).toEqual(answer("Close it"))
+    expect(named(["Repeat it", "Move on (Recommended)"], "Repeat it.")).toEqual(answer("Repeat it"))
+    expect(named(["Show me what you said", "Carry on (Recommended)"], "Show me what you said.")).toEqual(answer("Show me what you said"))
+    // An option it isn't still lets those words stop the run, as do they while he's hearing of another thread.
+    expect(named(["Cancel the deploy", "Retry the deploy (Recommended)"], "Cancel the run.")?.act).toBe("stop")
+    const other: Assistant.Subject = { _tag: "Answer", said: "It's waiting on you to allow a command.", about: Option.some(ref(std)) }
+    expect(named(["Stop the run", "Retry the deploy (Recommended)"], "Stop the run.", { subject: other })?.act).toBe("stop")
+  })
+
   test("a bare stop never stops a thread", () => {
     const busy: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
     // Not even while he's hearing about one that's running.

@@ -1261,6 +1261,16 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   if (said === "" || (over !== undefined && over.times >= 3 && !meant) || (hallucinated.has(said) && utterance.voiced < faint)) {
     return decision({ act: "resume" })
   }
+  // The name of an option of the thread's question open, like "Cancel the run", "Close it" or "Repeat it", is that option, said over it:
+  // never stopping the work that asked it, taking a card down, or hearing it again. Unless he's hearing of another thread, whose run
+  // those words may be to stop.
+  if (Option.isSome(open) && open.value.asks?._tag === "Question" && open.value.wording !== undefined && Questions.names(open.value.wording.part, utterance.heard)) {
+    const asking = open.value
+    const elsewhere = Option.exists(about(subject), (ref) => !asking.candidates.some((candidate) => Threads.same(candidate, ref)))
+    const thread = desk.threads.find((listed) => asking.candidates.some((ref) => Threads.same(listed.ref, ref)))
+    const settled = elsewhere ? undefined : settling(asking, utterance.heard, said, thread?.handle ?? "")
+    if (settled !== undefined) return settled
+  }
   // Right after the question, it's the question he didn't catch, which is asked again in other words; after anything else, like an update, that's said again instead.
   const askedLast = Option.isSome(open) && subject._tag === "Answer" && subject.said === open.value.asked
   if (again.has(said)) {

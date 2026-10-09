@@ -432,6 +432,9 @@ const named = (part: Said, said: string) => {
 /** An option by its name, as written or as said, or failing that by how it sounds, when only one fits. */
 const byName = (part: Said, said: string) => one(named(part, said))
 
+/** Whether what he said is one option's name in full, marks and all, as compared, or by how it sounds, like "Cancel the run". */
+export const names = (part: Said, heard: string) => exactly(part, heard) !== undefined || byName(part, gist(heard)) !== undefined
+
 /**
  * Whether the options are named with numbers, like "2 workers" or "Node 20":
  * then a number he says is the one in a name, never a place.

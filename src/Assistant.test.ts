@@ -2657,6 +2657,22 @@ describe("Assistant", () => {
     expect(await answering(deploy, "Cancel.", "Cancel the deploy")).toEqual({ asked: 1, spoken: ["Cancel the deploy it is, sir."], answers: [{ deploy: "Cancel the deploy" }] })
   })
 
+  test("an option named like stopping the run answers its question, never interrupting the turn that asked it", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    for (const label of ["Cancel the run", "Stop the run"]) {
+      const question = { id: "next", question: "The deploy run keeps failing. What now?", options: [{ label }, { label: "Retry the deploy (Recommended)" }] }
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [question]) })
+          yield* asked(made, cloud)
+          yield* made.answer(`${label}.`)
+          return { spoken: made.spoken().slice(1), sent: made.dispatched.map(({ type }) => type), answers: answered(made.dispatched) }
+        }),
+      )
+      expect(result).toEqual({ spoken: [`${label} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: label }] })
+    }
+  })
+
   test("a yes or an okay that starts another option's name is the model's to tell, which may take it for that option, never sending yapd's pick in its place", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (labels: ReadonlyArray<string>, heard: string, text: string) =>
