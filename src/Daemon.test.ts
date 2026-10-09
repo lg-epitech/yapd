@@ -1882,7 +1882,7 @@ describe("Daemon", () => {
     ["thanks", "Thanks.", "over"],
     ["stop", "Stop.", "over"],
     ["a follow-up", "What's it waiting on?", "right after"],
-  ])("what he missed that a catch-up answer told him, followed by %s said %s it, is heard only once it was said to the end", async (_, said, when) => {
+  ])("what he missed that a catch-up answer told him, followed by %s said %s it, is heard only once it was said to the end, and told again when he asks", async (_, said, when) => {
     const result = await run(
       Effect.gen(function* () {
         const { finish, wait, toggle, dictating, speak, played, journal } = yield* assisted(
@@ -1903,7 +1903,12 @@ describe("Daemon", () => {
         yield* wait(when === "over" ? 3 : 11)
         yield* speak
         for (let i = 0; i < 3; i++) yield* wait(11)
-        return { unheard: (yield* journal.unheard(0, 12)).map(({ said }) => said), played: [...played] }
+        const unheard = (yield* journal.unheard(0, 12)).map(({ said }) => said)
+        const told = played.length
+        // What he said back was part of catching up, so asking again still reaches what he didn't hear of it.
+        yield* dictating("What did I miss?")
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        return { unheard, played: played.slice(0, told), again: played.slice(told) }
       }),
     )
     // Cut off, it's dealt with all the same: never said again.
@@ -1913,5 +1918,28 @@ describe("Daemon", () => {
       ...(said === "What's it waiting on?" ? ["A review, sir."] : []),
     ])
     expect(result.unheard).toEqual(when === "over" ? ["yapd. The loader fix is ready."] : [])
+    // Heard to the end, it's never told twice.
+    expect(result.again).toEqual([when === "over" ? "You missed this: yapd. The loader fix is ready." : "Nothing else."])
+  })
+
+  test.each([
+    ["What did I miss?", "Nothing else.", "catch-up"],
+    ["What's going on?", "Two things are running, sir.", undefined],
+  ])("thanks said to the answer to %s is noted as catching up only when that was", async (asked, spoken, over) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictating, wait, speak, journal } = yield* assisted(() => Brain.decision({ act: "answer", spoken }), {
+          microphone: true,
+          transcripts: ["Thanks."],
+        })
+        yield* dictating(asked)
+        yield* wait(11)
+        yield* speak
+        yield* wait(1)
+        return (yield* journal.since(0, { kinds: ["reply"] })).map(({ detail }) => (detail as { readonly over?: string }).over)
+      }),
+    )
+    // Even with nothing missed, what he says back to catching up never hides what comes in meanwhile and he doesn't hear.
+    expect(result).toEqual([over])
   })
 })

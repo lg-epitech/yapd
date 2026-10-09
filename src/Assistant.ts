@@ -66,6 +66,8 @@ export type Subject =
       readonly about: Option.Option<Threads.Ref>
       /** What he missed that it told him, by journal entry, which counts as heard once he's heard it to the end, said again or not. */
       readonly missed?: ReadonlyArray<number>
+      /** Whether it answered him catching up, even with nothing he missed, so what he says back to it is part of catching up. */
+      readonly catchingUp?: true
       /** The question it asks, if it does: once that's closed, however quietly, it's told rather than asked again (I4). */
       readonly question?: Open
       /** The question it was, in the words it was asked in, once it's closed: shown as it was, but told rather than asked again (I4). */
@@ -282,14 +284,23 @@ const alone = (kept: Kept) => {
 /**
  * Whether a journal entry is him catching up, asking what he missed, at once
  * or on a second look, or asking to hear something again, like a catch-up he
- * didn't hear through: neither tells him anything until he's heard the answer.
+ * didn't hear through, or saying something back to what he missed, like
+ * "thanks" or "stop" over it: none tells him anything until he's heard the
+ * answer, and what a reply cut off he never did.
  */
 const catchUp = (kept: Kept) => {
   if (Brain.catchingUp(kept.text ?? "")) return true
   if (typeof kept.detail !== "object" || kept.detail === null) return false
-  const { decision, second } = kept.detail as { readonly decision?: Partial<Brain.Decision>; readonly second?: Partial<Brain.Decision> }
-  return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again"
+  const { decision, second, over } = kept.detail as {
+    readonly decision?: Partial<Brain.Decision>
+    readonly second?: Partial<Brain.Decision>
+    readonly over?: unknown
+  }
+  return decision?.how === "missed" || second?.how === "missed" || decision?.act === "again" || over === "catch-up"
 }
+
+/** Whether "it" is an answer telling him what he missed, or what he asked catching up, so what he says back to it is part of catching up. */
+const caughtUp = (subject: Subject) => subject._tag === "Answer" && (subject.missed !== undefined || subject.catchingUp === true)
 
 /** Whether he only told yapd to stop what it's saying, like "skip" or "stop, stop", rather than taking it in, like "thanks". */
 const hushed = (heard: string) => enough.has([...new Set(gist(heard).split(" "))].join(" "))
@@ -823,7 +834,7 @@ export const make = (options: {
         const ref = Option.map(about, ({ ref }) => ref)
         const told = {
           say: text,
-          subject: { _tag: "Answer", said: text, about: ref, ...(missed.length === 0 ? {} : { missed }) },
+          subject: { _tag: "Answer", said: text, about: ref, ...(missed.length === 0 ? {} : { missed }), ...(catching ? { catchingUp: true } : {}) },
           kind: "answer",
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),
@@ -1867,13 +1878,16 @@ export const make = (options: {
         const { utterance, decision } = thought
         const { second } = outcome
         const ms = (yield* Clock.currentTimeMillis) - began
+        // Said back to what he missed, cutting it off or after it, it's part of catching up, so it never hides what he didn't hear
+        // of that from the next "what did I miss?": heard to the end, it's heard, and never told again anyway.
+        const over = utterance.via === "reply" && caughtUp(thought.subject) ? { over: "catch-up" } : {}
         // What was said back has an entry of its own.
         yield* journal.write({
           at: utterance.at,
           kind: utterance.via === "reply" ? "reply" : "dictation",
           text: utterance.heard,
           utterance: utterance.id,
-          detail: { via: utterance.via, source: thought.source, decision, ...(second === undefined ? {} : { second }), ms, outcome: outcome.kind },
+          detail: { via: utterance.via, source: thought.source, decision, ...(second === undefined ? {} : { second }), ...over, ms, outcome: outcome.kind },
         })
         yield* Effect.logInfo(`Timing: ${(ms / 1000).toFixed(1)} s from what was said to what to say`)
       })
