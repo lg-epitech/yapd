@@ -421,11 +421,13 @@ export const make = (options: {
     if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)
     if (Option.isSome(sent) && sent.value._tag === "Cancel") {
       // Withdrawn, T3 Code drops the run, and its message, from the thread, or shows it cancelled. One that started meanwhile is being read,
-      // as is one he steered into the turn under way, which cancels the run it waited in too, but keeps the message.
+      // as is one he steered into the turn under way, which cancels the run it waited in too, but keeps the message. Looked for as `traced`
+      // finds it: once enough turns since have pushed all else of it out of the thread's last turns, the cancelled run they still show
+      // can't tell the two apart, and only the whole thread can, which failing to read fails the look.
       const { runId, messageId } = sent.value
       if (messageId === undefined) return Effect.map(actions.detail(row.thread), ({ runs }) => !runs.some(({ id, status }) => id === runId && status !== "cancelled"))
       return Effect.map(
-        actions.message(row.thread, messageId),
+        actions.traced(row.thread, messageId),
         Option.match({
           onNone: () => true,
           onSome: ({ intent, run }) => !Option.exists(intent, steeredIn) && Option.exists(run, ({ status }) => status === "cancelled"),
