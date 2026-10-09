@@ -813,6 +813,8 @@ const overHelper = (
         if (playing !== undefined) send({ type: "finished", id: playing.id })
         playing = undefined
       }).pipe(Effect.zipRight(flush)),
+      /** The helper quits, taking the microphone with it. */
+      quit: Effect.sync(() => connection?.terminate()).pipe(Effect.zipRight(flush)),
       replies: Effect.map(Effect.flatMap(Journal.Journal, (journal) => journal.since(0)), (entries) => entries.map(({ text }) => text)).pipe(
         Effect.provide(context),
       ),
@@ -1051,6 +1053,38 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result.commands.slice(0, 3)).toEqual(["play", "stop", "play"])
     // A second and a half before he began, two seconds in, rather than before where it stopped, three and a half seconds in.
     expect(result.plays).toEqual([0, 0.5])
+  })
+
+  test("lets what it's making out decide how a line ends that finishes meanwhile, however long that takes", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // A line short enough to be over before Whisper is done, which takes longer than yapd waits for a reply.
+        const helper = yield* overHelper([[0.9, "Hold on, merge it."]], { delays: [10], duration: 2, spoken: "Codex is done, sir." })
+        yield* helper.wait(1)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        yield* helper.finish
+        for (let second = 0; second < 10; second++) yield* helper.wait(1)
+        return { sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ sent: ["Hold on, merge it."], replies: ["Hold on, merge it."] })
+  })
+
+  test("still passes on what it was making out when the helper quits meanwhile", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Hold on, merge it."]], { delays: [5] })
+        yield* helper.wait(1)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.quit
+        yield* helper.wait(5)
+        return { sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ sent: ["Hold on, merge it."], replies: ["Hold on, merge it."] })
   })
 
   test("carries on when Whisper can't make out what may be its own voice", async () => {
