@@ -47,6 +47,8 @@ describe("Questions", () => {
       "Use `FEE_TABLE_V2` or the old one?",
       "Should I keep the {debug} flag…",
       "Quelle base de données préférez-vous pour les tests?",
+      "Should I cherry-pick 4f2a9c81e7b3 onto main?",
+      "Is 2d5cee5c-6a1f-4b7e-9d3c-1f0e8a7b6c5d the right request?",
       `Which of these should I do first, given that ${"the migration ".repeat(11)}is late?`,
     ]) {
       expect([unsayable, Questions.sayQuestion(unsayable)]).toEqual([unsayable, Option.none()])
@@ -181,13 +183,15 @@ describe("Questions", () => {
     ] as const) {
       expect([heard, pick(heard)]).toEqual([heard, index === undefined ? undefined : picked(index)])
     }
-    // Cut off before yapd said its pick, a yes is asked again in full.
+    // Cut off before yapd said its pick, a yes is asked again in full, and a no may be to the question, which is the model's.
     expect(pick("Yes.", false)).toEqual({ _tag: "Again" })
+    expect(pick("No.", false)).toBeUndefined()
     // A plain no to the pick: which one then.
     expect(pick("No.")).toEqual({ _tag: "Instead" })
-    // A letter is a letter's own option when one is called by one.
+    // A letter is a letter's own option when one is called by one, and no option's place when one is.
     expect(Questions.pick(part("Which plan?", ["A", "B", "Neither"]), "B.", { inFull: true, parts: 1 })).toEqual(picked(1))
     expect(Questions.pick(part("Which grade?", ["B", "A"]), "A.", { inFull: true, parts: 1 })).toEqual(picked(1))
+    expect(Questions.pick(part("Which plan?", ["A", "Keep going", "Stop"]), "C.", { inFull: true, parts: 1 })).toBeUndefined()
     // Yes or no to the option that starts with it, whatever yapd would pick.
     const migrate = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
     expect(Questions.pick(migrate, "Yeah.", { inFull: true, parts: 1 })).toEqual(picked(0))
@@ -225,6 +229,8 @@ describe("Questions", () => {
     expect(pick("Yes.")).toEqual(picked(2))
     expect(pick("None of them.")).toEqual({ _tag: "Words", text: "None of those." })
     expect(Questions.pick(part("Which checks?", ["Lint", "Types"], { multiSelect: true }), "Both.", { inFull: true, parts: 1 })).toEqual(picked(0, 1))
+    // "Both" of more than two is the model's to make sense of.
+    expect(Questions.pick(part("Which checks?", ["Lint", "Types", "Tests"], { multiSelect: true }), "Both.", { inFull: true, parts: 1 })).toBeUndefined()
     expect(pick("Alpha and something else.")).toBeUndefined()
     // Sent as a list straight to the agent, and as one string when T3 Code takes the answer as a message.
     const asked = question(extras.id, ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
@@ -240,6 +246,9 @@ describe("Questions", () => {
     expect(Questions.resolve(extras, "Alpha, Gamma")).toEqual({ _tag: "Picked", options: [0, 2] })
     expect(Questions.resolve(colour, "Blue, but only for the tests.")).toEqual({ _tag: "Words", text: "Blue, but only for the tests." })
     expect(Questions.resolve(colour, "Red\nBlue")).toEqual({ _tag: "Words", text: "Red\nBlue" })
+    // An option with more on a line of its own is his words, all of them, never only the option.
+    expect(Questions.resolve(colour, "Blue\nbut only for the tests")).toEqual({ _tag: "Words", text: "Blue\nbut only for the tests" })
+    expect(Questions.resolve(extras, "Alpha\nGamma\nbut skip them on CI")).toEqual({ _tag: "Words", text: "Alpha\nGamma\nbut skip them on CI" })
     expect(Questions.resolve(colour, " ")).toEqual({ _tag: "Again" })
     expect(Questions.resolve(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Green.")).toEqual({ _tag: "Instead" })
   })
