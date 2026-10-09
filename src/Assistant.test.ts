@@ -176,6 +176,8 @@ const assistant = (
     readonly writer?: { readonly begun: Effect.Effect<void>; readonly stopped: Effect.Effect<void> }
     /** How long writing a prompt from what it's written from takes, on top of the rest, which can be for good. */
     readonly writes?: (material: Material) => Effect.Effect<void>
+    /** The persona's line for going ahead, in place of the written one. */
+    readonly onIt?: string
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -205,6 +207,13 @@ const assistant = (
     })
     const started: Array<Request> = []
     const said: Array<Notice> = []
+    /** What the persona was told is being said. */
+    const noted: Array<string> = []
+    const persona = Layer.succeed(Persona.Persona, {
+      lines: Effect.succeed(lines),
+      onIt: () => Effect.succeed(given.onIt ?? lines.onIt),
+      said: (spoken) => Effect.sync(() => void noted.push(spoken)),
+    })
     const seen: Array<Brain.Situation> = []
     const drafts = yield* Drafts.make({
       machines: [
@@ -244,6 +253,7 @@ const assistant = (
           Effect.sleep(`${given.researching ?? 0} seconds`).pipe(Effect.as({ action: "start" as const, why: "It's in the loader.", prompt: "Fix the loader.", spoken: "" })),
         prepare: Effect.void,
       }),
+      Effect.provide(persona),
     )
     let power = { on: true, turns: 1 }
     let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean }>()
@@ -278,7 +288,7 @@ const assistant = (
                 )
               }),
           }),
-          Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines), onIt: () => Effect.succeed(lines.onIt), said: () => Effect.void }),
+          persona,
         ),
       ),
     )
@@ -287,6 +297,8 @@ const assistant = (
     const questions = () => said.filter(({ kind }) => kind === "question")
     return {
       ...made,
+      told: said,
+      noted,
       started,
       seen,
       journal,
@@ -720,6 +732,27 @@ describe("Assistant", () => {
     expect(result).toEqual({ runningOn: false, runningAfterOff: false })
   })
 
+  test("notes the line for going ahead that new work is said with as the last one he heard only once it's known to play", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, told, noted } = yield* assistant(
+          () => Brain.decision({ act: "start", text: "In std, fix the loader." }),
+          () => written({ project: "std", evidence: "std", spoken: "On it, sir, in std, on Opus, without a worktree." }),
+          { onIt: "Right away, sir." },
+        )
+        yield* dictate("In std, fix the loader.")
+        const started = told.find(({ kind }) => kind === "done")
+        // Queued, and even heard as far as the test's speaker goes, but not yet known to play.
+        const before = [...noted]
+        yield* started?.confirmed ?? Effect.void
+        return { spoken: started?.spoken, before, noted }
+      }),
+    )
+    expect(result.spoken).toBe("Right away, sir. In std, on Opus, without a worktree.")
+    expect(result.before).toEqual([])
+    expect(result.noted).toEqual(["Right away, sir. In std, on Opus, without a worktree."])
+  })
+
   test("starting new work that mentions an existing thread starts new work", async () => {
     const dictated =
       "Can you please go and look at what I did for the migration process for Mina and start another thread in integration on the main worktree to start working on the migration for Tezos, so I have a ticket open for that as well in my linear."
@@ -733,7 +766,7 @@ describe("Assistant", () => {
               project: "integration",
               evidence: "integration",
               prompt: "Look at what I did for the Mina migration and start on the migration for Tezos.",
-              spoken: "Started in integration, on Opus, without a worktree.",
+              spoken: "In integration, on Opus, without a worktree.",
               ...(lines[0]?.text === dictated ? {} : { action: "none" }),
             }),
         )
@@ -744,7 +777,7 @@ describe("Assistant", () => {
     )
     expect(result.questions).toBe(0)
     expect(result.started.map(({ project }) => project)).toEqual(["/code/integration"])
-    expect(result.spoken).toEqual(["Started in integration, on Opus, without a worktree."])
+    expect(result.spoken).toEqual(["On it, sir. In integration, on Opus, without a worktree."])
     expect(result.kept).toEqual([["new-thread", true]])
   })
 
@@ -890,7 +923,7 @@ describe("Assistant", () => {
           ({ lines }) =>
             lines.length === 1
               ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" })
-              : written({ project: "std", evidence: "Std", spoken: "Started in std, on Opus, without a worktree." }),
+              : written({ project: "std", evidence: "Std", spoken: "In std, on Opus, without a worktree." }),
         )
         yield* dictate("Fix the loader.")
         const first = yield* open
@@ -909,7 +942,7 @@ describe("Assistant", () => {
       "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
       // The same question again within ten minutes, so in other words.
       "Which project should the loader fix go in, sir?",
-      "Started in std, on Opus, without a worktree.",
+      "On it, sir. In std, on Opus, without a worktree.",
     ])
     expect(result.started.map(({ project }) => project)).toEqual(["/code/std"])
     expect(result.open).toEqual(Option.none())
@@ -927,7 +960,7 @@ describe("Assistant", () => {
               const named = lines.length === 1 ? undefined : ["yapd", "std"].find((name) => said.toLowerCase().includes(name))
               return named === undefined
                 ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" })
-                : written({ project: named, evidence: said.replace(/\W+$/, ""), spoken: `Started in ${named}, on Opus, without a worktree.` })
+                : written({ project: named, evidence: said.replace(/\W+$/, ""), spoken: `In ${named}, on Opus, without a worktree.` })
             },
           )
           yield* dictate("Fix the loader.")
@@ -938,7 +971,7 @@ describe("Assistant", () => {
     for (const reply of ["Yapd.", "yapd", "Yapd, please."]) {
       expect(await answered(reply)).toEqual({
         taken: true,
-        spoken: ["For the loader fix, is that yapd or std?", "Started in yapd, on Opus, without a worktree."],
+        spoken: ["For the loader fix, is that yapd or std?", "On it, sir. In yapd, on Opus, without a worktree."],
         open: Option.none(),
         started: ["/code/yapd"],
       })
@@ -1218,7 +1251,7 @@ describe("Assistant", () => {
           ({ lines }) =>
             lines.length === 1
               ? written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" })
-              : written({ project: "std", evidence: "Std", spoken: "Started in std, on Opus, without a worktree." }),
+              : written({ project: "std", evidence: "Std", spoken: "In std, on Opus, without a worktree." }),
           { launching: 5 },
         )
         yield* dictate("Fix the loader.")

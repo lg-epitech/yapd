@@ -113,6 +113,8 @@ export interface Outcome {
   readonly missed?: ReadonlyArray<number>
   /** What was decided on a second look, at a thread or at what was found, which the answer is. */
   readonly second?: Brain.Decision
+  /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
+  readonly confirmed?: Effect.Effect<void>
 }
 
 /** What the user says to yapd itself, worked out and acted on. */
@@ -714,7 +716,13 @@ export const make = (options: {
             return reply(outcome.spoken, { _tag: "Nothing" })
           case "Started": {
             const { started, machine, spoken } = outcome
-            return { say: spoken, subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) }, kind: "done" } satisfies Outcome
+            return {
+              say: spoken,
+              subject: { _tag: "Answer", said: spoken, about: Option.some({ machine: machine.name, id: started.thread }) },
+              kind: "done",
+              // Only once it's known to play, so a line for going ahead that's dropped as yapd is turned off, or can't be played, never counts as the last one he heard.
+              confirmed: persona.said(spoken),
+            } satisfies Outcome
           }
           case "Asked": {
             const about = outcome.about || "that"
@@ -1013,6 +1021,7 @@ export const make = (options: {
               }),
             ),
             ...(missed === undefined ? {} : { heard: Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard(missed, now)) }),
+            ...(outcome.confirmed === undefined ? {} : { confirmed: outcome.confirmed }),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {

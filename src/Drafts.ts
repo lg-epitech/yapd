@@ -1,5 +1,6 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
+import { afterOnIt, type Lines, Persona, withOnIt } from "./Persona.ts"
 import type { Heard } from "./Recent.ts"
 import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
@@ -93,15 +94,23 @@ export const resolve = (
 
 /**
  * What's said once it started. The writer's own words when they match what
- * started, since it says names the way people do. Otherwise the plain facts,
+ * started, since it says names the way people do, after the line for going
+ * ahead, `lines.onIt`, which they leave to yapd. Otherwise the plain facts,
  * with what the launcher had to add.
  */
-export const confirmation = (spoken: string, { unsure, machine, project, catalog, request }: Resolved, started: Started) => {
+export const confirmation = (
+  spoken: string,
+  { unsure, machine, project, catalog, request }: Resolved,
+  started: Started,
+  lines: Pick<Lines, "onIt" | "address">,
+) => {
   const asked = started.worktree === request.worktree && (request.model === undefined || same(request.model, started.model))
   const title = catalog.models.find(({ name }) => same(name, started.model))?.title ?? started.model
   const where = started.worktree ? "in a worktree" : "without a worktree"
   const plain = `Started in ${project.name}${machine.here ? "" : ` on ${machine.name}`}, on ${title}, ${where}.`
-  const said = asked && spoken.trim() !== "" ? spoken.trim() : plain
+  // An "On it" the writer put in front anyway goes, since the line for going ahead takes its place, and with only that there are no words of its own.
+  const words = afterOnIt(spoken, lines)
+  const said = asked && words !== "" ? withOnIt(lines.onIt, words) : plain
   return [
     said,
     // It's how they catch a worktree that was misheard, so it's never left to the writer alone.
@@ -162,6 +171,7 @@ export const make = (options: {
 }) =>
   Effect.gen(function* () {
     const writer = yield* Writer
+    const persona = yield* Persona
     const scope = yield* Effect.scope
     const writing = yield* Effect.makeSemaphore(writers)
     const research = options.machines.some(({ researcher }) => researcher.available)
@@ -223,9 +233,11 @@ export const make = (options: {
           }
           const started = outcome.right
           yield* Effect.logInfo(`Started ${started.thread} in ${started.directory}`)
+          // Picked as it's about to be said, and noted as heard by whoever says it, once it is.
+          const lines = { ...(yield* persona.lines), onIt: yield* persona.onIt() }
           const begun = {
             _tag: "Started",
-            spoken: [confirmation(spoken, resolved, started), warning].filter(Boolean).join(" "),
+            spoken: [confirmation(spoken, resolved, started, lines), warning].filter(Boolean).join(" "),
             started,
             machine,
             request,

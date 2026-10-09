@@ -308,6 +308,7 @@ const assisted = (
     })
     const drafts = yield* Drafts.make({ machines: [], rules: Effect.succeed(Option.none()), recent: Effect.succeed([]) }).pipe(
       Effect.provideService(Writer, { decide: () => Effect.never, research: () => Effect.never, prepare: Effect.void }),
+      Effect.provide(Persona.Plain),
     )
     const asked: Array<Brain.Situation> = []
     const assistant = yield* Assistant.make({
