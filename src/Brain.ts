@@ -629,6 +629,55 @@ const sealed = (text: string) => {
 }
 
 /**
+ * Where a message starts as Claude Code writes one for a commit, a tag, or a
+ * pull request or an issue: a heredoc quoted so that nothing in it runs,
+ * which `cat` passes on as it is, like `git commit -m "$(cat <<'EOF'`. It's
+ * looked for where `sealed` reads what it would run, so only in a command of
+ * its own, never between quotes, and only at the end of its line as written.
+ */
+const messageStarts =
+  /(?:^|[;&|\n])[ \t]*(?:git[ \t]+(?:-C[ \t]+\S+[ \t]+)?(?:commit|tag)|gh[ \t]+(?:pr|issue)[ \t]+(?:create|edit|comment))\b[^;&|\n]*?[ \t](?:-[a-zA-Z]*m|--message|--body|--title)[ \t=]+"\$\(cat[ \t]+<<(-?)'(\w+)'/g
+
+/** The end of a line, after any spaces. */
+const lineEnd = /[ \t]*\n/y
+
+/**
+ * What it would run without the lines of a message, above, which are only
+ * words, never commands, whatever they say, like "rm -rf" in a commit's
+ * message: from the line after it starts to the line that ends it, as the
+ * shell reads a heredoc, all of its line and nothing else, but tabs before
+ * it after "<<-", or to the end when no line does. It looks for a few, each
+ * after the last one's taken away, which could have hidden a quote.
+ */
+const unmessaged = (text: string) => {
+  let left = text
+  let from = 0
+  for (let taken = 0; taken < 4; taken += 1) {
+    const read = sealed(left)
+    messageStarts.lastIndex = from
+    let found = messageStarts.exec(read)
+    for (; found !== null; found = messageStarts.exec(read)) {
+      lineEnd.lastIndex = found.index + found[0].length
+      if (lineEnd.test(left)) break
+    }
+    if (found === null) return left
+    const [, tabs, end] = found
+    const body = lineEnd.lastIndex
+    let line = body
+    while (line < left.length) {
+      const next = left.indexOf("\n", line)
+      const written = left.slice(line, next === -1 ? left.length : next)
+      if ((tabs === "-" ? written.replace(/^\t+/, "") : written) === end) break
+      line = next === -1 ? left.length : next + 1
+    }
+    const after = left.indexOf("\n", line)
+    left = `${left.slice(0, body)}${after === -1 || line >= left.length ? "" : left.slice(after + 1)}`
+    from = body - 1
+  }
+  return left
+}
+
+/**
  * A name set to true among what a tool is given, as its JSON writes it, or
  * as it's looked through, a name and its value a line each: how a tool is
  * told to do what a command's flags would. Only spaces come before a line
@@ -718,10 +767,11 @@ const riskyToRun = (run: string) => risky.test(run) || commands(run).some((comma
  * so many words: a tool that deletes for good, by its name or what it's told
  * to do, or one that deletes told to take all that's under what it's given,
  * which a search for "how to remove a recursive function" never is. T3 Code's
- * own words for it, like "Bash: grep 'rm' -r src", are read as their command.
+ * own words for it, like "Bash: grep 'rm' -r src", are read as their command,
+ * and a commit's message, as Claude Code writes one, as words.
  */
 export const dangerous = (text: string) => {
-  const command = continued(text.replace(summarized, ""))
+  const command = continued(unmessaged(text.replace(summarized, "")))
   const whole = sealed(command)
   const read = new Set([command, unquoted(command), whole, unquoted(whole)])
   if ([...read].some(riskyToRun) || forcing.test(text) || overwriting.test(text)) return true

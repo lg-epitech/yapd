@@ -1014,7 +1014,15 @@ describe("Assistant", () => {
         }),
       )
     // A search for what would be risky to run, and git only reading or writing it down, take a yes, as "Bash: grep 'rm' -r src".
-    for (const command of ["grep 'rm' -r src", "git log --grep 'clean' -f", 'git commit -m "push --force"', "bash -c 'grep rm -r src'"]) {
+    for (const command of [
+      "grep 'rm' -r src",
+      "git log --grep 'clean' -f",
+      'git commit -m "push --force"',
+      "bash -c 'grep rm -r src'",
+      "rg -n 'rm -rf' src",
+      // And a commit's message as Claude Code writes one, which is only words.
+      "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF\n)\"",
+    ]) {
       expect(await allowing(approval("r1", command))).toEqual({ spoken: [`Cloud deployment discovery wants to run ${command}. Allow it, sir?`, "Approved, sir."], dispatched: ["r1 accept"] })
     }
     // A tool given a command apart from its words, as "mcp__shell__run: git", runs them with it, never on their own.

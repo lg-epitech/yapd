@@ -424,6 +424,15 @@ describe("Brain", () => {
       "git grep -O'rm -rf' -e x",
       "ack --pager='rm -rf ~/work' x",
       "rg -l x | xargs rm -rf",
+      'git commit -m "$(cat <<EOF\n$(rm -rf ~/work)\nEOF\n)"',
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF\n)\" && rm -rf ~/work",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF\n)\"\nrm -rf ~/work",
+      "git commit -m \"$(cat <<'EOF'\nwip\n  EOF\n)\"\nrm -rf ~/work\nEOF\nrm -rf ~/x",
+      "git commit -m \"$(cat <<-'EOF'\nwip\n\tEOF\n)\"\nrm -rf ~/work",
+      "$(cat <<'EOF'\nrm -rf ~/work\nEOF\n)",
+      "sh -c \"$(cat <<'EOF'\nrm -rf ~/work\nEOF\n)\"",
+      "eval \"x; git commit -m \"$(cat <<'EOF'\nfoo; rm -rf ~/work\nEOF\n)\"",
+      "echo 'a\ngit commit -m \"$(cat <<'EOF'\n'; rm -rf ~/work; echo '\nEOF",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -518,6 +527,12 @@ describe("Brain", () => {
       "ag 'rm -rf' src",
       "ack 'rm -rf'",
       "ack -r 'clean -f' lib",
+      "git commit -m \"$(cat <<'EOF'\nRemove the rm -rf from the docs\n\nIt's git push --force and git clean -fdx no more.\nEOF\n)\"",
+      "git add -A && git commit -m \"$(cat <<'EOF'\nfix: rm -rf; push --force | clean -f\nEOF\n)\"",
+      "git commit -m \"$(cat <<'EOF'\nfix: rm -rf it's\nEOF\n)\"\nBash: git commit -m \"$(cat <<'EOF'\nfix: rm -rf it's",
+      "gh pr create --title \"Fix\" --body \"$(cat <<'EOF'\n- drops git reset --hard before the deploy to production\nEOF\n)\"",
+      "git tag -a v1 -m \"$(cat <<'EOF'\nrm -rf\nEOF\n)\"",
+      "cd ~/work && git commit -am \"$(cat <<'EOF'\nDrop git push -f from the docs\nEOF\n)\"",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
@@ -574,6 +589,8 @@ describe("Brain", () => {
       "separators between quotes": "'a;'".repeat(5000),
       "separators after backslashes": "rm \\;".repeat(5000),
       "a git tool told many flags": `mcp__git__push\n${"-a -b\nmode\na\n".repeat(1700)}`,
+      "many messages": `git commit -m "$(cat <<'EOF'\nx\nEOF\n)"\n`.repeat(600),
+      "many messages begun on a line": `git commit${` -m "$(cat <<'E'`.repeat(1000)}`,
     }
     /** How long it takes to tell, the quickest of three, so a pause in between doesn't count. */
     const took = (text: string) =>
