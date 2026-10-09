@@ -44,8 +44,15 @@ export const sayable = (lines: Lines) => [lines.onIt, lines.queued, lines.mishea
 /** ", sir" before a line's last mark, when the user is addressed at all. */
 export const addressed = (lines: Pick<Lines, "address">) => (lines.address.trim() === "" ? "" : `, ${lines.address.trim()}`)
 
+/**
+ * What ends a sentence or sets a part of it off: a stop, a comma, a dash, or a
+ * hyphen with a space after it. Never a hyphen joining a word or a number, as
+ * in "master-only" or "-1", nor a bracket or a quote, which belong to what's said.
+ */
+const mark = String.raw`(?:[,.!?…;:—–]|-(?=\s|$))`
+
 /** After how he's addressed, only a mark or the end: a word that goes on into the sentence, like "master" in "master branch only", is what was said. */
-const alone = String.raw`(?=\s*(?:[,.!?…;:—–-]|$))`
+const alone = String.raw`(?=\s*(?:${mark}|$))`
 
 /**
  * How he may be addressed when the lines don't say yet, as when they're still
@@ -64,7 +71,7 @@ const someone = String.raw`,?\s*(?:sir|sire|ma['’]am|madam|miss|boss|chief|cap
  */
 export const afterOnIt = (spoken: string, lines: Pick<Lines, "address">) => {
   const address = lines.address.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const onIt = new RegExp(`^on it(?:${address === "" ? someone : `,?\\s*${address}${alone}`})?(?![\\p{L}\\p{N}])[\\s\\p{P}]*`, "iu")
+  const onIt = new RegExp(`^on it(?:${address === "" ? someone : `,?\\s*${address}${alone}`})?(?![\\p{L}\\p{N}])(?:\\s*${mark})*\\s*`, "iu")
   const said = spoken.trim()
   const rest = said.replace(onIt, "")
   return rest === said ? said : `${rest.charAt(0).toUpperCase()}${rest.slice(1)}`
