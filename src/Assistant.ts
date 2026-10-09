@@ -327,27 +327,20 @@ interface Queued {
 type QuestionAsks = Extract<Asks, { readonly _tag: "Question" }>
 
 /**
- * What he answered of a thread's question in one breath, from the part he'd
- * got to: all of it for that part, when it's one line or the last part left,
- * a list for one that takes several; otherwise a line for each part, in
- * order. With what the last of them was, as it's said before the next. None
- * when a line comes to nothing that part can take.
+ * What he answered of a thread's question in one breath: the part he'd got
+ * to, all of it, a list for one that takes several, one option a line. Never
+ * the parts after, which he's yet to hear, and are asked once this one is
+ * answered. With what it was, as it's said before the next. None when it's
+ * nothing that part can take, like words a form that takes only its options
+ * can't.
  */
 const fill = (asks: QuestionAsks, text: string): { readonly asks: QuestionAsks; readonly ack: string } | undefined => {
-  const lines = text.split("\n").map((line) => line.trim()).filter((line) => line !== "")
-  const each = lines.length <= 1 || asks.questions.length - asks.part <= 1 ? [text.trim()] : lines
-  let filled = asks
-  let ack = ""
-  for (const line of each) {
-    const question = filled.questions[filled.part]
-    if (question === undefined) break
-    const part = Questions.said(question, Option.none())
-    const answer = Questions.resolve(part, line)
-    if (answer._tag !== "Picked" && answer._tag !== "Words") return undefined
-    filled = { ...filled, collected: { ...filled.collected, [question.id]: answer }, part: filled.part + 1 }
-    ack = Questions.ack(part, answer)
-  }
-  return { asks: filled, ack }
+  const question = asks.questions[asks.part]
+  if (question === undefined) return undefined
+  const part = Questions.said(question, Option.none())
+  const answer = Questions.resolve(part, text)
+  if (answer._tag !== "Picked" && answer._tag !== "Words") return undefined
+  return { asks: { ...asks, collected: { ...asks.collected, [question.id]: answer }, part: asks.part + 1 }, ack: Questions.ack(part, answer) }
 }
 
 /** A thread's question from its first part, with nothing he'd answered of it. */
@@ -1697,9 +1690,9 @@ export const make = (options: {
         const risky = heard?._tag === "Approval" && heard.dangerous && decision.how !== "decline" && !Brain.approving(thought.utterance.heard)
         const hearing = decision.act === "reply" && decision.text.trim() === ""
         if (heard?._tag === "Approval" && !risky) return yield* write(plan, thought, said, at, heard)
+        // Words a form that takes only its options can't take ask the part he'd got to once more, as over the question itself.
         const filled = heard?._tag === "Question" && !hearing ? fill(heard, decision.text) : undefined
-        if (heard?._tag === "Question" && !hearing) {
-          if (filled === undefined) return reply(said.cantTell, thought.subject)
+        if (heard?._tag === "Question" && filled !== undefined) {
           if (filled.asks.part >= filled.asks.questions.length) return yield* write(plan, thought, said, at, filled.asks)
           // Where he's got to, so what's asked next picks up from there: a part he's yet to hear.
           known.set(heard.requestId, { ref: target.ref, asks: filled.asks, through: undefined })
@@ -1732,10 +1725,20 @@ export const make = (options: {
               ? asks.part === asks.questions.length - 1
                 ? part.last(filled.ack)
                 : part.next(filled.ack)
-              : hearing || asks.part > 0
+              : hearing || heard !== undefined || asks.part > 0
                 ? part.here
                 : waiting.asked
-        yield* Effect.logInfo(hearing ? "Reading back what it waits on, since he asked to hear it" : "Reading back what it waits on, since he hasn't heard it asked")
+        const why =
+          hearing
+            ? "since he asked to hear it"
+            : filled !== undefined
+              ? "from the part after the one he answered"
+              : heard?._tag === "Question"
+                ? "since it takes only its options"
+                : heard !== undefined
+                  ? "since a risky one needs him to say approve"
+                  : "since he hasn't heard it asked"
+        yield* Effect.logInfo(`Reading back what it waits on, ${why}`)
         const read = yield* opening(
           {
             kind: asks._tag === "Approval" ? "approval" : "question",

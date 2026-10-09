@@ -1519,6 +1519,42 @@ describe("Assistant", () => {
     expect(await cut((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Start with mainnet." }))).toEqual({ spoken: [last], sent: [] })
   })
 
+  test("a dictated answer to a thread's question answers the part he's at, a list one option a line, never the parts after, which are asked; one a form can't take asks that part again", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const dictating = (questions: ReadonlyArray<Record<string, unknown>>, text: string, then: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text }), undefined, {
+            others: [cloud],
+            items: card("q1", questions),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the cloud one what I want.")
+          const between = answered(made.dispatched)
+          yield* made.answer(then)
+          return { between, spoken: made.spoken().slice(2), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await dictating([extras, colour], "Alpha\nGamma", "Red.")).toEqual({
+      between: [],
+      spoken: ["Alpha and Gamma, sir. And last: Which colour should the test use? Red or Blue? I'd go with Blue.", "Red it is, sir."],
+      answers: [{ [extras.id]: ["Alpha", "Gamma"], [colour.id]: "Red" }],
+    })
+    // Two lines to a part that takes one are his words for it, and the next part is still asked.
+    expect(await dictating([colour, extras], "Red\nGamma", "Just Beta.")).toEqual({
+      between: [],
+      spoken: ["Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Beta it is, sir."],
+      answers: [{ [colour.id]: "Red\nGamma", [extras.id]: ["Beta"] }],
+    })
+    // A form that takes only its options asks which one, rather than say it couldn't tell.
+    expect(await dictating([{ ...colour, allowCustomAnswer: false }], "Purple, please.", "Red.")).toEqual({
+      between: [],
+      spoken: ["Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.", "Red it is, sir."],
+      answers: [{ [colour.id]: "Red" }],
+    })
+  })
+
   test("what he answered of a question before yapd was turned off and on is never sent: it's brought back from its first part, being asked or put off", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const cycled = (putOff: boolean) =>

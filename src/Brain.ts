@@ -70,7 +70,7 @@ export const Decision = Schema.Struct({
   how: Schema.String,
   /** ISO 8601 with offset, for remind/snooze/mode until; "" otherwise. */
   when: Schema.String,
-  /** send: the message as he'd type it · reply: the answer, one line per question in order · remember: the fact,
+  /** send: the message as he'd type it · reply: the answer to the part being asked, several options one a line · remember: the fact,
    *  or "name: steps" for a routine · remind: what to say · tidy rename: the title · find: the words to search
    *  · start: the request in his words. */
   text: Schema.String,
@@ -1429,7 +1429,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
 - "undo": take back what you just did for him, as LATELY shows it. "how" is "carry" when he wants a thread you stopped to carry on, "" to withdraw the message you just sent, like "scratch that". "target" is the thread, when he names one.
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
-- "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
+- "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
 - These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "mode" to change when you talk; "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it; "show" something on his screen.`
