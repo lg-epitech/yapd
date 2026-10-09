@@ -1,8 +1,8 @@
 # API
 
-yapd serves a small HTTP API on the port its hooks use, `127.0.0.1:4747` unless `YAPD_PORT` says otherwise. The [menu bar app](../README.md#menu-bar) only uses this API, so your own UI can do everything it does: a status bar module on Linux, a Stream Deck button, a script.
+yapd serves a small HTTP API on the port its hooks use, `127.0.0.1:4747` unless `YAPD_PORT` says otherwise. The [menu bar app](guide.md#menu-bar) only uses this API, so your own UI can do everything it does: a status bar module on Linux, a Stream Deck button, a script.
 
-It only listens on localhost. From another machine, forward the port over SSH, like `ssh -N -L 4747:127.0.0.1:4747 mac`. A machine whose hooks already reach yapd through a [reverse tunnel](../README.md#agents-on-another-machine) can use the API at the same address.
+It only listens on localhost. From another machine, forward the port over SSH, like `ssh -N -L 4747:127.0.0.1:4747 mac`. A machine whose hooks already reach yapd through a [reverse tunnel](guide.md#agents-on-another-machine) can use the API at the same address.
 
 There's no authentication: anything that can reach the port can use it, as hooks do. Requests have to be addressed to `127.0.0.1`, `localhost` or `[::1]`, so a web page can't get in through a domain name of its own that points here, and a page from anywhere else can't read the responses, since yapd sends no CORS headers.
 
