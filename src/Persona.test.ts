@@ -314,6 +314,11 @@ describe("Persona", () => {
     expect(Persona.afterOnIt("On it, master branch only.", Persona.plain)).toBe("Master branch only.")
     expect(Persona.afterOnIt("On it, miss nothing in staging.", Persona.plain)).toBe("Miss nothing in staging.")
     expect(Persona.afterOnIt("On it, love the idea.", Persona.plain)).toBe("Love the idea.")
+    // The same once his address is known, when it's a word that can go on into the sentence.
+    expect(Persona.afterOnIt("On it, master branch only.", { address: "master" })).toBe("Master branch only.")
+    expect(Persona.afterOnIt("On it, miss nothing in staging.", { address: "miss" })).toBe("Miss nothing in staging.")
+    expect(Persona.afterOnIt("On it, master, in yapd.", { address: "master" })).toBe("In yapd.")
+    expect(Persona.afterOnIt("On it, master.", { address: "master" })).toBe("")
     expect(Persona.afterOnIt("On it, in yapd.", Persona.plain)).toBe("In yapd.")
     expect(Persona.afterOnIt("On it, in yapd, on Fable.", Persona.plain)).toBe("In yapd, on Fable.")
     expect(Persona.afterOnIt("On it, on Fable.", sir)).toBe("On Fable.")
