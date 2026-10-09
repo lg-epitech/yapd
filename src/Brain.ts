@@ -412,31 +412,99 @@ const flagsAfter = (command: string, name: RegExp) => {
 /** The names below, so a command with none of them, like most, is passed over at once. */
 const flaggable = /rm|push|clean|branch|restore|gcloud|az|rsync/i
 
-/** What a flag anywhere after a command's name makes risky, read a command at a time. */
-const riskyFlags: ReadonlyArray<(command: string) => boolean> = [
+/** What a flag anywhere after a command's name makes risky, read a command at a time, under the git subcommand each is for. */
+const riskyFlags = {
   // Deleting a tree, forced or not, its flags together or apart, but not only from git's index, with `--cached` after the last that does.
   // The rm of git's own git-rm counts, never a flag that ends in it, like docker's `--rm`, which a flag of the command docker runs would follow.
-  (command) => {
+  rm: (command: string) => {
     const removing = flagged(command, /(?:^|[^\w-]|\bgit-)rm$/i, /-[a-z]*r|--recursive/iy)
     return removing !== -1 && !/--cached/i.test(command.slice(removing))
   },
   // A push that forces, wherever the flag goes, or that deletes a branch, and a clean that forces, by "-f" or by name.
-  (command) => after(command, /\bpush\b/i, /\s(?:-f\b|--force\b|\+\S|--delete\b|-d\b|:\S)/i),
-  (command) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f|--force\b/iy) !== -1,
+  push: (command: string) => after(command, /\bpush\b/i, /\s(?:-f\b|--force\b|\+\S|--delete\b|-d\b|:\S)/i),
+  clean: (command: string) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f|--force\b/iy) !== -1,
   // Deleting a branch whatever it holds, as "-d" alone never does: "-D", or "-d" or "--delete" with "-f" or "--force", together or apart.
-  (command) => {
+  branch: (command: string) => {
     const given = flagsAfter(command, /(?:^|\W)branch$/)
     return given.some((flag) => /^(?:-[a-zA-Z]*[dD]|--delete\b)/.test(flag)) && given.some((flag) => /^(?:-[a-zA-Z]*[fD]|--force\b)/.test(flag))
   },
   // Restoring over changes: not only what's staged, after the last restore, or the working tree too, after the first.
-  (command) => {
+  restore: (command: string) => {
     const last = /^[\s\S]*\bgit\s+restore\b/i.exec(command)
     return last !== null && (!/--staged/i.test(command.slice(last[0].length)) || after(command, /\bgit\s+restore\b/i, /--worktree/i))
   },
   // Deleting what's hosted, and mirroring with deletes.
-  (command) => after(command, /\b(?:gcloud|az)\b/i, /\sdelete\b/i),
-  (command) => after(command, /\brsync\b/i, /\s--delete/i),
-]
+  hosted: (command: string) => after(command, /\b(?:gcloud|az)\b/i, /\sdelete\b/i),
+  rsync: (command: string) => after(command, /\brsync\b/i, /\s--delete/i),
+}
+
+/** All of them, for a command that could run any of what's in it. */
+const everyFlag = Object.values(riskyFlags)
+
+/** Git's subcommands whose own flags are the ones above, which are all that count of a git command that is one of them. */
+const gitFlags = new Map([
+  ["rm", riskyFlags.rm],
+  ["push", riskyFlags.push],
+  ["clean", riskyFlags.clean],
+  ["branch", riskyFlags.branch],
+  ["restore", riskyFlags.restore],
+])
+
+/** Commands that never run what they're given, only look for it, like grep looking for "rm" through a folder with `-r`. */
+const readers = new Set(["grep", "egrep", "fgrep"])
+
+/** Git's subcommands that never run what they're given, like log looking for "clean" or a commit's message. */
+const gitReaders = new Set(["log", "show", "commit", "tag", "notes", "merge", "stash", "diff", "status", "blame", "shortlog"])
+
+/** Words that run the rest of a command as it is, when nothing comes between them and it, like sudo or time, or start one, like `then`. */
+const leading = new Set(["sudo", "doas", "env", "nice", "nohup", "time", "command", "builtin", "exec", "xargs", "then", "do", "else", "elif", "if", "while", "until", "!", "{"])
+
+/** Shells, which run what follows their "-c" as a command. */
+const shells = new Set(["sh", "bash", "zsh", "dash", "ksh"])
+
+/** Git's own options before its subcommand that take the word after them, like -C's folder. */
+const gitTaking = new Set(["-C", "--git-dir", "--work-tree", "--namespace"])
+
+/** Git's own options before its subcommand that take nothing, or what's after their "=". */
+const gitAlone = /^(?:-[pP]|--paginate|--no-pager|--bare|--no-replace-objects|--(?:literal|glob|noglob|icase)-pathspecs|--no-optional-locks|--(?:git-dir|work-tree|namespace)=.*)$/
+
+/** A word without the quoting around it or in it, as the shell reads it. */
+const plain = (word: string) => word.replace(/\$(?=["'])|["'\\]/g, "")
+
+/**
+ * The checks above that count for a command, by what runs: none for one that
+ * only looks for what it's given, like `grep 'rm' -r src`, and only its own
+ * for a git subcommand, so `git log --grep clean -f` and `git commit -m "rm"
+ * -r` are a plain yes. What runs is the first word, after any settings, like
+ * `LC_ALL=C`, and words that run the rest as it is, like sudo, or a shell's
+ * "-c". Any other command could run any of what's in it, like find's -exec,
+ * xargs or ssh, so every check counts, wherever its name is; so it does when
+ * what runs can't be told, like after sudo's "-u" and its user or git's "-c",
+ * which can set what git runs, or when the command runs another inside it,
+ * like `$(…)`.
+ */
+const counting = (command: string): ReadonlyArray<(command: string) => boolean> => {
+  if (/`|[$<>]\(/.test(command)) return everyFlag
+  const words = command.split(/\s+/).filter((word) => word !== "")
+  let at = 0
+  while (at < words.length) {
+    const word = plain(words[at] ?? "")
+    if (/^\w+=/.test(word) || leading.has(word)) at += 1
+    else if (shells.has(word) && plain(words[at + 1] ?? "") === "-c") at += 2
+    else break
+  }
+  const name = plain(words[at] ?? "").replace(/^.*\//, "")
+  if (readers.has(name)) return []
+  if (name !== "git") return everyFlag
+  for (at += 1; at < words.length; at += 1) {
+    const word = plain(words[at] ?? "")
+    if (gitTaking.has(word)) at += 1
+    else if (!gitAlone.test(word)) break
+  }
+  const subcommand = plain(words[at] ?? "")
+  const own = gitFlags.get(subcommand)
+  return own !== undefined ? [own] : gitReaders.has(subcommand) ? [] : everyFlag
+}
 
 /**
  * A command as the shell runs it: a line ended by a backslash goes on into
@@ -522,8 +590,8 @@ const toldTo = /(?:^|")(?:action|operation|op|method|command|mode|type)"?(?:\s*:
 const deleting = (text: string) =>
   [...text.matchAll(toolName)].some(([name]) => deletes.test(name)) || [...text.matchAll(toldTo)].some(([, what]) => deletes.test(what ?? ""))
 
-/** Whether what a command, or a few, would run is risky, by what it says or by a flag after its name. */
-const riskyToRun = (run: string) => risky.test(run) || commands(run).some((command) => flaggable.test(command) && riskyFlags.some((risks) => risks(command)))
+/** Whether what a command, or a few, would run is risky, by what it says or by a flag after its name, of those that count for what runs. */
+const riskyToRun = (run: string) => risky.test(run) || commands(run).some((command) => flaggable.test(command) && counting(command).some((risks) => risks(command)))
 
 /**
  * Whether what a thread wants to do is risky, by what it says it would run

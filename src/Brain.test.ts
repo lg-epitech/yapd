@@ -358,6 +358,16 @@ describe("Brain", () => {
       'git push origin main $"--force"',
       'mcp__fs__copy_file {"source":"a.txt","destination":"b.txt","overwrite":true}',
       "mcp__fs__move_file\nsource\na.txt\ndestination\nb.txt\noverwriteExisting\ntrue",
+      'grep -r "$(rm -rf ~/work)" src',
+      "git commit -m \"`rm -rf ~/work`\"",
+      "grep -l TODO -r src | xargs rm -rf",
+      "sudo -u grep rm -rf ~/work",
+      "find . -name '*.tmp' -exec rm -rf {} +",
+      "git submodule foreach git clean -fdx",
+      "git -C ~/work clean -fdx",
+      "git --no-pager branch -D old",
+      "git -c core.pager='rm -rf ~/work' log",
+      "echo rm -rf ~/work | xargs -0 sh -c",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -403,6 +413,15 @@ describe("Brain", () => {
       "rm $'\\x2df' build.log",
       'mcp__fs__copy_file {"source":"a.txt","destination":"b.txt","overwrite":false}',
       'mcp__fs__write_file {"path":"b.txt","no_overwrite":true}',
+      "grep 'rm' -r src",
+      'grep "rm" -rn src',
+      "grep rm -r src",
+      "LC_ALL=C sudo grep -R 'clean' -f patterns.txt /etc",
+      "git log --grep 'clean' -f",
+      'git commit -m "rm" -r',
+      'git commit -m "push --force"',
+      "git -C ~/work log --grep branch -D",
+      "bash -c 'grep rm -r src'",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
