@@ -191,6 +191,11 @@ const make = (says?: string, options: {
     ...Array.from({ length: 10 }, () => new Float32Array([0.9])),
     ...Array.from({ length: defaults.silence }, () => new Float32Array([0])),
   ]).pipe(Effect.zipRight(flush))
+  /** Says what the user `says` for as long as it takes to be his rather than talk nearby, which changing a thread needs. */
+  const talk = Queue.offerAll(microphone, [
+    ...Array.from({ length: 30 }, () => new Float32Array(512).fill(0.9)),
+    ...Array.from({ length: defaults.silence }, () => new Float32Array(512)),
+  ]).pipe(Effect.zipRight(flush))
   const wait = (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush))
   /** A turn that took `seconds`, as its hooks report it. */
   const turn = (session: string, message: string, seconds: number, extra: { readonly needsYou?: boolean; readonly launched?: boolean } = {}) =>
@@ -207,7 +212,8 @@ const make = (says?: string, options: {
     })
   /**
    * Something yapd has to say for itself, which as a question, the one open, records how it went, in `saying` when it
-   * started being said, until that's undone, and in `heard` when it was heard to the end.
+   * started being said, until that's undone, and in `heard` when it was heard to the end. As an answer with `followUp`,
+   * it takes what's said over it or right after for a follow-up, noted there, unless it's talk with Sam.
    */
   const notice = (
     id: string,
@@ -221,6 +227,7 @@ const make = (says?: string, options: {
       readonly saying?: Array<string>
       readonly heard?: Array<string>
       readonly gone?: Array<string>
+      readonly followUp?: Array<string>
     } = {},
   ) =>
     tell({
@@ -234,6 +241,12 @@ const make = (says?: string, options: {
       ...(options.saying === undefined ? {} : { saying: Effect.sync(() => void options.saying?.push(id)) }),
       ...(options.heard === undefined ? {} : { heard: Effect.sync(() => void options.heard?.push(id)) }),
       ...(options.gone === undefined ? {} : { gone: Effect.sync(() => void options.gone?.push(id)) }),
+      ...(options.followUp === undefined
+        ? {}
+        : {
+            followUp: (heard: string) =>
+              Effect.succeed(heard.startsWith("Sam,") ? Option.none() : Option.some(Effect.sync(() => void options.followUp?.push(`${id}: ${heard}`)))),
+          }),
       ...(options.question === undefined
         ? {}
         : {
@@ -265,7 +278,7 @@ const make = (says?: string, options: {
   /** What the user heard lately, newest first, by id. */
   const heard = Effect.map(Stream.runHead(made.state), (state) => Option.getOrThrow(state).heard.map(({ id }) => id))
   const toggle = (on: boolean) => made.turn(on).pipe(Effect.zipRight(flush))
-  return { microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
+  return { microphone, made, handle, finish, turn, notice, lastHeard: made.lastHeard, speak, talk, followUps, wait, dictate, record, reading, played, stopped, condensed, warnings, nextEvent, nextPlayback: Queue.take(playbacks), rests: () => rests, warms: () => warms, renders: () => rendered.size, flush, toggle, power: made.turn, heard, replay: made.replay, awaiting: made.awaiting.pipe(Effect.map((arrived) => arrived.pipe(Effect.zipRight(flush)))), journal: Context.get(context, Journal.Journal) }
 })
 
 const daemon = make()
@@ -294,13 +307,14 @@ const thread = (id: string, title: string) =>
  */
 const assisted = (
   model: (situation: Brain.Situation) => Brain.Decision,
-  options: Parameters<typeof make>[1] = {},
+  /** With what the user `says` over an update, which is meant for its agent, as `make` takes it. */
+  options: Parameters<typeof make>[1] & { readonly says?: string } = {},
   desk: ReadonlyArray<T3Live.Thread> = [],
   /** How long the model takes over what was said, on top of deciding. */
   deciding: (situation: Brain.Situation) => Effect.Effect<void> = () => Effect.void,
 ) =>
   Effect.gen(function* () {
-    const daemon = yield* make(undefined, options)
+    const daemon = yield* make(options.says, options)
     const { made, journal } = daemon
     const view: T3Live.View = {
       projects: new Map([["yapd", { id: "yapd", title: "yapd", workspaceRoot: "/code/yapd" }]]),
@@ -1722,5 +1736,144 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "It changes the parser.", "yapd. The PR is ready."])
     // Heard to the end the last time.
     expect(result.unheard).toBe(0)
+  })
+
+  test.each(["a follow-up", "silence"])("an answer said to the end is listened to as an update is, and what's next waits for %s", async (after) => {
+    const followed = after === "a follow-up"
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, finish, wait, speak, played } = yield* make(undefined, { microphone: true, transcripts: ["Tell it to fix the tests."] })
+        const followUps: Array<string> = []
+        const heard: Array<string> = []
+        yield* notice("status", "The loader fix is running its tests, sir.", { answer: true, followUp: followUps, heard })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(10)
+        // Heard as soon as it's said to the end, with the microphone still open.
+        const through = [...heard]
+        yield* wait(2)
+        const lingering = [...played]
+        if (followed) yield* speak
+        else yield* wait(1)
+        yield* wait(1)
+        return { through, lingering, followUps, played: [...played] }
+      }),
+    )
+    expect(result.through).toEqual(["status"])
+    expect(result.lingering).toEqual(["The loader fix is running its tests, sir."])
+    expect(result.followUps).toEqual(followed ? ["status: Tell it to fix the tests."] : [])
+    expect(result.played).toEqual(["The loader fix is running its tests, sir.", "yapd. The PR is ready."])
+  })
+
+  test.each(["a dictation", "turning yapd off", "the audio helper quitting"])("an answer cut off by %s isn't listened to after, while the next, said to the end, is", async (by) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const first = "The loader fix is running its tests, sir."
+        const { notice, wait, dictate, toggle, played } = yield* make(undefined, { microphone: true, ...(by === "the audio helper quitting" ? { breaks: { [first]: 5 } } : {}) })
+        const followUps: Array<string> = []
+        yield* notice("first", first, { answer: true, followUp: followUps })
+        yield* wait(5)
+        if (by === "a dictation") yield* Scope.close(yield* dictate, Exit.void)
+        if (by === "turning yapd off") {
+          yield* toggle(false)
+          yield* toggle(true)
+        }
+        yield* notice("second", "Nothing needs you right now, sir.", { answer: true, followUp: followUps })
+        yield* notice("started", "Started the parser fix, sir.", { done: true })
+        yield* wait(1)
+        // Said at once after the first was cut off, then listened to after.
+        const cut = [...played]
+        yield* wait(10)
+        const lingering = [...played]
+        yield* wait(3)
+        return { cut, lingering, played: [...played] }
+      }),
+    )
+    expect(result.cut).toEqual(["The loader fix is running its tests, sir.", "Nothing needs you right now, sir."])
+    expect(result.lingering).toEqual(result.cut)
+    expect(result.played).toEqual([...result.cut, "Started the parser fix, sir."])
+  })
+
+  test("a reply right after a status answer goes to the assistant, with \"it\" the answer's thread, while one over an update still goes to its agent", async () => {
+    const loader = thread("f0000000-0000-4000-8000-000000000001", "Fix the loader")
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictating, finish, speak, talk, wait, played, asked, followUps, journal } = yield* assisted(
+          (situation) =>
+            situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "answer", target: situation.desk.threads[0]?.handle ?? "", spoken: "It's running its tests, sir." })
+              : // What "it" is, as the model is shown it.
+                Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Fix the tests.", how: "now" }),
+          { says: "Use the staging branch.", transcripts: ["Tell it to fix the tests."] },
+          [loader],
+        )
+        yield* dictating("Get me the status of this thread.")
+        yield* wait(10)
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        const followedUp = asked.at(-1)!
+        // An update, which what's said over still goes to its agent.
+        yield* finish("a", "The PR is ready.")
+        yield* wait(2)
+        yield* speak
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        const actions = yield* journal.since(0, { kinds: ["action"] })
+        return {
+          asked: asked.length,
+          via: followedUp.utterance.via,
+          heard: followedUp.utterance.heard,
+          it: followedUp.subject._tag === "Answer" ? Option.map(followedUp.subject.about, ({ id }) => id) : Option.none(),
+          to: actions.map(({ thread, detail }) => [thread, (detail as { act: string }).act]),
+          replies: (yield* journal.since(0, { kinds: ["reply"] })).map(({ text }) => text),
+          relayed: [...followUps],
+          played: [...played],
+        }
+      }),
+    )
+    expect(result.asked).toBe(2)
+    expect(result.via).toBe("reply")
+    expect(result.heard).toBe("Tell it to fix the tests.")
+    expect(result.it).toEqual(Option.some(loader.id))
+    // To the thread, which isn't there to be reached here.
+    expect(result.to).toEqual([[loader.id, "Message"]])
+    expect(result.replies).toEqual(["Tell it to fix the tests.", "Use the staging branch."])
+    expect(result.relayed).toEqual(["a sent: Use the staging branch."])
+    expect(result.played).toEqual([
+      "It's running its tests, sir.",
+      "That didn't go through: I can't reach the threads on Rosie right now.",
+      "yapd. The PR is ready.",
+      "Okay, passed on.",
+    ])
+  })
+
+  test.each([
+    ["Thanks.", "right after"],
+    ["Stop.", "over"],
+  ])("\"%s\" said %s an answer ends it without the model", async (said, when) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictating, finish, speak, wait, played, stopped, asked, journal } = yield* assisted(
+          () => Brain.decision({ act: "answer", spoken: "Two things are running, sir." }),
+          { microphone: true, transcripts: [said] },
+        )
+        yield* dictating("What's going on?")
+        yield* wait(when === "over" ? 3 : 11)
+        yield* speak
+        yield* finish("a", "The PR is ready.")
+        yield* wait(1)
+        const replies = yield* journal.since(0, { kinds: ["reply"] })
+        return {
+          asked: asked.length,
+          replies: replies.map(({ text, detail }) => [text, (detail as { decision: Brain.Decision }).decision.act]),
+          played: [...played],
+          stopped: [...stopped],
+        }
+      }),
+    )
+    expect(result.asked).toBe(1)
+    expect(result.replies).toEqual([[said, "dismiss"]])
+    // Nothing said back, and what's next goes at once.
+    expect(result.played).toEqual(["Two things are running, sir.", "yapd. The PR is ready."])
+    expect(result.stopped).toEqual(when === "over" ? ["Two things are running, sir."] : [])
   })
 })

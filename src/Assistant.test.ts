@@ -477,6 +477,14 @@ const assistant = (
         }),
       /** Nothing was said in the time the question leaves for an answer. */
       unanswered: (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush)),
+      /** Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on, unless it isn't taken. */
+      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer")) =>
+        Effect.gen(function* () {
+          const taken = yield* to!.followUp!(heard, voiced)
+          if (Option.isSome(taken)) yield* taken.value
+          yield* flush
+          return Option.isSome(taken)
+        }),
     }
   })
 
@@ -4789,5 +4797,77 @@ describe("Assistant", () => {
     )
     expect(result.said).toEqual(["Fix the loader: checks pass and it's waiting for a review, sir.", "Checks pass and it's waiting for a review, sir."])
     expect(result.opened).toEqual([url, url])
+  })
+
+  test("an answer can be followed up as anything dictated is, with \"it\" the thread it was about, so a message goes there", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, notices, spoken, dispatched, seen, journal } = yield* assistant((situation) =>
+          Option.isSome(situation.second)
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: "It's comparing fee tables: three of eight networks done, sir." })
+            : situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "look", target: handle(situation, tezos) })
+              : // What "it" is, as the model is shown it.
+                Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Use the Mina fee table.", how: "now" }),
+        )
+        yield* dictate("Get me the status of the Tezos one.")
+        const followed = yield* followUp("Tell it to use the Mina fee table.")
+        const asked = seen.at(-1)!
+        return {
+          followed,
+          spoken: spoken(),
+          // Only the answer is listened to after: not the line said while it's looked up, nor what came of the message.
+          listened: notices().filter(({ followUp }) => followUp !== undefined).map(({ spoken }) => spoken),
+          sent: dispatched.map(({ type, threadId, text }) => [type, threadId, text]),
+          via: asked.utterance.via,
+          lines: asked.lines,
+          replies: (yield* journal.since(0, { kinds: ["reply"] })).map(({ text }) => text),
+        }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    // The thread goes unnamed, since it's the one he was just told about.
+    expect(result.spoken).toEqual(["One moment.", "It's comparing fee tables: three of eight networks done, sir.", "On it, sir."])
+    expect(result.listened).toEqual(["It's comparing fee tables: three of eight networks done, sir."])
+    expect(result.sent).toEqual([["message.dispatch", tezos.id, "Use the Mina fee table."]])
+    expect(result.via).toBe("reply")
+    expect(result.lines).toEqual([{ speaker: "yapd", text: "It's comparing fee tables: three of eight networks done, sir." }])
+    expect(result.replies).toEqual(["Tell it to use the Mina fee table."])
+  })
+
+  test("thanks or stop said back to an answer ends it without the model, and noise or a change too faint to be his isn't taken", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, seen, dispatched, journal } = yield* assistant((situation) =>
+          situation.utterance.via === "shortcut" ? minaStatus(situation) : Brain.decision({ act: "send", target: handle(situation, mina), text: "Fix the rounding.", how: "now" }),
+        )
+        yield* dictate("What's the status on the Mina tickets?")
+        const before = seen.length
+        const taken: Array<boolean> = []
+        for (const heard of ["Thanks.", "Thank you, sir.", "Stop."]) taken.push(yield* followUp(heard))
+        const thanked = seen.length - before
+        // Whisper's words for a cough, and a message said under the breath.
+        const noise = [yield* followUp("Thank you.", 0.1), yield* followUp("Fix the rounding.", 0.2)]
+        const replies = yield* journal.since(0, { kinds: ["reply"] })
+        return {
+          taken,
+          thanked,
+          noise,
+          spoken: spoken(),
+          sent: dispatched.length,
+          replies: replies.map(({ text, detail }) => [text, (detail as { source: string; decision: Brain.Decision }).source, (detail as { decision: Brain.Decision }).decision.act]),
+        }
+      }),
+    )
+    expect(result.taken).toEqual([true, true, true])
+    expect(result.thanked).toBe(0)
+    expect(result.noise).toEqual([false, false])
+    expect(result.spoken).toEqual(["The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."])
+    expect(result.sent).toBe(0)
+    expect(result.replies).toEqual([
+      ["Thanks.", "fast", "dismiss"],
+      ["Thank you, sir.", "fast", "dismiss"],
+      ["Stop.", "fast", "dismiss"],
+    ])
   })
 })

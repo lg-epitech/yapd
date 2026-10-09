@@ -6,7 +6,7 @@ import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
 import { Model } from "./Model.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
-import { agreed, enough, gist, type Line } from "./Responder.ts"
+import { agreed, enough, gist, type Line, noted } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 
@@ -585,6 +585,21 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
 /** Whether there's a run to stop: one going, finishing, or waiting on him. */
 const stoppable = (listed: Threads.Listed) => ["running", "finishing", "approval", "question"].includes(listed.state)
 
+/** Whether what "it" means asks something of him, which taking it in, like "okay", may be his answer to. */
+const asksHim = (situation: Pick<Situation, "subject" | "desk">) => {
+  const { subject } = situation
+  switch (subject._tag) {
+    case "Nothing":
+      return false
+    case "Thread":
+      return Option.isSome(subject.asks)
+    case "Session":
+      return subject.update.needsYou
+    case "Answer":
+      return subject.question !== undefined || Option.exists(focused(situation), ({ state }) => state === "approval" || state === "question")
+  }
+}
+
 /**
  * What needs no model to work out, from what he said as a whole, never a
  * word in it: ignoring what nobody said, saying something again, who needs
@@ -673,6 +688,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   }
   // On its own, only ever yapd talking: a thread is stopped by saying so.
   if (enough.has(said)) return decision({ act: "dismiss" })
+  // Said back to what asked him nothing, like an answer, taking it in is all it is, as after an update.
+  if (noted.has(said) && utterance.via === "reply" && !asksHim(situation)) return decision({ act: "dismiss" })
   return undefined
 }
 

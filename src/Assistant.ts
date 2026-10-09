@@ -1704,23 +1704,54 @@ export const make = (options: {
           yield* Effect.logInfo(`Not taking "${heard}" as the answer, with only ${voiced.toFixed(2)} s of speech`)
           return Option.none()
         }
-        return Option.some(
-          Effect.flatMap(options.awaiting, (arrived) =>
-            background(
-              turn.withPermits(1)(
-                Effect.gen(function* () {
-                  yield* Effect.logInfo(`Heard: ${heard}`)
-                  const outcome = yield* acting(thought)
-                  yield* note(thought, outcome, at)
-                  yield* deliver(outcome, utterance)
-                  yield* offering
-                }),
-              ).pipe(Effect.ensuring(arrived), Effect.annotateLogs({ utterance: utterance.id })),
-              turns,
-            ),
-          ),
-        )
+        return Option.some(replying(thought))
       })
+
+    /**
+     * What's said over an answer or right after it: a follow-up to it, with
+     * "it" what the answer was about, like "tell it to fix the tests" after
+     * how a thread is doing, worked out as he talks and acted on once he's
+     * stopped, as what he dictates is. Talk that wasn't meant for yapd, or a
+     * change to a thread with too little speech to be his, isn't taken: the
+     * answer carries on, or the microphone closes. `line` is what he heard of
+     * it, which can be its words for no app to show its card.
+     */
+    const followUp =
+      (about: Subject, line: Effect.Effect<string>) =>
+      (heard: string, voiced: number): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+        Effect.gen(function* () {
+          const at = yield* Clock.currentTimeMillis
+          const { turns } = yield* options.power
+          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
+          const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line }])
+          if (thought.decision.act === "resume") return Option.none()
+          if (Brain.murmured(thought.decision, utterance)) {
+            yield* Effect.logInfo(`Not taking "${heard}" as a follow-up, with only ${voiced.toFixed(2)} s of speech`)
+            return Option.none()
+          }
+          return Option.some(replying(thought))
+        })
+
+    /**
+     * What's said back to something yapd said, once he's stopped: acted on in
+     * the background, in its turn, with nothing but answers said until what
+     * comes of it is, and noted like what he dictates.
+     */
+    const replying = (thought: Thought) =>
+      Effect.flatMap(options.awaiting, (arrived) =>
+        background(
+          turn.withPermits(1)(
+            Effect.gen(function* () {
+              yield* Effect.logInfo(`Heard: ${thought.utterance.heard}`)
+              const outcome = yield* acting(thought)
+              yield* note(thought, outcome, thought.utterance.at)
+              yield* deliver(outcome, thought.utterance)
+              yield* offering
+            }),
+          ).pipe(Effect.ensuring(arrived), Effect.annotateLogs({ utterance: thought.utterance.id })),
+          thought.utterance.turns,
+        ),
+      )
 
     /** Says what came of a request ahead of anything else, and notes it in the journal. */
     const deliver = (outcome: Outcome, utterance: Pick<Utterance, "id" | "turns">): Effect.Effect<void> =>
@@ -1767,10 +1798,11 @@ export const make = (options: {
         const used = Effect.sync(() => {
           reworded = true
         })
+        const kind = open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer"
         yield* options.tell(
           {
             id: mint(at, "a"),
-            kind: open !== undefined ? "question" : outcome.kind === "done" ? "done" : "answer",
+            kind,
             priority: "needs-you",
             spoken: outcome.say,
             ...(instead === undefined ? {} : { instead: { spoken: instead, when: off, used } }),
@@ -1809,6 +1841,8 @@ export const make = (options: {
                   }),
                 }),
             ...(outcome.confirmed === undefined ? {} : { confirmed: outcome.confirmed }),
+            // An answer can be followed up about what it was about, in the words he heard it in.
+            ...(kind === "answer" ? { followUp: followUp(subject, Effect.sync(() => (reworded && instead !== undefined ? instead : outcome.say))) } : {}),
             ...(open === undefined
               ? { stale: Effect.succeed(false) }
               : {
