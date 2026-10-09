@@ -37,7 +37,7 @@ Live on `dev` now: everything below. Rig's threads are followed, waiting on thei
 - Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message goes by voice or new work starts, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
-- You can interrupt from the first word of an update or an answer, not only after its first three seconds. Over those, while some of yapd's own voice still gets into the microphone, it keeps talking until Whisper makes out it's you (about a second after you stop; a second in if you keep talking; two words of yours, or a "stop" or "wait") and quietly ignores its own words, even where they run into yours.
+- You can interrupt from the first word of an update or an answer, not only after its first three seconds. Over those, while some of yapd's own voice still gets into the microphone, it keeps talking until Whisper makes out it's you (about a second after you stop; a second in if you keep talking; two words of yours it isn't saying, or a "stop" or "wait") and quietly ignores its own words, even where they run into yours.
 - "Who needs me?" and usage need no model call; a status question takes one, against a minute or more in the reverted attempt.
 
 ## Under the hood
@@ -59,3 +59,6 @@ Live on `dev` now: everything below. Rig's threads are followed, waiting on thei
 - A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.
 - Catching up, if yapd has to ask "which one?" about your follow-up, the next "what did I miss?" may say "Nothing else." though an update is still unheard.
 - After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
+- Over yapd's first three seconds, its own voice heard badly enough, like "Over in your app." or "Oh, Rennie app." for "Over in yapd", can still stop it and be taken for yours. A transcription still running as those seconds end can let the start of its voice duck or stop it too.
+- Once yapd has stopped for you over its first three seconds, one word of its own still coming in can be passed on with yours.
+- "Of course." on its own, said straight over the end of a short question of yapd's, isn't taken for an answer: "yes" is.
