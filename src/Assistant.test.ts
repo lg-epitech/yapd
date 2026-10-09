@@ -1755,6 +1755,34 @@ describe("Assistant", () => {
     expect(result.answers).toEqual([{ [colour.id]: "Blue (Recommended)" }])
   })
 
+  test("what only agrees, said before he heard yapd's pick, is never sent as that pick, however the model takes it: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes what he said for agreeing with yapd's pick.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue (Recommended)", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [colour]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          // It starts playing, and he talks over it before "I'd go with Blue", or hears it through.
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const again = "Again, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    for (const heard of ["Yeah, that works.", "Sounds great, let's do that."]) {
+      expect([heard, await answering(heard, true)]).toEqual([heard, { asked: 1, spoken: [again], answers: [] }])
+      expect([heard, await answering(heard, false)]).toEqual([heard, { asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] }])
+    }
+    // Naming it, he picked it himself.
+    expect(await answering("Blue works, yeah.", true)).toEqual({ asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
+    expect(await answering("The second, I guess.", true)).toEqual({ asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
+  })
+
   test("a plain no after yapd's pick asks which one then, without it", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (options: ReadonlyArray<string>, then: string) =>

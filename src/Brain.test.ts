@@ -187,6 +187,11 @@ describe("Brain", () => {
     expect(shown).toContain("The question: «Which test extras should run?», headed «Extras».")
     expect(shown).toContain("Its options: «Alpha» («Runs the alpha suite.»), «Beta», «Gamma (Recommended)». Several can be picked.")
     expect(shown).toContain("You said you'd go with «Gamma (Recommended)».")
+    // Cut off before yapd's pick, the model is told he never heard it, so what only agrees isn't to it.
+    const unheard: Assistant.Open = { ...open, ...(open.asks?._tag === "Question" ? { asks: { ...open.asks, inFull: false } } : {}) }
+    const cut = Brain.prompt(situation("Yeah, that works.", { open: Option.some(unheard), desk: desk([ref(tezos)]) }), Option.none())
+    expect(cut).not.toContain("You said you'd go with")
+    expect(cut).toContain(`He didn't hear you say you'd go with «Gamma (Recommended)», so what only agrees, like "yeah, that works", isn't to it: that's "again" with "how" "same"`)
     expect(shown).toContain(`"how" "skip" with "reply" skips this part. "again" with "how" "more" is to hear what the options mean.`)
     // His words go as they are, and a no isn't taken for letting it go.
     expect(shown).toContain(`"text" is all of his words, as he'd type them.`)

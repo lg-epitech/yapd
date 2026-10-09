@@ -1729,7 +1729,14 @@ const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording">) => {
               `Its options: ${question.options.map(({ label, description }) => `${fenced(label, 80)}${description.trim() === "" ? "" : ` (${fenced(description, 80)})`}`).join(", ")}.`,
               ...(question.multiSelect ? ["Several can be picked."] : []),
             ]),
-        ...Option.match(pick, { onNone: () => [], onSome: (label) => [`You said you'd go with ${fenced(label, 80)}.`] }),
+        // Cut off before it, he can't be agreeing with yapd's pick, however his words sound.
+        ...Option.match(pick, {
+          onNone: () => [],
+          onSome: (label) =>
+            asks.inFull
+              ? [`You said you'd go with ${fenced(label, 80)}.`]
+              : [`He didn't hear you say you'd go with ${fenced(label, 80)}, so what only agrees, like "yeah, that works", isn't to it: that's "again" with "how" "same", to ask it in full.`],
+        }),
         `An answer is "reply": "text" is the option he picked, as it's written; several, one a line.${
           question.allowCustomAnswer
             ? ` When he adds a condition, a reason or anything the work should know, like "Blue, but only for the tests", "none of those, use staging" or "hold off until I check the fees", "text" is all of his words, as he'd type them.`

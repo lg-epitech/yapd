@@ -477,6 +477,25 @@ const byWords = (part: Said, said: string) => {
   return one(fitting(part, having))
 }
 
+/** Words an option's name has that say nothing of which it is. */
+const glue: ReadonlySet<string> = new Set(["and", "or", "of", "to", "for", "in", "it", "is", "with", "as"])
+
+/**
+ * Whether his words name this option, by a word of its name or by its
+ * place, rather than only agree with what yapd would pick: "Blue, I think"
+ * and "the second, please" do, "yeah, that works" doesn't.
+ */
+export const mentions = (part: Said, index: number, heard: string) => {
+  const choice = part.options[index]
+  if (choice === undefined) return false
+  const words = new Set(figures(gist(heard)).split(" "))
+  const own = [unmarked(choice.label), choice.said].flatMap((name) => figures(gist(name)).split(" ")).filter((word) => word !== "" && !pointing.has(word) && !glue.has(word))
+  // Not by a letter, nor "one", which say other things too.
+  const placed = Object.entries(places).flatMap(([word, at]) => (at === index && !/^(?:[a-d]|one)$/.test(word) ? [word] : []))
+  const last = index === part.options.length - 1 ? ["last", "latter"] : []
+  return [...own, ...placed, ...last].some((word) => words.has(word))
+}
+
 /** Plain yeses. */
 const yeses: ReadonlySet<string> = new Set([...agreed].filter((said) => !/\bboth\b/.test(said)))
 
