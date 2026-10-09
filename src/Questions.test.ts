@@ -210,6 +210,14 @@ describe("Questions", () => {
     // Only an option's name in full picks one it's a word of; anything more is the model's.
     const next = part("What next?", ["Skip the flaky test", "Stop", "Keep going"])
     expect(["Skip.", "Stop.", "Skip the flaky test."].map((heard) => Questions.pick(next, heard, { inFull: true, parts: 1 }))).toEqual([{ _tag: "Leave" }, picked(1), picked(0)])
+    // Words that let it go but start an option may be that option, which the model tells; words to stop talking, or "never mind", let it go.
+    const changelog = part("Should I also update the changelog?", ["Update the changelog", "Leave the changelog"])
+    const deploy = part("The deploy is failing. What now?", ["Cancel the deploy", "Retry the deploy (Recommended)"])
+    const tests = part("The slow tests take ten minutes. What should I do?", ["Skip the slow tests", "Run everything"])
+    expect([Questions.pick(changelog, "Leave it.", { inFull: true, parts: 1 }), Questions.pick(deploy, "Cancel.", { inFull: true, parts: 1 })]).toEqual([undefined, undefined])
+    expect(Questions.pick(tests, "Skip that one.", { inFull: true, parts: 2 })).toBeUndefined()
+    expect(["Skip it.", "Never mind.", "Forget it."].map((heard) => Questions.pick(tests, heard, { inFull: true, parts: 2 })?._tag)).toEqual(["Skip", "Leave", "Leave"])
+    expect(["Leave it.", "Cancel."].map((heard) => Questions.pick(networks, heard, { inFull: true, parts: 1 })?._tag)).toEqual(["Leave", "Leave"])
     expect(pick("Ghostnet, but only for the tests.")).toBeUndefined()
     expect(pick("Mainnet and Ghostnet.")).toBeUndefined()
     // A form that takes only its options asks which of them, rather than send words it can't take.

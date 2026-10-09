@@ -601,7 +601,9 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
  * wants done with the question itself. `inFull` is whether he heard the
  * part through to yapd's pick, and `parts` how many it has. Undefined for
  * anything else, which is the model's to judge. Words like "stop", "skip" or
- * "later" are never taken for an option they're only a word of.
+ * "later" are never taken for an option they're only a word of, and words
+ * that let it go but start an option, like "leave it" to "Leave the
+ * changelog", are the model's too.
  */
 export const pick = (part: Said, heard: string, asked: { readonly inFull: boolean; readonly parts: number }): Reply | undefined => {
   const said = gist(heard)
@@ -635,6 +637,10 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   if (repeating.has(said)) return { _tag: "Again" }
   if (explaining.has(said)) return { _tag: "More" }
   if (later.has(said)) return { _tag: "Later" }
+  // "Leave it" to "Leave the changelog", or "cancel" to "Cancel the deploy", may well be that option, which the model tells. Never words
+  // to stop talking, like "skip it" or "stop", which no agent gets, nor "never mind" or "forget it".
+  const lead = /^(?:leave|cancel|drop|skip|pass|move)\b/.exec(said)?.[0]
+  if ((leaving.has(said) || skipping.has(said)) && !enough.has(said) && lead !== undefined && starting(lead) !== undefined) return undefined
   if (skipping.has(said) && asked.parts > 1) return { _tag: "Skip" }
   if (leaving.has(said) || skipping.has(said)) return { _tag: "Leave" }
   return undefined

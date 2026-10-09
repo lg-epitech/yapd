@@ -2302,12 +2302,12 @@ describe("Assistant", () => {
     expect(result.dictated).toEqual(["date-fns", "Day.js", "Rosie"])
   })
 
-  test("'stop', 'skip', 'cancel' or 'enough' over a question lets it go, never picking an option it's a word of, which only its name in full picks", async () => {
+  test("'stop', 'skip', 'never mind' or 'enough' over a question lets it go, never picking an option it's a word of, which only its name in full picks", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     for (const [said, label] of [
       ["Stop.", "Stop here"],
       ["Skip.", "Skip the flaky test"],
-      ["Cancel.", "Cancel the migration"],
+      ["Never mind.", "Never mind the flaky test"],
       ["Enough.", "That's enough for now"],
     ] as const) {
       const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "next", question: "What next?", options: [{ label }, { label: "Keep going" }] }] }]
@@ -2327,6 +2327,23 @@ describe("Assistant", () => {
       expect(result.left).toBe("I'll leave that one, sir.")
       expect(result.picked).toEqual([{ next: label }])
     }
+  })
+
+  test("'leave it' or 'cancel' to a question with an option that starts with it is the model's to tell, which may take it for that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: Record<string, unknown>, heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [question]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const changelog = { id: "log", question: "Should I also update the changelog?", options: [{ label: "Update the changelog" }, { label: "Leave the changelog" }] }
+    const deploy = { id: "deploy", question: "The deploy is half done and failing. What now?", options: [{ label: "Cancel the deploy" }, { label: "Retry the deploy (Recommended)" }] }
+    expect(await answering(changelog, "Leave it.", "Leave the changelog")).toEqual({ asked: 1, spoken: ["Leave the changelog it is, sir."], answers: [{ log: "Leave the changelog" }] })
+    expect(await answering(deploy, "Cancel.", "Cancel the deploy")).toEqual({ asked: 1, spoken: ["Cancel the deploy it is, sir."], answers: [{ deploy: "Cancel the deploy" }] })
   })
 
   test("a plain no to a thread's question that takes any answer is sent as the answer, while 'stop' still lets it go", async () => {
