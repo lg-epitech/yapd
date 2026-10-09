@@ -1856,31 +1856,47 @@ describe("Assistant", () => {
     expect(result.kept).toEqual([{ thread: tezos.id, text: "Use the fee table from the Mina work.", said: "On it, sir: Migrate Tezos Integration." }])
   })
 
+  /**
+   * The persona with his own lines for going ahead, as `YAPD_ON_IT` gives
+   * them, and the rest as written in the style the test's lines stand for,
+   * keeping in `noted` each line it's told he heard.
+   */
+  const owning = (own: ReadonlyArray<string>, noted: Array<string>) =>
+    Effect.gen(function* () {
+      const store = yield* Store.make(":memory:")
+      const built = yield* Layer.build(
+        Persona.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(Warmth, { warm: () => Effect.void }),
+              Layer.succeed(Settings.Settings, Settings.fromStore(store)),
+              Layer.succeed(Model, { ask: () => Effect.fail(new ModelError({ cause: "Without a style, nothing is written." })) }),
+            ),
+          ),
+          Layer.provide(Layer.setConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_ON_IT", own.join("|")]])))),
+        ),
+      )
+      const persona = Context.get(built, Persona.Persona)
+      return {
+        ...persona,
+        lines: Effect.map(persona.lines, ({ onIt }) => ({ ...lines, onIt })),
+        said: (line: string) => Effect.zipRight(Effect.sync(() => void noted.push(line)), persona.said(line)),
+      }
+    })
+
+  /** Which of his lines a confirmation is, said before the Tezos thread's name or on its own. */
+  const going = (own: ReadonlyArray<string>) => (said: string) =>
+    own.find((line) => said === line || said === `${line.slice(0, -1)}: Migrate Tezos Integration.`)
+
   test("with lines of his own for going ahead, a message says one, noted only once it's played, so the next says another, and none he didn't hear is noted", async () => {
     const own = ["Right away, sir.", "Very good, sir.", "Consider it done, sir.", "Very well, sir."]
-    /** Which of his lines a confirmation is, said before the thread's name or on its own. */
-    const going = (said: string) => own.find((line) => said === line || said === `${line.slice(0, -1)}: Migrate Tezos Integration.`)
     const result = await run(
       Effect.gen(function* () {
-        const store = yield* Store.make(":memory:")
-        const built = yield* Layer.build(
-          Persona.layer.pipe(
-            Layer.provide(
-              Layer.mergeAll(
-                Layer.succeed(Warmth, { warm: () => Effect.void }),
-                Layer.succeed(Settings.Settings, Settings.fromStore(store)),
-                Layer.succeed(Model, { ask: () => Effect.fail(new ModelError({ cause: "Without a style, nothing is written." })) }),
-              ),
-            ),
-            Layer.provide(Layer.setConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_ON_IT", own.join("|")]])))),
-          ),
-        )
-        const persona = Context.get(built, Persona.Persona)
         const noted: Array<string> = []
         const { dictate, spoken, play } = yield* assistant(
           (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: situation.utterance.heard, how: "now" }),
           undefined,
-          { waiting: true, persona: { ...persona, said: (line) => Effect.zipRight(Effect.sync(() => void noted.push(line)), persona.said(line)) } },
+          { waiting: true, persona: yield* owning(own, noted) },
         )
         yield* dictate("Tell the Tezos migration to use the fee table.")
         const unplayed = [...noted]
@@ -1893,7 +1909,7 @@ describe("Assistant", () => {
       }),
     )
     expect(result.spoken).toHaveLength(3)
-    const [first, ...after] = result.spoken.map(going)
+    const [first, ...after] = result.spoken.map(going(own))
     // Before the thread's name, as the written one is.
     expect(result.spoken[0]).toBe(`${first?.slice(0, -1)}: Migrate Tezos Integration.`)
     expect(result.unplayed).toEqual([])
@@ -1904,6 +1920,80 @@ describe("Assistant", () => {
       expect(line).not.toBe(first)
     }
     expect(result.noted).toEqual([first!])
+  })
+
+  test("with two lines of his own for going ahead, messages said while the one before waits to play each take the other, so none plays twice in a row", async () => {
+    const own = ["Right away, sir.", "Very good, sir."]
+    const result = await run(
+      Effect.gen(function* () {
+        const noted: Array<string> = []
+        const { dictate, told, play } = yield* assistant(
+          (situation) => Brain.decision({ act: "send", target: handle(situation, tezos), text: situation.utterance.heard, how: "now" }),
+          undefined,
+          { waiting: true, persona: yield* owning(own, noted) },
+        )
+        yield* dictate("Tell the Tezos migration to use the fee table.")
+        yield* play()
+        // Each picked before either plays, while what's ahead of it is still being said.
+        yield* dictate("Tell it to rebase on main.")
+        yield* dictate("Tell it to open a pull request.")
+        const waiting = [...noted]
+        yield* play(told[1])
+        yield* play(told[2])
+        return { spoken: told.map(({ spoken }) => spoken), waiting, noted }
+      }),
+    )
+    const said = result.spoken.map((spoken) => going(own)(spoken) ?? spoken)
+    const [first] = said
+    // The second takes the other line, since he heard the first last, and the third the first again, since the second plays just before it.
+    expect(said).toEqual([first!, own.find((line) => line !== first)!, first!])
+    expect(result.waiting).toEqual([first!])
+    expect(result.noted).toEqual(said)
+  })
+
+  test("with two lines of his own for going ahead, a request with two messages says a different one for each, even once another reply picked between them, and notes both in turn once played", async () => {
+    const own = ["Right away, sir.", "Very good, sir."]
+    const result = await run(
+      Effect.gen(function* () {
+        const noted: Array<string> = []
+        const persona = yield* owning(own, noted)
+        /** The lines picked for the request's steps, and what another reply going ahead, like one passed on over an update, picked just after the first. */
+        const picked: Array<string> = []
+        const others: Array<string> = []
+        const { dictate, told, play } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Tell the Tezos")
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now", rest: "tell the Mina one to use its fee table" })
+              : Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" }),
+          undefined,
+          {
+            waiting: true,
+            persona: {
+              ...persona,
+              onIt: (besides) =>
+                Effect.tap(persona.onIt(besides), (line) =>
+                  Effect.zipRight(
+                    Effect.sync(() => void picked.push(line)),
+                    others.length === 0 ? Effect.flatMap(persona.onIt(), (other) => Effect.sync(() => void others.push(other))) : Effect.void,
+                  ),
+                ),
+            },
+          },
+        )
+        yield* dictate("Tell the Tezos migration to use the fee table, and tell the Mina one to use its fee table.")
+        const unplayed = [...noted]
+        yield* play()
+        return { spoken: told.map(({ spoken }) => spoken), picked, others, unplayed, noted }
+      }),
+    )
+    const [first, second] = result.picked
+    // A different one for each step, though the other reply took the one the first step didn't, which the second would otherwise take for being the latest picked.
+    expect(result.picked).toEqual([first!, own.find((line) => line !== first)!])
+    expect(result.others).toEqual([second!])
+    // Each before its thread's name, "sir" said once.
+    expect(result.spoken).toEqual([`${first!.slice(0, -1)}: Migrate Tezos Integration. ${second!.replace(/, sir\.$/, "")}: Open Mina SSV2 Bug Tickets.`])
+    expect(result.unplayed).toEqual([])
+    expect(result.noted).toEqual([first!, second!])
   })
 
   test("a write at medium confidence about a thread that isn't the focus asks once, naming both", async () => {

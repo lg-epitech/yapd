@@ -117,7 +117,10 @@ export interface Outcome {
   readonly missed?: ReadonlyArray<number>
   /** What was decided on a second look, at a thread or at what was found, which the answer is. */
   readonly second?: Brain.Decision
-  /** The line for going ahead it says last, if it says one. */
+  /**
+   * The line for going ahead it says last, if it says one, which one picked
+   * for a step said after it in the same breath is kept from being.
+   */
   readonly onIt?: string
   /** Run once what's said is known to be playing, like noting the line for going ahead it starts with as the one he heard last. */
   readonly confirmed?: Effect.Effect<void>
@@ -191,11 +194,14 @@ const joining = "1 second"
  * Which step of its request something is, whether it's the same words sent
  * again on his yes, and whether it's done quietly: the step before was said
  * on its own already, so only what didn't go, or a question, is said of it.
+ * `besides` is the line for going ahead the step before says in the same
+ * breath, which its own is kept from being.
  */
 interface Stepping {
   readonly step: number
   readonly twice: boolean
   readonly quietly?: boolean
+  readonly besides?: string
 }
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
@@ -1003,7 +1009,7 @@ export const make = (options: {
       outcome: Hands.Outcome,
       thought: Thought,
       said: Lines,
-      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean },
+      at: { readonly step: number; readonly commandId: string; readonly quietly?: boolean; readonly besides?: string },
       free: <A>(effect: Effect.Effect<A>) => Effect.Effect<A> = (effect) => effect,
     ): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -1060,8 +1066,8 @@ export const make = (options: {
           case "Done": {
             // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, or in the queue a stop held till he says, he's told why.
             const quietly = at.quietly === true && outcome.waiting === undefined && !Hands.held(outcome)
-            // His line for going ahead, a different one from the last he heard, picked only when it's said, and noted only once it plays.
-            const onIt = !quietly && Hands.goesAhead(act, outcome.how, outcome) ? yield* persona.onIt() : undefined
+            // His line for going ahead, a different one from the last he heard and from one the step before says with it, picked only when it's said, and noted only once it plays.
+            const onIt = !quietly && Hands.goesAhead(act, outcome.how, outcome) ? yield* persona.onIt(at.besides) : undefined
             const line = quietly ? "" : Hands.done(act, outcome.how, onIt === undefined ? said : { ...said, onIt }, called, outcome)
             yield* noting(line === "" ? undefined : line, {
               how: outcome.how,
@@ -1181,14 +1187,23 @@ export const make = (options: {
       Effect.gen(function* () {
         if (next.source === "failed") return { ...first, say: joined(first.say, `I couldn't work out the rest${addressed(said)}.`, said) }
         if ((next.decision.act === "dismiss" && next.decision.rest.trim() === "") || next.decision.act === "resume") return first
-        const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, { step, twice: false, quietly })
+        // A line for going ahead the step before says is kept from being said again in the same breath.
+        const after = yield* follow(Brain.check(next.decision, next.situation, said), next, said, {
+          step,
+          twice: false,
+          quietly,
+          ...(first.onIt === undefined ? {} : { besides: first.onIt }),
+        })
         if (after.say === "") return first
         // What he missed that the step before told him is heard once he's heard the lot, as is what the rest told him.
         const missed = [...(first.missed ?? []), ...(after.missed ?? [])]
         const second = first.second ?? after.second
-        // Of two lines for going ahead, the one said last is the last he heard.
+        // Of two lines for going ahead, the one said last is the one a step after both is kept from, and the last he heard: each is noted in turn, once it's known to play.
         const onIt = after.onIt ?? first.onIt
-        const confirmed = after.confirmed ?? first.confirmed
+        const confirmed =
+          first.confirmed === undefined || after.confirmed === undefined
+            ? (after.confirmed ?? first.confirmed)
+            : Effect.zipRight(first.confirmed, after.confirmed)
         return {
           ...after,
           say: joined(first.say, after.say, said),
@@ -1219,7 +1234,12 @@ export const make = (options: {
               outcome,
               thought,
               said,
-              { step: at.step, commandId: Ledger.ids(utterance.id, at.step, false).commandId, ...(at.quietly === true ? { quietly: true } : {}) },
+              {
+                step: at.step,
+                commandId: Ledger.ids(utterance.id, at.step, false).commandId,
+                ...(at.quietly === true ? { quietly: true } : {}),
+                ...(at.besides === undefined ? {} : { besides: at.besides }),
+              },
               free,
             ),
           ),
