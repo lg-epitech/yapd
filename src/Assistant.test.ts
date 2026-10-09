@@ -254,13 +254,14 @@ const assistant = (
     readonly onIt?: string
     /**
      * Rig, followed too: how its tunnel stands, and its threads, when they can
-     * be seen; with `dispatched`, a T3 Code of its own that answers, keeping
-     * what it's sent there, what its threads wait on as `items`, and what it
-     * tells of as `changes`.
+     * be seen, which `seen` says when it's down a while; with `dispatched`, a
+     * T3 Code of its own that answers, keeping what it's sent there, what its
+     * threads wait on as `items`, and what it tells of as `changes`.
      */
     readonly rig?: {
       readonly status: Effect.Effect<Tunnel.Status>
       readonly threads?: ReadonlyArray<T3Live.Thread>
+      readonly seen?: () => boolean
       readonly dispatched?: Array<Record<string, unknown>>
       readonly items?: ReadonlyArray<Record<string, unknown>>
       readonly changes?: Stream.Stream<T3Live.Change>
@@ -325,7 +326,7 @@ const assistant = (
             machine: "rig",
             live: {
               view: Effect.sync(() =>
-                Option.map(Option.fromNullable(rig.threads), (threads) => ({
+                Option.map(Option.filter(Option.fromNullable(rig.threads), () => rig.seen?.() !== false), (threads) => ({
                   ...view,
                   threads: new Map([...threads, ...rigChanged.values()].map((thread) => [thread.id, thread] as const)),
                 })),
@@ -7232,5 +7233,41 @@ describe("Assistant", () => {
     expect(result.ids[1]).toBe(result.ids[0])
     expect(result.steps).toEqual([`rig ${onRig.id} sent`])
     expect(result.here).toEqual([])
+  })
+
+  test("a rig question whose threads go out of sight before it's said is let go without a word, never as dealt with, and asked again once rig is back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig"))
+        yield* made.flush
+        const asked = made.questions().length
+        // Rig drops out as it comes up to be said.
+        seen = false
+        const stale = yield* made.questions().at(-1)!.stale
+        const closed = (yield* made.journal.since(0, { kinds: ["action"] })).flatMap(({ detail }) => {
+          const open = (detail as { readonly open?: unknown }).open
+          return typeof open === "string" ? [open] : []
+        })
+        // A minute on, rig's back, and what still waits on him there is asked once more.
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(1)
+        yield* made.wait(1)
+        return { asked, stale, closed, open: yield* made.open, again: made.questions().length }
+      }),
+    )
+    expect(result.asked).toBe(1)
+    expect(result.stale).toBe(true)
+    expect(result.closed).toEqual(["dropped: out of sight"])
+    expect(Option.map(result.open, ({ asked }) => asked)).toEqual(
+      Option.some("A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."),
+    )
+    expect(result.again).toBe(2)
   })
 })

@@ -2503,12 +2503,16 @@ export const make = (options: {
                     if (asking?.open.id !== open.id || asking.held.size > 0) return true
                     if (request === undefined) return false
                     // What a thread waits on him for, dealt with in T3 Code since, or said before, is let go without a word, and what's next is asked.
-                    const waits = yield* still(open.candidates[0] ?? { machine: "", id: "" }, request)
+                    // Its machine's threads can't be seen, like rig's while it can't be reached, it's let go too, but not as dealt with: it's
+                    // asked again once they can be.
+                    const ref = open.candidates[0] ?? { machine: "", id: "" }
+                    const waits = yield* still(ref, request)
                     if (waits && claim !== undefined && claim.kept === undefined) claim.kept = yield* journal.claim(claim.asking.entry)
                     if (waits && (claim === undefined || Option.isSome(claim.kept ?? Option.none()))) return false
+                    const away = !waits && Option.isSome(yield* threads.unseen(ref.machine))
                     if (asking?.open.id === open.id) {
-                      if (!waits) gone.add(open.id)
-                      yield* close(open, waits ? "dropped: said before" : "dropped: dealt with in T3 Code")
+                      if (!waits && !away) gone.add(open.id)
+                      yield* close(open, waits ? "dropped: said before" : away ? "dropped: out of sight" : "dropped: dealt with in T3 Code")
                       yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
                     }
                     return true
@@ -2569,7 +2573,11 @@ export const make = (options: {
     const put = (waiting: Queued, turns: number) =>
       Effect.gen(function* () {
         const { ref, asks: request, asked: words, about, rewordings, parts } = waiting.asking
-        if (!(yield* still(ref, request.requestId))) return yield* Effect.logInfo(`Not asking "${words}", since it no longer waits on it`)
+        if (!(yield* still(ref, request.requestId))) {
+          // Its machine's threads out of sight, it's asked once they're back, as what still waits on him is.
+          const away = Option.isSome(yield* threads.unseen(ref.machine))
+          return yield* Effect.logInfo(`Not asking "${words}", since ${away ? `${ref.machine}'s threads can't be seen right now` : "it no longer waits on it"}`)
+        }
         const at = yield* Clock.currentTimeMillis
         // Its own, since no request of his is what it's for.
         const utterance = mint(at, "n")
