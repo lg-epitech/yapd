@@ -92,7 +92,7 @@ const persona = (
 
 /** What's said for going ahead, `times` times over, each noted as said, picked the same way every run. */
 const goingAhead = (persona: Context.Tag.Service<Persona.Persona>, times: number) =>
-  Effect.runSync(Effect.replicateEffect(Effect.tap(persona.onIt, persona.said), times).pipe(Effect.withRandom(Random.make("yapd"))))
+  Effect.runSync(Effect.replicateEffect(Effect.tap(persona.onIt(), persona.said), times).pipe(Effect.withRandom(Random.make("yapd"))))
 
 const own = ["Right away, sir.", "Very good, sir.", "Consider it done, sir.", "Very well, sir."]
 
@@ -136,7 +136,7 @@ describe("Persona", () => {
     const read: Array<string> = []
     const lines = Effect.runSync(
       Effect.replicateEffect(
-        Effect.zipLeft(Effect.tap(said.onIt, said.said), Effect.tap(said.lines, ({ onIt }) => read.push(onIt))),
+        Effect.zipLeft(Effect.tap(said.onIt(), said.said), Effect.tap(said.lines, ({ onIt }) => read.push(onIt))),
         200,
       ).pipe(Effect.withRandom(Random.make("yapd"))),
     )
@@ -150,10 +150,10 @@ describe("Persona", () => {
     const heard = Effect.runSync(
       Effect.replicateEffect(
         Effect.gen(function* () {
-          const last = yield* Effect.tap(said.onIt, said.said)
+          const last = yield* Effect.tap(said.onIt(), said.said)
           // Picked, then never said, like when he carries on talking and the reply is worked out again.
-          yield* said.onIt
-          return [last, yield* said.onIt] as const
+          yield* said.onIt()
+          return [last, yield* said.onIt()] as const
         }),
         200,
       ).pipe(Effect.withRandom(Random.make("yapd"))),
@@ -161,7 +161,35 @@ describe("Persona", () => {
     heard.forEach(([last, next]) => expect(next).not.toBe(last))
     // Lines that aren't his own, like the one for being queued, leave the last one he heard as it was.
     Effect.runSync(said.said(own[0]!).pipe(Effect.zipRight(said.said(jarvis.queued))))
-    expect(new Set(Effect.runSync(Effect.replicateEffect(said.onIt, 40)))).toEqual(new Set(own.slice(1)))
+    expect(new Set(Effect.runSync(Effect.replicateEffect(said.onIt(), 40)))).toEqual(new Set(own.slice(1)))
+  })
+
+  test("a second line for going ahead in the same breath is never the first, nor the one he heard last while there are lines enough", async () => {
+    const { persona: said } = await persona(undefined, jarvis, { YAPD_ON_IT: own.join("|") })
+    const picked = Effect.runSync(
+      Effect.replicateEffect(
+        Effect.gen(function* () {
+          const last = yield* Effect.tap(said.onIt(), said.said)
+          const first = yield* said.onIt()
+          return [last, first, yield* said.onIt(first)] as const
+        }),
+        200,
+      ).pipe(Effect.withRandom(Random.make("yapd"))),
+    )
+    picked.forEach(([last, first, second]) => {
+      expect(second).not.toBe(first)
+      expect(second).not.toBe(last)
+    })
+    expect(new Set(picked.map(([, , second]) => second))).toEqual(new Set(own))
+    // With two, the one he heard last is said again rather than the same one twice in one breath.
+    const two = await persona(undefined, jarvis, { YAPD_ON_IT: own.slice(0, 2).join("|") })
+    Effect.runSync(two.persona.said(own[0]!))
+    expect(new Set(Effect.runSync(Effect.replicateEffect(two.persona.onIt(own[1]), 20)))).toEqual(new Set([own[0]!]))
+    // With one of his own, or none, there's only the one line to say.
+    const one = await persona(undefined, jarvis, { YAPD_ON_IT: own[0]! })
+    expect(Effect.runSync(one.persona.onIt(own[0]))).toBe(own[0]!)
+    const none = await persona(undefined, jarvis)
+    expect(Effect.runSync(none.persona.onIt(jarvis.onIt))).toBe(jarvis.onIt)
   })
 
   test("renders all his own lines ahead, and not the written one they replace", async () => {

@@ -166,7 +166,7 @@ export const ProviderResponder = Layer.effect(
     return {
       respond: (interruption) =>
         Effect.gen(function* () {
-          const fast = yield* quick(interruption, persona.onIt)
+          const fast = yield* quick(interruption, persona.onIt())
           if (fast !== undefined) return fast
           return yield* model.ask(Reply, prompt(interruption, style)).pipe(
             Effect.mapError((cause) => new RespondError({ cause })),

@@ -73,10 +73,11 @@ export class Persona extends Context.Tag("yapd/Persona")<
     readonly lines: Effect.Effect<Lines>
     /**
      * The line to say once he's asked for something: one of his own, never
-     * the one he heard last, or the written one. Picking it changes nothing,
-     * since a reply that has one may yet be dropped or say something else.
+     * the one he heard last, nor `besides`, one said in the same breath, or
+     * the written one. Picking it changes nothing, since a reply that has one
+     * may yet be dropped or say something else.
      */
-    readonly onIt: Effect.Effect<string>
+    readonly onIt: (besides?: string) => Effect.Effect<string>
     /** Notes a line as being said, so the next line for going ahead is a different one. Only his own count. */
     readonly said: (line: string) => Effect.Effect<void>
   }
@@ -102,20 +103,22 @@ const ownLines = Effect.gen(function* () {
 const owning = (own: ReadonlyArray<string>) => (lines: Lines): Lines => (own.length === 0 ? lines : { ...lines, onIt: own[0]! })
 
 /**
- * One of his own lines, never the one said last, so they vary, and how to
- * note one as said. Only noting changes which comes next: a line picked for a
- * reply that's then dropped, or queued, or that fails, was never heard.
- * Without his own, it's the line as it is now.
+ * One of his own lines, never the one said last, nor one said alongside, so
+ * they vary, and how to note one as said. Only noting changes which comes
+ * next: a line picked for a reply that's then dropped, or queued, or that
+ * fails, was never heard. Without his own, it's the line as it is now, even
+ * twice in one breath.
  */
 const alternating = (own: ReadonlyArray<string>, lines: Effect.Effect<Lines>) =>
   Effect.gen(function* () {
     const last = yield* Ref.make<string | undefined>(undefined)
     return {
-      onIt:
+      onIt: (besides?: string) =>
         own.length === 0
           ? Effect.map(lines, ({ onIt }) => onIt)
           : Effect.flatMap(Ref.get(last), (said) => {
-              const others = own.length === 1 ? own : own.filter((line) => line !== said)
+              // The same line twice in one breath stands out more than one heard a while ago, so with too few to avoid both, it's `besides` that's avoided.
+              const others = [own.filter((line) => line !== said && line !== besides), own.filter((line) => line !== besides), own].find((lines) => lines.length > 0)!
               return Effect.map(Random.nextIntBetween(0, others.length), (index) => others[index]!)
             }),
       said: (line: string) => (own.includes(line) ? Ref.set(last, line) : Effect.void),
@@ -186,4 +189,4 @@ export const layer = Layer.scoped(
 )
 
 /** The plain lines, for tests and for wherever there's no style. */
-export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain), onIt: Effect.succeed(plain.onIt), said: () => Effect.void })
+export const Plain = Layer.succeed(Persona, { lines: Effect.succeed(plain), onIt: () => Effect.succeed(plain.onIt), said: () => Effect.void })

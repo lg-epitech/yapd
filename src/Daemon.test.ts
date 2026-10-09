@@ -80,7 +80,7 @@ const make = (says?: string, options: {
       ? Persona.Plain
       : Layer.succeed(Persona.Persona, {
           lines: Effect.succeed(Persona.plain),
-          onIt: Effect.succeed(Persona.plain.onIt),
+          onIt: () => Effect.succeed(Persona.plain.onIt),
           said: (line) => Effect.sync(() => void options.noted?.push(line)),
         }),
     Journal.memory,

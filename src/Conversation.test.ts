@@ -55,7 +55,7 @@ const conversation = (
     const layer = Layer.mergeAll(
       Layer.succeed(Persona.Persona, {
         lines: Effect.succeed(Persona.plain),
-        onIt: Effect.succeed(Persona.plain.onIt),
+        onIt: () => Effect.succeed(Persona.plain.onIt),
         said: (line) => Effect.sync(() => void noted.push(line)),
       }),
       Journal.memory,
