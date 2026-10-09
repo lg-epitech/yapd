@@ -17,7 +17,7 @@ const swiftc = (() => {
 })()
 
 /** The app's files the checks check, which need neither AppKit nor SwiftUI. */
-const checked = ["Cards.swift", "State.swift"]
+const checked = ["Cards.swift", "Fading.swift", "State.swift"]
 
 /** Where the checks are built, once, and removed after. */
 const dir = mkdtemp(join(tmpdir(), "yapd-app-"))
@@ -68,6 +68,23 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(yapd).toMatch(/following\.follow\(status\.showing, connecting: connecting\)/)
       expect(yapd).not.toMatch(/panel\.show\(card, talking: (true|false)\)/)
       expect(yapd.match(/send\("DELETE"[^\n]*/g)).toEqual(['send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },'])
+    },
+    120_000,
+  )
+
+  test(
+    "the panel keeps a card up while yapd talks about it, even one fetched after it started, and fades it a while after, or a while after it's shown with nothing said",
+    async () => {
+      expect(await run("fading")).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      // What the checks cover is what the panel uses: it fades a card only as it's told, with no timer of its own, and is told whether yapd is
+      // speaking with every state, card or not.
+      const panel = await Bun.file(join(app, "yapd", "Panel.swift")).text()
+      expect(panel).toMatch(/func heard\(speaking: Bool\) \{\s*fading\.heard\(speaking: speaking\)\s*\}/)
+      expect(panel).toMatch(/panel\.orderFrontRegardless\(\)\s*fading\.shown\(talking: talking\)\s*\}/)
+      expect(panel).toMatch(/func hide\(\) \{\s*fading\.hidden\(\)/)
+      expect(panel).not.toMatch(/Task\s*\{/)
+      const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
+      expect(yapd.match(/panel\.heard\([^)]*\)/g)).toEqual(["panel.heard(speaking: false)", 'panel.heard(speaking: status.activity == "speaking")'])
     },
     120_000,
   )

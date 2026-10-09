@@ -78,6 +78,7 @@ final class Yapd {
   private func follow(_ status: Status, connecting: Bool) {
     if let showing = status.showing { last = showing.id }
     following.follow(status.showing, connecting: connecting)
+    // Kept by the panel even before the card it points at is fetched and up, so one yapd is talking about by then stays up until it's done.
     panel.heard(speaking: status.activity == "speaking")
   }
 

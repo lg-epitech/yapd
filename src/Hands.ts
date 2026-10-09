@@ -1212,15 +1212,21 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
 export const sentBefore = (sent: number, now: number, lines: Lines, called: Option.Option<string>) =>
   `I sent that${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} ${ago(now - sent)}${addressed(lines)}.`
 
+/** What `twice` asks on its own, after saying the same words went lately. */
+export const twiceAsks = "Again?"
+
 /** Asked when the same words went to the same thread lately, and it hasn't said anything since. */
-export const twice = (sent: number, now: number, lines: Lines, called: Option.Option<string>) => `${sentBefore(sent, now, lines, called)} Again?`
+export const twice = (sent: number, now: number, lines: Lines, called: Option.Option<string>) => `${sentBefore(sent, now, lines, called)} ${twiceAsks}`
 
 /** That a message he wants back was read already. */
 export const readAlready = (lines: Lines, called: Option.Option<string>) =>
   `${Option.match(called, { onNone: () => "It's", onSome: (name) => `${capital(name)} has` })} already read it${addressed(lines)}.`
 
+/** What `read` offers on its own, after saying the message was read already. */
+export const readAsks = "Shall I tell it to ignore that?"
+
 /** Offered when a message he wants back was read already. */
-export const read = (lines: Lines, called: Option.Option<string>) => `${readAlready(lines, called)} Shall I tell it to ignore that?`
+export const read = (lines: Lines, called: Option.Option<string>) => `${readAlready(lines, called)} ${readAsks}`
 
 /**
  * Said after a restart, for a step other than a message that couldn't be

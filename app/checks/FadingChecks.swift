@@ -1,0 +1,85 @@
+import Foundation
+
+/// A card on the panel, keeping each wait before it fades, and how many times it faded.
+@MainActor
+private final class Faded {
+  var waits: [Duration] = []
+  var fades = 0
+
+  var doing: Fading.Doing {
+    Fading.Doing(
+      wait: { delay in self.waits.append(delay) },
+      fade: { self.fades += 1 }
+    )
+  }
+}
+
+/// The panel keeps a card up while yapd talks about it, even one that went up after it started, and fades it a while after, or a
+/// while after it's shown when nothing's said of it.
+@MainActor func checkFading() async {
+  // Fetched once yapd had started talking about it, as when the app follows a state that points at it and says yapd is speaking,
+  // which the panel hears before the card is up: it stays up until yapd stops, however long that takes, then lingers.
+  do {
+    let faded = Faded()
+    let fading = Fading(faded.doing)
+    let following = Following(Following.Doing(
+      fetch: { id in Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil) },
+      show: { _, talking in fading.shown(talking: talking) },
+      hide: { fading.hidden() },
+      takeDown: { _ in },
+      wait: { _ in }
+    ))
+    following.follow(pointing("c1", fresh: true), connecting: false)
+    fading.heard(speaking: true)
+    await following.settled()
+    await fading.settled()
+    check(faded.fades == 0 && faded.waits.isEmpty, "keeps up a card yapd started talking about before it went up, not fading it after \(faded.waits)")
+    fading.heard(speaking: false)
+    await fading.settled()
+    check(faded.fades == 1 && faded.waits == [.seconds(20)], "fades a card a while after yapd stops talking about it, not after \(faded.waits)")
+  }
+
+  // Up before yapd starts talking about it, it stays up until yapd stops.
+  do {
+    let faded = Faded()
+    let fading = Fading(faded.doing)
+    fading.shown(talking: true)
+    fading.heard(speaking: true)
+    await fading.settled()
+    check(faded.fades == 0, "keeps up a card while yapd talks about it")
+    fading.heard(speaking: false)
+    await fading.settled()
+    check(faded.fades == 1 && faded.waits.last == .seconds(20), "fades a card a while after yapd stops talking about it, not after \(faded.waits)")
+  }
+
+  // Never talked about after all, it lingers as if it had been.
+  do {
+    let faded = Faded()
+    let fading = Fading(faded.doing)
+    fading.shown(talking: true)
+    await fading.settled()
+    check(faded.fades == 1 && faded.waits == [.seconds(5), .seconds(20)], "fades a card yapd never talks about a while after, not after \(faded.waits)")
+  }
+
+  // Shown again with nothing said of it, it lingers, even while yapd is speaking of something else.
+  do {
+    let faded = Faded()
+    let fading = Fading(faded.doing)
+    fading.heard(speaking: true)
+    fading.shown(talking: false)
+    await fading.settled()
+    check(faded.fades == 1 && faded.waits == [.seconds(20)], "fades a card shown with nothing said a while after, not after \(faded.waits)")
+  }
+
+  // Taken away while yapd talks about it, it's gone: what yapd says after doesn't have it fade.
+  do {
+    let faded = Faded()
+    let fading = Fading(faded.doing)
+    fading.heard(speaking: true)
+    fading.shown(talking: true)
+    fading.hidden()
+    fading.heard(speaking: false)
+    await fading.settled()
+    check(faded.fades == 0, "leaves a card taken away to stay away, not fading it after \(faded.waits)")
+  }
+}

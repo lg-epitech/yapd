@@ -84,7 +84,7 @@ export interface Open {
   /** What was understood, minus what's being asked. */
   readonly decision: Brain.Decision
   readonly candidates: ReadonlyArray<Threads.Ref>
-  /** The exact words said. */
+  /** The exact words said: any news, then the question. */
   readonly asked: string
   /** What it's about in a few words, for asking it again and letting it go: the request, or the threads it chooses between. */
   readonly about: string
@@ -95,6 +95,13 @@ export interface Open {
   readonly resend: Option.Option<string>
   /** What the question follows, like why a message didn't go, or that it went lately, which is said on its own if he never hears the question. */
   readonly news?: string
+  /**
+   * After news, the question on its own, like "Send it again?", as whatever
+   * asks it puts it, never worked out from the news, which said on its own
+   * isn't always put as it is before the question. A line saying it again may
+   * leave the news out, and it's still the question asked again (I4).
+   */
+  readonly question?: string
 }
 
 /** What the user meant, worked out, not yet acted on. */
@@ -254,6 +261,12 @@ const nowhere: Threads.Desk = { threads: [], away: [] }
 
 /** Whether a journal entry is a question yapd asked. */
 const question = (kept: Kept) => typeof kept.detail === "object" && kept.detail !== null && "question" in kept.detail
+
+/** The question a journal entry asked on its own, without the news before it, unless it's from a yapd that didn't keep it. */
+const alone = (kept: Kept) => {
+  const asked = (kept.detail as { readonly question?: unknown }).question
+  return typeof asked === "string" ? [asked] : []
+}
 
 /**
  * Whether a journal entry is him catching up, asking what he missed, at once
@@ -484,8 +497,9 @@ export const make = (options: {
     const askedLately = Effect.gen(function* () {
       const kept = yield* journal.since((yield* Clock.currentTimeMillis) - fresh, { kinds: ["answer"] })
       const lines = yield* persona.lines
-      // In its own words, without "it's on your screen" when it went up on a card as it was asked.
-      return kept.filter(question).flatMap(({ said }) => (said === undefined ? [] : [said, Show.offScreen(said, lines)]))
+      // In its own words, without "it's on your screen" when it went up on a card as it was asked, and the question alone, since saying it
+      // again may leave out the news before it, like "Send it again?" without that the message may not have got there.
+      return kept.filter(question).flatMap((kept) => [...(kept.said === undefined ? [] : [kept.said, Show.offScreen(kept.said, lines)]), ...alone(kept)])
     })
 
     /** Threads a search for his words turns up, to add to the desk. T3 Code answers in a few ms, so only what's there within the cap is taken. */
@@ -693,7 +707,8 @@ export const make = (options: {
           yield* close(open, "dropped: asked enough")
           return unfinished(reply(said.leaving, { _tag: "Nothing" }), open.decision.rest, said)
         }
-        const reworded = { ...open, asked }
+        // In other words, it follows no news, so it's the question on its own.
+        const reworded = { ...open, asked, question: asked }
         asking = { ...asking, open: reworded, asks: asking.asks + 1, repeat: undefined, held: new Set() }
         yield* Effect.logInfo(`Asked again: ${asked}`)
         return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open), question: reworded }, kind: "question" } satisfies Outcome
@@ -1191,10 +1206,11 @@ export const make = (options: {
             yield* noting(undefined, { twin: outcome.row.commandId })
             if (outcome.row.state !== "sent") {
               const news = `I couldn't confirm that got ${Option.match(called, { onNone: () => "there", onSome: (name) => `to ${name}` })} before${addressed(said)}.`
-              const asked = `${news} ${unaddressed(said.again, said)}`
+              const question = unaddressed(said.again, said)
+              const asked = `${news} ${question}`
               // Sent again under its own ids, it goes at the time it first went, whatever time these words say, like at once for one told to a turn once it was stopped.
               const again = Option.match(Hands.went(outcome.row), { onNone: () => twin, onSome: ({ how }) => ({ ...twin, how }) })
-              return yield* asking({ ...base, kind: "resend", decision: again, asked, about: doing, resend: Option.some(outcome.row.commandId), news })
+              return yield* asking({ ...base, kind: "resend", decision: again, asked, about: doing, resend: Option.some(outcome.row.commandId), news, question })
             }
             return yield* asking({
               ...base,
@@ -1204,6 +1220,7 @@ export const make = (options: {
               about: doing,
               resend: Option.none(),
               news: Hands.sentBefore(outcome.row.at, now, said, called),
+              question: Hands.twiceAsks,
             })
           }
           case "Read": {
@@ -1217,19 +1234,31 @@ export const make = (options: {
               about: `tell ${name} to ignore that`,
               resend: Option.none(),
               news: Hands.readAlready(said, called),
+              question: Hands.readAsks,
             })
           }
           default: {
             const line = Hands.failed(act, outcome, said, called)
             yield* noting(line, { reason: outcome.reason, ...(outcome.stopped === undefined ? {} : { stopped: outcome.stopped }) })
-            // What didn't go, and why, without the question.
+            // What didn't go, and why, without the question, which isn't always put as the line puts it, like "couldn't tell it yet" for "the
+            // message didn't get there": so the question is kept as the line asks it, never worked out from the news.
             const news = Hands.failed(act, "again" in outcome ? { ...outcome, again: Option.none<string>() } : outcome, said, called)
+            const question = unaddressed(said.again, said)
             if (Option.isSome(onceMore) && act._tag === "Message") {
-              return yield* asking({ ...base, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: onceMore, news })
+              return yield* asking({ ...base, kind: "resend", decision, asked: line, about: `send that to ${name} again`, resend: onceMore, news, question })
             }
             // The word to carry on, after letting go of the queue, is offered again the same way.
             if (Option.isSome(onceMore) && act._tag === "Undo" && act.carry) {
-              return yield* asking({ ...base, kind: "resend", decision: resending(Hands.carryOn, "now"), asked: line, about: `ask ${name} to carry on`, resend: onceMore, news })
+              return yield* asking({
+                ...base,
+                kind: "resend",
+                decision: resending(Hands.carryOn, "now"),
+                asked: line,
+                about: `ask ${name} to carry on`,
+                resend: onceMore,
+                news,
+                question,
+              })
             }
             return unfinished({ say: line, subject: { ...subject, said: line }, kind: "done" }, decision.rest, said, situation.desk)
           }
@@ -1667,7 +1696,8 @@ export const make = (options: {
                 ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
                 said: outcome.say,
                 utterance: utterance.id,
-                ...(open === undefined ? {} : { detail: { question: true, open: open.id } }),
+                // The question on its own too, apart from the news before it.
+                ...(open === undefined ? {} : { detail: { question: Brain.alone(open), open: open.id } }),
               })
         yield* Effect.logInfo(`Said: ${outcome.say}`)
         const { subject, missed, card } = outcome
@@ -1838,6 +1868,7 @@ export const make = (options: {
             material: Option.none(),
             resend: Option.some(row.commandId),
             news: Hands.missing(said, Option.some(listed.called)),
+            question: unaddressed(said.again, said),
           },
           { turns: power.turns, at: yield* Clock.currentTimeMillis },
         )
