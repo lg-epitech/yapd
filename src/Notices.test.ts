@@ -616,6 +616,30 @@ describe("Notices", () => {
     expect(result).toEqual({ live: [question], restarted: [question] })
   })
 
+  test("a question the thread shows before its card can be read is still asked once the card is there, never only told", async () => {
+    // T3 Code writes what a thread waits on and the card that asks it apart: the Tezos one's card comes a moment later, the Mina one's never.
+    const tezos = thread("tezos", "Migrate Tezos Integration", { activeRunId: "run-1", pendingRuntimeRequest: { id: "r1", kind: "user_input", createdAt: minutes(0) } })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { activeRunId: "run-2", pendingRuntimeRequest: { id: "r2", kind: "user_input", createdAt: minutes(0) } })
+    const bounded: Record<string, Bounded> = { tezos: {}, mina: {} }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos, mina], bounded })
+        yield* made.hear({ _tag: "Asked", thread: tezos, request: tezos.pendingRuntimeRequest! }, { _tag: "Asked", thread: mina, request: mina.pendingRuntimeRequest! })
+        yield* made.wait(0.25)
+        yield* made.wait(0.25)
+        const early = [...made.told, ...made.asked]
+        bounded.tezos = { turnItems: asking("r1", "Which fee table?") }
+        for (let step = 0; step < 8; step++) yield* made.wait(0.25)
+        return { early, told: made.told, asked: made.asked }
+      }),
+    )
+    expect(result).toEqual({
+      early: [],
+      told: ["Open Mina SSV2 Bug Tickets has a question for you, sir: it's waiting for you in T3 Code."],
+      asked: ["A question on Migrate Tezos Integration, sir: Which fee table?"],
+    })
+  })
+
   test("a question is asked in its own words with no model call when they can be said, and only a part that can't is rewritten", async () => {
     const question = (header: string, asked: string, options: ReadonlyArray<string>) => ({ id: asked, question: asked, options: options.map((label) => ({ label, description: "" })), ...(header === "" ? {} : { header }) })
     const tezos = thread("tezos", "Migrate Tezos Integration", { activeRunId: "run-1", pendingRuntimeRequest: { id: "r1", kind: "user_input", createdAt: minutes(0) } })

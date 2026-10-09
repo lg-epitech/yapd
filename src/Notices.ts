@@ -217,6 +217,9 @@ export const lines = {
 /** What a request is said to want when it can't be read, or the model can't say. */
 const unworded = (kind: string) => (kind === "user_input" ? "has a question for you" : "wants your go-ahead on something")
 
+/** How long a request the thread shows as what it waits on is read again for while its card isn't there yet, and how often. */
+const card = { tries: 8, every: "250 millis" } as const
+
 /** What's said of what a thread waits on, kept in the journal under the key it's said once under, ever. */
 const noted = (ref: Threads.Ref, project: string, request: Pick<T3Actions.Request, "_tag" | "id">, at: number, spoken: string) => ({
   at,
@@ -326,7 +329,9 @@ export const questioning = (
  * told, like a secret, which is never answered by voice, or one that can't
  * be read, or an approval the model couldn't word, which isn't asked blind.
  * A question is read in the agent's own words, and only a part that can't
- * be said as it is goes to the model. None while the thread doesn't wait
+ * be said as it is goes to the model. The thread can show it waits on
+ * something before its card can be read, as T3 Code writes them apart, so
+ * that's read again a few times first. None while the thread doesn't wait
  * on it, even behind something it asked since, or isn't on the desk.
  */
 export const composer = (threads: Threads.Threads["Type"]) =>
@@ -343,8 +348,15 @@ export const composer = (threads: Threads.Threads["Type"]) =>
         const kind = thread.value.pendingRuntimeRequest?.id === requestId ? thread.value.pendingRuntimeRequest.kind : ""
         const said = yield* persona.lines
         const when = at ?? (yield* Clock.currentTimeMillis)
-        const request = yield* threads.detail(ref, requestId).pipe(
-          Effect.map(({ request }) => request),
+        /** Its card, read again a moment later while the thread still waits on it and it isn't there yet. */
+        const read = (tries: number): Effect.Effect<Option.Option<T3Actions.Request>, Threads.ThreadsError> =>
+          Effect.gen(function* () {
+            const { request } = yield* threads.detail(ref, requestId)
+            if (Option.isSome(request) || tries === 0 || !(yield* threads.waiting(ref, requestId))) return request
+            yield* Effect.sleep(card.every)
+            return yield* read(tries - 1)
+          })
+        const request = yield* read(card.tries).pipe(
           Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not read what it waits on: ${error.reason}`), Option.none<T3Actions.Request>())),
         )
         const told = (spoken: string, detail: string): Assistant.Worded => ({
