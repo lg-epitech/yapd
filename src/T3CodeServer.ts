@@ -159,7 +159,10 @@ export const call =
       let sent = false
       return asked(server, token, method, payload, schema, patience, () => {
         sent = true
-      }).pipe(Effect.mapError((error) => (error._tag === "Trouble" && sent ? new Trouble({ ...error, sent: true }) : error)))
+      }).pipe(
+        // With its cause named, since spreading an error leaves its cause behind.
+        Effect.mapError((error) => (error._tag === "Trouble" && sent ? new Trouble({ ...error, cause: error.cause, sent: true }) : error)),
+      )
     })
 
 /** The request itself, saying through `went` once it has gone out. */

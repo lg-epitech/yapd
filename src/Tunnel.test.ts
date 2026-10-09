@@ -376,6 +376,54 @@ describe("Tunnel", () => {
     }
   })
 
+  test("what went wrong with rig's T3 Code is kept under how it's said, so the log still has it", async () => {
+    const located = Effect.succeed<Tunnel.Located>({ server: { origin: "http://127.0.0.1:1" }, token: Redacted.make("token") })
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(
+      Object.assign(() => Promise.reject(new TypeError("Unable to connect. Is the computer able to access the url?")), { preconnect: globalThis.fetch.preconnect }),
+    )
+    try {
+      const error = await Effect.runPromise(Effect.flip(Effect.flatMap(Tunnel.transport(located, "rig"), ({ api }) => api("/api/test", Schema.Unknown))))
+      expect(error.reason).toBe("rig's T3 Code isn't answering.")
+      expect(error.cause).toMatchObject({ _tag: "Trouble", reason: "T3 Code isn't answering." })
+      expect(String((error.cause as Error).cause)).toBe("TypeError: Unable to connect. Is the computer able to access the url?")
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  test("never puts the token in the log, nor in what's said, whatever rig's T3 Code or the way there says", async () => {
+    const secret = "t3-secret-token"
+    const located = Effect.succeed<Tunnel.Located>({ server: { origin: "http://127.0.0.1:1" }, token: Redacted.make(secret) })
+    // The worst a failing transport could do: quote the token, in its error and in what T3 Code says no with.
+    const answers: Array<() => Promise<Response>> = [
+      () => Promise.reject(new TypeError(`fetch failed with authorization: Bearer ${secret}`)),
+      async () => new Response(JSON.stringify({ token: secret }), { status: 200 }),
+    ]
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(() => answers.shift()!(), { preconnect: globalThis.fetch.preconnect }))
+    const lines: Array<string> = []
+    // As the log prints it, whole, causes and all.
+    const logger = Logger.make(({ message }) => void lines.push(Bun.inspect(message)))
+    try {
+      const reasons = await Effect.runPromise(
+        Effect.gen(function* () {
+          const { api } = yield* Tunnel.transport(located, "rig")
+          const failed = [
+            yield* Effect.flip(api("/api/test", Schema.Unknown)),
+            yield* Effect.flip(api("/api/test", Schema.Struct({ token: Schema.Number }))),
+          ]
+          for (const error of failed) yield* Effect.logWarning(`Couldn't read rig's thread: ${error.reason}`, error)
+          return failed.map(({ reason }) => reason)
+        }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+      )
+      expect(reasons).toEqual(["rig's T3 Code isn't answering.", "rig's T3 Code answered in a way I don't understand."])
+      expect(lines).toHaveLength(2)
+      expect(lines[0]).toContain("fetch failed with authorization: Bearer [token]")
+      expect(lines.some((line) => line.includes(secret))).toBe(false)
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
   test("right after yapd starts, says it's still connecting rather than wait for SSH", () =>
     Effect.runPromise(
       Effect.gen(function* () {
