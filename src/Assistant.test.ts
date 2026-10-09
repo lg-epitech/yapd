@@ -4246,7 +4246,9 @@ describe("Assistant", () => {
     const screens = ["It's on your screen.", "IT'S ON YOUR SCREEN.", "It's on your screen!", "It\u2019s on your screen.", "it's  on your screen,", "It's on your screen, sir."]
     // Addressing him first, or not at all, or with the address going along with "it's on your screen" after it.
     const addressed = [`Sir, ${choices}?`, `Sir, ${choices}, sir?`, `${choices}?`, `Sir, it's on your screen. ${choices}, sir?`, `${choices}, it's on your screen, sir?`]
-    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, ...screens.map((screen) => `${screen} ${choices}, sir?`), ...addressed])
+    // Or addressing him inside "it's on your screen", which then can't be taken off: the question in it is still the one asked.
+    const inside = [`It's, sir, on your screen. ${choices}?`, `It's on, sir, your screen. ${choices}?`, `It's on your, sir, screen. ${choices}?`, `IT\u2019S, SIR, ON YOUR SCREEN! ${choices}?`]
+    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, ...screens.map((screen) => `${screen} ${choices}, sir?`), ...addressed, ...inside])
       expect(await echoed(echo)).toBe("The loader is fixed.")
   })
 

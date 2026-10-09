@@ -1462,7 +1462,7 @@ export const make = (options: {
             // it is before it's said.
             const theirs = Show.offScreen(decision.spoken.trim(), said)
             const taken =
-              subject._tag !== "Nothing" && !(subject._tag === "Answer" && subject.asked !== undefined) && !Brain.repeated(theirs, situation.asked, said)
+              subject._tag !== "Nothing" && !(subject._tag === "Answer" && subject.asked !== undefined) && !Brain.echoes(theirs, situation.asked, said)
             // Whether what was asked to be seen is on his screen is told only as it goes up.
             const say = Show.offScreen((taken ? theirs : "") || last, said)
             // Shown too while an app watches, for what's still not caught the second time.

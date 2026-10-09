@@ -217,6 +217,17 @@ export const repeated = (question: string, before: ReadonlyArray<string>, lines:
   return before.some((asked) => compared(asked) === compared(question))
 }
 
+/**
+ * Whether a line says again, anywhere in it, a question asked before, wherever
+ * either addresses him, if at all: "It's, sir, on your screen. A or B?" asks
+ * "A or B, sir?" again, however the rest of the line is put.
+ */
+export const echoes = (line: string, before: ReadonlyArray<string>, lines: Pick<Lines, "address">) => {
+  const compared = (text: string) => ` ${words(without(text, lines.address))} `
+  const said = compared(line)
+  return before.some((asked) => compared(asked).trim() !== "" && said.includes(compared(asked)))
+}
+
 /** The threads a question chooses between, as they're named in it: "A or B". */
 export const choices = (candidates: ReadonlyArray<Threads.Listed>) => either(candidates.slice(0, 3).map((listed) => named(listed, candidates)))
 
