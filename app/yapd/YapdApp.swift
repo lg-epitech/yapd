@@ -83,12 +83,10 @@ final class Yapd {
     panel.heard(speaking: status.activity == "speaking")
   }
 
-  /// One of the cards yapd showed lately.
-  private static func fetch(_ id: String, from api: URL) async -> Card? {
-    guard let fetched = try? await URLSession.shared.data(from: api.appending(path: "cards/\(id)")),
-          (fetched.1 as? HTTPURLResponse)?.statusCode == 200
-    else { return nil }
-    return try? JSONDecoder().decode(Card.self, from: fetched.0)
+  /// One of the cards yapd showed lately, unless yapd says it no longer has it or doesn't answer with it.
+  private static func fetch(_ id: String, from api: URL) async -> Fetched {
+    guard let (body, response) = try? await URLSession.shared.data(from: api.appending(path: "cards/\(id)")) else { return .failed }
+    return Fetched(body, response)
   }
 
   func turn(on: Bool) {
@@ -104,7 +102,8 @@ final class Yapd {
   func showLast() {
     guard let last else { return }
     following.showAgain(last) {
-      // Gone, with a yapd that restarted since or after twenty more, so there's nothing to show again.
+      // Gone, with a yapd that restarted since or after twenty more, so there's nothing to show again; one that only failed to
+      // come back, as while yapd is slow or restarting, is kept, to ask for again.
       if self.last == last { self.last = nil }
     }
   }

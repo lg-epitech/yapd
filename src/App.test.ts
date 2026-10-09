@@ -60,7 +60,7 @@ describe.skipIf(swiftc === undefined)("App", () => {
   )
 
   test(
-    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, checks what it shows against it whenever it connects, has yapd take down only the card it means, and shows the last card again only if nothing newer came while it was fetched",
+    "the panel puts up the card yapd points at once it can fetch it, trying again a few times, checks what it shows against it whenever it connects, has yapd take down only the card it means, and shows the last card again only if nothing newer came while it was fetched, keeping it to ask for again unless yapd says it no longer has it",
     async () => {
       expect(await run("following")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       // What the checks cover is what the app uses: the card it shows is the one it follows, and the one it has yapd take down is the one it names.
@@ -71,6 +71,10 @@ describe.skipIf(swiftc === undefined)("App", () => {
       // The last card is shown again, and put back up, only by Following, which checks nothing newer came while it was fetched.
       expect(yapd).toMatch(/func showLast\(\) \{\s*guard let last else \{ return \}\s*following\.showAgain\(last\) \{/)
       expect(yapd.match(/Yapd\.fetch\([^)]*\)/g)).toEqual(["Yapd.fetch(id, from: api)"])
+      // yapd's answer is read as the checks read it, so only a 404 has the last card taken for gone.
+      expect(yapd).toMatch(
+        /async -> Fetched \{\s*guard let \(body, response\) = try\? await URLSession\.shared\.data\(from: api\.appending\(path: "cards\/\\\(id\)"\)\) else \{ return \.failed \}\s*return Fetched\(body, response\)\s*\}/,
+      )
       expect(yapd.match(/send\("PUT", "cards[^\n]*/g)).toEqual(['send("PUT", "cards/current", body: try? JSONEncoder().encode(["id": id]), to: api) },'])
     },
     120_000,

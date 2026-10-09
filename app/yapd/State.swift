@@ -44,6 +44,24 @@ struct Status: Decodable {
   }
 }
 
+/// What came of fetching one of the cards yapd showed lately, from `GET /cards/{id}`.
+enum Fetched: Equatable {
+  case card(Card)
+  /// yapd said it no longer has it, after twenty more or as it restarted since.
+  case missing
+  /// yapd didn't answer, or not with the card, which says nothing of whether it still has it.
+  case failed
+
+  /// What yapd's answer says, `body` and `response` as they came back.
+  init(_ body: Data, _ response: URLResponse) {
+    switch (response as? HTTPURLResponse)?.statusCode {
+    case 200: self = (try? JSONDecoder().decode(Card.self, from: body)).map(Fetched.card) ?? .failed
+    case 404: self = .missing
+    default: self = .failed
+    }
+  }
+}
+
 /// The card the panel shows, following the one yapd points at: put up once it's fetched, which is tried again a few times, a
 /// while apart, as long as yapd still points at it, and taken away when yapd takes it down. What yapd points at is only what
 /// it asks for, so on connecting, even to the same card, it's checked against what the panel actually shows, which may have
@@ -52,8 +70,8 @@ struct Status: Decodable {
 final class Following {
   /// What it does with the panel, and asks of yapd.
   struct Doing {
-    /// One of the cards yapd showed lately, or none when that fails.
-    let fetch: @MainActor (String) async -> Card?
+    /// One of the cards yapd showed lately, unless yapd no longer has it or fetching it fails.
+    let fetch: @MainActor (String) async -> Fetched
     /// Puts a card up, `talking` when yapd is about to talk about it.
     let show: @MainActor (Card, _ talking: Bool) -> Void
     /// Takes the card away at once.
@@ -133,15 +151,21 @@ final class Following {
 
   /// Fetches one of the cards yapd showed lately and shows it again, with nothing said of it, and has yapd put it back up too,
   /// unless yapd points at another, hides it or connects, or a card is put away, before it's fetched: what came last wins, so a
-  /// fetch that comes back late never replaces a card put up since or undoes a hide. `gone` when yapd no longer has it.
+  /// fetch that comes back late never replaces a card put up since or undoes a hide. `gone` when yapd says it no longer has it;
+  /// when fetching it fails, as while yapd is slow or restarting, nothing shows, and it can be asked for again.
   func showAgain(_ id: String, gone: @escaping @MainActor () -> Void) {
     supersede()
     let asked = newer
     replaying = Task {
-      let card = await doing.fetch(id)
+      let fetched = await doing.fetch(id)
       // Stopped, a fetch that failed only for that says nothing of whether yapd still has it.
       guard !Task.isCancelled, asked == newer else { return }
-      guard let card else { return gone() }
+      let card: Card
+      switch fetched {
+      case .card(let fetched): card = fetched
+      case .missing: return gone()
+      case .failed: return
+      }
       putting?.cancel()
       putting = nil
       wanted = card.id
@@ -168,7 +192,8 @@ final class Following {
     for wait in [nil] + Self.retries.map(Optional.some) {
       if let wait { await doing.wait(wait) }
       guard !Task.isCancelled, wanted == id else { return }
-      if let card = await doing.fetch(id) {
+      // Tried again even when yapd says it no longer has it, only for as long as yapd points at it, which it stops doing then.
+      if case .card(let card) = await doing.fetch(id) {
         guard !Task.isCancelled, wanted == id else { return }
         shown = id
         return doing.show(card, true)
