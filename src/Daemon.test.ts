@@ -1990,6 +1990,51 @@ describe("Daemon", () => {
     expect(result.again).toEqual(["You missed this: yapd. The loader fix is ready."])
   })
 
+  test("thanks after the last of three steps asked over a catch-up answer, each worked out late, still leaves what he missed to be told", async () => {
+    const asked = "What's it waiting on, then the tests, then the docs?"
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, dictating, speak, played } = yield* assisted(
+          (situation) => {
+            const { heard, via } = situation.utterance
+            if (via === "reply" && heard === asked) return Brain.decision({ act: "answer", spoken: "A review, sir.", rest: "the tests, then the docs" })
+            if (via === "reply" && heard === "the tests, then the docs") return Brain.decision({ act: "answer", spoken: "They pass, sir.", rest: "the docs" })
+            if (via === "reply") return Brain.decision({ act: "answer", spoken: "They're done, sir." })
+            const told = situation.unheard.map(({ said }) => said).join(" ")
+            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+          },
+          { microphone: true, transcripts: [asked, "Thanks."] },
+          [],
+          // The later steps take longer than a request waits for them, so each is said on its own once it's worked out.
+          (situation) => (situation.utterance.heard.startsWith("the ") ? Effect.sleep("3 seconds") : Effect.void),
+        )
+        yield* finish("a", "The loader fix is ready.")
+        yield* wait(2)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* dictating("What did I miss?")
+        yield* wait(3)
+        yield* speak
+        yield* wait(7)
+        // Thanks over the last step's line, which cuts it off.
+        yield* speak
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        const told = played.length
+        yield* dictating("What did I miss?")
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        return { played: played.slice(0, told), again: played.slice(told) }
+      }),
+    )
+    expect(result.played).toEqual([
+      "yapd. The loader fix is ready.",
+      "You missed this: yapd. The loader fix is ready.",
+      "A review, sir.",
+      "They pass, sir.",
+      "They're done, sir.",
+    ])
+    expect(result.again).toEqual(["You missed this: yapd. The loader fix is ready."])
+  })
+
   test.each([
     ["What did I miss?", "Nothing else.", "catch-up"],
     ["What's going on?", "Two things are running, sir.", undefined],
