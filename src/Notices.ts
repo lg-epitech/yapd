@@ -19,14 +19,16 @@ import * as Threads from "./Threads.ts"
 // Stop is the run's whose last words it has, or, when its words are no run's
 // that can be told, and the run failed or said nothing, whose when it came
 // says, and one that can't be told either way is left to as if it were, since
-// a turn said twice is worse than one not said. An approval or a question is
-// asked, for the user to answer by voice; a secret is only told, since it's
-// only ever given in T3 Code.
+// a turn said twice is worse than one not said. A question is asked, for the
+// user to answer by voice; a secret is only told, since it's only ever given
+// in T3 Code; and an approval is never brought up at all, since his agents
+// run with full access and he doesn't want one at every turn: it's still
+// there when he asks who needs him, and answered when he brings it up.
 
 /** What a change to a thread may come to, before anything is read of it. */
 export type News =
-  /** It waits on the user, for an approval, an answer or a secret. */
-  | { readonly _tag: "Asked"; readonly thread: T3Live.Thread; readonly requestId: string }
+  /** It waits on the user, for an approval, an answer or a secret, as `kind` says: "user_input" for an answer or a secret, anything else for an approval. */
+  | { readonly _tag: "Asked"; readonly thread: T3Live.Thread; readonly requestId: string; readonly kind: string }
   /** A run of it ended, however: what it comes to is only known once it's read, a while later. */
   | { readonly _tag: "Ran"; readonly thread: T3Live.Thread; readonly runId: string }
   /** What it waited on him for was dealt with, there or anywhere, or the thread went: it's no longer asked. */
@@ -40,7 +42,7 @@ export const verdict = (change: T3Live.Change): Option.Option<News> => {
   if (change.thread.lineage?.relationshipToParent === "subagent") return Option.none()
   switch (change._tag) {
     case "Asked":
-      return Option.some({ _tag: "Asked", thread: change.thread, requestId: change.request.id })
+      return Option.some({ _tag: "Asked", thread: change.thread, requestId: change.request.id, kind: change.request.kind })
     case "Finished": {
       // The run that was going, or the latest one, which came and went unseen.
       const runId = change.before.activeRunId ?? change.thread.latestRunId
@@ -476,8 +478,12 @@ export const make = (options: {
         // What waits on him is there to say whenever yapd is on, even turned off and on while it was worded: off, it's said once it's on.
         const { on, turns } = yield* options.power
         if (!on) return
-        // Asked as the one question open, for him to answer by voice.
-        if (worded.value._tag === "Ask") return yield* options.ask(kept === undefined ? worded.value.asking : { ...worded.value.asking, kept })
+        if (worded.value._tag === "Ask") {
+          // Never an approval, even one the thread shows as a question: it's there when he asks who needs him.
+          if (worded.value.asking.asks._tag === "Approval") return yield* Effect.logInfo("Not announcing an approval shown as a question")
+          // Asked as the one question open, for him to answer by voice.
+          return yield* options.ask(kept === undefined ? worded.value.asking : { ...worded.value.asking, kept })
+        }
         yield* notify(ref, worded.value.spoken, worded.value.entry, threads.waiting(ref, requestId), at, turns, undefined, kept)
       })
 
@@ -606,6 +612,8 @@ export const make = (options: {
           if (change._tag === "Removed" || news.value.thread.pendingRuntimeRequest === null) return yield* options.settled(news.value.requestId)
           return yield* FiberSet.run(running, answered(ref, news.value.requestId).pipe(trouble))
         }
+        // An approval is never brought up, however it comes.
+        if (news.value._tag === "Asked" && news.value.kind !== "user_input") return yield* Effect.logInfo(`Not announcing an approval: ${news.value.kind}`)
         // Off, nothing is said later of what happened meanwhile; what still waits on him is said once it's on.
         const { on, turns } = yield* options.power
         if (!on) return
@@ -622,7 +630,7 @@ export const make = (options: {
       /** Follows what happens to the threads, for as long as yapd runs. */
       follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
       /**
-       * What's waiting on him that he hasn't heard: run once T3 Code has
+       * The questions waiting on him that he hasn't heard: run once T3 Code has
        * caught up after a start, and each time yapd is turned on. One begun
        * and never heard to the end, as when yapd was turned off or restarted
        * while saying it, is said again, under the entry it was kept under.
@@ -637,7 +645,8 @@ export const make = (options: {
         for (const { ref, thread } of desk.threads) {
           const request = thread.pendingRuntimeRequest
           const created = request === null ? Number.NaN : Date.parse(request.createdAt)
-          if (request === null || Number.isNaN(created) || now - created > pending) continue
+          // Nor an approval, after a restart or once yapd is on.
+          if (request === null || request.kind !== "user_input" || Number.isNaN(created) || now - created > pending) continue
           const before = said.get(key.asked(ref.machine, request.id))
           if (before?.heardAt !== undefined) continue
           yield* FiberSet.run(running, asked(ref, request.id, now, before?.id).pipe(trouble, Effect.annotateLogs({ thread: thread.title })))

@@ -573,18 +573,53 @@ describe("Notices", () => {
     { type: "command_execution", status: "running", input: "git push origin tezos", nativeItemRef: { nativeId: "toolu_1" } },
   ]
 
-  test("a pending request is announced once after a restart, and not at all if it was already said", async () => {
+  /** A question as T3 Code shows it, with nothing to pick from. */
+  const asking = (requestId: string, question: string) => [{ type: "user_input_request", status: "waiting", requestId, questions: [{ id: "q", question }] }]
+
+  test("an approval is never announced, as it comes or after a restart, while a question still is", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", { activeRunId: "run-1", pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: minutes(1) } })
+    // An MCP server's form is an approval too; the billing one's can't be read; and the loader's adapter shows its approval as a question.
+    const deploy = thread("deploy", "Cloud deployment discovery", { activeRunId: "run-2", pendingRuntimeRequest: { id: "r2", kind: "mcp-elicitation", createdAt: minutes(1) } })
+    const billing = thread("billing", "Billing export", { activeRunId: "run-5", pendingRuntimeRequest: { id: "r5", kind: "file-change", createdAt: minutes(1) } })
+    const loader = thread("loader", "Fix the loader", { activeRunId: "run-3", pendingRuntimeRequest: { id: "r3", kind: "user_input", createdAt: minutes(1) } })
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { activeRunId: "run-4", pendingRuntimeRequest: { id: "r4", kind: "user_input", createdAt: minutes(1) } })
+    const bounded = {
+      tezos: { turnItems: pushing },
+      deploy: { turnItems: [{ type: "approval_request", status: "waiting", requestId: "r2", requestKind: "mcp-elicitation", prompt: "Let the deploy server read the cluster" }] },
+      loader: { turnItems: [{ type: "approval_request", status: "waiting", requestId: "r3", requestKind: "command", prompt: "Bash: rm -rf dist" }] },
+      mina: { turnItems: asking("r4", "Which database?") },
+    }
+    const view = [tezos, deploy, billing, loader, mina]
+    const result = await run(
+      Effect.gen(function* () {
+        const live = yield* notices({ view, bounded })
+        yield* live.hear(...view.map((waiting): T3Live.Change => ({ _tag: "Asked", thread: waiting, request: waiting.pendingRuntimeRequest! })))
+        // yapd restarts with none of them heard, or is turned on.
+        const restarted = yield* notices({ view, bounded })
+        yield* restarted.reconcile
+        yield* restarted.flush
+        return { live: [...live.told, ...live.asked], restarted: [...restarted.told, ...restarted.asked] }
+      }),
+    )
+    const question = "Open Mina SSV2 Bug Tickets asks which database to use, sir. What shall I tell it?"
+    expect(result).toEqual({ live: [question], restarted: [question] })
+  })
+
+  test("a pending question is announced once after a restart, and not at all if it was already said", async () => {
     const tezos = thread("tezos", "Migrate Tezos Integration", {
       activeRunId: "run-1",
-      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: minutes(60) },
+      pendingRuntimeRequest: { id: "r1", kind: "user_input", createdAt: minutes(60) },
     })
     const mina = thread("mina", "Open Mina SSV2 Bug Tickets", {
       activeRunId: "run-2",
       pendingRuntimeRequest: { id: "r2", kind: "user_input", createdAt: minutes(60) },
     })
+    // Never said, the loader's approval stays silent all the same.
+    const loader = thread("loader", "Fix the loader", { activeRunId: "run-3", pendingRuntimeRequest: { id: "r3", kind: "command", createdAt: minutes(60) } })
     const bounded = {
-      tezos: { turnItems: pushing },
-      mina: { turnItems: [{ type: "user_input_request", status: "waiting", requestId: "r2", questions: [{ id: "q", question: "Which database?" }] }] },
+      tezos: { turnItems: asking("r1", "Which fee table?") },
+      mina: { turnItems: asking("r2", "Which database?") },
+      loader: { turnItems: pushing.map((item) => ({ ...item, requestId: "r3" })) },
     }
     const result = await run(
       Effect.gen(function* () {
@@ -592,31 +627,31 @@ describe("Notices", () => {
         // The Mina question was said before the restart, and heard.
         const said = yield* Journal.fromStore(store).claim({ at: now - 3_000_000, kind: "notice", machine: "Rosie", thread: "mina", key: "ask:Rosie:r2", said: "It asks which database." })
         yield* Journal.fromStore(store).markHeard(Option.toArray(Option.flatten(said)), now - 2_990_000)
-        const first = yield* notices({ view: [tezos, mina], bounded, store })
+        const first = yield* notices({ view: [tezos, mina, loader], bounded, store })
         yield* first.reconcile
         yield* first.flush
         // And yapd restarts again.
-        const second = yield* notices({ view: [tezos, mina], bounded, store })
+        const second = yield* notices({ view: [tezos, mina, loader], bounded, store })
         yield* second.reconcile
         yield* second.flush
         return { first: [...first.told, ...first.asked], second: [...second.told, ...second.asked] }
       }),
     )
-    expect(result.first).toEqual(["Migrate Tezos Integration wants to push the branch. Allow it, sir?"])
+    expect(result.first).toEqual(["Migrate Tezos Integration asks which database to use, sir. What shall I tell it?"])
     expect(result.second).toEqual([])
   })
 
-  test("a pending request begun before a restart and never heard to the end is asked again after it, under the entry it was kept under, once", async () => {
+  test("a pending question begun before a restart and never heard to the end is asked again after it, under the entry it was kept under, once", async () => {
     const tezos = thread("tezos", "Migrate Tezos Integration", {
       activeRunId: "run-1",
-      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: minutes(60) },
+      pendingRuntimeRequest: { id: "r1", kind: "user_input", createdAt: minutes(60) },
     })
-    const bounded = { tezos: { turnItems: pushing } }
+    const bounded = { tezos: { turnItems: asking("r1", "Which fee table?") } }
     const result = await run(
       Effect.gen(function* () {
         const store = yield* Store.make(":memory:")
         // It was coming up to be asked, kept under its key, when yapd restarted.
-        yield* Journal.fromStore(store).claim({ at: now - 60_000, kind: "notice", machine: "Rosie", thread: "tezos", key: "ask:Rosie:r1", said: "It wants to push the branch." })
+        yield* Journal.fromStore(store).claim({ at: now - 60_000, kind: "notice", machine: "Rosie", thread: "tezos", key: "ask:Rosie:r1", said: "It asks which fee table." })
         const first = yield* notices({ view: [tezos], bounded, store })
         yield* first.reconcile
         yield* first.flush
@@ -628,7 +663,7 @@ describe("Notices", () => {
         return { first: first.asked, kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]), second: second.asked }
       }),
     )
-    expect(result.first).toEqual(["Migrate Tezos Integration wants to push the branch. Allow it, sir?"])
+    expect(result.first).toEqual(["Migrate Tezos Integration asks which database to use, sir. What shall I tell it?"])
     expect(result.kept).toEqual([["ask:Rosie:r1", true]])
     expect(result.second).toEqual([])
   })
