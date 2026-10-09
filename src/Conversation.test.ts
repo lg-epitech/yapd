@@ -2256,6 +2256,21 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ talking: ["play"], commands: ["play", "stop"], responded: [said], sent: [said], replies: [said] })
   })
 
+  test("lets go of words over them that yapd says a few seconds after, as where each word falls in a line is only guessed", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Its "ready for review" comes about four seconds after he begins.
+        const helper = yield* overHelper([[0.9, "Is it ready for review?"]], { live: true })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.9, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play"], sent: [], replies: [] })
+  })
+
   test("stops for everyday words of his over them, and passes them on as he said them, though they're only words nearly anything has", async () => {
     for (const said of ["Why did it do that?", "Don't do it."]) {
       const result = await overHelperScoped(
