@@ -349,6 +349,19 @@ const fromTheStart = (asks: QuestionAsks): QuestionAsks => ({ ...asks, part: 0, 
 /** Whether he's part-way through a thread's question: past its first part, or with some of it answered. */
 const partway = (asks: Asks): asks is QuestionAsks => asks._tag === "Question" && (asks.part > 0 || Object.keys(asks.collected).length > 0)
 
+/**
+ * A thread's question as a yes to it is taken. Asked which one then, without
+ * yapd's pick, a yes is to the one option left, when only one is, and to none
+ * otherwise. Asked any other way, its words name yapd's pick again, which a
+ * yes is to: it's always to what he heard last.
+ */
+const leaning = (open: Open): Pick<Open, "wording"> | Record<never, never> => {
+  const { wording } = open
+  if (wording === undefined || open.asked !== wording.instead) return {}
+  const others = wording.part.options.flatMap((_, index) => (Option.contains(wording.part.recommended, index) ? [] : [index]))
+  return { wording: { ...wording, part: { ...wording.part, recommended: others.length === 1 ? Option.fromNullable(others[0]) : Option.none<number>() } } }
+}
+
 /** A thread's question as it was asked, the part he'd got to and what he'd answered of it, to be queued to come back. */
 const resumed = (from: Queued, open: Pick<Open, "asks">, changes: Omit<Queued, "asking" | "again" | "kept">): Queued => ({
   ...from,
@@ -574,14 +587,14 @@ export const make = (options: {
      * The open question, unless it's been open so long it no longer counts:
      * for an approval or a thread's question, with whether he'd heard all of
      * it as it was last asked by the time he said what's answering it, `by`,
-     * which a plain yes to it needs.
+     * which a plain yes to it needs, and what a yes to a question is to.
      */
     const current = (now: number, by = Number.POSITIVE_INFINITY) => {
       if (asking === undefined || now - asking.open.at >= fresh) return Option.none<Open>()
       const { open, whole } = asking
       const asks = open.asks
       if (asks === undefined || asks._tag === "Agent") return Option.some(open)
-      return Option.some({ ...open, asks: { ...asks, inFull: heardBy({ at: by }, whole) } })
+      return Option.some({ ...open, asks: { ...asks, inFull: heardBy({ at: by }, whole) }, ...leaning(open) })
     }
 
     /**
@@ -841,11 +854,8 @@ export const make = (options: {
         }
         // Heard again on his asking, or with what its options mean, a thread's question is asked no more often: a minute on, it's still asked once more.
         const counted = wording === undefined || how === "still" || how === "instead" || how === "needed"
-        // Asked which one then, yapd's pick is no longer his to take, and when one's left, a yes is to that one.
-        const others = wording === undefined ? [] : wording.part.options.flatMap((_, index) => (Option.contains(wording.part.recommended, index) ? [] : [index]))
-        const recommended = others.length === 1 ? Option.fromNullable(others[0]) : Option.none<number>()
-        const reworded = wording !== undefined && how === "instead" ? { wording: { ...wording, part: { ...wording.part, recommended } } } : {}
-        asking = { ...asking, open: { ...open, asked, ...reworded }, asks: asking.asks + (counted ? 1 : 0), repeat: undefined, due: undefined, held: new Set(), whole: undefined }
+        // Its wording stays as it was: asked which one then, what a yes is to is worked out from these words, as `leaning` has it.
+        asking = { ...asking, open: { ...open, asked }, asks: asking.asks + (counted ? 1 : 0), repeat: undefined, due: undefined, held: new Set(), whole: undefined }
         yield* Effect.logInfo(`Asked again: ${asked}`)
         return { say: asked, subject: { _tag: "Answer", said: asked, about: askedAbout(open) }, kind: "question" } satisfies Outcome
       })

@@ -1649,6 +1649,33 @@ describe("Assistant", () => {
     expect(await answering(["Red", "Blue (Recommended)"], "Yes.")).toEqual({ spoken: ["Red then, sir?", "Red it is, sir."], answers: [{ colour: "Red" }] })
   })
 
+  test("after which one then, a yes is to what he heard last: yapd's pick once it's said again, and a second no is the model's to judge, never yapd's pick", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "dismiss", target: handle(situation, cloud), pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [{ id: "colour", question: "Which colour?", options: [{ label: "Red" }, { label: "Blue (Recommended)" }] }]),
+          })
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await answering("No.", "Say that again.", "Yes.")).toEqual({
+      asked: 0,
+      spoken: ["Red then, sir?", "Again, sir: Which colour? Red or Blue? I'd go with Blue.", "Blue it is, sir."],
+      answers: [{ colour: "Blue (Recommended)" }],
+    })
+    expect(await answering("No.", "What are the options?", "Yes.")).toEqual({
+      asked: 0,
+      spoken: ["Red then, sir?", "Red. Blue. I'd go with Blue. Which one, sir?", "Blue it is, sir."],
+      answers: [{ colour: "Blue (Recommended)" }],
+    })
+    expect(await answering("No.", "No.")).toEqual({ asked: 1, spoken: ["Red then, sir?", "I'll leave that one, sir."], answers: [] })
+  })
+
   test("a question he heard, closed by talk over an update, 'who needs me' or a failed model call, is asked again after, and let go with a word the third time", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
