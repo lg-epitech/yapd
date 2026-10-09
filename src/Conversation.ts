@@ -143,7 +143,10 @@ const reach = 2
 /** What Whisper makes up of near-silence, or of a voice it can't make out, which nobody said: let go wherever it comes in what's heard, longest first. */
 const madeUp = [
   ...hallucinated, "the end", "thank you very much", "thank you so much", "thanks for listening", "thank you for listening",
-  "see you next time", "see you later", "see you soon", "bye bye",
+  "thank you for your attention", "see you next time", "see you later", "see you soon", "see you in the next one", "see you guys",
+  "see you guys next time", "bye bye", "goodbye", "good night", "i'll be right back", "have a nice day", "have a good day",
+  "take care", "good luck", "welcome back", "let's get started", "i'm sorry", "oh my god", "you know what i mean", "bon appétit",
+  "peace out",
 ].map(gist).sort((one, other) => other.length - one.length)
 
 /** Words only what Whisper makes up has, from the videos it learnt on, which give away the whole sentence they're in. */
@@ -158,14 +161,28 @@ const fillers: ReadonlySet<string> = new Set([
   "right", "alright", "kid",
 ])
 
-/** Words in nearly anything either says, so yapd saying them too is no sign it's its own voice. */
+/** Words in nearly anything either says, so yapd saying them too is no sign it's its own voice, nor Whisper hearing them a sign it's his. */
 const common: ReadonlySet<string> = new Set([
   "a", "an", "the", "it", "it's", "its", "is", "are", "was", "were", "be", "been", "am", "do", "did", "does", "don't", "to", "on", "in",
   "of", "for", "at", "by", "with", "from", "as", "and", "or", "but", "if", "not", "no", "now", "then", "that", "that's", "this", "there",
   "here", "what", "what's", "which", "who", "how", "why", "when", "where", "i", "i'm", "i'll", "i've", "me", "my", "we", "us", "our",
   "your", "he", "she", "they", "them", "can", "could", "would", "should", "will", "just", "up", "out", "off", "over", "all", "any",
-  "some", "about", "into", "than", "too", "also", "go", "let", "let's", "get", "got", "one",
+  "some", "about", "into", "than", "too", "also", "go", "let", "let's", "get", "got", "one", "have", "has", "had", "going", "gonna",
+  "know", "see", "come", "like", "want", "think", "say", "said", "make", "take", "look", "good", "well", "very", "much", "more",
+  "really", "way", "there's", "you're", "we're", "didn't", "doesn't", "isn't", "can't", "won't",
 ])
+
+/**
+ * What he says to yapd in nothing but common words, which it takes for him
+ * only said just so, since Whisper makes up the like of "Let's go." and
+ * "That's it." of its voice too. As it's compared, without the fillers.
+ */
+const curt: ReadonlySet<string> = new Set(
+  [
+    "not now", "not that", "not that one", "not like that", "go on", "do it", "do that", "do it now", "why not", "how come", "what now",
+    "what's that", "what was that", "what is it", "what did you do", "which one", "what", "why", "how",
+  ].map((phrase) => phrase.split(" ").filter((word) => !fillers.has(word)).join(" ")),
+)
 
 /** Said on its own, what can only be for yapd to stop or wait. */
 const halting: ReadonlySet<string> = new Set([
@@ -219,8 +236,9 @@ const inTurn = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) =>
  * cancellation has learnt it, which yapd mustn't stop for, nor pass on. It
  * takes at least `least` words of his, so never what Whisper makes up, nor a
  * run of what yapd was `saying` then, as near as Whisper heard it, nor what
- * has no more words of his than of yapd's. A "stop" or "wait" that yapd isn't
- * saying is all it takes, even said over its words.
+ * has no more words of his than of yapd's, nor, over its words, only common
+ * ones, unless said just so, like "Not now.". A "stop" or "wait" that yapd
+ * isn't saying is all it takes, even said over its words.
  */
 export const theirs = (heard: string, saying: string, least = 2) => {
   const said = heard
@@ -239,6 +257,8 @@ export const theirs = (heard: string, saying: string, least = 2) => {
   const own = words.filter((word) => !yapd.some((spoken) => alike(word, spoken)))
   // A stop of his, on its own or said over yapd's words, or one with a word in it that yapd isn't saying.
   if (halting.has(own.join(" ")) || (halting.has(words.join(" ")) && own.some((word) => !common.has(word)))) return true
+  // Over its voice, nothing but common words is him only said just so, however few of them are yapd's.
+  if (saying !== "" && own.every((word) => common.has(word)) && !curt.has(words.join(" "))) return false
   // Common words yapd says too are no sign either way, unless nothing else is its, when they're his.
   const ours = words.filter((word) => !common.has(word) && !own.includes(word)).length
   const his = ours === 0 ? words.length : own.length

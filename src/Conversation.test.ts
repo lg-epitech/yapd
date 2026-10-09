@@ -621,6 +621,22 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(theirs("Stop.", saying)).toBe(true)
   })
 
+  test("takes what Whisper makes up of everyday words over yapd's for nobody, unless it's said just so", () => {
+    const line = "Codex on yapd finished the migration, and all the tests pass"
+    for (const heard of [
+      "I'm going to go.", "Let's go.", "I'm sorry.", "I don't know.", "That's it.", "That's all.", "Come on.", "Here we go.",
+      "I'll see you in the next one.", "See you guys.", "Thank you for your attention.", "I'll be right back.", "Have a nice day.",
+      "Take care.", "Good luck.", "Welcome back.",
+    ]) {
+      expect([heard, theirs(heard, line)]).toEqual([heard, false])
+    }
+    for (const heard of ["Not now.", "Do it.", "What did you do?", "Which one?", "Go on."]) {
+      expect([heard, theirs(heard, line)]).toEqual([heard, true])
+    }
+    // Once yapd has stopped talking, none of it can be its voice.
+    expect(theirs("No.", "", 1)).toBe(true)
+  })
+
   test("takes a word of his for him once yapd has stopped talking, but never what Whisper makes up", () => {
     expect(theirs("Docs.", saying)).toBe(false)
     expect(theirs("Docs.", "", 1)).toBe(true)
@@ -1009,7 +1025,10 @@ describe("Over its first words, while yapd's own voice can still get into the mi
   })
 
   test("lets go of all sorts of what Whisper makes up, and of a word on its own", async () => {
-    const madeUp = ["Okay.", "Mm-hmm.", "Thank you, bye.", "I'll see you next time.", "Thank you so much for watching.", "Absolutely."]
+    const madeUp = [
+      "Okay.", "Mm-hmm.", "Thank you, bye.", "I'll see you next time.", "Thank you so much for watching.", "Absolutely.", "Let's go.",
+      "I'm going to go.", "I'll see you in the next one.",
+    ]
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const helper = yield* overHelper(madeUp.map((text, index) => [0.8 + index / 100, text] as const))
