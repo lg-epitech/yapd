@@ -1,0 +1,258 @@
+import { describe, expect, test } from "bun:test"
+import { Either, Option } from "effect"
+import * as Persona from "./Persona.ts"
+import * as Questions from "./Questions.ts"
+
+const lines = { ...Persona.plain, address: "sir" }
+
+/** A part as T3 Code shows it: one pick from what's given, which takes his own words too, unless `more` says otherwise. */
+const question = (asked: string, options: ReadonlyArray<string | { readonly label: string; readonly description: string }>, more: Partial<Questions.Question> = {}): Questions.Question => ({
+  id: asked,
+  header: "",
+  question: asked,
+  options: options.map((option) => (typeof option === "string" ? { label: option, description: "" } : option)),
+  multiSelect: false,
+  allowCustomAnswer: true,
+  required: true,
+  ...more,
+})
+
+/** A part as it's said, in the agent's own words when they can be. */
+const part = (asked: string, options: ReadonlyArray<string | { readonly label: string; readonly description: string }>, more: Partial<Questions.Question> = {}) =>
+  Questions.said(question(asked, options, more), Questions.sayQuestion(asked))
+
+/** How each part of a question about the Tezos migration is put to him, which is asked. */
+const wording = (...parts: ReadonlyArray<Questions.Said>) => {
+  const worded = Questions.worded({ called: "the Tezos migration", parts, lines })
+  if (worded._tag !== "Ask") throw new Error(`Only told: ${Option.getOrElse(worded.spoken, () => "")}`)
+  return worded.parts
+}
+
+/** What's only told of a question, when it isn't asked. */
+const told = (...parts: ReadonlyArray<Questions.Said>) => {
+  const worded = Questions.worded({ called: "the Tezos migration", parts, lines })
+  return worded._tag === "Tell" ? worded.spoken : Option.some(`Asked: ${worded.parts[0]?.first}`)
+}
+
+describe("Questions", () => {
+  test("a question is read in its own words when they can be said, and left to the model when they can't", () => {
+    expect(Questions.sayQuestion("  Which library should we use   for `date` formatting?")).toEqual(Option.some("Which library should we use for date formatting?"))
+    expect(Questions.sayQuestion(`Should the "staging" config win, e.g. for tests & CI?`)).toEqual(Option.some("Should the staging config win, for example for tests and CI?"))
+    // The work is never put down to an agent.
+    expect(Questions.sayQuestion("Should the Claude agent also run the linter?")).toEqual(Option.some("Should the work also run the linter?"))
+    for (const unsayable of [
+      "Should I update src/config/loader.ts as well?",
+      "Can I push to t3/jarvis-m3 now?",
+      "Is https://github.com/x/y/pull/412 the right PR?",
+      "Use `FEE_TABLE_V2` or the old one?",
+      "Should I keep the {debug} flag…",
+      "Quelle base de données préférez-vous pour les tests?",
+      `Which of these should I do first, given that ${"the migration ".repeat(11)}is late?`,
+    ]) {
+      expect([unsayable, Questions.sayQuestion(unsayable)]).toEqual([unsayable, Option.none()])
+    }
+  })
+
+  test("options are said as they read: '(Recommended)' becomes yapd's pick, code and quotes go, and one that can't be said goes by its description or its number", () => {
+    expect(Questions.sayLabel("Blue (Recommended)", 1, "")).toEqual({ said: "Blue", recommended: true, by: "label" })
+    expect(Questions.sayLabel("Blue [recommended]", 1, "")).toEqual({ said: "Blue", recommended: true, by: "label" })
+    expect(Questions.sayLabel("Blue - Recommended", 1, "")).toEqual({ said: "Blue", recommended: true, by: "label" })
+    expect(Questions.sayLabel("`date-fns`", 0, "")).toEqual({ said: "date-fns", recommended: false, by: "label" })
+    expect(Questions.sayLabel(`"main".`, 0, "")).toEqual({ said: "main", recommended: false, by: "label" })
+    // What looks like one of yapd's handles is the agent's own.
+    expect(Questions.sayLabel("t3.small", 0, "")).toEqual({ said: "t3.small", recommended: false, by: "label" })
+    expect(Questions.sayLabel("src/utils/date.ts", 1, "Keep the helper we wrote. It's tested.")).toEqual({ said: "option two, keep the helper we wrote", recommended: false, by: "meaning" })
+    expect(Questions.sayLabel("~/code/fees.json (Recommended)", 2, "Read the fee table from the JSON file the exporter writes on every run of the nightly job.")).toEqual({
+      said: "option three",
+      recommended: true,
+      by: "number",
+    })
+    // Asked with yapd's pick, and what's sent stays the label as the agent wrote it.
+    const library = part("Which library should we use for date formatting?", ["date-fns (Recommended)", "`Day.js`", "Luxon"])
+    expect(wording(library)[0]!.first).toBe("A question on the Tezos migration, sir: Which library should we use for date formatting? date-fns, Day.js or Luxon? I'd go with date-fns.")
+    expect(Questions.answers({ questions: [question(library.id, ["date-fns (Recommended)", "`Day.js`", "Luxon"])], mode: "live" }, { [library.id]: { _tag: "Picked", options: [0] } })).toEqual(
+      Either.right({ [library.id]: "date-fns (Recommended)" }),
+    )
+    // Two options marked: no pick.
+    expect(wording(part("Which colour?", ["Red (Recommended)", "Blue (Recommended)"]))[0]!.first).toBe("A question on the Tezos migration, sir: Which colour? Red or Blue?")
+    // A label in code is still asked, by what it means.
+    expect(wording(part("Which date helper?", ["date-fns", { label: "src/utils/date.ts", description: "Keep the helper we wrote." }]))[0]!.first).toBe(
+      "A question on the Tezos migration, sir: Which date helper? date-fns or option two, keep the helper we wrote?",
+    )
+    // Names that say nothing are read with what they mean.
+    const opaque = part("How should the cache be handled?", [
+      { label: "Option A", description: "Keep the cache. It's warm already." },
+      { label: "Option B", description: "Drop it and rebuild." },
+    ])
+    expect(opaque.opaque).toBe(true)
+    expect(wording(opaque)[0]!.first).toBe("A question on the Tezos migration, sir: How should the cache be handled? Option A, keep the cache; option B, drop it and rebuild?")
+    // Mostly known only by their number, it's only told, as is one with nothing to ask.
+    expect(told(part("Which file?", ["~/a/b.json", "~/c/d.json", "Neither"]))).toEqual(Option.none())
+    expect(told(Questions.said(question("x", []), Option.none()))).toEqual(Option.none())
+  })
+
+  test("the line leaves out options the question names already, and Yes or No", () => {
+    expect(wording(part("Should we use Red or Blue for the test?", ["Red", "Blue (Recommended)"]))[0]!.first).toBe(
+      "A question on the Tezos migration, sir: Should we use Red or Blue for the test? I'd go with Blue.",
+    )
+    expect(wording(part("Should I also migrate the invoices table?", ["Yes (Recommended)", "No"]))[0]!.first).toBe(
+      "A question on the Tezos migration, sir: Should I also migrate the invoices table? I'd say yes.",
+    )
+    expect(wording(part("Should I also bump the version?", []))[0]!.first).toBe("A question on the Tezos migration, sir: Should I also bump the version?")
+    // An option the question doesn't name is read.
+    expect(wording(part("Should we use Red or Blue?", ["Red", "Blue", "Green"]))[0]!.first).toBe("A question on the Tezos migration, sir: Should we use Red or Blue? Red, Blue or Green?")
+    // Several can be picked.
+    expect(wording(part("Which test extras should run?", ["Alpha", "Beta", "Gamma"], { multiSelect: true }))[0]!.first).toBe(
+      "A question on the Tezos migration, sir: Which test extras should run? Any of Alpha, Beta and Gamma?",
+    )
+    expect(wording(part("Which checks should run?", ["Lint", "Types"], { multiSelect: true }))[0]!.first).toBe("A question on the Tezos migration, sir: Which checks should run? Lint, Types or both?")
+  })
+
+  test("a question in parts is asked one at a time, each after what the last was answered with, and brought back from where he'd got to", () => {
+    const colour = part("Which colour should the test use?", ["Red", "Blue (Recommended)"])
+    const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma"], { multiSelect: true })
+    const [first, second] = wording(colour, extras)
+    expect(first!.first).toBe("Two questions on the Tezos migration, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue.")
+    expect(second!.last(Questions.ack(colour, { _tag: "Picked", options: [0] }))).toBe("Red, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?")
+    expect(second!.last(Questions.ack(colour, { _tag: "Words", text: "Red, but only for now." }))).toStartWith("Noted, sir. And last:")
+    expect(Questions.ack(extras, { _tag: "Picked", options: [0, 2] })).toBe("Alpha and Gamma")
+    expect(first!.here).toStartWith("Here are the two questions on the Tezos migration, sir. First: Which colour")
+    expect(second!.here).toBe("Here's the last question on the Tezos migration, sir: Which test extras should run? Any of Alpha, Beta and Gamma?")
+    // Again in full, in other words each time; still unanswered; what they mean; which one then; let go.
+    expect(first!.again).toEqual([
+      "Again, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Once more, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Here it is again, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+    ])
+    expect(first!.still).toEqual([
+      "Back to the Tezos migration, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "The Tezos migration still needs an answer, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+    ])
+    const described = part("Which colour should the test use?", [
+      { label: "Red", description: "A red test." },
+      { label: "Blue (Recommended)", description: "A blue test. It matches the theme." },
+      { label: "Green", description: "" },
+    ])
+    expect(wording(described)[0]!.more).toBe("Red: a red test. Blue: a blue test. Green. I'd go with Blue. Which one, sir?")
+    expect(wording(described)[0]!.instead).toBe("Which one then, sir: Red or Green?")
+    expect(first!.instead).toBe("Red then, sir?")
+    expect(first!.letGo).toBe("I'll leave the question on the Tezos migration for now, sir; ask me for it when you're ready.")
+    expect(wording(part("Which library?", ["`date-fns`", "Day.js"]))[0]!.terms).toEqual(["date-fns", "Day.js"])
+  })
+
+  test("a question with too many options or parts to take in is only told, with what it asks", () => {
+    expect(told(part("Which network first?", ["Mainnet", "Ghostnet", "Shadownet", "Weeklynet", "Localnet"]))).toEqual(
+      Option.some("A question on the Tezos migration, sir: Which network first? It has five options, so it's waiting for you in T3 Code."),
+    )
+    const many = ["One?", "Two?", "Three?", "Four?", "Five?"].map((asked) => part(asked, []))
+    expect(told(...many)).toEqual(Option.some("Five questions on the Tezos migration, sir: that's too many to ask you one at a time, so they're waiting for you in T3 Code."))
+    // Four parts are still asked.
+    expect(wording(...many.slice(0, 4))[0]!.first).toBe("Four questions on the Tezos migration, sir. First: One?")
+    // With its words unsayable and the model failing, its header stands in.
+    expect(wording(Questions.said(question("Use `oauth2` or `apikey`?", ["OAuth", "API key"], { header: "Auth method" }), Option.none()))[0]!.first).toBe(
+      "A question on the Tezos migration, sir: About auth method: OAuth or API key?",
+    )
+  })
+
+  test("answers are matched without the model by label, sound, position, number or letter, a word only one has, yes to the pick once heard in full, and yes or no to the option that starts with it", () => {
+    const networks = part("Which network should we start with?", ["Mainnet", "Ghostnet (Recommended)", "Full history", "Shadow testnet"])
+    const pick = (heard: string, inFull = true) => Questions.pick(networks, heard, { inFull, parts: 1 })
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    for (const [heard, index] of [
+      ["Mainnet.", 0],
+      ["Ghostnet (Recommended)", 1],
+      ["ghost net", 1],
+      ["Uh, Main net, please.", 0],
+      ["The third one.", 2],
+      ["Second.", 1],
+      ["Number two.", 1],
+      ["Option 4.", 3],
+      ["Option D.", 3],
+      ["Four.", 3],
+      ["C.", 2],
+      ["Last.", 3],
+      ["The full history one.", 2],
+      ["Shadow.", 3],
+      ["Yes.", 1],
+      ["Sounds good.", 1],
+      ["Go with what you recommend.", 1],
+      ["Your pick.", 1],
+      ["You decide.", 1],
+    ] as const) {
+      expect([heard, pick(heard)]).toEqual([heard, index === undefined ? undefined : picked(index)])
+    }
+    // Cut off before yapd said its pick, a yes is asked again in full.
+    expect(pick("Yes.", false)).toEqual({ _tag: "Again" })
+    // A plain no to the pick: which one then.
+    expect(pick("No.")).toEqual({ _tag: "Instead" })
+    // A letter is a letter's own option when one is called by one.
+    expect(Questions.pick(part("Which plan?", ["A", "B", "Neither"]), "B.", { inFull: true, parts: 1 })).toEqual(picked(1))
+    expect(Questions.pick(part("Which grade?", ["B", "A"]), "A.", { inFull: true, parts: 1 })).toEqual(picked(1))
+    // Yes or no to the option that starts with it, whatever yapd would pick.
+    const migrate = part("Should I migrate the invoices too?", ["Yes, all of them", "No (Recommended)"])
+    expect(Questions.pick(migrate, "Yeah.", { inFull: true, parts: 1 })).toEqual(picked(0))
+    expect(Questions.pick(migrate, "Nope.", { inFull: true, parts: 1 })).toEqual(picked(1))
+    // With nothing to pick from, a yes or a no is his answer, and so are "you decide" and "none of those".
+    const bump = part("Should I also bump the version?", [])
+    expect(Questions.pick(bump, "No.", { inFull: true, parts: 1 })).toEqual({ _tag: "Words", text: "No" })
+    expect(Questions.pick(part("Which colour?", ["Red", "Blue"]), "Up to you.", { inFull: true, parts: 1 })).toEqual({ _tag: "Words", text: "You decide." })
+    expect(pick("None of those.")).toEqual({ _tag: "Words", text: "None of those." })
+    // What he wants done with the question itself.
+    expect(["Say that again.", "What are the options?", "Later.", "Skip.", "Never mind."].map((heard) => pick(heard)?._tag)).toEqual(["Again", "More", "Later", "Leave", "Leave"])
+    expect(Questions.pick(networks, "Skip.", { inFull: true, parts: 2 })).toEqual({ _tag: "Skip" })
+    // Only an option's name in full picks one it's a word of; anything more is the model's.
+    const next = part("What next?", ["Skip the flaky test", "Stop", "Keep going"])
+    expect(["Skip.", "Stop.", "Skip the flaky test."].map((heard) => Questions.pick(next, heard, { inFull: true, parts: 1 }))).toEqual([{ _tag: "Leave" }, picked(1), picked(0)])
+    expect(pick("Ghostnet, but only for the tests.")).toBeUndefined()
+    expect(pick("Mainnet and Ghostnet.")).toBeUndefined()
+    // A form that takes only its options asks which one, rather than send words it can't take.
+    expect(Questions.pick(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Neither.", { inFull: true, parts: 1 })).toEqual({ _tag: "Instead" })
+  })
+
+  test("a multi-select answer takes lists, 'all', 'both', 'all but X' and 'none'", () => {
+    const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
+    const pick = (heard: string) => Questions.pick(extras, heard, { inFull: true, parts: 2 })
+    const picked = (...options: ReadonlyArray<number>): Questions.Reply => ({ _tag: "Picked", options })
+    expect(pick("Alpha and Gamma.")).toEqual(picked(0, 2))
+    expect(pick("Alpha, Beta and full history.")).toEqual(picked(0, 1, 3))
+    expect(pick("Gamma plus alpha.")).toEqual(picked(0, 2))
+    expect(pick("Alpha Gamma.")).toEqual(picked(0, 2))
+    expect(pick("Just Beta.")).toEqual(picked(1))
+    expect(pick("All of them.")).toEqual(picked(0, 1, 2, 3))
+    expect(pick("Everything.")).toEqual(picked(0, 1, 2, 3))
+    expect(pick("All but Beta.")).toEqual(picked(0, 2, 3))
+    expect(pick("Everything except Beta and full history.")).toEqual(picked(0, 2))
+    expect(pick("Yes.")).toEqual(picked(2))
+    expect(pick("None of them.")).toEqual({ _tag: "Words", text: "None of those." })
+    expect(Questions.pick(part("Which checks?", ["Lint", "Types"], { multiSelect: true }), "Both.", { inFull: true, parts: 1 })).toEqual(picked(0, 1))
+    expect(pick("Alpha and something else.")).toBeUndefined()
+    // Sent as a list straight to the agent, and as one string when T3 Code takes the answer as a message.
+    const asked = question(extras.id, ["Alpha", "Beta", "Gamma (Recommended)", "Full history"], { multiSelect: true })
+    expect(Questions.answers({ questions: [asked], mode: "live" }, { [asked.id]: { _tag: "Picked", options: [0, 2] } })).toEqual(Either.right({ [asked.id]: ["Alpha", "Gamma (Recommended)"] }))
+    expect(Questions.answers({ questions: [asked], mode: "message" }, { [asked.id]: { _tag: "Picked", options: [0, 2] } })).toEqual(Either.right({ [asked.id]: "Alpha, Gamma (Recommended)" }))
+  })
+
+  test("the model's answer comes back to the options it names, line by line, or else to his own words", () => {
+    const colour = part("Which colour should the test use?", ["Red", "Blue (Recommended)"])
+    const extras = part("Which test extras should run?", ["Alpha", "Beta", "Gamma"], { multiSelect: true })
+    expect(Questions.resolve(colour, "Blue (Recommended)")).toEqual({ _tag: "Picked", options: [1] })
+    expect(Questions.resolve(extras, "Alpha\nGamma")).toEqual({ _tag: "Picked", options: [0, 2] })
+    expect(Questions.resolve(extras, "Alpha, Gamma")).toEqual({ _tag: "Picked", options: [0, 2] })
+    expect(Questions.resolve(colour, "Blue, but only for the tests.")).toEqual({ _tag: "Words", text: "Blue, but only for the tests." })
+    expect(Questions.resolve(colour, "Red\nBlue")).toEqual({ _tag: "Words", text: "Red\nBlue" })
+    expect(Questions.resolve(colour, " ")).toEqual({ _tag: "Again" })
+    expect(Questions.resolve(part("Which colour?", ["Red", "Blue"], { allowCustomAnswer: false }), "Green.")).toEqual({ _tag: "Instead" })
+  })
+
+  test("what's sent leaves out a part he skipped, needs every part a message needs, and never goes under an id or an option the question doesn't have", () => {
+    const colour = question("Which colour?", ["Red", "Blue"])
+    const notes = question("Anything else?", [], { required: false })
+    const both = { questions: [colour, notes], mode: "live" as const }
+    expect(Questions.answers(both, { [colour.id]: { _tag: "Picked", options: [0] }, [notes.id]: { _tag: "Skip" } })).toEqual(Either.right({ [colour.id]: "Red" }))
+    expect(Questions.answers(both, { [colour.id]: { _tag: "Skip" }, [notes.id]: { _tag: "Skip" } })).toEqual(Either.right({}))
+    expect(Questions.answers({ ...both, mode: "message" }, { [colour.id]: { _tag: "Skip" }, [notes.id]: { _tag: "Words", text: "No." } })).toEqual(Either.left("unanswered"))
+    expect(Questions.answers({ ...both, mode: "message" }, { [colour.id]: { _tag: "Words", text: "Green." } })).toEqual(Either.right({ [colour.id]: "Green." }))
+    expect(Questions.answers(both, { "Which color?": { _tag: "Picked", options: [0] } })).toEqual(Either.left("mismatched"))
+    expect(Questions.answers(both, { [colour.id]: { _tag: "Picked", options: [2] } })).toEqual(Either.left("mismatched"))
+  })
+})
