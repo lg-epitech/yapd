@@ -4870,4 +4870,47 @@ describe("Assistant", () => {
       ["Stop.", "fast", "dismiss"],
     ])
   })
+
+  test("a follow-up to an answer holds what's waiting to be read until what came of it is said", async () => {
+    let slow = false
+    let reads = 0
+    let spokenSoFar: () => ReadonlyArray<string> = () => []
+    /** What had been said each time what's waiting to be read was let go, in order. */
+    const letGo: Array<ReadonlyArray<string>> = []
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, until, wait } = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.second)
+              ? Brain.decision({ act: "look", target: handle(situation, tezos) })
+              : Brain.decision({
+                  act: "answer",
+                  target: handle(situation, tezos),
+                  spoken: situation.utterance.via === "reply" ? "It's waiting on the Mina fee table, sir." : "It's comparing fee tables: three of eight networks done, sir.",
+                }),
+          undefined,
+          {
+            // Reading the thread again for the follow-up is slow once the test says.
+            reading: Effect.suspend(() => (slow ? Effect.zipRight(Effect.sync(() => reads++), Effect.sleep("5 seconds")) : Effect.void)),
+            awaiting: Effect.succeed(Effect.sync(() => void letGo.push(spokenSoFar()))),
+          },
+        )
+        spokenSoFar = spoken
+        yield* dictate("Get me the status of the Tezos one.")
+        const before = letGo.length
+        slow = true
+        const following = yield* Effect.fork(followUp("What's it waiting on?"))
+        yield* until(() => reads > 0)
+        // Still reading the thread, so nothing waiting has been let go.
+        const reading = letGo.length - before
+        yield* wait(5)
+        const followed = yield* Fiber.join(following)
+        return { followed, reading, letGo: letGo.slice(before) }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    expect(result.reading).toBe(0)
+    expect(result.letGo).toHaveLength(1)
+    expect(result.letGo[0]!.at(-1)).toBe("It's waiting on the Mina fee table, sir.")
+  })
 })
