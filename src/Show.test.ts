@@ -626,6 +626,13 @@ describe("Show", () => {
     expect(Show.tally({ threads: [{ ...listed, state: "running" }], away: rig }, ", sir", now)).toBe("One running here, sir. I can't see rig's threads yet.")
     // With every machine seen, it's as before.
     expect(Show.tally({ threads: [idle], away: [] }, ", sir", now)).toBe("Nothing's running, sir.")
+    // With only rig's to be seen, it's what's running on rig.
+    const mac = [{ machine: "Rosie", reason: "T3 Code isn't running on Rosie, so I can't see its threads." }]
+    const there = { ...listed, here: false, ref: { machine: "rig", id: "std" }, state: "running" as const }
+    expect(Show.tally({ threads: [there], away: mac }, ", sir", now)).toBe("One running on rig, sir. T3 Code isn't running on Rosie, so I can't see its threads.")
+    // Rosie's and rig's seen, and only a third machine away, it's what's running on those two.
+    const alaska = [{ machine: "alaska", reason: "I can't reach alaska right now." }]
+    expect(Show.tally({ threads: [there, idle], away: alaska }, ", sir", now)).toBe("One running, sir. I can't reach alaska right now.")
   })
 
   test("a pull request that doesn't open is said with why, after its verdict", async () => {
