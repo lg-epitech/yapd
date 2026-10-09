@@ -84,6 +84,14 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(panel).toMatch(/func hide\(\) \{\s*fading\.hidden\(\)/)
       expect(panel).toMatch(/func away\(\) \{\s*fading\.away\(\)\s*\}/)
       expect(panel).not.toMatch(/Task\s*\{/)
+      // Kept up after all, or shown afresh, the card stops fading and shows in full, and a fade that ends late puts away only its own card.
+      expect(panel).toMatch(/keep: \{ \[weak self\] in self\?\.keep\(\) \}/)
+      expect(panel).toMatch(/shown \+= 1\s/)
+      expect(panel).toMatch(/keep\(\)\s*panel\.orderFrontRegardless\(\)/)
+      expect(panel).toMatch(/let showing = shown\s*await NSAnimationContext\.runAnimationGroup/)
+      expect(panel).toMatch(/guard !Task\.isCancelled, showing == shown else \{ return \}\s*close\(\)/)
+      expect(panel.match(/alphaValue = \d/g)).toEqual(["alphaValue = 0", "alphaValue = 1"])
+      expect(panel).toMatch(/context\.duration = 0\s*panel\.animator\(\)\.alphaValue = 1/)
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
       // Gone, the panel is told it's away, not that yapd stopped speaking, so a card still being talked about once it's back stays up.
       expect(yapd.match(/panel\.heard\([^)]*\)/g)).toEqual(['panel.heard(speaking: status.activity == "speaking")'])

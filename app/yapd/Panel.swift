@@ -19,6 +19,8 @@ final class Panel {
   private var fading: Fading!
   /// The card it shows, or showed last.
   private(set) var card: Card?
+  /// How many cards it has shown, so a fade that ends once another went up leaves that one be.
+  private var shown = 0
   /// Told when a card goes away, by its close button or by fading, so yapd can take it down too.
   var closed: (Card) -> Void = { _ in }
 
@@ -26,7 +28,8 @@ final class Panel {
     fading = Fading(
       Fading.Doing(
         wait: { delay in try? await Task.sleep(for: delay) },
-        fade: { [weak self] in await self?.fadeAway() }
+        fade: { [weak self] in await self?.fadeAway() },
+        keep: { [weak self] in self?.keep() }
       )
     )
   }
@@ -34,6 +37,7 @@ final class Panel {
   /// Shows a card. `talking` is whether yapd is about to talk about it, which it fades after; otherwise it lingers.
   func show(_ card: Card, talking: Bool) {
     self.card = card
+    shown += 1
     let panel = panel ?? make()
     self.panel = panel
     let hosting = NSHostingView(rootView: CardView(card: card, tallest: nil, close: { [weak self] in self?.close() }))
@@ -59,7 +63,7 @@ final class Panel {
     hosting.autoresizingMask = [.width, .height]
     effect.addSubview(hosting)
     panel.contentView = effect
-    panel.alphaValue = 1
+    keep()
     panel.orderFrontRegardless()
     fading.shown(talking: talking)
   }
@@ -85,15 +89,27 @@ final class Panel {
     if let card { closed(card) }
   }
 
-  /// Fades the card away, then puts it away, unless another went up or it was taken away meanwhile.
+  /// Fades the card away, then puts it away, unless another went up, it was taken away or it was kept meanwhile.
   private func fadeAway() async {
     guard let panel else { return }
+    let showing = shown
     await NSAnimationContext.runAnimationGroup { context in
       context.duration = 0.6
       panel.animator().alphaValue = 0
     }
-    guard !Task.isCancelled else { return }
+    // Stopped part way, the animation still ends here: only the card it faded, still up and still meant to fade, is put away.
+    guard !Task.isCancelled, showing == shown else { return }
     close()
+  }
+
+  /// Shows the card fully, stopping a fade under way, which would otherwise leave it up but unseen.
+  private func keep() {
+    guard let panel else { return }
+    // A new animation of the opacity replaces the one under way, which a plain set might not.
+    NSAnimationContext.runAnimationGroup({ context in
+      context.duration = 0
+      panel.animator().alphaValue = 1
+    }, completionHandler: nil)
   }
 
   private func make() -> NSPanel {
