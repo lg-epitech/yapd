@@ -565,14 +565,18 @@ export const make = (options: {
   const landed = (row: Ledger.Row, actions: T3Actions.Actions): Effect.Effect<boolean, T3CodeServer.Trouble> => {
     const sent = command(row.body)
     if (row.messageId !== null && row.kind === "message") return actions.has(row.thread, row.messageId)
-    // An answer got there once the thread no longer waits on what it answered, even behind something newer it asked.
+    // An answer got there once the thread no longer waits on what it answered, even behind something newer it asked. A thread the live
+    // view doesn't have, like rig's while it can't be reached, is read from its T3 Code instead, which fails the look when that can't
+    // be reached either: one that can't be seen is never taken for one that waits on nothing.
     if (Option.isSome(sent) && (sent.value._tag === "Decide" || sent.value._tag === "Answer")) {
       const { requestId } = sent.value
+      const read = Effect.map(actions.detail(row.thread, requestId), ({ pending }) => !pending.includes(requestId))
       return Effect.flatMap(threads.find(refOf(row)), (thread) => {
-        const pending = Option.getOrNull(Option.flatMap(thread, ({ pendingRuntimeRequest }) => Option.fromNullable(pendingRuntimeRequest)))
+        if (Option.isNone(thread)) return read
+        const pending = thread.value.pendingRuntimeRequest
         if (pending === null) return Effect.succeed(true)
         if (pending.id === requestId) return Effect.succeed(false)
-        return Effect.map(actions.detail(row.thread, requestId), ({ pending }) => !pending.includes(requestId))
+        return read
       })
     }
     if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)

@@ -7534,4 +7534,34 @@ describe("Assistant", () => {
     expect(result.sent).toBe(0)
     expect(result.decided).toEqual(["r9 accept"])
   })
+
+  test("an answer to a rig question whose sending fails as rig drops out is never noted as sent, nor said to have gone", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+          // The tunnel drops as the answer goes, so whether it got there can't be told, and rig's threads go out of sight with it.
+          answer: () => (payload, bounded) =>
+            payload.type === "runtime-request.respond"
+              ? Effect.suspend(() => {
+                  seen = false
+                  return Effect.fail(new T3CodeServer.Trouble({ reason: "The connection closed.", sent: true }))
+                })
+              : takes(payload, bounded),
+        })
+        yield* asked(made, onRig, "rig")
+        yield* made.answer("Red.")
+        const steps = yield* made.ledger.steps(0)
+        return { spoken: made.spoken(), sent: rig.length, steps: steps.map(({ machine, state }) => `${machine} ${state}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I couldn't confirm it got your answer, sir.",
+    ])
+    expect(result.sent).toBe(1)
+    expect(result.steps).toEqual(["rig unknown"])
+  })
 })
