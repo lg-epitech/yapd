@@ -832,9 +832,11 @@ export const make = (options: {
         // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
         const missed = catching ? thought.situation.unheard.map(({ id }) => id) : []
         const ref = Option.map(about, ({ ref }) => ref)
+        // Asked back over catching up, the answer is still part of it, so thanks after it doesn't hide what he didn't hear either.
+        const still = catching || (thought.utterance.via === "reply" && caughtUp(thought.subject))
         const told = {
           say: text,
-          subject: { _tag: "Answer", said: text, about: ref, ...(missed.length === 0 ? {} : { missed }), ...(catching ? { catchingUp: true } : {}) },
+          subject: { _tag: "Answer", said: text, about: ref, ...(missed.length === 0 ? {} : { missed }), ...(still ? { catchingUp: true } : {}) },
           kind: "answer",
           ...(missed.length === 0 ? {} : { missed }),
           ...(second === undefined ? {} : { second }),

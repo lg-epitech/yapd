@@ -1922,6 +1922,38 @@ describe("Daemon", () => {
     expect(result.again).toEqual([when === "over" ? "You missed this: yapd. The loader fix is ready." : "Nothing else."])
   })
 
+  test("thanks after the answer to a follow-up said over a catch-up answer still leaves what he missed to be told", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, dictating, speak, played } = yield* assisted(
+          (situation) => {
+            if (situation.utterance.via === "reply") return Brain.decision({ act: "answer", spoken: "A review, sir." })
+            const told = situation.unheard.map(({ said }) => said).join(" ")
+            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+          },
+          { microphone: true, transcripts: ["What's it waiting on?", "Thanks."] },
+        )
+        yield* finish("a", "The loader fix is ready.")
+        yield* wait(2)
+        yield* toggle(false)
+        yield* toggle(true)
+        yield* dictating("What did I miss?")
+        yield* wait(3)
+        // The follow-up cuts the catch-up answer off, and thanks comes after its own answer.
+        yield* speak
+        yield* wait(11)
+        yield* speak
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        const told = played.length
+        yield* dictating("What did I miss?")
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        return { played: played.slice(0, told), again: played.slice(told) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The loader fix is ready.", "You missed this: yapd. The loader fix is ready.", "A review, sir."])
+    expect(result.again).toEqual(["You missed this: yapd. The loader fix is ready."])
+  })
+
   test.each([
     ["What did I miss?", "Nothing else.", "catch-up"],
     ["What's going on?", "Two things are running, sir.", undefined],
