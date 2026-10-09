@@ -1886,6 +1886,30 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ commands: ["play"], sent: [], replies: [] })
   })
 
+  test("doesn't stop for a word of its own cut in two where its voice stopped getting in, heard as a stop in a look at what follows", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const spoken = "Codex is resizing the storage volume for the database now, sir, and then it will restart the server once that's done."
+        // "Storage" cut in two as the echo cancellation learnt its voice, and its voice running on past that long enough for a look.
+        const helper = yield* overHelper([[0.8, "Codex is resizing the Stoke."], [0.81, "Stop. Volume for the database now and then it will restart."]], {
+          spoken,
+          live: true,
+        })
+        yield* helper.wait(2.6)
+        yield* helper.talk(0.8, 12)
+        yield* helper.wait(0.4)
+        for (let burst = 0; burst < 5; burst++) {
+          yield* helper.talk(0.81, 9)
+          yield* helper.wait(0.29)
+        }
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play"], sent: [], replies: [] })
+  }, 30_000)
+
   test("can't ask a question without its words, which tell its own voice getting into the microphone from an answer", () => {
     // @ts-expect-error Without them, any of its voice that got through would be taken for him.
     const unspoken: Conversation.Question = { audio: "/tmp/question.wav", answer: () => Effect.succeed(Option.none()) }
