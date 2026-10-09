@@ -20,7 +20,7 @@ import {
 import { Audio, AudioError, native } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
-import { between, cut, theirs, together, unechoed, unfaded, unfinished } from "./Conversation.ts"
+import { between, cut, passedOn, theirs, together, unechoed, unfaded, unfinished } from "./Conversation.ts"
 import { defaults } from "./Endpointer.ts"
 import { Relays } from "./Relay.ts"
 import * as Helper from "./Helper.ts"
@@ -778,6 +778,16 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(unechoed("Over in yapd, the tests pass.", saying)).toBe("")
     // Once it has stopped, none of it can be its voice.
     expect(unechoed("Over in yapd, the tests pass.", "")).toBe("Over in yapd, the tests pass.")
+  })
+
+  test("passes on the user's question about what yapd just said whole, though it ends in its words, but leaves its voice out after his", () => {
+    const line = "Over in yapd, the tests pass now and the pull request is ready for review"
+    for (const heard of ["Wait, which pull request?", "Hold on, what about the tests?", "Hold on, do the tests pass now?"]) {
+      expect([heard, passedOn(heard, line)]).toEqual([heard, heard])
+    }
+    expect(passedOn("Stop. in yapd, the tests", line)).toBe("Stop.")
+    expect(passedOn("Hold on in yap D the tests", line)).toBe("Hold on")
+    expect(passedOn("Over in yapd, the tests pass. Hold on, which PR was that?", line)).toBe("Hold on, which PR was that?")
   })
 
   test("leaves the last of its voice out of what the user says straight after it stops, as long as he said more", () => {
@@ -1638,6 +1648,23 @@ describe("Over its first words, while yapd's own voice can still get into the mi
           const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass now"], [0.9, said]], { live: true })
           yield* helper.talk(0.8, 30)
           yield* helper.talk(0.9, 20)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([said, result]).toEqual([said, { commands: ["play", "stop"], sent: [said], replies: [said] }])
+    }
+  }, 30_000)
+
+  test("stops for the user's question about what it just said, and passes it on whole, though it ends in its words", async () => {
+    // Made out once he's done, and, talking on, partway through and again once he's done.
+    for (const [at, said, frames] of [[1, "Wait, which pull request?", 20], [0.8, "Hold on, what about the tests?", 20], [0.5, "Hold on a second, what about the tests?", 45]] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, said]], { live: true })
+          yield* helper.wait(at)
+          yield* helper.talk(0.9, frames)
           yield* helper.quiet
           yield* helper.wait(1)
           return { commands: helper.commands.slice(0, 2), sent: helper.sent, replies: yield* helper.replies }

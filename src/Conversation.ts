@@ -548,6 +548,20 @@ export const unechoed = (heard: string, before: string, after = before) => {
   return left.slice(0, left.length - run(left.map(token).reverse(), [...closing].reverse(), true)).join(" ")
 }
 
+/** Words a sentence is cut off on, rather than ends: those it hardly ever ends on, and those a question about something goes on from. */
+const hanging = (heard: string) => dangling.test(heard) || /\b(which|what|about|is|are|was|were|do|does|did|how|why|where|who)[,]?$/i.test(heard)
+
+/**
+ * What's passed on as what he said: what was heard less yapd's own voice at
+ * either end, unless what it said, taken off the end, would leave him cut off
+ * mid-sentence, like "Wait, which", when it's his question about what it
+ * said, like "Wait, which pull request?", and stays.
+ */
+export const passedOn = (heard: string, before: string, after = before) => {
+  const kept = unechoed(heard, before, after)
+  return !/[.!?]$/.test(kept) && hanging(kept) ? unechoed(heard, before, "") : kept
+}
+
 /**
  * What he said straight after yapd stopped, less the last of its voice still
  * coming in first: sentences that are nobody's, then the last word or more of
@@ -585,7 +599,7 @@ const judged = (heard: string, saying: string, more: string, from: Begun, cut: C
   const least = from.over ? 2 : 1
   const whole = trimmed(heard, cut)
   if (cut.start === true) return { kept: heard, his: theirs(whole, saying, least), some: anything(whole, saying) }
-  const kept = unechoed(heard, saying)
+  const kept = passedOn(heard, saying)
   // With its voice taken out of one end, what's left is what he said before or after it, judged by `more` of what it was
   // saying, since its voice may run on past where its words were guessed to be. Taken out of both, what's left may well be
   // its voice too, misheard, so it's judged whole.
@@ -1293,7 +1307,7 @@ export const make = (options: {
           ? Effect.succeed(piece.heard)
           : Effect.gen(function* () {
               const heard = yield* transcribe(piece.audio)
-              const kept = unechoed(heard, piece.before, piece.after)
+              const kept = passedOn(heard, piece.before, piece.after)
               if (kept !== heard) yield* Effect.logInfo(`Left out its own voice, keeping: ${kept}`)
               return kept
             }),
