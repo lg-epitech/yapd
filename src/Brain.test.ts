@@ -349,6 +349,9 @@ describe("Brain", () => {
       "rm ~/work build -r -f",
       "/bin/rm ~/work --recursive",
       "git clean . -fdx",
+      "rm -\\rf ~/work",
+      "r\\m -rf ~/work",
+      "git push origin main --\\force",
     ]
     const ordinary = [
       "npm install left-pad",
@@ -388,6 +391,8 @@ describe("Brain", () => {
       "rm build.log -f",
       "git rm node_modules -r --cached",
       "docker run --rm -it node:20 ls -R",
+      "rm -\\f build.log",
+      "git push origin main --\\follow-tags",
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])

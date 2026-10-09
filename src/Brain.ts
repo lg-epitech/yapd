@@ -452,12 +452,14 @@ const riskyFlags: ReadonlyArray<(command: string) => boolean> = [
 const continued = (text: string) => text.replace(/\\\r?\n/g, "")
 
 /**
- * A command as the shell runs it once it takes away the quotes around what
- * it's given, so `rm '-rf'` is `rm -rf`, which the patterns above, looking
- * for a flag where a word starts, would miss with its quotes. It's looked
- * through as well as the command as written, whose quotes JSON needs.
+ * A command as the shell runs it once it takes away its quoting: the quotes
+ * around what it's given, so `rm '-rf'` is `rm -rf`, and a backslash before
+ * any other character, which it keeps as it is, so `r\m -\rf` is `rm -rf`
+ * too, which the patterns above, looking for a name or a flag where a word
+ * starts, would miss as written. It's looked through as well as the command
+ * as written, whose quotes JSON needs.
  */
-const unquoted = (command: string) => command.replace(/["']/g, "")
+const unquoted = (command: string) => command.replace(/\\([\s\S])/g, "$1").replace(/["']/g, "")
 
 /**
  * A name set to true among what a tool is given, as its JSON writes it, or
