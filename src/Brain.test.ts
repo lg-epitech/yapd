@@ -91,6 +91,50 @@ const which = (candidates: ReadonlyArray<Threads.Ref>): Assistant.Open => ({
   resend: Option.none(),
 })
 
+/** The Tezos migration's question in two parts, open at `part`, the first answered "Red" when it's the second. */
+const questionOpen = (part: number) => {
+  const colour: Questions.Question = {
+    id: "colour",
+    header: "Colour",
+    question: "Which colour should the test use?",
+    options: [
+      { label: "Red", description: "A red test." },
+      { label: "Blue", description: "" },
+    ],
+    multiSelect: false,
+    allowCustomAnswer: true,
+    required: true,
+  }
+  const extras: Questions.Question = {
+    id: "extras",
+    header: "Extras",
+    question: "Which test extras should run?",
+    options: [
+      { label: "Alpha", description: "Runs the alpha suite." },
+      { label: "Beta", description: "" },
+      { label: "Gamma (Recommended)", description: "" },
+    ],
+    multiSelect: true,
+    allowCustomAnswer: true,
+    required: true,
+  }
+  const parts = [colour, extras].map((question) => Questions.said(question, Questions.sayQuestion(question.question)))
+  const worded = Questions.worded({ called: "Migrate Tezos Integration", parts, lines })
+  if (worded._tag !== "Ask") throw new Error("Only told")
+  const wording = worded.parts[part]!
+  const open: Assistant.Open = {
+    ...which([ref(tezos)]),
+    kind: "question",
+    heard: "",
+    decision: Brain.decision({ act: "reply" }),
+    asked: part === 0 ? wording.first : wording.last("Red"),
+    about: "the question on Migrate Tezos Integration",
+    asks: { _tag: "Question", requestId: "q1", questions: [colour, extras], mode: "live", part, collected: part === 0 ? {} : { colour: { _tag: "Picked", options: [0] } }, inFull: true },
+    wording,
+  }
+  return { open, desk: desk([ref(tezos)]) }
+}
+
 describe("Brain", () => {
   test("the first, the second and the last pick the open question's candidates in order", () => {
     const candidates = [ref(mina), ref(tezos), ref(std)]
@@ -133,6 +177,55 @@ describe("Brain", () => {
     expect(again({ _tag: "Session", update, said: answered })).toEqual({ act: "again", pending: "replaces", spoken: answered })
     const shown = Brain.prompt(situation("Can you repeat that?", { subject: { _tag: "Session", update, said: answered } }), Option.none())
     expect(shown).toContain(`yet: «${update.spoken}»\nWhat you said last, over it: «${answered}»`)
+  })
+
+  test("the OPEN section shows the part being asked, its options with what they mean, whether several can be picked, yapd's pick and what's answered already", () => {
+    const { open } = questionOpen(1)
+    const shown = Brain.prompt(situation("Alpha, and Gamma too.", { open: Option.some(open), desk: desk([ref(tezos)]) }), Option.none())
+    expect(shown).toContain("It asks the thread's question for it, part 2 of 2.")
+    expect(shown).toContain("He answered already: «Which colour should the test use?» → «Red».")
+    expect(shown).toContain("The question: «Which test extras should run?», headed «Extras».")
+    expect(shown).toContain("Its options: «Alpha» («Runs the alpha suite.»), «Beta», «Gamma (Recommended)». Several can be picked.")
+    expect(shown).toContain("You said you'd go with «Gamma (Recommended)».")
+    expect(shown).toContain(`"how" "skip" with "reply" skips this part. "again" with "how" "more" is to hear what the options mean.`)
+    // His words go as they are, and a no isn't taken for letting it go.
+    expect(shown).toContain(`"text" is all of his words, as he'd type them.`)
+    expect(shown).not.toContain("A no that isn't one of its options")
+    expect(shown).toContain(`"text" empty when he wants to hear a thread's question before answering: yapd reads it to him.`)
+    // On a second look at a thread asking him, its options too.
+    const [colour] = open.asks?._tag === "Question" ? open.asks.questions : []
+    const looked = Brain.prompt(
+      situation("What's it asking?", {
+        second: Option.some({ ref: ref(tezos), detail: { messages: [], runs: [], request: Option.some({ _tag: "Question", id: "q1", questions: [colour!], mode: "live" }), plan: Option.none(), pending: ["q1"] } }),
+      }),
+      Option.none(),
+    )
+    expect(looked).toContain("Asking him: «Which colour should the test use?» Its options: «Red», «Blue».")
+  })
+
+  test("'what's the question' and 'what are the options' are worked out without the model", () => {
+    const decided = (heard: string, part: number) => {
+      const { open, desk: shown } = questionOpen(part)
+      const made = Brain.fast(situation(heard, { open: Option.some(open), desk: shown, subject: { _tag: "Answer", said: open.asked, about: Option.some(ref(tezos)) } }), lines)
+      return made === undefined ? undefined : { act: made.act, how: made.how, text: made.text, pending: made.pending }
+    }
+    expect(decided("What are the options?", 0)).toEqual({ act: "again", how: "more", text: "", pending: "answers" })
+    expect(decided("What's the question?", 0)).toEqual({ act: "again", how: "same", text: "", pending: "answers" })
+    expect(decided("Later.", 0)).toEqual({ act: "dismiss", how: "later", text: "", pending: "answers" })
+    expect(decided("Skip that one.", 0)).toEqual({ act: "reply", how: "skip", text: "", pending: "answers" })
+    expect(decided("Red, please.", 0)).toEqual({ act: "reply", how: "", text: "Red", pending: "answers" })
+    expect(decided("All but Beta.", 1)).toEqual({ act: "reply", how: "", text: "Alpha\nGamma (Recommended)", pending: "answers" })
+    // With nothing open, about the thread he's on about while it asks him something: read to him again.
+    const asking = thread("9b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e", "Cloud deployment discovery", "p-std", {
+      pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "2026-10-08T21:58:00.000Z" },
+    })
+    const shown: Threads.Desk = {
+      threads: Threads.shortlist({ machine: "Rosie", view: { ...view, threads: new Map([...view.threads, [asking.id, asking]]) }, focus: Option.none(), pending: [], most: 30, started: new Map(), said: new Map(), now }),
+      away: [],
+    }
+    const about = (of: T3Live.Thread) => Brain.fast(situation("What's the question?", { desk: shown, subject: { _tag: "Answer", said: "I'll leave it.", about: Option.some(ref(of)) } }), lines)
+    expect(about(asking)).toEqual(Brain.decision({ act: "reply", target: shown.threads.find(({ ref }) => ref.id === asking.id)!.handle }))
+    expect(about(mina)).toBeUndefined()
   })
 
   test("a bare stop never stops a thread", () => {

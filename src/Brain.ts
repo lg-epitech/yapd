@@ -6,6 +6,7 @@ import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
 import { Model } from "./Model.ts"
 import { addressed, type Lines } from "./Persona.ts"
+import * as Questions from "./Questions.ts"
 import { agreed, enough, gist, type Line } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
@@ -62,7 +63,8 @@ export const Decision = Schema.Struct({
   machine: Schema.String,
   /** With OPEN shown: "answers" if this answers it, "replaces" if it's something new. "" without OPEN. */
   pending: Schema.Literal("answers", "replaces", ""),
-  /** answer: missed · send: now|after|restart · decide: accept|session|decline · again: same|more · find: threads|journal
+  /** answer: missed · send: now|after|restart · decide: accept|session|decline · again: same|more|instead · dismiss: later
+   *  · reply: skip · find: threads|journal
    *  mode: focus|quiet|normal|brief|full · remember: fact|routine · remind: at|finished|asked|checks|merged
    *  tidy: archive|unarchive|rename|snooze|settle|pin · show: threads|thread|pr|usage|missed|memories */
   how: Schema.String,
@@ -262,9 +264,11 @@ export const reworded = (open: Pick<Assistant.Open, "kind" | "asked" | "about" |
 export const unrepeated = (open: Pick<Assistant.Open, "kind" | "asked" | "about" | "rewordings">, before: ReadonlyArray<string>, lines: Lines) =>
   repeated(open.asked, before) ? reworded(open, before, lines) : open.asked
 
-/** What's said when a question went unanswered twice, and is let go: what a thread waits on him for still waits in T3 Code. */
-export const dropped = (open: Pick<Assistant.Open, "kind" | "about">, lines: Lines) =>
-  open.kind === "approval" || open.kind === "question"
+/** What's said when a question went unanswered twice, and is let go: what a thread waits on him for still waits in T3 Code, and he can ask for its question. */
+export const dropped = (open: Pick<Assistant.Open, "kind" | "about" | "wording">, lines: Lines) =>
+  open.kind === "question" && open.wording !== undefined
+    ? open.wording.letGo
+    : open.kind === "approval" || open.kind === "question"
     ? `I didn't hear back about ${open.kind === "approval" ? `whether to ${open.about}` : open.about}, so it's still waiting for you in T3 Code${addressed(lines)}.`
     : yesNo(open.kind)
     ? `I didn't hear back about whether to ${open.about}, so I left it${addressed(lines)}.`
@@ -982,6 +986,12 @@ const askingUsage = (said: string, known: Option.Option<Threads.Usage>) => {
   return asked[1]!.trim().split(" ").some((word) => limits.has(word) || ["claude", "codex", ...providers].includes(word))
 }
 
+/** Asking to hear what a thread asked him, which is read to him again, from the part he'd got to. */
+const questioning: ReadonlySet<string> = new Set([
+  "what's the question", "what was the question", "what did it ask", "what did it ask me", "read me the question", "ask me the question",
+  "what's it asking", "what is it asking", "what was it asking", "what's it asking me",
+])
+
 /** "What did I miss", for which what he hasn't heard comes first. */
 const missed: ReadonlySet<string> = new Set([
   "what did i miss", "what have i missed", "catch me up", "brief me", "fill me in", "what did i miss while i was away",
@@ -1011,9 +1021,6 @@ const declines: ReadonlySet<string> = new Set([
   "no", "nope", "nah", "no thanks", "no thank you", "deny", "deny it", "denied", "decline", "decline it", "declined", "reject", "reject it",
   "don't", "dont", "do not", "don't do it", "no don't", "no don't do it", "don't allow it", "don't approve it",
 ])
-
-/** A plain no, which answers a thread's question that takes any answer, like "Should I also bump the version?". */
-const noes: ReadonlySet<string> = new Set(["no", "nope", "nah", "no thanks", "no thank you"])
 
 /** Allowing it for the rest of the thread's work, which only these words ask for. */
 const sessionly = /\b(for (the|this) session|from now on)\b/
@@ -1059,11 +1066,14 @@ export const focused = (situation: Pick<Situation, "subject" | "desk">) => {
  * What answers what a thread waits on him for without the model: "approve",
  * a plain yes or a no to an approval, of which either yes only allows one
  * he's heard all of, and a plain yes only one that isn't risky, as the
- * assistant sees to, asking once more otherwise; an option of a question,
- * by position or a name only it has, or a plain no to one that takes any
- * answer. Anything else is the model's to judge.
+ * assistant sees to, asking once more otherwise; or, to the part of a
+ * question being asked, what his words plainly come to, as `Questions.pick`
+ * has it: the options he picked, his own words, or what he wants done with
+ * the question itself, like hearing it again, what its options mean, or
+ * putting it off. Anything else is the model's to judge.
  */
-const settling = (asks: Assistant.Asks | undefined, said: string, target: string): Decision | undefined => {
+const settling = (open: Assistant.Open, heard: string, said: string, target: string): Decision | undefined => {
+  const { asks } = open
   switch (asks?._tag) {
     case "Approval": {
       const bare = said.replace(sessionly, " ").replace(/\s+/g, " ").trim()
@@ -1075,23 +1085,29 @@ const settling = (asks: Assistant.Asks | undefined, said: string, target: string
       return undefined
     }
     case "Question": {
-      const [only, ...more] = asks.questions
-      // "Stop", "skip" or "enough" is to stop talking, never an option, even one that starts with it, like "Stop here".
-      if (only === undefined || more.length > 0 || enough.has(said)) return undefined
-      const { options } = only
-      // To one that takes any answer, with nothing to pick from, a plain no is the answer, never letting it go.
-      if (options.length === 0 && only.allowCustomAnswer && noes.has(said)) return decision({ act: "reply", target, text: "No", pending: "answers" })
-      const ordinal = ordinals.find(([pattern]) => pattern.test(said))
-      // A no, or "cancel", is only the option that's just that, never one it's a word of, like "Cancel the migration".
-      const named = refused.has(said) ? [] : said.split(" ").filter((word) => !pointing.has(word))
-      /** The one option that fits, if only one does. */
-      const one = (fitting: typeof options) => (fitting.length === 1 ? fitting[0] : undefined)
-      const picked =
-        ordinal !== undefined
-          ? options[ordinal[1](options.length)]
-          : (one(options.filter((option) => gist(option.label) === said)) ??
-            (named.length === 1 ? one(options.filter((option) => words(option.label).split(" ").includes(named[0]!))) : undefined))
-      return picked === undefined ? undefined : decision({ act: "reply", target, text: picked.label, pending: "answers" })
+      const part = open.wording?.part
+      const reply = part === undefined ? undefined : Questions.pick(part, heard, { inFull: asks.inFull, parts: asks.questions.length })
+      if (part === undefined || reply === undefined) return undefined
+      const answers = (given: Partial<Decision> & Pick<Decision, "act">) => decision({ target, pending: "answers", ...given })
+      switch (reply._tag) {
+        case "Picked":
+          // As the agent wrote them, one a line, which is what's sent.
+          return answers({ act: "reply", text: reply.options.flatMap((index) => Option.toArray(Option.fromNullable(part.options[index]?.label))).join("\n") })
+        case "Words":
+          return answers({ act: "reply", text: reply.text })
+        case "Skip":
+          return answers({ act: "reply", how: "skip" })
+        case "Again":
+          return answers({ act: "again", how: "same" })
+        case "More":
+          return answers({ act: "again", how: "more" })
+        case "Instead":
+          return answers({ act: "again", how: "instead" })
+        case "Later":
+          return answers({ act: "dismiss", how: "later" })
+        case "Leave":
+          return answers({ act: "dismiss" })
+      }
     }
     default:
       return undefined
@@ -1130,6 +1146,8 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   }
   // Said of the work he's hearing about while it's at it, it can only mean stopping that.
   const on = focused(situation)
+  // With nothing open, what's asked is what the thread he's on about asks him, when it asks him something: it's read to him again.
+  if (Option.isNone(open) && questioning.has(said)) return Option.isSome(on) && on.value.state === "question" ? decision({ act: "reply", target: on.value.handle }) : undefined
   if (stopping.has(said) && Option.isSome(on) && stoppable(on.value)) {
     return decision({ act: "stop", target: on.value.handle, pending: Option.isSome(open) ? "replaces" : "" })
   }
@@ -1143,8 +1161,10 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
     const question = open.value
     const candidates = question.candidates.flatMap((ref) => desk.threads.filter((listed) => Threads.same(listed.ref, ref)))
     // What a thread waits on him for, answered in so many words, or by its option, which may well be "No".
-    const settled = settling(question.asks, said, candidates[0]?.handle ?? "")
+    const settled = settling(question, meant ? said : utterance.heard, said, candidates[0]?.handle ?? "")
     if (settled !== undefined) return settled
+    // A no to a thread's question before he'd heard yapd's pick may be to the pick or to the question, which is the model's to judge.
+    if (question.asks?._tag === "Question" && !question.asks.inFull && Option.isSome(question.wording?.part.recommended ?? Option.none()) && refused.has(said)) return undefined
     // Said over a question, "stop" or "enough" is to stop talking, which lets it go: never a yes to what it asks, like stopping a thread.
     if (refused.has(said) || enough.has(said)) return decision({ act: "dismiss", pending: "answers" })
     const pick = (listed: Threads.Listed | undefined) =>
@@ -1409,7 +1429,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
 - "undo": take back what you just did for him, as LATELY shows it. "how" is "carry" when he wants a thread you stopped to carry on, "" to withdraw the message you just sent, like "scratch that". "target" is the thread, when he names one.
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
-- "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words.
+- "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
 - These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "mode" to change when you talk; "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it; "show" something on his screen.`
@@ -1619,7 +1639,9 @@ const detail = (desk: Threads.Desk, second: NonNullable<Option.Option.Value<Situ
         request._tag === "Approval"
           ? `Waiting for his approval to: ${fenced(request.what, 300)}${request.command === undefined ? "" : `, that is ${fenced(request.command, 300)}`}`
           : request._tag === "Question"
-            ? `Asking him: ${request.questions.map(({ question }) => fenced(question, 200)).join(" ")}`
+            ? `Asking him: ${request.questions
+                .map(({ question, options }) => `${fenced(question, 200)}${options.length === 0 ? "" : ` Its options: ${options.map(({ label }) => fenced(label, 80)).join(", ")}.`}`)
+                .join(" ")}`
             : `Waiting for a secret from him, ${fenced(request.label, 100)}, which he only ever gives in T3 Code, never by voice`,
       ],
     }),
@@ -1667,20 +1689,49 @@ const usageLines = (usage: Option.Option<Threads.Usage>, now: number) =>
           ].join("\n"),
   })
 
-/** What a yes, a no or an answer does to what a thread waits on him for, which OPEN asks about. */
-const waitingOn = (asks: Assistant.Asks) => {
-  switch (asks._tag) {
+/**
+ * What a yes, a no or an answer does to what a thread waits on him for, which
+ * OPEN asks about: for a question, only the part being asked, with what he
+ * answered of it before, its options and what they mean, and yapd's pick.
+ */
+const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording">) => {
+  const { asks } = open
+  switch (asks?._tag) {
     case "Approval":
       return `\nIt asks whether to allow what the thread waits on. A yes is "decide" with "how" "accept"; "session" only when he says for the session or from now on. A no is "decide" with "how" "decline". A no with something else instead, like "no, use the staging config", is "decide" "decline" with the rest in "rest".${
         asks.inFull ? "" : " He didn't hear all of it, so take a bare yes for one only when nothing else fits."
       }`
-    case "Question":
-      return `\nIt asks the thread's question for it. ${asks.questions
-        .map(({ question, options }) => `${fenced(question, 300)}${options.length === 0 ? "" : ` Its options: ${options.map(({ label }) => fenced(label, 80)).join(", ")}.`}`)
-        .join(" ")} An answer is "reply" with "text" the option he picked, as it's written${
-        asks.questions.every(({ allowCustomAnswer }) => allowCustomAnswer) ? ", or his own words" : ""
-      }. A no that isn't one of its options is "dismiss".`
-    case "Agent":
+    case "Question": {
+      const question = asks.questions[asks.part]
+      if (question === undefined) return ""
+      const part = open.wording?.part
+      const answered = asks.questions.slice(0, asks.part).flatMap(({ id, question: asked, options }) => {
+        const answer = asks.collected[id]
+        if (answer === undefined) return []
+        const given =
+          answer._tag === "Picked" ? answer.options.flatMap((index) => Option.toArray(Option.fromNullable(options[index]?.label))).join(", ") : answer._tag === "Words" ? answer.text : "skipped"
+        return [`${fenced(asked, 80)} → ${fenced(given, 80)}`]
+      })
+      const pick = Option.flatMap(part?.recommended ?? Option.none<number>(), (index) => Option.fromNullable(question.options[index]?.label))
+      return [
+        `\nIt asks the thread's question for it${asks.questions.length === 1 ? "" : `, part ${asks.part + 1} of ${asks.questions.length}`}.`,
+        ...(answered.length === 0 ? [] : [`He answered already: ${answered.join("; ")}.`]),
+        `The question: ${fenced(question.question, 300)}${question.header.trim() === "" ? "" : `, headed ${fenced(question.header, 40)}`}.`,
+        ...(question.options.length === 0
+          ? ["It gives no options: any answer will do."]
+          : [
+              `Its options: ${question.options.map(({ label, description }) => `${fenced(label, 80)}${description.trim() === "" ? "" : ` (${fenced(description, 80)})`}`).join(", ")}.`,
+              ...(question.multiSelect ? ["Several can be picked."] : []),
+            ]),
+        ...Option.match(pick, { onNone: () => [], onSome: (label) => [`You said you'd go with ${fenced(label, 80)}.`] }),
+        `An answer is "reply": "text" is the option he picked, as it's written; several, one a line.${
+          question.allowCustomAnswer
+            ? ` When he adds a condition, a reason or anything the work should know, like "Blue, but only for the tests", "none of those, use staging" or "hold off until I check the fees", "text" is all of his words, as he'd type them.`
+            : " It takes only its options."
+        } "how" "skip" with "reply" skips this part. "again" with "how" "more" is to hear what the options mean. "dismiss" is only for never mind or stop asking; "dismiss" with "how" "later" puts it off.`,
+      ].join(" ")
+    }
+    default:
       return ""
   }
 }
@@ -1729,7 +1780,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
             : `\nIts choices, in the order you said them: ${open.candidates.map((ref) => handleOf(desk, ref.machine, ref.id) ?? "a thread that's gone").join(", ")}`
         }${
           open.asks !== undefined
-            ? waitingOn(open.asks)
+            ? waitingOn(open)
             : yesNo(open.kind)
               ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act === "send" ? ` with the message ${fenced(open.decision.text, 400)}` : ""}`
               : ""
