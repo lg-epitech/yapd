@@ -7622,4 +7622,45 @@ describe("Assistant", () => {
       open: false,
     })
   })
+
+  test("a press that comes to nothing over a thread's question he hadn't heard all of brings it back at once, never as a second asking a minute on", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const first = "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    const here = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    /** The question comes up, the shortcut is pressed as `pressing` has it, and what he dictates comes to nothing, like with the microphone off, nothing caught, or cancelled. */
+    const pressed = (pressing: "playing" | "queued" | "late") =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+          yield* asked(made, cloud)
+          const question = made.questions().at(-1)!
+          if (pressing === "queued") {
+            // Pressed while it waits its turn to be said, which the press then keeps from being said at all.
+            yield* made.prepare(1, 1)
+            const stale = yield* question.stale
+            yield* made.nothing(1)
+            if (!stale) return yield* Effect.die("It was said after all.")
+          } else {
+            // Pressed as it's said, which cuts it off, and got ready for at once, or only once the dictation is over.
+            yield* question.stale
+            yield* made.cut()
+            if (pressing === "playing") yield* made.prepare(1, 1)
+            yield* made.nothing(1)
+            if (pressing === "late") yield* made.prepare(1, 1)
+          }
+          yield* made.flush
+          const atOnce = made.spoken().slice(1)
+          // Heard in full this time and left unanswered, it's still asked once more a minute on, rather than let go.
+          yield* made.play()
+          yield* made.unanswered()
+          yield* made.wait(61)
+          return { atOnce, then: made.spoken().slice(1 + atOnce.length), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const still = "Back to Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(await pressed("playing")).toEqual({ atOnce: [here], then: [still], open: true })
+    expect(await pressed("late")).toEqual({ atOnce: [here], then: [still], open: true })
+    // Never said at all, it's asked as it was first going to be.
+    expect(await pressed("queued")).toEqual({ atOnce: [first], then: [still], open: true })
+  })
 })

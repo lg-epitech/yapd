@@ -1080,12 +1080,27 @@ export const make = (options: {
     /**
      * What was being said has been dealt with, without answering the open
      * question, so once nothing else being said holds it, it's waited on again,
-     * as if it went unanswered.
+     * as if it went unanswered, or as `then` has it.
      */
-    const release = (key: string) =>
+    const release = (key: string, then: (id: string) => Effect.Effect<void> = later) =>
       Effect.suspend(() => {
         if (asking === undefined || !asking.held.delete(key) || asking.held.size > 0) return Effect.void
-        return later(asking.open.id)
+        return then(asking.open.id)
+      })
+
+    /**
+     * The open question, once a press that came to nothing no longer holds
+     * it, nor anything else: a thread's he hadn't heard all of, which the
+     * press may have cut off or kept from being said at all, comes back at
+     * once from the part he'd got to, as after anything that takes its place,
+     * since that was no asking of his; anything else is waited on again, as
+     * if it went unanswered.
+     */
+    const resume = (id: string) =>
+      Effect.suspend(() => {
+        if (asking?.open.id !== id || asking.held.size > 0) return Effect.void
+        if (asking.open.kind !== "question" || asking.from === undefined || asking.whole !== undefined) return later(id)
+        return close(asking.open, "replaced")
       })
 
     /** Says something now, ahead of the rest of the answer, like that it's looking. */
@@ -2941,9 +2956,12 @@ export const make = (options: {
           if (yield* outdated(turns)) return yield* arrived
           // Its dictation is over already, dealt with or come to nothing, so there's nothing left to keep or hold for it.
           if (over.has(press)) {
-            // Come to nothing, it let go of nothing, so a question it would have held, which it may have cut off, is waited on again now instead.
+            // Come to nothing, it let go of nothing, so a question it would have held, which it may have cut off, is taken up again now instead.
             const cut = over.get(press)
-            if (cut !== undefined && asking?.open.id === cut && at >= asking.open.at) yield* later(cut)
+            if (cut !== undefined && asking?.open.id === cut && at >= asking.open.at) {
+              yield* resume(cut)
+              yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+            }
             return yield* arrived
           }
           presses.set(press, { subject: about, arrived })
@@ -2959,7 +2977,7 @@ export const make = (options: {
       // Whatever it held is let go of: a press from before yapd was turned off holds nothing that's open now anyway.
       nothing: (press) =>
         Effect.gen(function* () {
-          yield* release(`press:${press}`)
+          yield* release(`press:${press}`, resume)
           // In case it isn't got ready for yet, so it held nothing, it keeps the question he'd heard by now, which it may have cut off.
           const kept = yield* ended(press, asking?.said !== undefined ? asking.open.id : undefined)
           yield* kept?.arrived ?? Effect.void
