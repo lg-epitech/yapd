@@ -2605,6 +2605,51 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   })
 
+  test("lets go of what the user goes on with a second or more after what he said over them was let go, when that reads as broken off or what follows as going on from it", async () => {
+    for (const [first, then] of [
+      ["Tell it to fix the tests,", "and then merge it."],
+      ["Tell it to fix the tests.", "And then merge it."],
+    ] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, first], [0.91, then]], { live: true })
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 40)
+          // A pause of a second and a half, which ends past its first seconds.
+          yield* helper.quiet
+          yield* helper.talk(0, 25)
+          yield* helper.talk(0.91, 20)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([then, result]).toEqual([then, { responded: [], sent: [], replies: [] }])
+    }
+  }, 30_000)
+
+  test("takes what the user says again just after what he went on with was let go as the rest of something broken off, once that reads as said in full", async () => {
+    const said = "Which PR was that?"
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass now and the PR,"], [0.9, said]], { live: true })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, 88)
+        yield* helper.talk(0, 12)
+        yield* helper.talk(0.9, 20)
+        yield* helper.quiet
+        const first = [...helper.commands]
+        // Said again a second later.
+        yield* helper.wait(1)
+        yield* helper.talk(0.9, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { first, stopped: helper.commands.slice(0, 3), sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ first: ["play"], stopped: ["play", "volume", "stop"], sent: [said], replies: [said] })
+  })
+
   test("takes only the stop of what the user said over them, never adding what he goes on with before it has worked out what to do, however long he pauses first", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -2630,6 +2675,32 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       }),
     )
     expect(result).toEqual({ commands: ["play", "stop"], sent: [], replies: ["Wait."] })
+  })
+
+  test("takes only the stop of what the user said over them, never adding what he says after the rest of it, before it has worked out what to do", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes two seconds over the first part, and working out what to do three.
+        const helper = yield* overHelper([[0.9, "Wait for the tests to pass,"], [0.91, "then merge it."], [0.92, "and deploy it."]], {
+          live: true,
+          delays: [2],
+          responding: 3,
+          intent: "dismiss",
+        })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 25)
+        yield* helper.quiet
+        yield* helper.talk(0, 4)
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.talk(0, 10)
+        yield* helper.talk(0.92, 15)
+        yield* helper.quiet
+        yield* helper.wait(4)
+        return { sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ sent: [], replies: ["Wait."] })
   })
 
   test("stops at once for what the user says just after its first seconds, when its own voice before ended on an \"and\" Whisper heard for its \"in\"", async () => {

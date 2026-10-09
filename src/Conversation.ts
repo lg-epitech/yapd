@@ -131,11 +131,12 @@ const hesitation = "3 seconds"
 const rambling = 60_000
 /**
  * How soon after what he said over yapd's first seconds ended, when it can't
- * stand on its own, what he goes on with is the rest of it, rather than
- * something new, like saying it again, in milliseconds, after the quiet that
- * ended it: as long again as that.
+ * stand on its own, what he goes on with may be the rest of it, rather than
+ * something new, like saying it again, in milliseconds: as long as yapd
+ * waits for the rest of what he trails off with once it's heard him, its
+ * `hesitation`.
  */
-const goingOn = 700
+const goingOn = 3_000
 
 /** Words a sentence hardly ever ends on. */
 const dangling = /\b(and|or|but|to|the|a|an|of|for|with|my|your|if|when|because)[.,]?$/i
@@ -1037,9 +1038,11 @@ export const make = (options: {
             const { told, heard = "" } = talk
             if (told === undefined) return open
             if (open !== undefined && talk.began - open.ended <= goingOn && (open.open === "cut off" || continuing.test(heard))) {
-              talk.told = { whose: told.stop === undefined ? "unclear" : "stop", taken: told.stop ?? "", stop: told.stop, open: open.open }
+              // Which ends it, unless it reads as broken off too.
+              const going = unfinished(heard) ? "cut off" : undefined
+              talk.told = { whose: told.stop === undefined ? "unclear" : "stop", taken: told.stop ?? "", stop: told.stop, open: going }
               talk.at = open.at
-              open = { at: open.at, ended: talk.ended, open: open.open }
+              open = going === undefined ? undefined : { at: open.at, ended: talk.ended, open: going }
             } else open = told.open === undefined ? undefined : { at: talk.at ?? Number.POSITIVE_INFINITY, ended: talk.ended, open: told.open }
           }
           return open
@@ -1066,7 +1069,8 @@ export const make = (options: {
           return interrupted(
             taken.map((talk): Piece => ({ audio: talk.audio, heard: talk.told?.taken ?? "" })),
             from(taken),
-            after !== undefined,
+            // As after a stop of his taken out of more, which yapd stopped for.
+            after !== undefined || taken.some((talk) => talk.told?.open !== undefined),
           )
         }
         /** How it ends once the microphone has gone and nothing's left to make out: not yet while it's still playing. */
