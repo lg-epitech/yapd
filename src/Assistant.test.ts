@@ -2094,6 +2094,32 @@ describe("Assistant", () => {
     expect(await answering("The second, I guess.", true)).toEqual({ asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
   })
 
+  test("yapd's pick among several the model takes him to want, said before he heard it and never named, sends nothing: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const networks = { id: "networks", question: "Which networks should the tests run on?", options: [{ label: "Mainnet" }, { label: "Testnet (Recommended)" }, { label: "Devnet" }], multiSelect: true }
+    const answering = (heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes what he said for yapd's pick and another.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Testnet (Recommended)\nDevnet", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [networks]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const again = "Again, sir: Which networks should the tests run on? Any of Mainnet, Testnet and Devnet? I'd go with Testnet."
+    expect(await answering("Yeah, that works, and devnet too.", true)).toEqual({ spoken: [again], answers: [] })
+    // Heard in full, or named, it's his.
+    const both = { spoken: ["Testnet and Devnet it is, sir."], answers: [{ networks: ["Testnet (Recommended)", "Devnet"] }] }
+    expect(await answering("Yeah, that works, and devnet too.", false)).toEqual(both)
+    expect(await answering("Testnet, and devnet too I guess.", true)).toEqual(both)
+  })
+
   test("a plain no after yapd's pick asks which one then, without it", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (options: ReadonlyArray<string>, then: string) =>

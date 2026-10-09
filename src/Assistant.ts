@@ -2338,8 +2338,8 @@ export const make = (options: {
           const asked = question.questions[question.part]
           const part = open.wording?.part ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
-          // What only agrees, said before he heard yapd's pick, isn't to it, however the model took it: it's asked again in full, as a
-          // plain yes is then. Asked which one then, the pick is the one option left, as `leaning` has it.
+          // What only agrees, said before he heard yapd's pick, isn't to it, however the model took it, alone or with others he named: it's
+          // asked again in full, as a plain yes is then. Asked which one then, the pick is the one option left, as `leaning` has it.
           const leaned = { ...open, ...leaning(open) }.wording?.part
           const pick = leaned === undefined ? undefined : Option.getOrUndefined(leaned.recommended)
           if (
@@ -2348,8 +2348,7 @@ export const make = (options: {
             pick !== undefined &&
             !heardBy(utterance, opened.whole) &&
             answer?._tag === "Picked" &&
-            answer.options.length === 1 &&
-            answer.options[0] === pick &&
+            answer.options.includes(pick) &&
             !Questions.mentions(leaned, pick, utterance.heard)
           ) {
             yield* Effect.logInfo("Asking it again in full, since he only agreed before he heard which one I'd go with")
