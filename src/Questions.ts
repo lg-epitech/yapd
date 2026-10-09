@@ -637,6 +637,9 @@ const whether = (part: Said) => {
 /** Whether it answers how it's asked rather than which option, which then only an option's name in full picks. */
 const steers = (said: string) => [yeses, taking, noes, deciding, nones, repeating, explaining, later, skipping, leaving].some((phrases) => phrases.has(said))
 
+/** Words to stop yapd talking, put it off, skip it or hear it again: an option named so, like "Stop" or "Later", is only that once he's heard it offered. */
+const hushing = (said: string) => [repeating, later, skipping, leaving].some((phrases) => phrases.has(said))
+
 /**
  * The one option words mean, by its name or its sound, or, unless they're
  * about how it's asked, by its place or words only it has. Never when they
@@ -694,7 +697,8 @@ const wholes = (part: Said, said: string): ReadonlyArray<number> | undefined => 
  * `inFull` is whether he heard the part through to yapd's pick, and
  * `parts` how many it has. Undefined for anything else, which is the
  * model's to judge. Words like "stop", "skip" or "later" are never taken
- * for an option they're only a word of, and words that let it go but
+ * for an option they're only a word of, nor for one named just so before
+ * he's heard it in full, and words that let it go but
  * start an option, like "leave it" to "Leave the changelog", are the
  * model's too, while "skip it" or "next" to a part with more after it and
  * "Skip the slow tests" or "Next release" asks which of them.
@@ -703,7 +707,9 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
   const said = gist(heard)
   if (said === "") return undefined
   const picked = (options: ReadonlyArray<number>): Reply => ({ _tag: "Picked", options })
-  const exact = exactly(part, heard)
+  // "Stop" or "Later" said before he'd heard the options can't be to one he didn't know of, called that: it's to stop yapd, or put it off.
+  const unheard = !asked.inFull && hushing(said)
+  const exact = unheard ? undefined : exactly(part, heard)
   if (exact !== undefined) return picked([exact])
   // A form that takes only its options asks which of them instead.
   const words = (text: string): Reply => (part.ownWords ? { _tag: "Words", text } : { _tag: "Which" })
@@ -713,7 +719,7 @@ export const pick = (part: Said, heard: string, asked: { readonly inFull: boolea
     const several = part.several ? (wholes(part, said) ?? listed(part, heard)) : undefined
     return several === undefined ? undefined : picked(several)
   }
-  const named = byName(part, said)
+  const named = unheard ? undefined : byName(part, said)
   if (named !== undefined) return picked([named])
   const starting = (word: string) => one(fitting(part, ({ said }) => new RegExp(`^${word}\\b`, "i").test(said)))
   const recommended = Option.getOrUndefined(part.recommended)

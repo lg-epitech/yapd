@@ -2718,6 +2718,26 @@ describe("Assistant", () => {
     }
   })
 
+  test("an option named 'Stop' or 'Later', said before he heard the options, only stops yapd talking or puts it off, never sending that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "next", question: "Should I carry on with the migration?", options: labels.map((label) => ({ label })) }
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [question]), waiting: true })
+          yield* asked(made, cloud)
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await answering(["Continue (Recommended)", "Stop"], "Stop.", true)).toEqual({ spoken: ["I'll leave that one, sir."], answers: [] })
+    expect(await answering(["Now (Recommended)", "Later"], "Later.", true)).toEqual({ spoken: ["I'll bring it back in ten minutes, sir."], answers: [] })
+    // Heard them all, it's the option he named.
+    expect(await answering(["Continue (Recommended)", "Stop"], "Stop.", false)).toEqual({ spoken: ["Stop it is, sir."], answers: [{ next: "Stop" }] })
+    expect(await answering(["Now (Recommended)", "Later"], "Later.", false)).toEqual({ spoken: ["Later it is, sir."], answers: [{ next: "Later" }] })
+  })
+
   test("'leave it' or 'cancel' to a question with an option that starts with it is the model's to tell, which may take it for that option", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (question: Record<string, unknown>, heard: string, text: string) =>

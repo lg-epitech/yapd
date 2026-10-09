@@ -210,6 +210,15 @@ describe("Questions", () => {
     // Only an option's name in full picks one it's a word of; anything more is the model's.
     const next = part("What next?", ["Skip the flaky test", "Stop", "Keep going"])
     expect(["Skip.", "Stop.", "Skip the flaky test."].map((heard) => Questions.pick(next, heard, { inFull: true, parts: 1 }))).toEqual([{ _tag: "Leave" }, picked(1), picked(0)])
+    // Said before he'd heard the options, a name like "Stop" or "Later" is only to stop yapd, put it off or hear it again.
+    const carry = (labels: ReadonlyArray<string>, heard: string) => Questions.pick(part("Should I carry on with the migration?", labels), heard, { inFull: false, parts: 1 })
+    expect([
+      carry(["Continue (Recommended)", "Stop"], "Stop."),
+      carry(["Now (Recommended)", "Later"], "Later."),
+      carry(["Go on (Recommended)", "Never mind"], "Never mind."),
+      carry(["Go on (Recommended)", "Repeat"], "Repeat."),
+      carry(["Go on (Recommended)", "Pause it"], "Pause it."),
+    ]).toEqual([{ _tag: "Leave" }, { _tag: "Later" }, { _tag: "Leave" }, { _tag: "Again" }, picked(1)])
     // Words that let it go but start an option may be that option, which the model tells; words to stop talking, or "never mind", let it go.
     const changelog = part("Should I also update the changelog?", ["Update the changelog", "Leave the changelog"])
     const deploy = part("The deploy is failing. What now?", ["Cancel the deploy", "Retry the deploy (Recommended)"])
