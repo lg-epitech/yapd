@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test"
-import { Clock, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Scope, TestClock, TestContext } from "effect"
+import { describe, expect, spyOn, test } from "bun:test"
+import { Clock, type Duration, Effect, Exit, Fiber, Layer, Logger, Option, Redacted, Schema, Scope, TestClock, TestContext } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -347,7 +347,7 @@ describe("Tunnel", () => {
           const tunnel = yield* open(rig)
           yield* flush
           const asked = rig.calls.length
-          const actions = T3Actions.make(Tunnel.transport(tunnel.locate))
+          const actions = T3Actions.make(Tunnel.transport(tunnel.locate, "rig"))
           const sending = yield* Effect.fork(Effect.flip(actions.run("thread-1", { _tag: "Send", text: "Merge it.", messageId: "message-1", how: "now" }, "yapd:u1:0")))
           yield* flush
           const exit = Option.getOrUndefined(yield* sending.poll)
@@ -357,6 +357,24 @@ describe("Tunnel", () => {
         }
       }).pipe(Effect.scoped, Effect.provide(TestContext.TestContext)),
     ))
+
+  test("what goes wrong with rig's T3 Code is said as rig's, never as this machine's", async () => {
+    const located = Effect.succeed<Tunnel.Located>({ server: { origin: "http://127.0.0.1:1" }, token: Redacted.make("token") })
+    // Rig's network stalls with the tunnel still up, then its T3 Code turns the token down.
+    const answers: Array<() => Promise<Response>> = [() => Promise.reject(new TypeError("fetch failed")), async () => new Response(null, { status: 401 })]
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(() => answers.shift()!(), { preconnect: globalThis.fetch.preconnect }))
+    try {
+      const reasons = await Effect.runPromise(
+        Effect.gen(function* () {
+          const { api } = yield* Tunnel.transport(located, "rig")
+          return yield* Effect.forEach([0, 1], () => Effect.map(Effect.flip(api("/api/test", Schema.Unknown)), ({ reason }) => reason))
+        }),
+      )
+      expect(reasons).toEqual(["rig's T3 Code isn't answering.", "rig's T3 Code turned down my token. It may have expired."])
+    } finally {
+      fetch.mockRestore()
+    }
+  })
 
   test("right after yapd starts, says it's still connecting rather than wait for SSH", () =>
     Effect.runPromise(

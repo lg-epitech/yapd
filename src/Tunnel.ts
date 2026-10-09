@@ -45,9 +45,22 @@ export const serve = (token: Option.Option<Redacted.Redacted>, locate: Effect.Ef
 /** Where a machine's T3 Code answers from here, and the token for it. */
 export type Located = Server.Located
 
-/** What T3 Code is reached through, from wherever `locate` finds it, as T3Actions takes it. */
-export const transport = (locate: Effect.Effect<Located, Server.Trouble>): Effect.Effect<Server.Transport, Server.Trouble> =>
-  Effect.map(locate, ({ server, token }) => ({ api: Server.api(server, token), call: Server.call(server, token) }))
+/**
+ * What `machine`'s T3 Code is reached through, from wherever `locate` finds
+ * it, as T3Actions takes it. What goes wrong there is said as that machine's,
+ * like "rig's T3 Code isn't answering.", so it's never taken for this one's.
+ */
+export const transport = (locate: Effect.Effect<Located, Server.Trouble>, machine: string): Effect.Effect<Server.Transport, Server.Trouble> =>
+  Effect.map(locate, ({ server, token }) => {
+    const api = Server.api(server, token)
+    const call = Server.call(server, token)
+    const theirs = <E>(error: E) =>
+      error instanceof Server.Trouble && error.reason.startsWith("T3 Code ") ? new Server.Trouble({ ...error, reason: `${machine}'s ${error.reason}` }) : error
+    return {
+      api: (path, schema, init) => Effect.mapError(api(path, schema, init), theirs),
+      call: (method, payload, schema, patience) => Effect.mapError(call(method, payload, schema, patience), theirs),
+    }
+  })
 
 /**
  * Whether the machine's T3 Code can be reached now. While it can't, the reason

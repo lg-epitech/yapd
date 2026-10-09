@@ -105,7 +105,7 @@ export const serve = Effect.gen(function* () {
   const others = yield* Effect.forEach(tunnels, ([host, tunnel]) =>
     Effect.map(
       T3Live.follow(tunnel.refresh).pipe(Effect.annotateLogs({ machine: host })),
-      (live): Threads.Other => ({ machine: host, live, actions: T3Actions.make(Tunnel.transport(tunnel.locate)), status: tunnel.status }),
+      (live): Threads.Other => ({ machine: host, live, actions: T3Actions.make(Tunnel.transport(tunnel.locate, host)), status: tunnel.status }),
     ),
   )
   const threads = yield* Threads.make({
