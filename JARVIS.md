@@ -61,6 +61,6 @@ Live on `dev` now: everything below. Rig's threads are followed, waiting on thei
 - After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
 - Over yapd's first three seconds, its own voice heard as wholly other words, like "Oh, Rennie app." for "Over in yapd", can still stop it and be taken for yours. A transcription still running as those seconds end can let the start of its voice duck or stop it too.
 - Over those seconds, a "stop" or "wait" with some of yapd's own words in what you said is taken on its own, like "Tell it to stop the migration." as yapd says "migration".
-- Over those seconds, what you say either side of a pause is judged apart, so a second part in yapd's own words, like "the migration." after "Tell it to stop.", is left out.
-- A "wait" on its own, said just as yapd says "waiting", is taken for its voice.
-- "Of course." or "okay" on its own, said straight over the end of a short question of yapd's, isn't taken for an answer: "yes" is.
+- Over those seconds, what you say either side of a pause is judged apart, so a second part in yapd's own words, like "the migration." after "Tell it to stop.", is left out. When the first part isn't taken, or only its "stop" is, what you go on with within a moment is let go too, so say it all again.
+- A "stop" or "wait" on its own is taken for yapd's voice when yapd says "stopped" or "waiting" within a few seconds of it.
+- "Of course." or "okay" on its own, said straight over the end of a short question of yapd's, isn't taken for an answer: "yes" is. An answer begun over the question's last word, or less than a quarter of a second after it, can be left with it: yapd stays quiet, so say it again.
