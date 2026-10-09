@@ -440,6 +440,10 @@ describe("Brain", () => {
     ]
     expect(risky.filter((text) => !Brain.dangerous(text))).toEqual([])
     expect(ordinary.filter(Brain.dangerous)).toEqual([])
+    // As an approval is read: all of what it would run, then T3 Code's own words for it, the tool's name and a colon before the command.
+    const asked = (text: string) => `${text}\nBash: ${text}`
+    expect(risky.filter((text) => !Brain.dangerous(asked(text)))).toEqual([])
+    expect(ordinary.filter((text) => Brain.dangerous(asked(text)))).toEqual([])
     // The words that allow a risky one, and never one turned down in the same breath.
     expect(["Approve.", "Yes, approve it.", "Allow it.", "Confirm.", "I approve."].filter((heard) => !Brain.approving(heard))).toEqual([])
     expect(

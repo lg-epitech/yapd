@@ -997,6 +997,24 @@ describe("Assistant", () => {
     }
   })
 
+  test("an approval is risky by the command in T3 Code's own words for it, never by the tool's name before it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    /** Asks for what `items` say it would run to be allowed, in T3 Code's own words for it, and says yes. */
+    const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    // A search for what would be risky to run, and git only reading or writing it down, take a yes, as "Bash: grep 'rm' -r src".
+    for (const command of ["grep 'rm' -r src", "git log --grep 'clean' -f", 'git commit -m "push --force"', "bash -c 'grep rm -r src'"]) {
+      expect(await allowing(approval("r1", command))).toEqual({ spoken: [`Cloud deployment discovery wants to run ${command}. Allow it, sir?`, "Approved, sir."], dispatched: ["r1 accept"] })
+    }
+  })
+
   test("'approve' allows a dangerous approval first time", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     const result = await run(

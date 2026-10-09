@@ -619,6 +619,14 @@ const deletesForGood = /__(?:delete|destroy|drop|remove|purge|wipe)|\b(?:delete|
  */
 const toolName = /^[\w.:-]+(?=[ \t]*(?:\{|\r?\n|$))/
 
+/**
+ * T3 Code's own words for what a tool would do, when it has none better: the
+ * tool's name and a colon before the command, the file or what it's given,
+ * like "Bash: grep 'rm' -r src" or "mcp__fs__rm: ~/work". The name is never
+ * what runs, so what's after it is read as the command in its place.
+ */
+const summarized = /^(?:[A-Z]\w*|mcp__[\w.:/-]*): /gm
+
 /** What a tool is told to do, under a name like "action" or "command", or the tool it's told to call, as its JSON writes it or a line each. */
 const toldTo = /(?:^|")(?:action|operation|op|method|command|mode|type|tool|tool[_-]?name)"?(?:\s*:\s*"|[ \t]*\r?\n)([^"\n]*)/gim
 
@@ -633,10 +641,11 @@ const riskyToRun = (run: string) => risky.test(run) || commands(run).some((comma
  * or change, as the shell would run it, or by what a tool is told to do in
  * so many words: a tool that deletes for good, by its name or what it's told
  * to do, or one that deletes told to take all that's under what it's given,
- * which a search for "how to remove a recursive function" never is.
+ * which a search for "how to remove a recursive function" never is. T3 Code's
+ * own words for it, like "Bash: grep 'rm' -r src", are read as their command.
  */
 export const dangerous = (text: string) => {
-  const command = continued(text)
+  const command = continued(text.replace(summarized, ""))
   const whole = sealed(command)
   const read = new Set([command, unquoted(command), whole, unquoted(whole)])
   if ([...read].some(riskyToRun) || forcing.test(text) || overwriting.test(text)) return true
