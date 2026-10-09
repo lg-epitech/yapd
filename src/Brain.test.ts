@@ -355,6 +355,19 @@ describe("Brain", () => {
     )
   })
 
+  test("a question asked lately is asked in other words, wherever the last asking addressed him, if at all, and only his address is passed over", () => {
+    const candidates = desk().threads.slice(0, 2)
+    const choices = Brain.choices(candidates)
+    const other = `Which one, sir: ${choices}?`
+    expect(Brain.which(candidates, lines, [])).toBe(`${choices}, sir?`)
+    for (const asked of [`Sir, ${choices}?`, `${choices}?`, `Sir. ${choices}, SIR!`]) expect(Brain.which(candidates, lines, [asked])).toBe(other)
+    expect(Brain.confirming("stop Migrate Tezos Integration", lines, ["Sir, stop Migrate Tezos Integration?"])).toBe("Shall I stop Migrate Tezos Integration, sir?")
+    // Any other word still counts, as does "sir" when it isn't how he's addressed.
+    expect(Brain.repeated(`Boss, ${choices}?`, [`${choices}, boss?`], { address: "boss" })).toBe(true)
+    expect(Brain.repeated(`Sir, ${choices}?`, [`${choices}?`], { address: "boss" })).toBe(false)
+    expect(Brain.repeated(`Now, ${choices}?`, [`${choices}, sir?`], lines)).toBe(false)
+  })
+
   test("a near-silence 'Thank you.' is ignored", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")

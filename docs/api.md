@@ -116,7 +116,11 @@ When you ask about a thread that waits on something that can't be read aloud, li
 | `200` | The card. |
 | `404` | No such card, or yapd restarted since. |
 
-`DELETE /cards/current` takes the card down, so `showing` becomes `null`. It answers `204`, whether or not one was up.
+`DELETE /cards/current` takes the card down, so `showing` becomes `null`. With `?id=`, it takes that card down only if it's still the one up, and leaves any other up, as the menu bar app does for a card it put away: a request that gets there late never takes down a card put up since. It answers `204` either way, whether or not it took one down.
+
+```sh
+curl -X DELETE 'http://127.0.0.1:4747/cards/current?id=cmgi3k2xa4f1'
+```
 
 `PUT /cards/current` with one of those cards' `id` puts it back up, as the menu's Show Last Card does, so `showing` points at it again and "hide that" takes it down. Nothing is said of it.
 

@@ -1526,6 +1526,81 @@ describe("Daemon", () => {
     expect(result.told).toEqual(["It's on your screen. Nothing's running."])
   })
 
+  test("a notice that goes stale while the words said in its place are rendered is never played, nor told it was said in them", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, wait, played } = yield* make(undefined, { renderSeconds: 5 })
+        let closed = false
+        const told: Array<string> = []
+        const noting = (what: string) => Effect.sync(() => void told.push(what))
+        yield* Effect.forkScoped(
+          made.tell({
+            id: "q",
+            kind: "question",
+            open: "open-q",
+            priority: "needs-you",
+            spoken: "It's on your screen. Which project?",
+            at: 0,
+            stale: Effect.sync(() => closed),
+            instead: { spoken: "Which project?", when: Effect.succeed(true), used: noting("used") },
+            saying: noting("saying"),
+            gone: noting("gone"),
+            question: { answer: () => Effect.succeed(Option.none()), unanswered: noting("unanswered"), unsaid: noting("unsaid") },
+          }),
+        )
+        // Its own words are rendered and its turn comes, then it's closed while the words in their place are rendered.
+        yield* wait(5)
+        closed = true
+        yield* wait(5)
+        yield* wait(10)
+        return { played: [...played], told }
+      }),
+    )
+    expect(result).toEqual({ played: [], told: ["gone"] })
+  })
+
+  test("a question he asked to see closed by what he says while its words for no app are rendered is never asked, nor its card put up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, assistant, show, wait, flush, played } = yield* assisted(
+          (situation) =>
+            situation.utterance.heard === "Thanks."
+              ? Brain.decision({ act: "dismiss", pending: "replaces" })
+              : Brain.decision({ act: "clarify", sure: "low", target: situation.desk.threads[0]?.handle ?? "", others: situation.desk.threads[1]?.handle ?? "" }),
+          { renderSeconds: 2 },
+          [thread("f0000000-0000-4000-8000-000000000001", "Fix the loader"), thread("f0000000-0000-4000-8000-000000000002", "Fix the parser")],
+        )
+        const type = (heard: string) =>
+          Effect.gen(function* () {
+            const { turns } = yield* made.power
+            yield* assistant.heard({ heard, via: "typed", at: yield* Clock.currentTimeMillis, voiced: Number.POSITIVE_INFINITY, turns })
+          })
+        const asked = yield* Effect.forkScoped(type("Which fix was that?"))
+        yield* flush
+        yield* wait(2)
+        yield* Fiber.join(asked)
+        yield* wait(10)
+        // Asked to see it while the app watches, which goes before it's said, so the question alone is rendered to be said in its place.
+        const watching = yield* Scope.make()
+        yield* Scope.extend(show.watch, watching)
+        const shown = yield* Effect.forkScoped(type("Show me what you said."))
+        yield* flush
+        yield* Scope.close(watching, Exit.void)
+        yield* wait(2)
+        yield* Fiber.join(shown)
+        yield* wait(1)
+        yield* type("Thanks.")
+        const open = yield* assistant.open
+        yield* wait(3)
+        yield* wait(10)
+        return { open, played: [...played], up: Option.map(yield* Stream.runHead(show.showing).pipe(Effect.map(Option.flatten)), ({ kind }) => kind) }
+      }),
+    )
+    expect(result.open).toEqual(Option.none())
+    expect(result.played).toEqual(["Fix the loader or Fix the parser?"])
+    expect(result.up).toEqual(Option.none())
+  })
+
   test("an update heard before yapd was turned off and on is never said again for 'say that again' after, while one heard since is", async () => {
     const result = await run(
       Effect.gen(function* () {

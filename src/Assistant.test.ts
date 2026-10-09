@@ -4080,7 +4080,7 @@ describe("Assistant", () => {
         // Each time it's said again, and once it faded and the app took it down too, so the app shows it for as long as it's talked about.
         const again: Array<{ readonly said: string | undefined; readonly up: Option.Option<{ readonly id: string; readonly kind: string; readonly markdown: string }> }> = []
         for (const hidden of [false, false, true]) {
-          if (hidden) yield* show.hide
+          if (hidden) yield* show.hide()
           yield* dictate("Say that again.")
           again.push({ said: spoken().at(-1), up: yield* up })
         }
@@ -4113,7 +4113,7 @@ describe("Assistant", () => {
         yield* dictate("Show me what's running.")
         const before = Option.map(yield* show.seen, ({ kind }) => kind)
         // The app faded it, and took it down too.
-        yield* show.hide
+        yield* show.hide()
         yield* toggle(false)
         yield* toggle(true)
         yield* heard({ heard: "Say that again.", via: "typed", at: yield* TestClock.currentTimeMillis, voiced: Infinity, turns: 3 })
@@ -4168,7 +4168,7 @@ describe("Assistant", () => {
           else {
             yield* dictate("Show me what's running.")
             // The app faded it, and took it down too.
-            yield* show.hide
+            yield* show.hide()
           }
           const told = spoken().length
           yield* toggle(false)
@@ -4225,7 +4225,7 @@ describe("Assistant", () => {
     expect(await said("update")).toBe("The loader is fixed.")
   })
 
-  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation, or with 'it's on your screen' before it", async () => {
+  test("the model's line for 'say that again' is never a question yapd asked lately, whatever its case or punctuation, wherever it addresses him, or with 'it's on your screen' before or after it, however that's written", async () => {
     const choices = "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets"
     const echoed = (echo: string) =>
       run(
@@ -4242,7 +4242,11 @@ describe("Assistant", () => {
           return spoken().at(-1)
         }),
       )
-    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, `It's on your screen. ${choices}, sir?`])
+    // However the model writes it: in capitals, with other marks or spacing, a curly apostrophe, or addressing him.
+    const screens = ["It's on your screen.", "IT'S ON YOUR SCREEN.", "It's on your screen!", "It\u2019s on your screen.", "it's  on your screen,", "It's on your screen, sir."]
+    // Addressing him first, or not at all, or with the address going along with "it's on your screen" after it.
+    const addressed = [`Sir, ${choices}?`, `Sir, ${choices}, sir?`, `${choices}?`, `Sir, it's on your screen. ${choices}, sir?`, `${choices}, it's on your screen, sir?`]
+    for (const echo of [`${choices}, sir?`, `${choices}, sir.`, `${choices.toLowerCase()} sir`, ...screens.map((screen) => `${screen} ${choices}, sir?`), ...addressed])
       expect(await echoed(echo)).toBe("The loader is fixed.")
   })
 

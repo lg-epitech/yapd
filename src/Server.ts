@@ -110,8 +110,8 @@ export interface Api {
   readonly utter: (text: string) => Effect.Effect<Option.Option<string>, unknown>
   /** One of the cards shown lately. */
   readonly card: (id: string) => Effect.Effect<Option.Option<Card>>
-  /** Takes the card down. */
-  readonly hide: Effect.Effect<void>
+  /** Takes the card down, or `id` only while it's the one up. */
+  readonly hide: (id?: string) => Effect.Effect<void>
   /** Puts one of the cards shown lately back up, and says whether there was one. */
   readonly back: (id: string) => Effect.Effect<boolean>
   readonly threads: Effect.Effect<ReadonlyArray<Machine>>
@@ -223,7 +223,11 @@ export const serve = (port: number, api: Api) =>
             Effect.catchAll(failed("take what you typed")),
           )
         }
-        if (route === "DELETE /cards/current") return yield* Effect.as(api.hide, new Response(null, { status: 204 }))
+        if (route === "DELETE /cards/current") {
+          // Only the card it names, when it names one, so a request that comes late, like the app's for a card it put away, never takes down one put up since.
+          const id = url.searchParams.get("id")
+          return yield* Effect.as(api.hide(id ?? undefined), new Response(null, { status: 204 }))
+        }
         if (route === "PUT /cards/current") {
           const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.flatMap(decodeCard), Effect.option)
           if (Option.isNone(body)) return new Response('Send {"id": "the card\'s id"}.', { status: 400 })

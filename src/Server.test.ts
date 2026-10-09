@@ -31,7 +31,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   replay: () => Effect.succeed("unknown"),
   utter: () => Effect.succeed(Option.none()),
   card: () => Effect.succeed(Option.none()),
-  hide: Effect.void,
+  hide: () => Effect.void,
   back: () => Effect.succeed(false),
   threads: Effect.succeed([]),
   journal: () => Effect.succeed([]),
@@ -56,7 +56,7 @@ const stateful = Effect.gen(function* () {
         Effect.map(SubscriptionRef.get(ref), (state) => (id !== update.id ? "unknown" : state.on ? "queued" : "off")),
       utter: (text) => Effect.map(SubscriptionRef.get(ref), (state) => (state.on ? Option.some(`u-${text.length}`) : Option.none())),
       card: (id) => Effect.succeed(id === card.id ? Option.some(card) : Option.none()),
-      hide: SubscriptionRef.update(ref, (state) => ({ ...state, showing: null })),
+      hide: (id) => SubscriptionRef.update(ref, (state) => (id === undefined || state.showing?.id === id ? { ...state, showing: null } : state)),
       back: (id) =>
         id === card.id ? Effect.as(SubscriptionRef.update(ref, (state) => ({ ...state, showing: { id, kind, title, at } })), true) : Effect.succeed(false),
       threads: Effect.succeed(machines),
@@ -198,6 +198,14 @@ describe("Server", () => {
       expect(yield* json("/state")).toMatchObject({ showing: { id: "c1" } })
       expect((yield* back('{"id": "c2"}')).status).toBe(404)
       expect((yield* back("{}")).status).toBe(400)
+      // Named, only that card goes, and only while it's the one up: a request for one taken down since leaves the one up since.
+      const named = (id: string) => call(`/cards/current?id=${id}`, { method: "DELETE" })
+      expect((yield* named("c2")).status).toBe(204)
+      expect(yield* json("/state")).toMatchObject({ showing: { id: "c1" } })
+      expect((yield* named("")).status).toBe(204)
+      expect(yield* json("/state")).toMatchObject({ showing: { id: "c1" } })
+      expect((yield* named("c1")).status).toBe(204)
+      expect(yield* json("/state")).toMatchObject({ showing: null })
 
       const threads = yield* call("/threads")
       expect(threads.status).toBe(200)
@@ -261,7 +269,7 @@ describe("Server", () => {
       const server = yield* Server.serve(0, {
         ...api,
         card: (id) => noting("card", api.card(id)),
-        hide: noting("hide", api.hide),
+        hide: (id) => noting("hide", api.hide(id)),
         back: (id) => noting("back", api.back(id)),
         threads: noting("threads", api.threads),
         journal: (page) => noting("journal", api.journal(page)),
@@ -270,6 +278,7 @@ describe("Server", () => {
       const routes: ReadonlyArray<readonly [string, RequestInit]> = [
         ["/cards/c1", {}],
         ["/cards/current", { method: "DELETE" }],
+        ["/cards/current?id=c1", { method: "DELETE" }],
         // As a form or a no-cors fetch posts it, which needs no preflight.
         ["/cards/current", { method: "PUT", headers: { "content-type": "text/plain" }, body: '{"id": "c1"}' }],
         ["/threads", {}],
@@ -293,10 +302,10 @@ describe("Server", () => {
       return { fromPages, turnedAway, app, done }
     }))).then((result) => {
       expect(result).toEqual({
-        fromPages: Array.from({ length: 4 }, () => [403, 403, 403, 403, 403, 403]),
+        fromPages: Array.from({ length: 4 }, () => [403, 403, 403, 403, 403, 403, 403]),
         turnedAway: { done: [], pages: [], watching: 0, showing: "c1" },
-        app: [200, 204, 204, 200, 200],
-        done: ["card", "hide", "back", "threads", "journal"],
+        app: [200, 204, 204, 204, 200, 200],
+        done: ["card", "hide", "hide", "back", "threads", "journal"],
       })
     })
   })

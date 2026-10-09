@@ -58,8 +58,9 @@ final class Following {
     let show: @MainActor (Card, _ talking: Bool) -> Void
     /// Takes the card away at once.
     let hide: @MainActor () -> Void
-    /// Has yapd take its card down too, as `DELETE /cards/current`.
-    let takeDown: @MainActor () -> Void
+    /// Has yapd take this card down too, as `DELETE /cards/current?id=`, which it does only while it's still the one up, so a
+    /// request that gets there late never takes down a card put up since.
+    let takeDown: @MainActor (String) -> Void
     /// Waits before trying again.
     let wait: @MainActor (Duration) async -> Void
   }
@@ -102,7 +103,7 @@ final class Following {
       // Put up while the app wasn't there to show it, or put away since: it isn't on screen, so yapd takes it down too, and it's kept to show again.
       shown = nil
       doing.hide()
-      return doing.takeDown()
+      return doing.takeDown(showing.id)
     }
     putting = Task { await put(showing.id) }
   }
@@ -116,7 +117,7 @@ final class Following {
   func closed(_ id: String) {
     if shown == id { shown = nil }
     guard wanted == id else { return }
-    if connected { doing.takeDown() } else { untold = id }
+    if connected { doing.takeDown(id) } else { untold = id }
   }
 
   /// Shows a card fetched again, with nothing said of it, which yapd is asked to point at too.
@@ -146,6 +147,6 @@ final class Following {
     }
     // Given up on, it isn't on screen, so yapd takes it down too, and it's kept to show again.
     guard !Task.isCancelled, wanted == id else { return }
-    doing.takeDown()
+    doing.takeDown(id)
   }
 }

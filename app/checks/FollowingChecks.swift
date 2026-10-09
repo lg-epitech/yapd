@@ -25,7 +25,7 @@ private final class Watched {
       },
       show: { card, talking in self.done.append(talking ? "show \(card.id)" : "show \(card.id) quietly") },
       hide: { self.done.append("hide") },
-      takeDown: { self.done.append("take down") },
+      takeDown: { id in self.done.append("take down \(id)") },
       wait: { delay in self.waits.append(delay) }
     )
   }
@@ -62,7 +62,7 @@ private func pointing(_ id: String, fresh: Bool) -> Status.Showing {
     following.follow(pointing("c3", fresh: true), connecting: false)
     await following.settled()
     check(
-      watched.fetches.count == 4 && watched.waits == [.seconds(1), .seconds(2), .seconds(4)] && watched.done == ["take down"] && following.shown == nil,
+      watched.fetches.count == 4 && watched.waits == [.seconds(1), .seconds(2), .seconds(4)] && watched.done == ["take down c3"] && following.shown == nil,
       "gives up on a card it can't fetch after a few tries, not after \(watched.fetches.count), having done \(watched.done)"
     )
   }
@@ -88,7 +88,7 @@ private func pointing(_ id: String, fresh: Bool) -> Status.Showing {
     following.follow(pointing("c1", fresh: fresh), connecting: true)
     await following.settled()
     check(
-      watched.done == ["show c1", "hide", "take down"] && following.shown == nil && watched.fetches == ["c1"],
+      watched.done == ["show c1", "hide", "take down c1"] && following.shown == nil && watched.fetches == ["c1"],
       "has yapd take down a card \(fresh ? "put up a moment ago" : "put up a while ago") that faded while it was away, not \(watched.done)"
     )
   }
@@ -115,6 +115,32 @@ private func pointing(_ id: String, fresh: Bool) -> Status.Showing {
     following.follow(pointing("c8", fresh: true), connecting: false)
     await following.settled()
     following.closed("c7")
-    check(watched.done == ["show c7", "take down", "show c8"], "has yapd take down only the card it points at once it's closed, not \(watched.done)")
+    check(watched.done == ["show c7", "take down c7", "show c8"], "has yapd take down only the card it points at once it's closed, not \(watched.done)")
+  }
+
+  // Closed as yapd puts up another, its request gets there after the other went up: yapd, taking down only the card named, keeps the other up.
+  do {
+    var up: String? = "c9"
+    var requests: [String] = []
+    var shown: String?
+    let following = Following(Following.Doing(
+      fetch: { id in Card(id: id, kind: "said", title: "What I said", markdown: "### I said\n\nOne running.", url: nil, caption: nil) },
+      show: { card, _ in shown = card.id },
+      hide: { shown = nil },
+      takeDown: { id in requests.append(id) },
+      wait: { _ in }
+    ))
+    following.follow(pointing("c9", fresh: true), connecting: true)
+    await following.settled()
+    following.closed("c9")
+    up = "c10"
+    following.follow(pointing("c10", fresh: true), connecting: false)
+    await following.settled()
+    for id in requests where up == id { up = nil }
+    following.follow(up.map { pointing($0, fresh: true) }, connecting: false)
+    check(
+      requests == ["c9"] && up == "c10" && shown == "c10",
+      "has yapd take down only the card it closed, not \(requests), leaving \(up ?? "none") up and \(shown ?? "none") shown"
+    )
   }
 }

@@ -39,13 +39,14 @@ export interface Notice {
   readonly spoken: string
   /** When what it's about came up, like when the user sent the dictation, which is where it goes among updates. */
   readonly at: number
-  /** Whether it's no longer worth saying, asked as its turn comes. */
+  /** Whether it's no longer worth saying, asked as its turn comes, and again once words said in its place are rendered, just before it's played. */
   readonly stale: Effect.Effect<boolean>
   /**
    * What's said in its place when `when`, asked just before it's played, says
    * so, like the line without "it's on your screen" once no app is there to
    * show its card: rendered only then, and `used` once it's what's played,
-   * never when it can't be rendered and its own words go after all.
+   * never when it can't be rendered and its own words go after all, nor when
+   * it went stale meanwhile.
    */
   readonly instead?: { readonly spoken: string; readonly when: Effect.Effect<boolean>; readonly used?: Effect.Effect<void> }
   /** Run as it starts being said, which is when the user hears of it: never when it can't be played, and for a question, undone if it breaks off. */

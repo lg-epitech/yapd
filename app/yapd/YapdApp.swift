@@ -26,7 +26,7 @@ final class Yapd {
         fetch: { id in await Yapd.fetch(id, from: api) },
         show: { card, talking in panel.show(card, talking: talking) },
         hide: { panel.hide() },
-        takeDown: { Yapd.send("DELETE", "cards/current", to: api) },
+        takeDown: { id in Yapd.send("DELETE", "cards/current", query: [URLQueryItem(name: "id", value: id)], to: api) },
         wait: { delay in try? await Task.sleep(for: delay) }
       )
     )
@@ -116,9 +116,10 @@ final class Yapd {
     Yapd.send(method, path, body: body, to: api)
   }
 
-  /// As `send`, to the API at `api`, for what's wired up before there's a Yapd to send it.
-  private static func send(_ method: String, _ path: String, body: Data? = nil, to api: URL) {
-    var request = URLRequest(url: api.appending(path: path))
+  /// As `send`, to the API at `api`, for what's wired up before there's a Yapd to send it, with a `query` when there's one.
+  private static func send(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil, to api: URL) {
+    let url = api.appending(path: path)
+    var request = URLRequest(url: query.isEmpty ? url : url.appending(queryItems: query))
     request.httpMethod = method
     if let body {
       request.setValue("application/json", forHTTPHeaderField: "Content-Type")

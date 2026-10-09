@@ -71,8 +71,8 @@ export class Show extends Context.Tag("yapd/Show")<
   {
     /** Puts a card up in place of the one there, as it's talked about: saying `line` again puts it back up. */
     readonly put: (draft: Draft, line?: Line) => Effect.Effect<Card>
-    /** Takes the card down, and says whether one was up. */
-    readonly hide: Effect.Effect<boolean>
+    /** Takes the card down, or `id` only while it's the one up, and says whether it did. */
+    readonly hide: (id?: string) => Effect.Effect<boolean>
     /** Puts one of the cards put up lately back up as it was, with nothing said of it, and says whether there was one. */
     readonly back: (id: string) => Effect.Effect<boolean>
     /** One of the cards put up lately. */
@@ -574,12 +574,20 @@ export const said = (line: string, heard: Option.Option<string>): Draft => ({
   markdown: [`### I said\n\n${plainly(line)}`, ...Option.match(heard, { onNone: () => [], onSome: (heard) => [`### I heard you say\n\n${plainly(heard)}`] })].join("\n\n"),
 })
 
-/** A line said with a card, without "it's on your screen", which is only true while an app shows it: what's said of it again. */
-export const offScreen = (line: string, lines: Lines) =>
-  [lines.onScreen, unaddressed(lines.onScreen, lines)]
-    .reduce((rest, phrase) => (phrase.trim() === "" ? rest : rest.replace(phrase, "")), line)
+/**
+ * A line said with a card, without "it's on your screen", which is only true
+ * while an app shows it: what's said of it again. However it's written, and
+ * whether it addresses him or not, since the model's line is compared with
+ * the questions asked lately without it.
+ */
+export const offScreen = (line: string, lines: Lines) => {
+  const plain = unaddressed(lines.onScreen, lines)
+  // Addressing him first, or only the words before the address would go.
+  return [`${plain} ${lines.address}`, lines.onScreen, plain]
+    .reduce((rest, phrase) => Brain.without(rest, phrase), line)
     .replace(/\s+/g, " ")
     .trim()
+}
 
 /**
  * What yapd said last, when there's anything to say again: what "it" means,
@@ -674,7 +682,7 @@ export const served = (
   page: (page: Server.Page) => Effect.Effect<ReadonlyArray<Kept>>,
 ): Pick<Server.Api, "card" | "hide" | "back" | "threads" | "journal" | "watch"> => ({
   card: (id) => Effect.map(show.card(id), Option.map(face)),
-  hide: Effect.asVoid(show.hide),
+  hide: (id) => Effect.asVoid(show.hide(id)),
   back: show.back,
   threads: Effect.map(desk, listing),
   journal: (asked) => Effect.map(page(asked), (kept) => kept.map(entry)),
@@ -725,17 +733,16 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
 
     const seen = Effect.flatMap(watched, (watching) => (watching && shownTo ? SubscriptionRef.get(up) : Effect.succeed(Option.none<Card>())))
 
-    /** Takes the card down, or only one put up for the request `mine`, and says whether it did. */
-    const takeDown = (mine?: string) =>
+    /** Takes the card down when it's `which`, in the same step as it's looked at, and says whether it did. */
+    const takeDown = (which: (card: Card) => boolean) =>
       Effect.gen(function* () {
-        const was = yield* SubscriptionRef.modify(up, (card) =>
-          mine === undefined || Option.exists(card, ({ id }) => requests.get(id) === mine) ? [card, Option.none<Card>()] : [Option.none<Card>(), card],
-        )
+        const was = yield* SubscriptionRef.modify(up, (card) => (Option.exists(card, which) ? [card, Option.none<Card>()] : [Option.none<Card>(), card]))
         if (Option.isSome(was)) yield* Effect.logInfo(`Took down ${was.value.kind}: ${was.value.title}`)
         return Option.isSome(was)
       })
 
-    const hide = takeDown()
+    // Asked for by id, like by an app for a card it put away, it's only that one: a request that comes late never takes down one put up since.
+    const hide = (id?: string) => takeDown((card) => id === undefined || card.id === id)
 
     /** Opens a thread's pull request, and says whether it did, or why not: its address isn't https, or the browser didn't open it in time. */
     const opening = (thread: T3Live.Thread) =>
@@ -771,7 +778,7 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
         const { now } = situation
         switch (how) {
           case "hide":
-            yield* takeDown(mine)
+            yield* takeDown(({ id }) => mine === undefined || requests.get(id) === mine)
             return { say: "", card: Option.none(), about: Option.none(), hides: true }
           case "threads":
             return yield* shown((address) => tally(situation.desk, address, now), overview(situation.desk, now), lines)
