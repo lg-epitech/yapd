@@ -2177,6 +2177,64 @@ describe("Hands", () => {
     expect(result).toEqual({ scratched: "Unknown", message: Option.some("sent"), again: "Twin", dispatched: ["message.dispatch", "queued-run.cancel"] })
   })
 
+  test("a restart after scratch that whose answer was lost, ten turns on, reads the whole thread to tell a message he moved into the turn under way from one withdrawn, and never takes the first as withdrawn", async () => {
+    const busy = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", status: "running" })
+    /**
+     * Scratch that for a message waiting in the queue, its answer lost and
+     * nothing found of it then, after which `meanwhile` does to the thread
+     * what it does, giving back the thread as its whole read has it, or that
+     * read failing. Where the cancel stands after a restart, what's said of
+     * it, and how many times the whole thread was read.
+     */
+    const restartedAfter = (meanwhile: (bounded: Bounded) => Bounded | "fails" | void) =>
+      run(
+        Effect.gen(function* () {
+          const { send, run: act, answering, bounded, ledger, whole, wholeReads, restarted } = yield* hands({ thread: busy, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          yield* send("u1", "When it's done, open a PR.", "after")
+          answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+          const scratched = yield* act({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+          const shown = meanwhile(bounded)
+          if (shown) whole(shown)
+          yield* TestClock.adjust("1 minute")
+          const { unconfirmed } = yield* restarted(yield* Clock.currentTimeMillis).reconcile
+          return {
+            scratched: scratched._tag,
+            state: Option.getOrNull(Option.map(yield* ledger.get("yapd:u2:0"), ({ state }) => state)),
+            said: unconfirmed.map((row) => Hands.unsure(row, lines, Option.none(), row.reason ?? undefined)),
+            wholeReads: wholeReads(),
+          }
+        }),
+      )
+    const unsure = { scratched: "Unknown" as const, state: "abandoned" as const, said: ["Before I restarted, I couldn't confirm your message was withdrawn, sir."], wholeReads: 1 }
+    // Moved into the turn under way, then ten turns on: only the whole thread shows it went into that turn, so it was never withdrawn.
+    expect(
+      await restartedAfter((bounded) => {
+        moved("completed")(bounded)
+        return tenTurnsOn(bounded)
+      }),
+    ).toEqual(unsure)
+    // Taken out of the queue, then ten turns on, whether T3 Code shows it cancelled or dropped it: withdrawn, as the whole thread shows too.
+    for (const dropped of [false, true]) {
+      expect(
+        await restartedAfter((bounded) => {
+          takenOut(dropped)(bounded)
+          return tenTurnsOn(bounded)
+        }),
+      ).toEqual({ scratched: "Unknown", state: "sent" as const, said: [], wholeReads: 1 })
+    }
+    // The whole thread too slow to read, it can't be told, so it's never taken as withdrawn.
+    expect(
+      await restartedAfter((bounded) => {
+        moved("completed")(bounded)
+        tenTurnsOn(bounded)
+        return "fails"
+      }),
+    ).toEqual({ ...unsure, said: ["Before I restarted, I couldn't confirm your message was withdrawn, sir. I couldn't look for it just now: T3 Code isn't answering."] })
+    // Its last turns enough to tell, the whole thread is never read.
+    expect(await restartedAfter(moved("completed"))).toEqual({ ...unsure, wholeReads: 0 })
+    expect(await restartedAfter(takenOut(false))).toEqual({ scratched: "Unknown", state: "sent" as const, said: [], wholeReads: 0 })
+  })
+
   test("scratch that is about the last thing done, never a message before it", async () => {
     const result = await run(
       Effect.gen(function* () {
