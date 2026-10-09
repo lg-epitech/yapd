@@ -301,24 +301,24 @@ const flags = String.raw`(?:-\S+\s+)*`
  * its prompt or the command, change or tool it's for, whatever the model
  * made of it: deleting for good, forcing history, production and deploys,
  * and credentials. It never turns anything down: it only asks for the word.
+ * What a flag anywhere after a command's name makes risky is looked for a
+ * command at a time, below, and no pattern here takes a word of any length
+ * before what it looks for, like a "\w+" before "_token", which would take
+ * time growing with the square of a long word's length.
  */
 const risky = new RegExp(
   [
-    // Deleting a tree, forced or not, its flags together or apart, but not only from git's index; a bucket's; what find finds; a file for good.
-    String.raw`\brm\s+(?![^\n;|&]*--cached)${flags}(?:-[a-z]*r|--recursive)`,
+    // Deleting a bucket's; what find finds; a file for good.
     String.raw`\b(?:s3|gsutil)\s+(?:rm|rb)\b`,
     String.raw`\s-delete\b`,
     String.raw`\bshred\b`,
-    // Forcing what git keeps, wherever the flag goes: a push, or one that deletes a branch, a reset, a clean, a rewrite, or skipping its checks.
-    String.raw`\bpush\b[^\n;|&]*(?:\s-f\b|\s--force\b|\s\+\S|\s--delete\b|\s-d\b|\s:\S)`,
+    // Forcing what git keeps: a push with a lease, a reset, a rewrite, or skipping its checks.
     String.raw`--force-with-lease`,
     String.raw`reset\s+--hard`,
-    String.raw`\bclean\s+${flags}-[a-z]*f`,
     String.raw`git\s+filter-(?:branch|repo)`,
     String.raw`--no-verify`,
-    // Throwing away work not yet committed: changes checked out or restored over, a stash dropped.
+    // Throwing away work not yet committed: changes checked out over, a stash dropped.
     String.raw`\bgit\s+checkout\s+(?:${flags}--\s|\.(?:\s|$))`,
-    String.raw`\bgit\s+restore\b(?:(?![^\n;|&]*--staged)|(?=[^\n;|&]*--worktree))`,
     String.raw`\bstash\s+(?:drop|clear)\b`,
     // Publishing, merging, and deleting what's hosted.
     String.raw`\b(?:npm|yarn|pnpm|bun|cargo|poetry)\s+publish\b`,
@@ -333,13 +333,11 @@ const risky = new RegExp(
     String.raw`terraform\s+(?:apply|destroy)`,
     String.raw`kubectl\s+delete`,
     String.raw`\baws\s+[\w-]+\s+(?:delete|terminate|remove|deregister)-[\w-]+`,
-    String.raw`\b(?:gcloud|az)\b[^\n;|&]*\sdelete\b`,
     String.raw`\b(?:docker|podman)\s+(?:[\w-]+\s+)?prune\b`,
-    // Resetting or dropping a database, emptying a cache, tearing down a stack, mirroring with deletes, and deleting as root.
+    // Resetting or dropping a database, emptying a cache, tearing down a stack, and deleting as root.
     String.raw`\b(?:migrate|db)[\s:]+(?:reset|drop)\b`,
     String.raw`\bflush(?:all|db)\b`,
     String.raw`\bpulumi\s+destroy\b`,
-    String.raw`\brsync\b[^\n;|&]*\s--delete`,
     String.raw`\bsudo\s+rm\b`,
     // A tool that deletes, by its name, like mcp__github__delete_repository.
     String.raw`__(?:delete|destroy|drop|remove|purge|wipe)|\b(?:delete|destroy|drop|remove|purge|wipe)_\w+`,
@@ -355,7 +353,7 @@ const risky = new RegExp(
     String.raw`\.ssh/|\bid_(?:rsa|ed25519|ecdsa|dsa)\b`,
     String.raw`\bcredentials?\b`,
     String.raw`(?:\b|_)(?:api|secret|private|access)[_-]?keys?\b`,
-    String.raw`\w+_(?:token|secret|password)\b`,
+    String.raw`\w_(?:token|secret|password)\b`,
     String.raw`\b(?:access|auth|bearer)[_-]?tokens?\b`,
     String.raw`\bsecrets?\b`,
     String.raw`\bpasswords?\b`,
@@ -364,8 +362,67 @@ const risky = new RegExp(
   "i",
 )
 
-/** What's risky only as it's written, since a capital is what tells it apart: deleting a branch whatever it holds, as "-d" never does. */
-const forced = /\bbranch\s+(?:-\S+\s+)*(?:-[a-zA-Z]*D\b|--delete\s+--force|--force\s+--delete)/
+/** Each command in what it would run, as a line break, ";", "|" or "&" ends one, which is as far as a flag goes. */
+const commands = (text: string) => text.split(/[\n;|&]/)
+
+/**
+ * Whether a command names something, then, anywhere after that, has what
+ * makes it risky, as a flag can go anywhere after its command's name: looked
+ * for after the first only, which finds all that looking after a later one
+ * would, where a pattern looks after each in turn, taking time growing with
+ * the square of a long command's length, as one going on over many lines is.
+ */
+const after = (command: string, name: RegExp, then: RegExp) => {
+  const found = name.exec(command)
+  return found !== null && then.test(command.slice(found.index + found[0].length))
+}
+
+/**
+ * Where a command's name that `name` says, like the "rm" of "/bin/rm", ends,
+ * the last one with a flag after it, together with others or apart, that
+ * starts as `flag` says, or -1. It's read a word at a time, once: the latest
+ * name stands for any before it whose flags it's among, since what's after
+ * it is after them too, where a pattern would read the flags after each name
+ * all over again, even a name a flag ends with, like "-.rm".
+ */
+const flagged = (command: string, name: RegExp, flag: RegExp) => {
+  const words = /\S+/g
+  let open = -1
+  let found = -1
+  for (let word = words.exec(command); word !== null; word = words.exec(command)) {
+    flag.lastIndex = word.index
+    if (open !== -1 && flag.test(command)) found = open
+    // Its flags go on up to a word that isn't one, which may name another.
+    if (!/^-\S/.test(word[0])) open = -1
+    if (name.test(word[0])) open = word.index + word[0].length
+  }
+  return found
+}
+
+/** The names below, so a command with none of them, like most, is passed over at once. */
+const flaggable = /rm|push|clean|branch|restore|gcloud|az|rsync/i
+
+/** What a flag anywhere after a command's name makes risky, read a command at a time. */
+const riskyFlags: ReadonlyArray<(command: string) => boolean> = [
+  // Deleting a tree, forced or not, its flags together or apart, but not only from git's index, with `--cached` after the last that does.
+  (command) => {
+    const removing = flagged(command, /(?:^|\W)rm$/i, /-[a-z]*r|--recursive/iy)
+    return removing !== -1 && !/--cached/i.test(command.slice(removing))
+  },
+  // A push that forces, wherever the flag goes, or that deletes a branch, and a clean that forces.
+  (command) => after(command, /\bpush\b/i, /\s(?:-f\b|--force\b|\+\S|--delete\b|-d\b|:\S)/i),
+  (command) => flagged(command, /(?:^|\W)clean$/i, /-[a-z]*f/iy) !== -1,
+  // Deleting a branch whatever it holds, as "-d" never does, which only a capital tells apart.
+  (command) => flagged(command, /(?:^|\W)branch$/, /-[a-zA-Z]*D\b|--delete\s+--force|--force\s+--delete/y) !== -1,
+  // Restoring over changes: not only what's staged, after the last restore, or the working tree too, after the first.
+  (command) => {
+    const last = /^[\s\S]*\bgit\s+restore\b/i.exec(command)
+    return last !== null && (!/--staged/i.test(command.slice(last[0].length)) || after(command, /\bgit\s+restore\b/i, /--worktree/i))
+  },
+  // Deleting what's hosted, and mirroring with deletes.
+  (command) => after(command, /\b(?:gcloud|az)\b/i, /\sdelete\b/i),
+  (command) => after(command, /\brsync\b/i, /\s--delete/i),
+]
 
 /**
  * A command as the shell runs it: a line ended by a backslash goes on into
@@ -391,9 +448,13 @@ const unquoted = (command: string) => command.replace(/["']/g, "")
 /**
  * A name set to true among what a tool is given, as its JSON writes it, or
  * as it's looked through, a name and its value a line each: how a tool is
- * told to do what a command's flags would.
+ * told to do what a command's flags would. Only spaces come before a line
+ * break that parts them, so what comes before a colon or a line break is
+ * never also what could come after one, which a pattern would try every way
+ * of dividing up, taking time growing with the square of a long run of
+ * spaces and line breaks.
  */
-const setTo = (names: string) => new RegExp(String.raw`(?:^|[\n"])(?:${names})"?\s*(?::|\n)\s*"?(?:true|yes|1)\b`, "i")
+const setTo = (names: string) => new RegExp(String.raw`(?:^|[\n"])(?:${names})"?(?:\s*:|[ \t]*\r?\n)\s*"?(?:true|yes|1)\b`, "i")
 
 /** A tool told to force, as `git push --force` does, or `--force-with-lease`, which still overwrites what it finds as it expected. */
 const forcing = setTo(String.raw`force|forced|force[_-]?(?:push|delete|with[_-]?lease)`)
@@ -418,6 +479,9 @@ const toldTo = /(?:^|")(?:action|operation|op|method|command|mode|type)"?(?:\s*:
 const deleting = (text: string) =>
   [...text.matchAll(toolName)].some(([name]) => deletes.test(name)) || [...text.matchAll(toldTo)].some(([, what]) => deletes.test(what ?? ""))
 
+/** Whether what a command, or a few, would run is risky, by what it says or by a flag after its name. */
+const riskyToRun = (run: string) => risky.test(run) || commands(run).some((command) => flaggable.test(command) && riskyFlags.some((risks) => risks(command)))
+
 /**
  * Whether what a thread wants to do is risky, by what it says it would run
  * or change, as the shell would run it, or by what a tool is told to do in
@@ -425,7 +489,8 @@ const deleting = (text: string) =>
  */
 export const dangerous = (text: string) => {
   const command = continued(text)
-  return [command, unquoted(command)].some((run) => risky.test(run) || forced.test(run)) || forcing.test(text) || (recursing.test(text) && deleting(text))
+  const quoteless = unquoted(command)
+  return riskyToRun(command) || (quoteless !== command && riskyToRun(quoteless)) || forcing.test(text) || (recursing.test(text) && deleting(text))
 }
 
 /**

@@ -398,6 +398,39 @@ describe("Brain", () => {
     expect(["Yes.", "Approve it, it's a session thing.", "Always."].some(Brain.forSession)).toBe(false)
   })
 
+  test("what's risky is told in moments, however what it would run is written, up to as much of it as is looked through", () => {
+    // As much as an approval is looked through for what's risky, written so that patterns take time growing with the square of its
+    // length: a command going on over many lines, many names a flag could follow in one command, or among its flags, a long word, a
+    // name set to true with a long run of spaces and line breaks after it, and many short commands.
+    const long = {
+      "a push going on over lines": "push \\\n".repeat(3000),
+      "an rm going on over lines": "rm \\\n".repeat(5000),
+      "rm after rm": "rm ".repeat(7000),
+      "rm among rm's flags": `rm ${"-.rm ".repeat(4000)}`,
+      "branch among branch's flags": `branch ${"-.branch ".repeat(2200)}`,
+      "clean among clean's flags": `clean ${"-.clean ".repeat(2500)}`,
+      "az after az": "az ".repeat(7000),
+      "rsync after rsync": "rsync ".repeat(3500),
+      "restore after restore, staged after them all": `${"git restore ".repeat(1700)}--staged`,
+      "rm -r after rm -r, cached after them all": `${"rm -r ".repeat(3300)}--cached`,
+      "a long word": "a".repeat(20_000),
+      "a long word of parts": "a_".repeat(10_000),
+      "force with line breaks after it": `"force${"\n ".repeat(9990)}`,
+      "recursive with line breaks after it": `"recursive${"\n ".repeat(9990)}rm`,
+      "many short commands": "rm;".repeat(6666),
+    }
+    /** How long it takes to tell, the quickest of three, so a pause in between doesn't count. */
+    const took = (text: string) =>
+      Math.min(
+        ...[1, 2, 3].map(() => {
+          const start = performance.now()
+          Brain.dangerous(text.slice(0, 20_000))
+          return performance.now() - start
+        }),
+      )
+    expect(Object.entries(long).flatMap(([name, text]) => (took(text) > 20 ? [name] : []))).toEqual([])
+  })
+
   test("a near-silence 'Thank you.' is ignored", () => {
     const faint = (heard: string, voiced: number) => Brain.fast(situation(heard, { utterance: { ...situation(heard).utterance, voiced } }), lines)?.act
     expect(faint("Thank you.", 0.2)).toBe("resume")
