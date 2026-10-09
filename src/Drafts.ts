@@ -119,9 +119,10 @@ export const confirmation = (
   const where = started.worktree ? "in a worktree" : "without a worktree"
   const plain = `Started in ${project.name}${machine.here ? "" : ` on ${machine.name}`}, on ${title}, ${where}.`
   // The writer's own words, or the plain facts: whether they say where it is goes by them alone, not by a line of his that may name a worktree.
-  const told = ahead(spoken, { request }, started, lines) ? afterOnIt(spoken, lines) : plain
+  const own = ahead(spoken, { request }, started, lines)
+  const told = own ? afterOnIt(spoken, lines) : plain
   return [
-    told === plain ? plain : withOnIt(lines.onIt, told),
+    own ? withOnIt(lines.onIt, told) : plain,
     // It's how they catch a worktree that was misheard, so it's never left to the writer alone.
     ...(/work\s?-?tree/i.test(told) ? [] : [`That's ${where}.`]),
     ...(unsure ? [`I couldn't tell whether you wanted a worktree, so I went by your rules.`] : []),
