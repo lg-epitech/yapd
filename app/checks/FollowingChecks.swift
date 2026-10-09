@@ -1,22 +1,40 @@
 import Foundation
 
-/// A panel and a yapd to follow, keeping what's done to them: each fetch, what's put up, hidden or taken down, and each wait.
+/// A panel and a yapd to follow, keeping what's done to them: each fetch, what's put up, hidden, taken down or put back up, and
+/// each wait.
 @MainActor
 private final class Watched {
   /// How many fetches fail before one doesn't.
   var failing: Int
+  /// A card whose fetch waits until it's let go, as one that's slow to come back.
+  var holding: String?
   var fetches: [String] = []
   var done: [String] = []
   var waits: [Duration] = []
+  /// The fetch of the card held, once it's started.
+  private var held: CheckedContinuation<Void, Never>?
 
-  init(failing: Int = 0) {
+  init(failing: Int = 0, holding: String? = nil) {
     self.failing = failing
+    self.holding = holding
+  }
+
+  /// Once the card held is being fetched.
+  func fetching() async {
+    while held == nil { await Task.yield() }
+  }
+
+  /// Lets the fetch of the card held come back.
+  func letGo() {
+    held?.resume()
+    held = nil
   }
 
   var doing: Following.Doing {
     Following.Doing(
       fetch: { id in
         self.fetches.append(id)
+        if id == self.holding { await withCheckedContinuation { self.held = $0 } }
         guard self.failing == 0 else {
           self.failing -= 1
           return nil
@@ -26,6 +44,7 @@ private final class Watched {
       show: { card, talking in self.done.append(talking ? "show \(card.id)" : "show \(card.id) quietly") },
       hide: { self.done.append("hide") },
       takeDown: { id in self.done.append("take down \(id)") },
+      putBack: { id in self.done.append("put back \(id)") },
       wait: { delay in self.waits.append(delay) }
     )
   }
@@ -128,6 +147,7 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
       show: { card, _ in shown = card.id },
       hide: { shown = nil },
       takeDown: { id in requests.append(id) },
+      putBack: { _ in },
       wait: { _ in }
     ))
     following.follow(pointing("c9", fresh: true), connecting: true)
@@ -142,5 +162,84 @@ func pointing(_ id: String, fresh: Bool) -> Status.Showing {
       requests == ["c9"] && up == "c10" && shown == "c10",
       "has yapd take down only the card it closed, not \(requests), leaving \(up ?? "none") up and \(shown ?? "none") shown"
     )
+  }
+
+  // Shown again from the menu, with nothing newer meanwhile, it's put up with nothing said of it, and yapd puts it back up too, even
+  // with states coming in meanwhile that still point at none.
+  do {
+    let watched = Watched()
+    let following = Following(watched.doing)
+    following.follow(pointing("c11", fresh: true), connecting: true)
+    await following.settled()
+    following.closed("c11")
+    following.follow(nil, connecting: false)
+    watched.holding = "c11"
+    watched.done = []
+    following.showAgain("c11") { watched.done.append("gone") }
+    await watched.fetching()
+    following.follow(nil, connecting: false)
+    watched.letGo()
+    await following.settled()
+    check(
+      watched.done == ["show c11 quietly", "put back c11"] && following.shown == "c11" && following.wanted == "c11",
+      "shows a card again and has yapd put it back up, not \(watched.done)"
+    )
+  }
+
+  // Gone from yapd, there's nothing to show again.
+  do {
+    let watched = Watched(failing: 1)
+    let following = Following(watched.doing)
+    following.showAgain("c12") { watched.done.append("gone") }
+    await following.settled()
+    check(watched.done == ["gone"] && following.shown == nil, "shows nothing again of a card yapd no longer has, not \(watched.done)")
+  }
+
+  // yapd puts up another before the card shown again is fetched: the other stays up, and yapd keeps pointing at it.
+  do {
+    let watched = Watched(holding: "c13")
+    let following = Following(watched.doing)
+    following.showAgain("c13") { watched.done.append("gone") }
+    await watched.fetching()
+    following.follow(pointing("c14", fresh: true), connecting: true)
+    watched.letGo()
+    await following.settled()
+    check(
+      watched.done == ["show c14"] && following.shown == "c14" && following.wanted == "c14",
+      "keeps up a card yapd put up while another was fetched to show again, not \(watched.done)"
+    )
+  }
+
+  // yapd hides the card before the one shown again is fetched: it stays hidden, and yapd isn't asked to put it back up.
+  do {
+    let watched = Watched(holding: "c15")
+    let following = Following(watched.doing)
+    following.follow(pointing("c16", fresh: true), connecting: true)
+    await following.settled()
+    following.showAgain("c15") { watched.done.append("gone") }
+    await watched.fetching()
+    following.follow(nil, connecting: false)
+    watched.letGo()
+    await following.settled()
+    check(
+      watched.done == ["show c16", "hide"] && following.shown == nil && following.wanted == nil,
+      "keeps hidden a card yapd hid while another was fetched to show again, not \(watched.done)"
+    )
+  }
+
+  // Put away from the panel before the card shown again is fetched, it isn't put back up; and its fetch, stopped, coming back with
+  // nothing, says nothing of whether yapd still has it.
+  do {
+    let watched = Watched(holding: "c17")
+    let following = Following(watched.doing)
+    following.follow(pointing("c18", fresh: true), connecting: true)
+    await following.settled()
+    watched.failing = 1
+    following.showAgain("c17") { watched.done.append("gone") }
+    await watched.fetching()
+    following.closed("c18")
+    watched.letGo()
+    await following.settled()
+    check(watched.done == ["show c18", "take down c18"] && following.shown == nil, "keeps away a card put away while another was fetched to show again, not \(watched.done)")
   }
 }
