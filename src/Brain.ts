@@ -914,16 +914,32 @@ export const dangerous = (text: string) => {
   )
 }
 
+/** What may come before his approve without making it anything else: a plain yes or okay, as in "yes, approve it". */
+const beforeApprove = /^(?:(?:yes|yeah|yep|ok|okay|sure|alright|all right) )+/
+
+/** What may come after it: thanks, which `gist` leaves in as it leaves out "please" and "sir". */
+const afterApprove = / (?:thanks|thank you|cheers)$/
+
 /**
- * Whether he allowed it in so many words, like "approve", "yes, approve it",
- * "allow", "allow it" or "confirm", which is all that ever allows what a
- * thread waits on, and said nothing against it, like "wouldn't", "no" or
- * "never", however the apostrophe was written. A plain yes, "sure", "OK",
- * "go ahead" or "do it" never does.
+ * Whether he allowed it in so many words, which is all that ever allows
+ * what a thread waits on: his answer itself is "approve" or "allow", like
+ * "approve", "yes, approve it", "I approve", "approve the Mina one",
+ * "allow" or "allow it", with at most a plain yes or okay before it. Never
+ * an approve in another clause, like "go ahead, I'll approve the other one
+ * later", "yes, and tell the Mina one to approve its plan" or "allow me a
+ * second", nor one asked, put off or held back, like "should I approve
+ * it?", "approve it later" or "approve it if the tests pass", nor with
+ * anything against it, like "wouldn't", "no" or "never", however the
+ * apostrophe was written. A plain yes, "sure", "OK", "go ahead" or "do it"
+ * never does.
  */
 export const approving = (heard: string) => {
-  const said = gist(heard.replace(/[’‘`]/g, "'"))
-  return /\b(approve[ds]?|allow|confirm(ed)?)\b/.test(said) && !/n't\b|\b(not|never|no|nope|dont|cant|wont|wouldnt|shouldnt|couldnt|didnt)\b/.test(said)
+  const written = heard.replace(/[’‘`]/g, "'")
+  if (written.includes("?")) return false
+  const said = gist(written).replace(sessionly, " ").replace(/\s+/g, " ").trim().replace(beforeApprove, "").replace(afterApprove, "")
+  if (/n't\b|\b(not|never|no|nope|dont|cant|wont|wouldnt|shouldnt|couldnt|didnt)\b/.test(said)) return false
+  if (/\b(later|should|shall|can|could|would|will|maybe|if|once|when|after|before|until)\b/.test(said)) return false
+  return /^(?:i )?(?:approve[ds]?|confirm(?:ed)?)\b/.test(said) || /^(?:i )?allow(?: (?:it|that|this)\b.*)?$/.test(said)
 }
 
 /** "Say that again", with nothing said lately. */

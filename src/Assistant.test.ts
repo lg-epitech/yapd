@@ -849,6 +849,50 @@ describe("Assistant", () => {
     expect(result.steps).toEqual(["decide sent"])
   })
 
+  test("'approve' with more after it, which the approve may be to as much as to the approval, never allows it: it's asked again on its own, and the rest is said to be left", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const allow = "Cloud deployment discovery wants to run rm -rf build, which can't be undone, so say 'approve' if you want it, sir."
+    // The model takes the approve for the one open, and what came after it for the rest.
+    const model = (situation: Brain.Situation) =>
+      Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers", rest: "tell the Mina one to wait" })
+    const answered = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(model, undefined, { others: [cloud], items: approval("r1", "rm -rf build") })
+        yield* asked(made, cloud)
+        yield* made.answer("Approve it, and tell the Mina one to wait.")
+        const before = made.dispatched.length
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(answered).toEqual({
+      before: 0,
+      spoken: [
+        allow,
+        "I left the rest, sir: tell the Mina one to wait. Shall I still allow Cloud deployment discovery to run rm -rf build? Only 'approve' will do.",
+        "Approved, sir.",
+      ],
+      dispatched: ["r1 accept"],
+    })
+    // Dictated with nothing open, it's read back to him, with the rest said to be left.
+    const dictated = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(model, undefined, { others: [cloud], items: approval("r1", "rm -rf build") })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("Approve the cloud one, and tell the Mina one to wait.")
+        const before = made.dispatched.length
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(dictated).toEqual({
+      before: 0,
+      spoken: [`I left the rest, sir: tell the Mina one to wait. ${allow.replace(", sir.", ".")}`, "Approved, sir."],
+      dispatched: ["r1 accept"],
+    })
+  })
+
   test("a plain yes to an approval, harmless-looking or not, only gets that it needs an 'approve', with nothing sent, and 'approve' then allows it once", async () => {
     const cloud = waitingOn({ id: "r1", kind: "command" })
     for (const command of ["git status", "git checkout -f main"]) {
@@ -875,8 +919,19 @@ describe("Assistant", () => {
         },
       ])
     }
-    // Nor does any other yes, however the model takes it.
-    for (const heard of ["Sure.", "OK.", "Go ahead.", "Do it.", "Yes, do it.", "Yeah, go for it."]) {
+    // Nor does any other yes, however the model takes it, even with an approve in another clause, or asked.
+    for (const heard of [
+      "Sure.",
+      "OK.",
+      "Go ahead.",
+      "Do it.",
+      "Yes, do it.",
+      "Yeah, go for it.",
+      "Go ahead, I'll approve the other one later.",
+      "Sure, but allow more time for the tests.",
+      "Yes. Allow me a second to look.",
+      "Should I approve it?",
+    ]) {
       const result = await run(
         Effect.gen(function* () {
           const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" }), undefined, {

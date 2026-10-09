@@ -1580,10 +1580,10 @@ export const make = (options: {
           return { _tag: "Undo", to, carry: decision.how === "carry" || stopped }
         case "decide": {
           if (Option.isNone(to) || asks?._tag !== "Approval") return undefined
-          // Allowed only with "approve" in his words, however it came here, never a plain yes; for the rest of the thread's work only when
-          // he said so, whatever the model took it for; never for always.
+          // Allowed only with "approve" as his answer, however it came here, never a plain yes, nor with more after it; for the rest of the
+          // thread's work only when he said so, whatever the model took it for; never for always.
           const allowing = decision.how === "accept" || decision.how === "session"
-          if (allowing && !Brain.approving(heard)) return undefined
+          if (allowing && (decision.rest.trim() !== "" || !Brain.approving(heard))) return undefined
           const allowed: Hands.Decision | undefined =
             decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(heard) ? "acceptForSession" : allowing ? "accept" : undefined
           return allowed === undefined ? undefined : { _tag: "Decide", to: to.value, requestId: asks.requestId, decision: allowed }
@@ -2256,8 +2256,9 @@ export const make = (options: {
         const pending = target.thread.pendingRuntimeRequest
         if (pending === null) return reply(Brain.dealtWith(said), thought.subject)
         const heard = Option.getOrUndefined(yield* meant(target.ref, pending.id, decision.act === "decide" ? "Approval" : "Question", thought.utterance))
-        // Allowed only with "approve", whatever the model took his words for: a plain yes, however it's put, has it read back to him.
-        const unapproved = heard?._tag === "Approval" && decision.how !== "decline" && !Brain.approving(thought.utterance.heard)
+        // Allowed only with "approve", whatever the model took his words for: a plain yes, however it's put, has it read back to him. So
+        // does an approve with more after it, which may as well be to what's in the rest, as the model split it.
+        const unapproved = heard?._tag === "Approval" && decision.how !== "decline" && (decision.rest.trim() !== "" || !Brain.approving(thought.utterance.heard))
         const hearing = decision.act === "reply" && decision.text.trim() === ""
         if (heard?._tag === "Approval" && !unapproved) return yield* write(plan, thought, said, at, heard)
         // Words a form that takes only its options can't take ask the part he'd got to once more, as over the question itself.
@@ -2330,7 +2331,8 @@ export const make = (options: {
         )
         // Asked as a notice would be, under the entry it was just kept under.
         if (asking?.open.utterance === thought.utterance.id && asking.open.asks === asks) asking.from = unqueued({ asking: { ...waiting, asks }, again: false, kept })
-        return read
+        // Read back for want of an approve on its own, what he said after it is said to be left.
+        return unapproved ? ahead(read, decision.rest, said) : read
       })
 
     /**
@@ -2554,7 +2556,15 @@ export const make = (options: {
         const allowing = answers && approval !== undefined && decision.act === "decide" && decision.how !== "decline"
         if (allowing && !Brain.approving(utterance.heard)) {
           yield* close(open, "dropped: not approved", utterance.id)
-          return reply(Brain.unapproved(said), decided.subject)
+          return unfinished(reply(Brain.unapproved(said), decided.subject), decision.rest, said, decided.situation.desk)
+        }
+        // With more after it, like "approve it, and tell the Mina one to wait", his approve may as well be to what's in the rest, as the
+        // model split it: it's asked again on its own, saying the rest was left, so only an approve to it alone allows it.
+        if (allowing && decision.rest.trim() !== "") {
+          yield* Effect.logInfo("Asking it again on its own, since his approve came with more")
+          if ((asking?.asks ?? asks) < asks) return ahead(yield* reask(said), decision.rest, said)
+          yield* close(open, "dropped: not approved", utterance.id)
+          return unfinished(reply(Brain.unapproved(said), decided.subject), decision.rest, said, decided.situation.desk)
         }
         if (allowing && !heardBy(utterance, opened.whole)) {
           if ((asking?.asks ?? asks) < asks) return yield* reask(said)

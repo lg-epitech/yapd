@@ -846,6 +846,26 @@ describe("Brain", () => {
         "Approve? No.",
       ].filter(Brain.approving),
     ).toEqual([])
+    // Only when the approve is his answer itself, a plain yes or okay before it at most: never one in another clause, nor asked, nor put off.
+    expect(
+      ["Yes, approve it and let it go on.", "Okay, approve it for the session.", "Approve the Mina one.", "Jarvis, approve it, please.", "Yes, I approve.", "Allow that."].filter(
+        (heard) => !Brain.approving(heard),
+      ),
+    ).toEqual([])
+    expect(
+      [
+        "Yes, and tell the Mina one to approve its plan.",
+        "Go ahead, I'll approve the other one later.",
+        "Sure, but allow more time for the tests.",
+        "Yes. Allow me a second to look.",
+        "Should I approve it?",
+        "Approve it?",
+        "Go ahead with the cloud one, and approve the Mina one.",
+        "Approve it later.",
+        "Approve it if the tests pass.",
+        "Can you approve it?",
+      ].filter(Brain.approving),
+    ).toEqual([])
     // For the rest of its work only in so many words.
     expect(["Yes, for the session.", "Allow it from now on."].every(Brain.forSession)).toBe(true)
     expect(["Yes.", "Approve it, it's a session thing.", "Always."].some(Brain.forSession)).toBe(false)
