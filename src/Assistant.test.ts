@@ -8009,6 +8009,57 @@ describe("Assistant", () => {
     expect(await pressed("queued")).toEqual({ atOnce: [first], then: [still], open: true })
   })
 
+  test("a faint word Whisper hears in silence over a thread's question he hadn't heard all of brings it back at once, and presses that come to nothing never use up its interruptions", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const faint = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        // Pressed as it's said, which cuts it off, and all Whisper makes of it is a faint "you".
+        yield* made.questions().at(-1)!.stale
+        yield* made.cut()
+        yield* made.prepare(1, 1)
+        yield* made.heard({ heard: "you", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 0.2, turns: 1 }, 1)
+        yield* made.flush
+        const atOnce = made.spoken().slice(1)
+        // Heard in full this time and left unanswered, it's still asked once more a minute on, rather than let go.
+        yield* made.play()
+        yield* made.unanswered()
+        yield* made.wait(61)
+        return { atOnce, then: made.spoken().slice(1 + atOnce.length), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    expect(faint).toEqual({
+      atOnce: [`Here's the question on Cloud deployment discovery, sir: ${line}`],
+      then: [`Back to Cloud deployment discovery, sir: ${line}`],
+      open: true,
+    })
+    const empty = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        // Cut off by the shortcut three times, each dictation coming to nothing.
+        for (const press of [1, 2, 3]) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.cut()
+          yield* made.prepare(press, 1)
+          yield* made.nothing(press)
+          yield* made.flush
+        }
+        return { spoken: made.spoken().slice(1), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    expect(empty).toEqual({
+      spoken: [
+        `Here's the question on Cloud deployment discovery, sir: ${line}`,
+        `Back to Cloud deployment discovery, sir: ${line}`,
+        `Cloud deployment discovery still needs an answer, sir: ${line}`,
+      ],
+      open: true,
+    })
+  })
+
   test("a thread's question closed quietly, as when it's answered in T3 Code, is told as the question it was when he asks to hear or see it again, never as one about a project", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const told = "I asked you the question on Cloud deployment discovery, sir: which colour should the test use."

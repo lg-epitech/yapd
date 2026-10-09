@@ -861,9 +861,10 @@ export const make = (options: {
         if (from !== undefined && open.kind === "question") {
           // A thread's question still waits for him in T3 Code, so whatever took its place, even what made no sense, it's asked again
           // first thing after, from the part he'd got to, or when it was due to be anyway; the third time it's let go with a word.
-          // Turned off, it's asked once yapd is on again, and out of sight, like rig's while it can't be reached, once its machine's
-          // threads can be seen again: neither is any asking of his, nor anything taking its place.
-          const waits = how === "dropped: off" || how === "dropped: out of sight"
+          // Turned off, it's asked once yapd is on again, out of sight, like rig's while it can't be reached, once its machine's
+          // threads can be seen again, and cut off by a press that came to nothing, at once: none is any asking of his, nor anything
+          // taking its place.
+          const waits = how === "dropped: off" || how === "dropped: out of sight" || how === "dropped: nothing said"
           const interrupted = (from.interrupted ?? 0) + (!waits && said !== undefined ? 1 : 0)
           const back = said === undefined ? from.back : "here"
           if (waits) asked.unshift(resumed(from, open, { asks: asking.asks, back }))
@@ -1092,29 +1093,30 @@ export const make = (options: {
       })
 
     /**
-     * What was being said has been dealt with, without answering the open
-     * question, so once nothing else being said holds it, it's waited on again,
-     * as if it went unanswered, or as `then` has it.
+     * What was being said has been dealt with, and left the open question
+     * open, so as far as that goes it came to nothing: once nothing else
+     * being said holds it, it's taken up again as `resume` has it.
      */
-    const release = (key: string, then: (id: string) => Effect.Effect<void> = later) =>
+    const release = (key: string) =>
       Effect.suspend(() => {
         if (asking === undefined || !asking.held.delete(key) || asking.held.size > 0) return Effect.void
-        return then(asking.open.id)
+        return resume(asking.open.id)
       })
 
     /**
-     * The open question, once a press that came to nothing no longer holds
-     * it, nor anything else: a thread's he hadn't heard all of, which the
-     * press may have cut off or kept from being said at all, comes back at
-     * once from the part he'd got to, as after anything that takes its place,
-     * since that was no asking of his; anything else is waited on again, as
-     * if it went unanswered.
+     * The open question, once a press or a request that came to nothing, like
+     * a faint word Whisper hears in silence, no longer holds it, nor anything
+     * else: a thread's he hadn't heard all of, which the press may have cut
+     * off or kept from being said at all, comes back at once from the part
+     * he'd got to, using up none of its asks nor its interruptions, since that
+     * was no asking of his, nor anything taking its place; anything else is
+     * waited on again, as if it went unanswered.
      */
     const resume = (id: string) =>
       Effect.suspend(() => {
         if (asking?.open.id !== id || asking.held.size > 0) return Effect.void
         if (asking.open.kind !== "question" || asking.from === undefined || asking.whole !== undefined) return later(id)
-        return close(asking.open, "replaced")
+        return Effect.zipRight(close(asking.open, "dropped: nothing said"), Effect.forkIn(turn.withPermits(1)(offering), scope))
       })
 
     /** Says something now, ahead of the rest of the answer, like that it's looking. */
@@ -3003,7 +3005,7 @@ export const make = (options: {
       // Whatever it held is let go of: a press from before yapd was turned off holds nothing that's open now anyway.
       nothing: (press) =>
         Effect.gen(function* () {
-          yield* release(`press:${press}`, resume)
+          yield* release(`press:${press}`)
           // In case it isn't got ready for yet, so it held nothing, it keeps the question he'd heard by now, which it may have cut off.
           const kept = yield* ended(press, asking?.said !== undefined ? asking.open.id : undefined)
           yield* kept?.arrived ?? Effect.void
