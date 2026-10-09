@@ -694,6 +694,17 @@ describe("Telling yapd's own voice from the user's", () => {
     expect(theirs("Neither, start a new project.", question)).toBe(true)
   })
 
+  test("takes the words it says around its name for its own, with its name misheard as another word, or two of its words as two others", () => {
+    for (const heard of ["In Japan.", "In yacht.", "The Japan.", "Japan now."]) {
+      expect([heard, theirs(heard, "In yapd, the tests pass now")]).toEqual([heard, false])
+    }
+    for (const heard of ["Of Erin yapped.", "Of her in yapped."]) {
+      expect([heard, theirs(heard, saying)]).toEqual([heard, false])
+    }
+    // Words of his put in among its are his.
+    expect(theirs("Run the integration tests.", saying)).toBe(true)
+  })
+
   test("takes what's mostly the words yapd was saying for its own voice, misheard or not", () => {
     expect(theirs("Over in yapd, the tests pass.", saying)).toBe(false)
     expect(theirs("Over in yap D, the test pass.", saying)).toBe(false)
@@ -792,6 +803,18 @@ const long: Conversation.Update = {
 }
 
 /**
+ * Lines with yapd's own voice getting into the microphone over their first
+ * second, with its name misheard, as Whisper writes it, and how many frames
+ * of it: heard as another word, and with two of its words heard as two others
+ * or the rest heard as a sentence of its own, which may look like his.
+ */
+const misheard: ReadonlyArray<readonly [string, string, number]> = [
+  [long.spoken.replace("Over in", "In"), "In Japan.", 12],
+  [long.spoken, "Of Erin yapped. The tests pass now.", 30],
+  [long.spoken, "Over in yapd, the tests pass. Now in the pool.", 40],
+]
+
+/**
  * Reads `long` out over the helper protocol, or what `spoken` says instead,
  * with a fake helper that starts a new voice processor for the first line, as
  * after yapd has rested, and says how far a line got when it's stopped by the
@@ -813,6 +836,8 @@ const overHelper = (
     readonly intent?: Responder.Intent
     readonly failing?: boolean
     readonly whole?: readonly [ReadonlyArray<number>, string]
+    /** Whether the clock moves on as frames come in, as it does live, rather than only when told to. */
+    readonly live?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -941,7 +966,7 @@ const overHelper = (
       while (unsent.length > 0) await new Promise((resolve) => setTimeout(resolve, 10))
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
-    const talk = (value: number, count: number) =>
+    const frames = (value: number, count: number) =>
       Effect.sync(() => {
         const samples = new Float32Array(512).fill(value)
         const message = new Uint8Array(5 + samples.byteLength)
@@ -950,6 +975,15 @@ const overHelper = (
         message.set(new Uint8Array(samples.buffer), 5)
         for (let frame = 0; frame < count; frame++) write(message)
       }).pipe(Effect.zipRight(flush))
+    // Live, a few frames at a time, each once it has lasted as long as it does.
+    const talk = (value: number, count: number) =>
+      options.live === true
+        ? Effect.forEach(
+            Array.from({ length: Math.ceil(count / 4) }, (_, index) => Math.min(4, count - index * 4)),
+            (some) => TestClock.adjust(`${some * 32} millis`).pipe(Effect.zipRight(frames(value, some))),
+            { discard: true },
+          )
+        : frames(value, count)
     const fiber = yield* Effect.fork(made.converse({ ...long, spoken: options.spoken ?? long.spoken }))
     yield* flush
     yield* flush
@@ -1536,6 +1570,22 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ commands: ["play"], transcribed: ["Over in yapped."], sent: [], replies: [] })
   })
 
+  test("doesn't stop for its own voice with its name misheard, though the rest is heard as words of their own or a sentence of its own, nor send or note it", async () => {
+    for (const [spoken, heard, frames] of misheard) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.8, heard]], { spoken, live: true })
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, frames)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([heard, result]).toEqual([heard, { commands: ["play"], sent: [], replies: [] }])
+    }
+  }, 30_000)
+
   test("doesn't take a question's own voice with its name misheard for an answer, nor stop asking it", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -1804,6 +1854,31 @@ describe("Answers over their first words, while yapd's own voice can still get i
       transcribed: ["Over in yapped, the tests pass."],
     })
   })
+
+  test("carries on over its own voice with its name misheard, though the rest is heard as words of their own or a sentence of its own, taking none of it for a follow-up", async () => {
+    for (const [spoken, heard, frames] of misheard) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const followUps: Array<string> = []
+          const through: Array<string> = []
+          const helper = yield* overHelper([[0.8, heard]], { live: true })
+          yield* Fiber.interrupt(helper.fiber)
+          const asked = helper.commands.length
+          const answering = yield* Effect.fork(helper.answer(answer(followUps, through, spoken)))
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, frames)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          const during = helper.commands.slice(asked)
+          yield* helper.wait(9)
+          yield* helper.finish
+          yield* helper.wait(3)
+          return { during, followed: yield* Fiber.join(answering), followUps, through }
+        }),
+      )
+      expect([heard, result]).toEqual([heard, { during: ["play"], followed: false, followUps: [], through: ["through"] }])
+    }
+  }, 30_000)
 
   test("stops for a follow-up over them once Whisper has made out it's him, takes only his words, and leaves the answer unheard", async () => {
     const result = await overHelperScoped(

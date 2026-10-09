@@ -318,35 +318,72 @@ const inTurn = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) =>
     })
   })
 
+/** Words heard, from `first` to `last`, taken for yapd's, from `start` to `end`. */
+interface Match {
+  readonly first: number
+  readonly last: number
+  readonly start: number
+  readonly end: number
+}
+
 /**
- * How many of `words` line up, in order, with what yapd says, as near as
- * Whisper hears it: skipping up to two of its words between, which Whisper
- * drops, and two of those heard, which it makes up, like "stop rage" for
- * "storage".
+ * How `words` line up, in order, with what yapd says, as near as Whisper
+ * hears it, as many of them as can: each a word of its, two of its run
+ * together, like "overin" for "over in", or split in two, like "of her" for
+ * "over", skipping up to two of its words between, which Whisper drops, and
+ * two of those heard, which it makes up, like "stop rage" for "storage".
  */
 const lined = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
-  // The most that line up with each word heard taken for what ends at each of yapd's.
+  // The most that line up with a match ending at each word heard and at each of yapd's, and the match that got there.
   const most = words.map(() => yapd.map(() => 0))
-  let best = 0
-  words.forEach((word, index) => {
+  const how = words.map(() => yapd.map((): { readonly match: Match; readonly from?: readonly [number, number] } | undefined => undefined))
+  let best: readonly [number, number] | undefined
+  words.forEach((_, last) => {
     yapd.forEach((_, end) => {
-      for (const start of [end, end - 1]) {
-        if (start < 0 || !alike(word, yapd.slice(start, end + 1).join(""))) continue
-        let before = 0
-        for (let earlier = Math.max(0, index - 3); earlier < index; earlier++) {
-          for (let previous = Math.max(0, start - 3); previous < start; previous++) before = Math.max(before, most[earlier]![previous]!)
+      for (const first of [last, last - 1]) {
+        for (const start of [end, end - 1]) {
+          if (first < 0 || start < 0 || !alike(words.slice(first, last + 1).join(""), yapd.slice(start, end + 1).join(""))) continue
+          let before = 0
+          let from: readonly [number, number] | undefined
+          for (let earlier = Math.max(0, first - 3); earlier < first; earlier++) {
+            for (let previous = Math.max(0, start - 3); previous < start; previous++) {
+              if (most[earlier]![previous]! > before) [before, from] = [most[earlier]![previous]!, [earlier, previous]]
+            }
+          }
+          const count = before + last - first + 1
+          if (count <= most[last]![end]!) continue
+          most[last]![end] = count
+          how[last]![end] = { match: { first, last, start, end }, ...(from === undefined ? {} : { from }) }
+          if (best === undefined || count > most[best[0]]![best[1]]!) best = [last, end]
         }
-        most[index]![end] = Math.max(most[index]![end]!, before + 1)
-        best = Math.max(best, before + 1)
       }
     })
   })
-  return best
+  const matches: Array<Match> = []
+  for (let at = best; at !== undefined; at = how[at[0]]![at[1]]!.from) matches.unshift(how[at[0]]![at[1]]!.match)
+  return matches
+}
+
+/**
+ * Which of `words` are yapd's: those that line up with what it was saying,
+ * and any in place of one of its words between two that do, which is that
+ * word misheard, like "Japan" for "yapd" in "Over in Japan, the tests".
+ */
+const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
+  const matches = lined(words, yapd)
+  const its = new Set<number>()
+  matches.forEach((match, index) => {
+    const next = matches[index + 1]
+    // Fewer heard between than it said, they stand for some of its words, rather than being put in among them.
+    const until = next !== undefined && next.first - match.last <= next.start - match.end ? next.first : match.last + 1
+    for (let at = match.first; at < until; at++) its.add(at)
+  })
+  return { matched: matches.reduce((count, match) => count + match.last - match.first + 1, 0), its }
 }
 
 /** Whether `words` are what yapd was saying, as near as Whisper heard it: all of them, or at least two in three, like "Over in yapped.". */
 const echoes = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
-  const matched = lined(words, yapd)
+  const { matched } = ours(words, yapd)
   return words.length > 0 && (matched === words.length || (matched >= 2 && 3 * matched >= 2 * words.length))
 }
 
@@ -379,22 +416,25 @@ const wordsOf = (heard: string, filling = false) => {
  * takes at least `least` words of his, so never what Whisper makes up, nor
  * mostly what yapd was `saying` then, in order, as near as Whisper heard it,
  * nor what has no more words of his than of yapd's, nor, over its words, only
- * common ones, unless said just so, like "Not now.". A "stop" or "wait" that
- * yapd isn't saying is all it takes, even said over its words.
+ * common ones, unless said just so, like "Not now.". His are the words that
+ * aren't in line with yapd's, nor in place of one of its between them, so a
+ * "the" or "in" it's saying, with its name misheard, like "In Japan.", is
+ * never two words of his. A "stop" or "wait" that yapd isn't saying is all it
+ * takes, even said over its words.
  */
 export const theirs = (heard: string, saying: string, least = 2) => {
   const words = wordsOf(heard)
   const yapd = vocabulary(saying)
   if (words.length === 0 || inTurn(words, yapd)) return false
-  const own = words.filter((word) => !among(word, yapd))
-  if (halted(words, own)) return true
+  if (halted(words, words.filter((word) => !among(word, yapd)))) return true
   if (echoes(words, yapd)) return false
-  // Over its voice, nothing but common words is him only said just so, however few of them are yapd's.
-  if (saying !== "" && own.every((word) => common.has(word)) && !curt.has(words.join(" "))) return false
-  // Common words yapd says too are no sign either way, unless nothing else is its, when they're his.
-  const ours = words.filter((word) => !common.has(word) && !own.includes(word)).length
-  const his = ours === 0 ? words.length : own.length
-  return his >= least && his > ours
+  const { its } = ours(words, yapd)
+  const his = words.filter((_, index) => !its.has(index))
+  // Said just so, all of it is his, however much of it yapd is saying too.
+  if (curt.has(words.join(" "))) return words.length >= least
+  // Over its voice, nothing but common words is him only said just so.
+  if (saying !== "" && his.every((word) => common.has(word))) return false
+  return his.length >= least && his.length > words.filter((word, index) => its.has(index) && !common.has(word)).length
 }
 
 /** Whether there's anything of his in what was heard, even a word that only fills a pause, like the "So," he starts with: nothing that's yapd's, nor that Whisper makes up. */
