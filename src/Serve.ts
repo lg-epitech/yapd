@@ -26,6 +26,7 @@ import * as Server from "./Server.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
 import { Shortcut } from "./Shortcut.ts"
+import * as Show from "./Show.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3Code from "./T3Code.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
@@ -99,12 +100,14 @@ export const serve = Effect.gen(function* () {
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
   const hands = Hands.make({ threads, ledger, started })
+  const show = yield* Show.make(threads.detail)
   const assistant = yield* Assistant.make({
     threads,
     journal,
     drafts,
     hands,
     ledger,
+    show,
     tell: daemon.tell,
     power: daemon.power,
     lastHeard: daemon.lastHeard,
@@ -161,19 +164,21 @@ export const serve = Effect.gen(function* () {
   const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number, at?: number) =>
     Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
-  const state = Stream.zipLatestWith(daemon.state, (yield* Activity).changes, (state, activity): Server.State => ({
-    on: state.on,
-    activity,
-    updates: state.heard.map(({ id, update }) => ({
-      id,
-      project: update.project,
-      text: update.spoken,
-      at: new Date(update.at).toISOString(),
+  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes).pipe(
+    Stream.map(([state, activity]) => ({
+      on: state.on,
+      activity,
+      updates: state.heard.map(({ id, update }) => ({
+        id,
+        project: update.project,
+        text: update.spoken,
+        at: new Date(update.at).toISOString(),
+      })),
     })),
-  }))
+  )
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
-    state,
+    state: Show.stated(state, show),
     // One at a time, so what's remembered is what's in effect.
     turn: (on) =>
       Effect.zipRight(settings.remember(on), turn(on)).pipe(
@@ -183,6 +188,8 @@ export const serve = Effect.gen(function* () {
     replay: daemon.replay,
     // Typed words were never faint, so nothing typed is taken for Whisper hearing words in silence.
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
+    // Every thread it can see, not only the likeliest, in the order the desk puts them.
+    ...Show.served(show, threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), journal.page),
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))

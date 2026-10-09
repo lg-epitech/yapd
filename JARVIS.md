@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite` and `yapd.before-m2.sqlite`.
 
-Live on `dev` now: everything below. Being built: an agent's questions read out and answered by voice, and showing what you ask for on screen.
+Live on `dev` now: everything below. Cards for "show me" appear once the menu bar app is rebuilt from this branch; until then yapd says the gist without them. Being built: an agent's questions read out and answered by voice.
 
 ## Talk to it (the shortcut)
 
@@ -19,6 +19,11 @@ Live on `dev` now: everything below. Being built: an agent's questions read out 
 - Answers come before any update waiting to be read.
 - "Stop", "skip" or "enough" over an update skips it. "What did I miss?" leaves out what's about to be read anyway, and says how many are coming up.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
+
+## Show me
+
+- "Show me what's running", "show me that PR", "show me my usage" or "what I missed" puts a card in a panel under the menu bar icon as yapd says it; "hide that" takes it down, and "open that PR" opens it in your browser, https only. A thread waiting on a command that can't be read aloud gets its card with the answer, and "say that again" puts it back up.
+- The API gains `/cards`, `/threads` and `/journal` to read from.
 
 ## Faster
 
@@ -44,3 +49,5 @@ Live on `dev` now: everything below. Being built: an agent's questions read out 
 - With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
 - After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.
 - With an older yapd on rig, a connection dropped while starting work there is said as "I can't reach rig" rather than "it may have started".
+- "Show Last Card" just after closing a card can come to nothing if the close reaches yapd after it: choose it again.
+- A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.

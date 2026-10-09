@@ -6,6 +6,7 @@ import * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
 import type { Kept } from "./Journal.ts"
+import type * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -181,6 +182,102 @@ describe("Brain", () => {
     expect(between._tag === "Ask" ? between.open.kind : between).toBe("which")
   })
 
+  test("'show me that' shows what was just talked about without the model, and 'hide that' only takes a card down while one is up", () => {
+    const subject: Assistant.Subject = { _tag: "Answer", said: "The Tezos migration is comparing fee tables, sir.", about: Option.some(ref(tezos)) }
+    const shown = (heard: string, overrides: Partial<Brain.Situation> = {}) => {
+      const decided = Brain.fast(situation(heard, { subject, ...overrides }), lines)
+      return decided === undefined ? undefined : { act: decided.act, how: decided.how, target: decided.target }
+    }
+    const tezosHandle = desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
+    expect(shown("Show me that.")).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me that P.R.")).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    // Opening it is the same, at once even when the model is slow or down.
+    for (const heard of ["Open that PR.", "Open that P.R.", "Open the pull request."]) expect(shown(heard)).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    // Its pull request while that's open, which opens it in the browser too, and the thread once it's merged.
+    const pulled = (state: string): Threads.Desk => ({
+      ...desk(),
+      threads: desk().threads.map((listed) =>
+        listed.ref.id !== tezos.id
+          ? listed
+          : {
+              ...listed,
+              thread: Schema.decodeUnknownSync(T3Live.Thread)({
+                ...listed.thread,
+                pullRequests: [{ number: 412, url: "https://github.com/lg-epitech/integration/pull/412", repository: "lg-epitech/integration", snapshot: { state, title: "Migrate Tezos" } }],
+              }),
+            },
+      ),
+    })
+    expect(shown("Show me that.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "pr", target: tezosHandle })
+    expect(shown("Show me that.", { desk: pulled("MERGED") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    // Asked for by name, the thread is what's shown, never its pull request opened in its place.
+    expect(shown("Show me the thread.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me that thread.", { desk: pulled("OPEN") })).toEqual({ act: "show", how: "thread", target: tezosHandle })
+    expect(shown("Show me what's running.")).toEqual({ act: "show", how: "threads", target: "" })
+    // Nothing "that" could be, so which thread is the model's to work out.
+    expect(shown("Show me that.", { subject: { _tag: "Nothing" } })).toBeUndefined()
+    // With nothing up, "hide that" could be about a thread.
+    expect(shown("Hide that.")).toBeUndefined()
+    expect(shown("Hide that.", { showing: "What's going on" })).toEqual({ act: "show", how: "hide", target: "" })
+  })
+
+  test("words for his screen never take back a message, even once its card is gone, and 'scratch that' still does with one up", () => {
+    const tezosHandle = desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
+    // A message for the Tezos one a minute ago, waiting in its queue, which taking back withdraws.
+    const queued: Ledger.Row = {
+      commandId: "yapd:u0:0",
+      messageId: "yapd:u0:0:m",
+      utterance: "u0",
+      step: 0,
+      kind: "message",
+      machine: "Rosie",
+      thread: tezos.id,
+      body: { _tag: "Send", text: "Use the fee table when it's done.", messageId: "yapd:u0:0:m", how: "after" },
+      digest: "use the fee table when it's done",
+      state: "sent",
+      how: "queued",
+      reason: null,
+      at: now - 60_000,
+    }
+    const acted = Option.some(queued)
+    // Its card has faded, so they're the model's, which can take them for taking back what was just done: at most, they take a card down.
+    for (const heard of ["Take that down.", "Clear that.", "Hide it, please."]) {
+      expect(Brain.fast(situation(heard, { acted }), lines)).toBeUndefined()
+      const checked = Brain.check(Brain.decision({ act: "undo", sure: "high" }), situation(heard, { acted }), lines)
+      expect(checked._tag === "Do" ? { act: checked.plan.decision.act, how: checked.plan.decision.how } : checked).toEqual({ act: "show", how: "hide" })
+    }
+    // Taking it back still does, whatever's on his screen.
+    for (const screen of [{}, { showing: "Migrate Tezos Integration" }]) {
+      expect(Brain.fast(situation("Scratch that.", { acted, ...screen }), lines)).toMatchObject({ act: "undo", target: tezosHandle, how: "" })
+      const checked = Brain.check(Brain.decision({ act: "undo", sure: "high" }), situation("Scratch that.", { acted, ...screen }), lines)
+      expect(checked._tag === "Do" ? checked.plan.decision.act : checked).toBe("undo")
+    }
+  })
+
+  test("showing a thread or its pull request asks between those it can't tell apart, and says why when no thread can be seen", () => {
+    const checked = (decided: Brain.Decision, overrides: Partial<Brain.Situation> = {}) => Brain.check(decided, situation("Show me the migration PR.", overrides), lines)
+    const [tezosHandle = "", minaHandle = ""] = [tezos, mina].map((thread) => desk().threads.find(({ ref }) => ref.id === thread.id)!.handle)
+    // Its pull request opens in his browser, so a low guess between two, or none at all, is asked about first.
+    expect(checked(Brain.decision({ act: "show", how: "pr", target: tezosHandle, others: minaHandle, sure: "low" }))._tag).toBe("Ask")
+    expect(checked(Brain.decision({ act: "show", how: "pr", others: `${tezosHandle}, ${minaHandle}` }))._tag).toBe("Ask")
+    expect(checked(Brain.decision({ act: "show", how: "pr", target: tezosHandle, others: minaHandle, sure: "medium" }))._tag).toBe("Do")
+    expect(checked(Brain.decision({ act: "show", how: "thread" }))).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    // With T3 Code down, there's no thread it could have told apart.
+    const blind: Threads.Desk = {
+      threads: [],
+      away: [
+        { machine: "Rosie", reason: "T3 Code isn't running, so I can't see your threads." },
+        { machine: "rig", reason: "I can't see rig's threads yet." },
+      ],
+    }
+    for (const how of ["thread", "pr"]) {
+      expect(checked(Brain.decision({ act: "show", how }), { desk: blind })).toEqual({
+        _tag: "Say",
+        spoken: "T3 Code isn't running, so I can't see your threads, sir. I can't see rig's threads yet.",
+      })
+    }
+  })
+
   test("naming a machine that can't be seen still lets through a thread here he plainly meant", () => {
     const rig = (decided: Brain.Decision) => Brain.check(decided, situation("What's the rig relay fix doing?"), lines)
     const here = rig(Brain.decision({ act: "look", target: "t2", machine: "rig", sure: "high" }))
@@ -256,6 +353,28 @@ describe("Brain", () => {
       `As of ${clock(read)}, when T3 Code last answered, so never what's used now: say it's as of ${clock(read)}.\n` +
         `- Claude: the five-hour window has reset since, so what it's at now isn't known, 40% of the weekly window (resets ${resetting})`,
     )
+  })
+
+  test("a question asked lately is asked in other words, wherever the last asking addressed him, if at all, and only his address is passed over", () => {
+    const candidates = desk().threads.slice(0, 2)
+    const choices = Brain.choices(candidates)
+    const other = `Which one, sir: ${choices}?`
+    expect(Brain.which(candidates, lines, [])).toBe(`${choices}, sir?`)
+    for (const asked of [`Sir, ${choices}?`, `${choices}?`, `Sir. ${choices}, SIR!`]) expect(Brain.which(candidates, lines, [asked])).toBe(other)
+    expect(Brain.confirming("stop Migrate Tezos Integration", lines, ["Sir, stop Migrate Tezos Integration?"])).toBe("Shall I stop Migrate Tezos Integration, sir?")
+    // Any other word still counts, as does "sir" when it isn't how he's addressed.
+    expect(Brain.repeated(`Boss, ${choices}?`, [`${choices}, boss?`], { address: "boss" })).toBe(true)
+    expect(Brain.repeated(`Sir, ${choices}?`, [`${choices}?`], { address: "boss" })).toBe(false)
+    expect(Brain.repeated(`Now, ${choices}?`, [`${choices}, sir?`], lines)).toBe(false)
+    // Said anywhere in a longer line, it's said again all the same, but not a question whose words only begin it.
+    expect(Brain.echoes(`It's, sir, on your screen. ${choices}?`, [`${choices}, sir?`], lines)).toBe(true)
+    expect(Brain.echoes(`The loader is fixed.`, [`${choices}, sir?`, ""], lines)).toBe(false)
+    expect(Brain.echoes(`${choices}ville is up.`, [`${choices}, sir?`], lines)).toBe(false)
+    // After news, the question on its own, as what asks it puts it, which a line saying it again may leave the news out of; one that follows none is all it asked.
+    const called = Option.some("Migrate Tezos Integration")
+    expect(Brain.alone({ asked: Hands.twice(now - 60_000, now, lines, called), question: Hands.twiceAsks })).toBe("Again?")
+    expect(Brain.alone({ asked: Hands.read(lines, called), question: Hands.readAsks })).toBe("Shall I tell it to ignore that?")
+    expect(Brain.alone({ asked: `${choices}, sir?` })).toBe(`${choices}, sir?`)
   })
 
   test("a near-silence 'Thank you.' is ignored", () => {

@@ -81,9 +81,11 @@ export const make = Effect.gen(function* () {
   const rows = new WeakMap<Conversation.Update, number>()
   /**
    * The update being read, or the last one that was, what of it was said
-   * last, like an answer over it, and when, which is what "it" means to the user.
+   * last, like an answer over it, and when, which is what "it" means to the
+   * user, with how many times yapd had been turned on or off as it was read:
+   * once it's turned off, it's no longer what "it" means.
    */
-  let latest: { readonly update: Conversation.Update; readonly said: string; at: number; playing: boolean } | undefined
+  let latest: { readonly update: Conversation.Update; readonly said: string; at: number; playing: boolean; readonly turns: number } | undefined
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   interface FollowUp {
     readonly update: Conversation.Update
@@ -156,21 +158,36 @@ export const make = Effect.gen(function* () {
   /**
    * Renders a notice and queues it. One that can't be rendered is only logged.
    * `since` is when what it's about began, if before now, so it isn't said if
-   * yapd was turned off since.
+   * yapd was turned off since. Never queued, however that ends, it's done with.
    */
-  const tell = (notice: Inbox.Notice, since?: number) =>
-    Effect.gen(function* () {
+  const tell = (notice: Inbox.Notice, since?: number) => {
+    /** Whether it was queued, after which it's done with only once it's taken out to be said, or dropped. */
+    let queued = false
+    return Effect.gen(function* () {
       const turns = since ?? (yield* switched).turns
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       yield* soon
       yield* voice.render(notice.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
       const said = { session: notice.id, priority: notice.priority, arrivedAt: notice.at, notice, audio }
-      if (!(yield* enqueue(said, turns))) {
+      // Noted in the same breath as it's queued, so nothing can stop it in between.
+      yield* enqueue(said, turns).pipe(
+        Effect.tap((taken) =>
+          Effect.sync(() => {
+            queued = taken
+          }),
+        ),
+        Effect.uninterruptible,
+      )
+      if (!queued) {
         yield* removeFile(audio)
         return yield* Effect.logInfo(`Not saying "${notice.spoken}", since yapd is off`)
       }
       yield* Effect.logInfo(`Ready: ${notice.spoken}`)
-    }).pipe(Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)))
+    }).pipe(
+      Effect.catchAllCause((cause) => Effect.logError(`Could not say "${notice.spoken}"`, cause)),
+      Effect.ensuring(Effect.suspend(() => (queued ? Effect.void : (notice.gone ?? Effect.void)))),
+    )
+  }
 
   const late = (update: Conversation.Update, spoken: string, failed: boolean) =>
     Effect.flatMap(Clock.currentTimeMillis, (at) =>
@@ -305,7 +322,7 @@ export const make = Effect.gen(function* () {
     saying: (update, line) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) =>
         Effect.sync(() => {
-          if (latest?.update === update) latest = { update, said: line, at, playing: true }
+          if (latest?.update === update) latest = { ...latest, said: line, at, playing: true }
         }),
       ),
   })
@@ -522,6 +539,25 @@ export const make = Effect.gen(function* () {
     })
 
   /**
+   * What's played for a notice: its own words, or those it says in their
+   * place when it asks for them just before it's played, rendered then and
+   * removed once it's said. Should rendering fail, its own words go after all.
+   * What tells it that it gets those in their place comes with them, to run
+   * once it's known it's still to be played.
+   */
+  const words = (said: Inbox.Said) =>
+    Effect.gen(function* () {
+      const { instead } = said.notice
+      const own = { path: said.audio, used: Effect.void }
+      if (instead === undefined || !(yield* instead.when)) return own
+      const path = join(dir, `${crypto.randomUUID()}${extension}`)
+      return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
+        Effect.as({ path, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`), instead.used ?? Effect.void) }),
+        Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say "${instead.spoken}" instead`, error), own)),
+      )
+    })
+
+  /**
    * Says a notice. Only a question is listened to: whatever else they'd say to
    * it has nowhere to go. What can't be played was never said, so it isn't
    * what the user heard last; and a question that can't be asked in full, even
@@ -534,8 +570,12 @@ export const make = Effect.gen(function* () {
       if (yield* said.notice.stale) return yield* dealtWith
       const saying = said.notice.saying ?? Effect.void
       const confirmed = said.notice.confirmed ?? Effect.void
+      const { path: played, used } = yield* words(said)
+      // Settled while its words were rendered, like a question closed by what he said meanwhile, it's dropped all the same.
+      if (yield* said.notice.stale) return yield* dealtWith
+      yield* used
       if (question === undefined) {
-        const playback = yield* audio.play(said.audio)
+        const playback = yield* audio.play(played)
         yield* saying
         if (playback.confirmed) yield* confirmed
         yield* playback.finished
@@ -546,7 +586,7 @@ export const make = Effect.gen(function* () {
       }
       const answer = (heard: string, voiced: number) =>
         question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
-      const answered = yield* conversation.ask({ audio: said.audio, saying, confirmed, answer }).pipe(
+      const answered = yield* conversation.ask({ audio: played, saying, confirmed, answer }).pipe(
         Effect.onError((cause) =>
           Cause.isInterruptedOnly(cause) ? Effect.void : dealtWith.pipe(Effect.zipRight(question.unsaid), Effect.zipRight(question.unanswered)),
         ),
@@ -641,7 +681,7 @@ export const make = Effect.gen(function* () {
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
-      latest = { update: ready.update, said: ready.update.spoken, at: yield* Clock.currentTimeMillis, playing: true }
+      latest = { update: ready.update, said: ready.update.spoken, at: yield* Clock.currentTimeMillis, playing: true, turns }
     }
     let kept = false
     let dealtWith = false
@@ -687,13 +727,14 @@ export const make = Effect.gen(function* () {
       ),
       // Stopped at once, and not kept for later.
       Effect.raceFirst(turnedOff(turns)),
+      // Not put back, it's done with, said or not.
       Effect.ensuring(
         Effect.suspend(() =>
           kept
             ? Effect.void
             : Effect.zipRight(
                 removeFile(Inbox.audio(ready)),
-                "update" in ready && ready.replay !== undefined ? replayed(ready.replay) : Effect.void,
+                "update" in ready ? (ready.replay === undefined ? Effect.void : replayed(ready.replay)) : (ready.notice.gone ?? Effect.void),
               ),
         ),
       ),
@@ -742,7 +783,10 @@ export const make = Effect.gen(function* () {
       const { heard } = yield* SubscriptionRef.get(state)
       for (const entry of dropped) {
         yield* removeFile(Inbox.audio(entry))
-        if (!("update" in entry)) continue
+        if (!("update" in entry)) {
+          yield* entry.notice.gone ?? Effect.void
+          continue
+        }
         if (!heardAlready(heard, entry.update)) yield* release(entry.hook)
         if (entry.replay !== undefined) yield* replayed(entry.replay)
       }
@@ -799,7 +843,7 @@ export const make = Effect.gen(function* () {
     ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
     /** Whether yapd is on, and how many times it was turned on or off, so what was heard before can tell. */
     power: switched,
-    /** The update being read, or the last one the user heard, what of it was said last, and when. */
+    /** The update being read, or the last one the user heard, what of it was said last, and when, with how many times yapd had been turned on or off then. */
     lastHeard: Effect.sync(() => Option.fromNullable(latest)),
     /** Something is about to be said, like an answer being worked out, so the speaker gets ready meanwhile. */
     coming: soon,
