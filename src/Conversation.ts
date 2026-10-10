@@ -153,11 +153,12 @@ interface Chain {
   /** Parts he's finished that are still being made out, by the id of the look at all of each, with where each comes, where he began it and its audio. */
   readonly checking: Map<number, Part>
   /**
-   * Parts he began once `cue` had been said to the end, with nothing he said
-   * over it known to be him: held, and not made out, as his reply to it,
+   * Parts he began once `cue` had been said to the end, `holding` them while
+   * nothing he said over it may be him: not made out, as his reply to it,
    * should all he said over it turn out to be only its own voice.
    */
   held: Array<Part>
+  holding: boolean
   /** His first stop or wait in it, as he said them, with the part it's in. */
   stop: (Part & { readonly said: string }) | undefined
   /** How far into the line he began the first part that was clearly him, if one was. */
@@ -673,8 +674,15 @@ const mistaken = (stop: string, heard: string, saying: string) => {
   return wordsOf(heard, vocabulary(saying)).some((word) => stopping.some((said) => alike(word, said) || alike(said, word)))
 }
 
-/** What some of what he said over yapd's first seconds comes to: his stop or wait, as he'd say it on its own, him, as `whose` has it, or unclear. */
-type Verdict = { readonly whose: "stop"; readonly stop: string } | { readonly whose: "his" | "unclear" }
+/**
+ * What some of what he said over yapd's first seconds comes to: his stop or
+ * wait, as he'd say it on its own, him, as `whose` has it, or unclear, and
+ * `unheard` when that's as Whisper heard nothing at all in it, or failed.
+ */
+type Verdict =
+  | { readonly whose: "stop"; readonly stop: string }
+  | { readonly whose: "his" }
+  | { readonly whose: "unclear"; readonly unheard?: true }
 
 /**
  * What all of something said over a line yapd was `saying`, before the echo
@@ -686,7 +694,7 @@ type Verdict = { readonly whose: "stop"; readonly stop: string } | { readonly wh
 const judge = (heard: string, saying: string, looked?: string): Verdict => {
   const stop = stopIn(heard, saying) ?? (looked === undefined || mistaken(looked, heard, saying) ? undefined : looked)
   if (stop !== undefined) return { whose: "stop", stop }
-  return { whose: whose(heard, saying) === "his" ? "his" : "unclear" }
+  return whose(heard, saying) === "his" ? { whose: "his" } : { whose: "unclear" }
 }
 
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
@@ -1097,26 +1105,36 @@ export const make = (options: {
             yield* transcriber.transcribe(audio).pipe(
               Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
               whisper.withPermits(1),
-              // Over "Sir?", what's like it is its own voice, so it's told by the rest.
-              Effect.map((heard) => (line.cue ? unsaid(heard) : heard)),
-              Effect.flatMap((heard) =>
-                Queue.offer(signals, {
+              Effect.flatMap((heard) => {
+                // Over "Sir?", what's like it is its own voice, so it's told by the rest.
+                const told = line.cue ? unsaid(heard) : heard
+                const whole = judge(told, saying, looked)
+                return Queue.offer(signals, {
                   _tag: "Looked",
                   id,
-                  stop: how === "whole" ? undefined : stopIn(how === "soFar" ? cutShort(heard) : heard, saying),
-                  ...(how === "soFar" ? {} : { whole: judge(heard, saying, looked) }),
-                }),
-              ),
+                  stop: how === "whole" ? undefined : stopIn(how === "soFar" ? cutShort(told) : told, saying),
+                  ...(how === "soFar" ? {} : { whole: whole.whose === "unclear" && heard.trim() === "" ? { whose: "unclear", unheard: true } : whole }),
+                })
+              }),
               Effect.forkScoped,
             )
             return id
           })
+        /** Once some of what he said over "Sir?" may be him, makes out what he began after it with that, for a stop, as it may go on from it. */
+        const unhold = Effect.gen(function* () {
+          if (chain === undefined) return
+          chain.holding = false
+          for (const reply of chain.held.splice(0)) chain.checking.set(yield* look(reply.audio, chain.at, "whole"), reply)
+        })
         /** Takes in what a part of what he said over its first seconds comes to: his stop, or him, clearly, stops yapd, and anything else is let go. */
         const told = (verdict: Verdict, part: Part) =>
           Effect.gen(function* () {
             if (chain === undefined) return
             // Logged without his words, which are never taken, so none of them can be kept anywhere.
-            if (verdict.whose === "unclear") return yield* Effect.logInfo("Carried on over what may be its own voice")
+            if (verdict.whose === "unclear") {
+              if (verdict.unheard === true) yield* unhold
+              return yield* Effect.logInfo("Carried on over what may be its own voice")
+            }
             if (verdict.whose === "stop") {
               if (chain.stop === undefined || part.order < chain.stop.order) chain.stop = { ...part, said: verdict.stop }
               // Nothing else he said counts, what he began once "Sir?" was over too.
@@ -1124,8 +1142,7 @@ export const make = (options: {
               yield* Effect.logInfo(`Heard him stop it over its first seconds, taking only that: ${verdict.stop}`)
             } else {
               chain.his = Math.min(chain.his ?? part.at, part.at)
-              // What he began once "Sir?" was over may go on from what he said over it, so it's made out with it, for a stop.
-              for (const reply of chain.held.splice(0)) chain.checking.set(yield* look(reply.audio, chain.at, "whole"), reply)
+              yield* unhold
               yield* Effect.logInfo("Heard him over its first seconds, so it falls quiet for him to say it again")
             }
             if (playing) yield* halt
@@ -1152,7 +1169,7 @@ export const make = (options: {
         const close = Effect.gen(function* () {
           if (chain === undefined || speaking || chain.checking.size > 0) return undefined
           // All he said over "Sir?" was only its own voice, so what he began once it was said to the end is his reply to it, taken whole.
-          if (chain.held.length > 0 && chain.stop === undefined && chain.his === undefined) {
+          if (chain.held.length > 0 && chain.holding && chain.stop === undefined) {
             const audio = Endpointer.concat(chain.held.map((part) => part.audio))
             yield* stopLulling
             chain = undefined
@@ -1195,6 +1212,7 @@ export const make = (options: {
                   parts: 0,
                   checking: new Map(),
                   held: [],
+                  holding: true,
                   stop: undefined,
                   his: undefined,
                   silent: false,
@@ -1254,7 +1272,7 @@ export const make = (options: {
                 const paused = part.paused !== undefined && signal.audio.length <= part.paused.samples ? part.paused : undefined
                 const finished = { order: part.order, at: part.at, audio: signal.audio }
                 // Begun once "Sir?" was over, with nothing over it known to be him, it's held for his reply until that's known.
-                if (part.after && chain.his === undefined) chain.held.push(finished)
+                if (part.after && chain.holding) chain.held.push(finished)
                 else if (paused?.whole !== undefined) yield* told(paused.whole, finished)
                 else chain.checking.set(paused?.id ?? (yield* look(signal.audio, chain.at, "whole", part.looked)), finished)
               }

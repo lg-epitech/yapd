@@ -3367,6 +3367,39 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
+  test("takes nothing of what the user goes on with straight after \"Sir?\" when Whisper heard nothing in what was said over it, which may have been him", async () => {
+    const again = "If the tests fail, revert it."
+    for (const delay of [0, 1]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "Which PR was that?"], [0.92, ""], [0.93, "revert it."], [0.94, again]], { delays: [0, delay] })
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          // Over the end of "Sir?", and on a third of a second after it.
+          yield* helper.talk(0.92, 10)
+          yield* helper.finish
+          yield* helper.talk(0.92, 10)
+          yield* helper.talk(0, 10)
+          yield* helper.talk(0.93, 15)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          const asked = { rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent] }
+          yield* helper.finish
+          yield* helper.talk(0.94, 30)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { asked, responded: helper.responded, sent: helper.sent }
+        }),
+      )
+      expect([delay, result]).toEqual([delay, { asked: { rendered: ["Sir?", "Sir?"], responded: [], sent: [] }, responded: [again], sent: [again] }])
+    }
+  }, 30_000)
+
   test("takes nothing of what the user goes on with over \"Sir?\", or while it's still being rendered, though it's said after its first seconds, and all of it when he says it again", async () => {
     const again = "If the build breaks, revert it."
     // Begun late in its first seconds, so "Sir?" is said after them, at once or a moment later, once it's rendered, or early, so
