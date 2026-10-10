@@ -3931,6 +3931,84 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
+  test("takes a reply begun as \"Sir?\" ends whole, though \"Sir?\" got into the microphone over its first seconds and ran into it with no pause, to a question as to an update", async () => {
+    // "Sir?" as it's rendered, its voice lasting 0.84 s.
+    const sir = new Float32Array(24000).fill(0.3, 0, 20160)
+    // Him straight after its voice getting into the microphone, its voice running on a moment past its end on its own, or
+    // him over its end, going on past it.
+    for (const asking of [false, true]) {
+      for (const after of ["reply", "echo", "over"] as const) {
+        const result = await overHelperScoped(
+          Effect.gen(function* () {
+            const answers: Array<string> = []
+            const helper = yield* overHelper([[0.9, "Yes."], [0.95, "Sir."], [0.91, "Yes."], [0.92, "Which PR was that?"]], { live: true, sir })
+            if (asking) {
+              yield* Fiber.interrupt(helper.fiber)
+              yield* Effect.fork(
+                helper.ask({
+                  audio: "/tmp/question.wav",
+                  spoken: "Send it again?",
+                  answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+                }),
+              )
+            }
+            yield* helper.wait(0.5)
+            yield* helper.talk(0.9, 12)
+            yield* helper.quiet
+            yield* helper.quiet
+            while (helper.rendered.length === 0 || helper.plays.length < (asking ? 3 : 2)) yield* helper.talk(0, 1)
+            // A frame at a time, its voice getting in from 0.45 s into it, or him from 0.6 s, until the last frame before it ends.
+            while ((yield* helper.since) < 0.45) yield* helper.talk(0, 1)
+            while ((yield* helper.since) < 0.84 - 0.032) yield* helper.talk(after === "over" && (yield* helper.since) >= 0.6 ? 0.92 : 0.95, 1)
+            if (after === "echo") yield* helper.talk(0.95, 3)
+            else for (let frame = 0; frame < 12; frame++) yield* helper.talk(after === "reply" ? 0.91 : 0.92, 1)
+            yield* helper.quiet
+            yield* helper.wait(1)
+            return { rendered: helper.rendered, responded: helper.responded, sent: helper.sent, answers }
+          }),
+        )
+        const taken = after === "reply" ? ["Yes."] : []
+        expect([asking, after, result]).toEqual([
+          asking,
+          after,
+          {
+            rendered: after === "over" ? ["Sir?", "Sir?"] : asking || after === "echo" ? ["Sir?"] : ["Sir?", "Okay."],
+            responded: asking ? [] : taken,
+            sent: asking ? [] : taken,
+            answers: asking ? taken : [],
+          },
+        ])
+      }
+    }
+  }, 60_000)
+
+  test("takes nothing of what the user goes on with past the end of \"Sir?\" with no pause, having begun before it was played, while it rendered", async () => {
+    const sir = new Float32Array(24000).fill(0.3, 0, 20160)
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // All he says from before "Sir?" until past it heard as "Sir?" alone, as Whisper can miss words said over a voice.
+        const helper = yield* overHelper([[0.9, "If the build breaks,"], [0.93, "if the build breaks,"], [0.95, "Sir."], [0.91, "revert it."]], {
+          live: true,
+          sir,
+          rendering: 0.4,
+          whole: [[0.93, 0.95], "Sir."],
+        })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.quiet
+        while (helper.rendered.length === 0) yield* helper.talk(0, 1)
+        while (helper.plays.length < 2) yield* helper.talk(0.93, 1)
+        while ((yield* helper.since) < 0.84 - 0.032) yield* helper.talk(0.95, 1)
+        for (let frame = 0; frame < 12; frame++) yield* helper.talk(0.91, 1)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { rendered: helper.rendered, responded: helper.responded, sent: helper.sent }
+      }),
+    )
+    expect(result).toEqual({ rendered: ["Sir?"], responded: [], sent: [] })
+  }, 30_000)
+
   test("takes nothing of what the user goes on with straight after \"Sir?\", having begun over it, though that's still being made out, and all of it when he says it again", async () => {
     const again = "If the tests fail, revert it."
     for (const delay of [0, 1]) {
