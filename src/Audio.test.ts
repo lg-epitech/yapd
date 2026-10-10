@@ -1,7 +1,7 @@
 import type { Socket } from "bun"
 import { describe, expect, test } from "bun:test"
 import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Option, Queue, Runtime, type Scope, Stream, TestClock, TestContext } from "effect"
-import { Activity, Audio, type Echo, native } from "./Audio.ts"
+import { Activity, Audio, native } from "./Audio.ts"
 import * as Helper from "./Helper.ts"
 
 interface Command {
@@ -178,7 +178,7 @@ describe("Native audio", () => {
       Effect.gen(function* () {
         const fake = yield* device()
         const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)))
-        /** How yapd's voice may be in the next frame heard. */
+        /** Whether yapd's voice may be in the next frame heard. */
         const hear = (microphone: Queue.Dequeue<Float32Array>) => Effect.flatMap(Queue.take(microphone), fake.audio.echo)
         yield* fake.audio.play("/tmp/fake.wav")
         const microphone = yield* fake.audio.microphone
@@ -191,22 +191,21 @@ describe("Native audio", () => {
         // Heard before it finished, though only looked at after.
         yield* fake.finish
         yield* flush
-        expect(yield* hear(microphone.value)).toBe("talking")
-        // The last of its voice may still come in for half a second after it stops, however long that takes to look at.
-        // One at a time, since the socket takes only so much at once.
-        for (let frame = 0; frame < 17; frame++) yield* Effect.zipRight(fake.frame(0), flush)
-        const after = yield* Effect.forEach(Array.from({ length: 17 }), () => hear(microphone.value))
-        expect(after).toEqual([...Array.from({ length: 16 }, (): Echo => "fading"), undefined])
+        expect(yield* hear(microphone.value)).toBe(true)
+        // Once it has stopped talking, what comes in is taken for him.
+        yield* fake.frame(0)
+        yield* flush
+        expect(yield* hear(microphone.value)).toBe(false)
         // Only what it plays teaches the echo cancellation its voice, however long the quiet after.
         yield* TestClock.adjust("1 minute")
         yield* fake.audio.play("/tmp/next.wav")
         yield* fake.frame(0)
         yield* flush
-        expect(yield* hear(microphone.value)).toBe("talking")
+        expect(yield* hear(microphone.value)).toBe(true)
         yield* TestClock.adjust("1 second")
         yield* fake.frame(0)
         yield* flush
-        expect(yield* hear(microphone.value)).toBe("playing")
+        expect(yield* hear(microphone.value)).toBe(false)
         // Once it has rested, the next voice processor starts over.
         yield* fake.audio.rest
         yield* fake.audio.play("/tmp/after.wav")
@@ -215,7 +214,7 @@ describe("Native audio", () => {
         if (Option.isNone(next)) return expect(Option.isSome(next)).toBe(true)
         yield* fake.frame(0)
         yield* flush
-        expect(yield* hear(next.value)).toBe("talking")
+        expect(yield* hear(next.value)).toBe(true)
       }),
     ))
 

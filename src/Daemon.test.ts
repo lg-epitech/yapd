@@ -149,7 +149,7 @@ const make = (says?: string, options: {
           }
         }),
       microphone: Effect.succeed(listening ? Option.some(microphone) : Option.none()),
-      echo: () => Effect.sync(() => (echoed++ < (options.echoing ?? 0) ? "talking" : undefined)),
+      echo: () => Effect.sync(() => echoed++ < (options.echoing ?? 0)),
       rest: Effect.sync(() => void rests++),
       warm: Effect.sync(() => void warms++),
     }),
@@ -2361,31 +2361,40 @@ describe("Daemon", () => {
   })
 
   test.each([
-    ["a dictation", "as he talks over an update's first seconds"],
-    ["a dictation", "as it says \"Sir?\" for him to say it again"],
-    ["turning yapd off", "as he talks over an update's first seconds"],
-    ["turning yapd off", "as it says \"Sir?\" for him to say it again"],
-  ] as const)("sends and notes nothing he said when %s cuts in %s", async (cut, when) => {
+    ["a dictation", "while he's still talking over an update's first seconds"],
+    ["a dictation", "while what he said over them is still being worked out"],
+    ["turning yapd off", "while he's still talking over an update's first seconds"],
+    ["turning yapd off", "while what he said over them is still being worked out"],
+  ] as const)("sends and notes nothing he said when %s cuts in %s, once it has stopped for him", async (cut, when) => {
     const result = await run(
       Effect.gen(function* () {
+        const stops: Array<string> = []
         // Its own voice can get in for as long as he talks, as before the echo cancellation has learnt it.
-        const { finish, talk, wait, dictate, toggle, followUps, responded, played, journal } = yield* make("Tell it to deploy.", { echoing: 60 })
+        const { finish, microphone, flush, talk, wait, dictate, toggle, followUps, responded, played, journal } = yield* make("Tell it to deploy.", {
+          echoing: 60,
+          thinking: 5,
+          stopping: Effect.sync(() => void stops.push("stopped")).pipe(Effect.as(2)),
+        })
         yield* finish("a", "The PR is ready.")
-        yield* talk
-        // Clearly him, so it fell quiet, and asks once the last of its voice can no longer be coming in.
-        if (when.includes("Sir?")) yield* wait(3)
-        const before = [...played]
+        if (when.startsWith("while he's")) yield* Queue.offerAll(microphone, Array.from({ length: 30 }, () => new Float32Array(512).fill(0.9))).pipe(Effect.zipRight(flush))
+        else yield* talk
+        const before = { played: [...played], stops: [...stops], responded: [...responded] }
         if (cut === "a dictation") {
           const dictation = yield* dictate
           yield* wait(1)
           yield* Scope.close(dictation, Exit.void)
         } else yield* toggle(false)
         yield* wait(30)
-        return { before, followUps: [...followUps], responded: [...responded], replies: yield* journal.since(0, { kinds: ["reply"] }) }
+        return { before, followUps: [...followUps], replies: yield* journal.since(0, { kinds: ["reply"] }) }
       }),
     )
-    expect(result.before).toEqual(when.includes("Sir?") ? ["yapd. The PR is ready.", "Sir?"] : ["yapd. The PR is ready."])
-    expect(result).toMatchObject({ followUps: [], responded: [], replies: [] })
+    // Stopped at once for him, as anywhere in a line, and what he finished saying taken whole to work out.
+    expect(result.before).toEqual({
+      played: ["yapd. The PR is ready."],
+      stops: ["stopped"],
+      responded: when.startsWith("while he's") ? [] : ["Tell it to deploy."],
+    })
+    expect(result).toMatchObject({ followUps: [], replies: [] })
   })
 
   test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s said in other words in its place tells its own voice getting into the microphone by those, so it's never what he said", async (_, kind) => {
@@ -2416,14 +2425,13 @@ describe("Daemon", () => {
         yield* wait(5)
         yield* speak
         yield* wait(5)
-        yield* wait(10)
+        yield* wait(15)
         return { played: [...played], told }
       }),
     )
-    expect(result).toEqual({
-      played: ["Codex on yapd and the Tezos one are both running their tests now. Which one?"],
-      told: kind === "answer" ? ["heard"] : ["heard", "unanswered"],
-    })
+    // Stopped for its own voice, it picked up again, saying nothing.
+    const line = "Codex on yapd and the Tezos one are both running their tests now. Which one?"
+    expect(result).toEqual({ played: [line, line], told: kind === "answer" ? ["heard"] : ["heard", "unanswered"] })
   })
 
   test("a notice that goes stale while the words said in its place are rendered is never played, nor told it was said in them", async () => {

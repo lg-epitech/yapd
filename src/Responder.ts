@@ -29,6 +29,12 @@ export interface Interruption {
   /** What's been said about the update so far, oldest first, ending with yapd's line they spoke over. */
   readonly lines: ReadonlyArray<Line>
   readonly heard: string
+  /**
+   * What yapd was saying around when they began, when that was while its own
+   * voice could still get into the microphone: the first words heard may be
+   * some of it, or their first word lost under it.
+   */
+  readonly echo?: string
 }
 
 export class RespondError extends Data.TaggedError("RespondError")<{ readonly cause: unknown }> {}
@@ -58,7 +64,7 @@ ${aloud}
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Write "message" in the language they spoke.`
 
-export const prompt = ({ project, turn, needsYou, lines, heard }: Interruption, style: Option.Option<string>) =>
+export const prompt = ({ project, turn, needsYou, lines, heard, echo }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
@@ -71,6 +77,11 @@ export const prompt = ({ project, turn, needsYou, lines, heard }: Interruption, 
     `Conversation so far, where "…" marks where you were cut off:\n${lines
       .map(({ speaker, text }) => `${speaker === "yapd" ? "You" : "User"}: ${text}`)
       .join("\n")}`,
+    ...(echo === undefined
+      ? []
+      : [
+          `They began while your own voice could still get into their microphone, so the first words heard may be yours, from around "${echo}", or their first word may be lost under it. If a message for the agent sounds cut off, or its meaning hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.`,
+        ]),
     `What the user just said:\n${heard}`,
   ].join("\n\n")
 
