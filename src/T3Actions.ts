@@ -167,6 +167,12 @@ export interface Detail {
   readonly plan: Option.Option<string>
   /** Every request it still waits on him for, oldest first, even one asked alongside a newer one, which its summary in T3 Code hides. */
   readonly pending: ReadonlyArray<string>
+  /**
+   * Whether a request it no longer waits on was answered, rather than
+   * cancelled, as stopping its run or a message steered in does to it. Taken
+   * as answered when T3 Code keeps no record of it.
+   */
+  readonly resolved: (id: string) => boolean
 }
 
 const decodeItem = Schema.decodeUnknownOption(Item)
@@ -187,6 +193,12 @@ const asking: ReadonlyArray<string> = ["approval_request", "user_input_request",
  * own record of each, which keeps one asked alongside a newer one that the
  * thread's summary shows instead, or by its turn items when it keeps none.
  */
+/** Whether T3 Code's own record of a request has it answered rather than cancelled or expired, or it keeps none. */
+export const resolvedIn = (projection: Pick<Projection, "runtimeRequests">) => (id: string) => {
+  const kept = projection.runtimeRequests.flatMap((request) => Option.toArray(decodeRuntimeRequest(request))).find((request) => request.id === id)
+  return kept === undefined || kept.status === "resolved"
+}
+
 export const waitingOn = (projection: Pick<Projection, "runtimeRequests" | "turnItems">): ReadonlyArray<string> => {
   const kept = projection.runtimeRequests.flatMap((request) => Option.toArray(decodeRuntimeRequest(request)))
   if (kept.length > 0) return kept.filter(({ status }) => status === "pending").map(({ id }) => id)
@@ -749,6 +761,7 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
           request: Option.flatMap(Option.fromNullable(waiting), (id) => request(projection.turnItems, id)),
           plan: plan(projection.plans),
           pending: waitingOn(projection),
+          resolved: resolvedIn(projection),
         } satisfies Detail
       }),
 

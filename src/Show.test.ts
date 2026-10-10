@@ -56,6 +56,7 @@ const detail = (what: string, request: T3Actions.Request = approval(what)): T3Ac
   request: Option.some(request),
   plan: Option.none(),
   pending: [request.id],
+  resolved: () => true,
 })
 
 const lines: Persona.Lines = { ...Persona.plain, address: "sir" }

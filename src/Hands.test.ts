@@ -39,6 +39,8 @@ interface Bounded {
   runs: Array<{ id: string; status: string; ordinal: number; userMessageId?: string; queueHeld?: boolean }>
   messages: Array<{ id: string; role: string; text: string; createdAt: string; runId?: string | null }>
   turnItems: Array<Record<string, unknown>>
+  /** T3 Code's own record of each request the thread asked him, when it keeps one. */
+  runtimeRequests?: Array<{ id: string; status: string }>
 }
 
 /**
@@ -1772,17 +1774,17 @@ describe("Hands", () => {
     expect(result.held).toEqual([])
   })
 
-  test("a message for now to a thread whose turn is waiting, which T3 Code won't steer into, goes in its queue, and he's told why", async () => {
-    const waiting = (pending: boolean) =>
+  test("a message for now to a thread whose turn is waiting, which T3 Code won't steer into, or waits on him for something, which steering in would drop, goes in its queue, and he's told why", async () => {
+    const waiting = (pending: boolean, status = "waiting") =>
       run(
         Effect.gen(function* () {
           const asking = thread(tezos.id, {
-            activeRunId: null,
-            activityRunStatus: "waiting",
-            status: "waiting",
+            activeRunId: status === "waiting" ? null : "run-1",
+            activityRunStatus: status,
+            status,
             pendingRuntimeRequest: pending ? { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } : null,
           })
-          const { send, dispatched } = yield* hands({ thread: asking, runs: [{ id: "run-1", status: "waiting", ordinal: 1 }] })
+          const { send, dispatched } = yield* hands({ thread: asking, runs: [{ id: "run-1", status, ordinal: 1 }] })
           const outcome = yield* send("u1", "Use the Mina fee table.")
           const said = outcome._tag === "Done" ? Hands.done({ _tag: "Message", to: tezos, text: "", how: "now" }, outcome.how, lines, Option.some("Migrate Tezos Integration"), outcome) : outcome._tag
           return { outcome: outcome._tag === "Done" ? [outcome.how, outcome.waiting] : outcome._tag, said, dispatched }
@@ -1797,6 +1799,12 @@ describe("Hands", () => {
     const finishing = await waiting(false)
     expect(finishing.outcome).toEqual(["queued", "finishing"])
     expect(finishing.said).toBe("Migrate Tezos Integration is finishing something off, sir, so that will go once it's done.")
+    // As T3 Code shows a turn waiting on a question or an approval: still running, which a message steered in would cancel what it waits on.
+    const running = await waiting(true, "running")
+    expect(running.dispatched[0]).toMatchObject({ type: "message.dispatch", dispatchMode: { type: "queue_after_active" } })
+    expect(running.dispatched[0]).not.toHaveProperty("deliveryIntent")
+    expect(running.outcome).toEqual(["queued", "asked"])
+    expect(running.said).toBe(asked.said)
   })
 
   test("a message that goes into a queue a stop put on hold, behind a turn begun since, is said to wait till it's let carry on, whether T3 Code answers, its answer is lost, or it goes on his yes", async () => {
@@ -2629,6 +2637,27 @@ describe("Hands", () => {
     expect(result.restarted).toEqual(Option.some("abandoned"))
     expect(result.unconfirmed).toEqual(["yapd:u1:0"])
     expect(result.undelivered).toBe(0)
+  })
+
+  test("an answer that may not have got there isn't taken for one that did once what it answered was cancelled meanwhile, as stopping the run does", async () => {
+    const asking = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const answering = (status: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* hands({ thread: asking, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+          made.bounded.turnItems.push({ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "colour", header: "Colour", question: "Which colour?", options: [{ label: "Red" }, { label: "Blue" }] }] })
+          // Its reply lost, the thread no longer waits on it by the time it's looked for: answered, or cancelled by a stop meanwhile.
+          made.answering((_, bounded) => {
+            bounded.runtimeRequests = [{ id: "q1", status }]
+            made.becomes({ ...asking, pendingRuntimeRequest: null })
+            return Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+          })
+          const outcome = yield* made.run({ utterance: "u1", step: 0 }, { _tag: "Reply", to: tezos, requestId: "q1", answers: { colour: "Red" }, said: Option.none() })
+          return outcome._tag
+        }),
+      )
+    expect(await answering("resolved")).toBe("Done")
+    expect(await answering("cancelled")).toBe("Unknown")
   })
 
   test("an answer to a question that asks him to type in a secret, or to a secret it asks for, is never sent", async () => {

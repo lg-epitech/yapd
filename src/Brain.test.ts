@@ -225,7 +225,7 @@ describe("Brain", () => {
     const [colour] = open.asks?._tag === "Question" ? open.asks.questions : []
     const looked = Brain.prompt(
       situation("What's it asking?", {
-        second: Option.some({ ref: ref(tezos), detail: { messages: [], runs: [], request: Option.some({ _tag: "Question", id: "q1", questions: [colour!], mode: "live" }), plan: Option.none(), pending: ["q1"] } }),
+        second: Option.some({ ref: ref(tezos), detail: { messages: [], runs: [], request: Option.some({ _tag: "Question", id: "q1", questions: [colour!], mode: "live" }), plan: Option.none(), pending: ["q1"], resolved: () => true } }),
       }),
       Option.none(),
     )
