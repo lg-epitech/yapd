@@ -2236,46 +2236,55 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   })
 
-  test("doesn't stop for a stop a look heard only as the last word when Whisper heard nothing in all of it, which can't bear it out", async () => {
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        const spoken = "Codex is resizing the storage volume for the database now, sir, and then it will restart the server once that's done."
-        // "Storage", cut off by a look about a second in, then all of it heard as nothing at all, as when Whisper fails on it.
-        const helper = yield* overHelper([[0.8, "Codex is resizing the stop"], [0.81, ""]], { spoken, whole: [[0.8, 0.81], ""], live: true })
-        yield* helper.wait(0.3)
-        yield* helper.talk(0.8, 36)
-        const looking = [...helper.commands]
-        yield* helper.talk(0.81, 10)
-        yield* helper.quiet
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { looking, commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
-      }),
-    )
-    expect(result).toEqual({ looking: ["play"], commands: ["play"], responded: [], sent: [], replies: [] })
+  test("doesn't stop for a stop a look heard only as the last word when Whisper heard nothing in all of it, which can't bear it out, even when that look comes back only once he's finished", async () => {
+    // The look back at once, or a second and a half on, half a second after he's finished.
+    for (const delays of [[], [1.5]]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const spoken = "Codex is resizing the storage volume for the database now, sir, and then it will restart the server once that's done."
+          // "Storage", cut off by a look about a second in, then all of it heard as nothing at all, as when Whisper fails on it.
+          const helper = yield* overHelper([[0.8, "Codex is resizing the stop"], [0.81, ""]], { spoken, whole: [[0.8, 0.81], ""], live: true, delays })
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 36)
+          const looking = [...helper.commands]
+          yield* helper.talk(0.81, 10)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.wait(1)
+          return { looking, commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([delays, result]).toEqual([delays, { looking: ["play"], commands: ["play"], responded: [], sent: [], replies: [] }])
+    }
   })
 
-  test("doesn't stop for a stop a look heard only as the last word when all of it has a word of its like it there, like its \"text\" for \"next\"", async () => {
-    const result = await overHelperScoped(
-      Effect.gen(function* () {
-        const spoken = "Codex rewrote the help text for the importer, sir, and the pull request on yapd is ready for review whenever you are."
-        // "Text", heard as "next" by a look about a second in, then as it is in all of it.
-        const helper = yield* overHelper([[0.8, "Codex rewrote the help next"], [0.81, ""]], {
-          spoken,
-          whole: [[0.8, 0.81], "Codex rewrote the help text for the importer."],
-          live: true,
-        })
-        yield* helper.wait(0.3)
-        yield* helper.talk(0.8, 36)
-        const looking = [...helper.commands]
-        yield* helper.talk(0.81, 10)
-        yield* helper.quiet
-        yield* helper.quiet
-        yield* helper.wait(1)
-        return { looking, commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
-      }),
-    )
-    expect(result).toEqual({ looking: ["play"], commands: ["play"], responded: [], sent: [], replies: [] })
+  test("doesn't stop for a stop a look heard only as the last word when all of it has a word of its like it there, like its \"text\" for \"next\", even when that look comes back only once he's finished", async () => {
+    // The look back at once, or a second and a half on, half a second after he's finished.
+    for (const delays of [[], [1.5]]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const spoken = "Codex rewrote the help text for the importer, sir, and the pull request on yapd is ready for review whenever you are."
+          // "Text", heard as "next" by a look about a second in, then as it is in all of it.
+          const helper = yield* overHelper([[0.8, "Codex rewrote the help next"], [0.81, ""]], {
+            spoken,
+            whole: [[0.8, 0.81], "Codex rewrote the help text for the importer."],
+            live: true,
+            delays,
+          })
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 36)
+          const looking = [...helper.commands]
+          yield* helper.talk(0.81, 10)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.wait(1)
+          return { looking, commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([delays, result]).toEqual([delays, { looking: ["play"], commands: ["play"], responded: [], sent: [], replies: [] }])
+    }
   })
 
   test("lets go of the user's words run on from its own voice, carrying on, and passes them on whole when he says them again after them", async () => {
