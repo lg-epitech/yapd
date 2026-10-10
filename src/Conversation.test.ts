@@ -2210,6 +2210,32 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   })
 
+  test("stops for a stop of his a look about a second in heard, though that look comes back only once he's finished, and Whisper hears only yapd's voice in all of it", async () => {
+    // Heard only as the last word, or with a word after it.
+    for (const looked of ["Wait.", "Wait. Over"]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          // Whisper takes a second and a half over the look, so it's back half a second after he's finished.
+          const helper = yield* overHelper([[0.8, looked], [0.81, ""]], { whole: [[0.8, 0.81], "and the PR."], live: true, intent: "dismiss", delays: [1.5] })
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 36)
+          yield* helper.talk(0.81, 10)
+          yield* helper.quiet
+          const finished = { transcribed: [...helper.transcribed], commands: [...helper.commands] }
+          // The microphone goes on hearing quiet, as the last of its voice stops coming in.
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.wait(1)
+          return { finished, commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([looked, result]).toEqual([
+        looked,
+        { finished: { transcribed: [looked], commands: ["play"] }, commands: ["play", "stop"], responded: ["Wait."], sent: [], replies: ["Wait."] },
+      ])
+    }
+  })
+
   test("doesn't stop for a stop a look heard only as the last word when Whisper heard nothing in all of it, which can't bear it out", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

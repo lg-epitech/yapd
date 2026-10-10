@@ -164,6 +164,14 @@ interface Chain {
   /** Parts he's finished that are still being made out, by the id of the look at all of each, with where each comes, where he began it and its audio. */
   readonly checking: Map<number, Part>
   /**
+   * Parts he finished while a look at some of each was still under way, by
+   * that look's id, with the stop a look found and the one heard only as the
+   * last word so far: all of each is made out once that look is back, with
+   * what it found too, so a stop of his it hears isn't lost for coming back
+   * a moment after he finished.
+   */
+  readonly waiting: Map<number, Part & { readonly looked: string | undefined; readonly ending: string | undefined }>
+  /**
    * Parts he began once `cue` had been said to the end, `holding` them while
    * nothing he said over it may be him: not made out, as his reply to it,
    * should all he said over it turn out to be only its own voice.
@@ -1240,7 +1248,7 @@ export const make = (options: {
          * soon as he's finished.
          */
         const close = Effect.gen(function* () {
-          if (chain === undefined || speaking || chain.checking.size > 0) return undefined
+          if (chain === undefined || speaking || chain.checking.size > 0 || chain.waiting.size > 0) return undefined
           // All he said over "Sir?" was only its own voice, so what he began once it was said to the end is his reply to it, taken whole.
           if (chain.held.length > 0 && chain.holding && chain.stop === undefined) {
             const audio = Endpointer.concat(chain.held.map((part) => part.audio))
@@ -1287,6 +1295,7 @@ export const make = (options: {
                   part: undefined,
                   parts: 0,
                   checking: new Map(),
+                  waiting: new Map(),
                   held: [],
                   holding: true,
                   stop: undefined,
@@ -1352,7 +1361,10 @@ export const make = (options: {
                 // Begun once "Sir?" was over, with nothing over it known to be him, it's held for his reply until that's known.
                 if (part.after && chain.holding) chain.held.push(finished)
                 else if (paused?.whole !== undefined) yield* told(paused.whole, finished)
-                else chain.checking.set(paused?.id ?? (yield* look(signal.audio, chain.at, "whole", part.looked, part.ending)), finished)
+                else if (paused !== undefined) chain.checking.set(paused.id, finished)
+                // A look at some of it still under way is waited for, as what it finds is for all of it to bear out too.
+                else if (part.looking !== undefined) chain.waiting.set(part.looking, { ...finished, looked: part.looked, ending: part.ending })
+                else chain.checking.set(yield* look(signal.audio, chain.at, "whole", part.looked, part.ending), finished)
               }
               const closed = yield* close
               if (closed !== undefined) return closed
@@ -1370,6 +1382,16 @@ export const make = (options: {
                 yield* Effect.logInfo(`Stopping for him over its first seconds: ${signal.stop}`)
                 part.looked ??= signal.stop
                 if (playing) yield* halt
+                break
+              }
+              const waited = chain.waiting.get(signal.id)
+              if (waited !== undefined) {
+                chain.waiting.delete(signal.id)
+                // Back once he'd finished, what it found goes with all of it, which has the last say: yapd stops for it only then.
+                const { looked = signal.stop, ending = signal.ending, ...finished } = waited
+                if (chain.stop === undefined) chain.checking.set(yield* look(finished.audio, chain.at, "whole", looked, ending), finished)
+                const closed = yield* close
+                if (closed !== undefined) return closed
                 break
               }
               const checked = chain.checking.get(signal.id)
