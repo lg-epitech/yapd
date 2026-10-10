@@ -77,6 +77,8 @@ Live on `dev` now: everything below except "Needs you". Rig's threads are follow
 - Over those seconds, a "stop", "wait" or "skip" anywhere in what you say is taken on its own, like "Tell it to stop the migration." or "Skip the tests.", and nothing else you said then: say the rest again.
 - What you say over those seconds with some of yapd's own words in it, like "Tell it to fix the tests,", is let go and yapd talks on. Pause for more than about 0.7 s and go on once those seconds are over, and what you go on with is taken on its own: say it all again.
 - What you start within about 0.7 s of yapd's own voice last getting in, as those seconds end, is still heard as said over them, so with any of yapd's words in it, like the "PR" of "Tell it to open a PR.", it's let go, as yapd talks on: say it again.
-- Said over "Sir?" itself, "Sure." or "Sorry?" is taken for its own voice and let go: say it again once it has finished.
+- Said over "Sir?" itself, "Sure." or "Sorry?" is taken for its own voice and let go: say it again once it has finished. Start "Sure, … once CI is green." over its end and pause after "Sure,", and only "once CI is green." is taken.
+- Once you've talked over "Sir?" twice, or it couldn't be said, it isn't said again, and what you say within about two seconds of your last words is let go: pause, then say it all again.
+- A "stop", "wait" or "skip" said over yapd's first three seconds at a loud volume can be lost under its voice, as yapd talks on: say it again.
 - A "stop" or "wait" on its own is taken for yapd's voice when yapd says "stopped" or "waiting" within a few seconds of it.
 - "Of course." or "okay" on its own, said over a short question of yapd's, is let go as something Whisper makes up, with no "Sir?", and so is an answer begun over the question's last word: say it again.
