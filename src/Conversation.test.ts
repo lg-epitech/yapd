@@ -3587,6 +3587,42 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ rendered: ["Sir?"], answered: true, answers: [said] })
   })
 
+  test("waits as long for an answer once \"Sir?\" has been talked over twice as after the question it stands in for", async () => {
+    const said = "Neither, start a new project."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const thinking = "Let me think about it."
+        const helper = yield* overHelper([[0.9, thinking], [0.91, thinking], [0.92, thinking], [0.93, said]], { duration: 3.5, live: true })
+        yield* Fiber.interrupt(helper.fiber)
+        const asking = yield* Effect.fork(
+          helper.ask({
+            audio: "/tmp/question.wav",
+            spoken: "Which one, sir: yapd or the docs site?",
+            answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+          }),
+        )
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        for (const value of [0.91, 0.92]) {
+          while (helper.rendered.length < (value === 0.91 ? 1 : 2)) yield* helper.talk(0, 1)
+          yield* helper.talk(value, 15)
+          yield* helper.quiet
+        }
+        // He takes five seconds over it once "Sir?" won't be said again, more than the three after an update.
+        yield* helper.talk(0, 156)
+        yield* helper.talk(0.93, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { rendered: helper.rendered, answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    expect(result).toEqual({ rendered: ["Sir?", "Sir?"], answered: true, answers: [said] })
+  }, 30_000)
+
   test("takes nothing the user begins as the last of its voice comes in after a short question, while what he said over it was still being made out as it ended", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
