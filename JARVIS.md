@@ -42,7 +42,7 @@ Live on `dev` now: everything below except "Needs you". Rig's threads are follow
 - Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message or an answer in your own words goes by voice or new work starts, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
-- You can interrupt from the first word of an update or an answer. Over yapd's first three seconds, "stop", "wait" or "skip" work at once, and other words work when they're clearly yours; otherwise say it again once it's a few seconds in.
+- You can interrupt from the first word of an update or an answer. Over yapd's first three seconds, "stop", "wait" or "skip" work at once; anything else you say makes it fall quiet and say "Sir?", and then you say it again.
 - "Who needs me?" and usage need no model call; a status question takes one, against a minute or more in the reverted attempt.
 
 ## Under the hood
@@ -70,11 +70,9 @@ Live on `dev` now: everything below except "Needs you". Rig's threads are follow
 - If T3 Code is slow to hand over a question as it arrives, you're only told one is waiting; "what's the question?" reads it to you.
 - Catching up, if yapd has to ask "which one?" about your follow-up, the next "what did I miss?" may say "Nothing else." though an update is still unheard.
 - After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
-- Over yapd's first three seconds, its own voice heard as wholly other words, like "Oh, Rennie app." for "Over in yapd", can still stop it and be taken for yours. A transcription still running as those seconds end can let the start of its voice duck or stop it too.
-- Over those seconds, a "stop" or "wait" with some of yapd's own words in what you said is taken on its own, like "Tell it to stop the migration." as yapd says "migration".
-- Over those seconds, what you say either side of a pause is judged apart, so a second part in yapd's own words, like "the migration." after "Tell it to stop.", is left out. When the first part isn't taken and reads as broken off, like "Tell it to fix the tests,", what you go on with in the next three seconds is let go too, and when only its "stop" is taken, so is anything you add before yapd answers that: say it all again. After a first part that isn't taken but reads as finished, only what starts like "and then…" is let go.
-- yapd's own voice over those seconds, heard as words that aren't its own and that read as broken off, like "…and the PR,", lets go of anything but a stop you say in the three seconds after it: say it again.
-- Going on within half a second of yapd stopping for what you said over those seconds, with some of its words in what you add, lets all of it go, or keeps only your "stop", and yapd picks up again: say it again.
-- What you start saying within about a third of a second of those seconds ending can be heard together with yapd's voice before it and let go: say it again.
+- Over yapd's first three seconds, its own voice heard as wholly other words, like "is important." for "importer", can make it fall quiet and say "Sir?" as if you'd spoken. Nothing of it is ever taken.
+- Over those seconds, a "stop", "wait" or "skip" anywhere in what you say is taken on its own, like "Tell it to stop the migration." or "Skip the tests.", and nothing else you said then: say the rest again.
+- What you say over those seconds with some of yapd's own words in it, like "Tell it to fix the tests,", is let go and yapd talks on. Pause for more than about 0.7 s and go on once those seconds are over, and what you go on with is taken on its own: say it all again.
+- What you start within about a quarter of a second of yapd's own voice coming in, as those seconds end, can be heard together with it and let go, as yapd talks on: say it again.
 - A "stop" or "wait" on its own is taken for yapd's voice when yapd says "stopped" or "waiting" within a few seconds of it.
-- "Of course." or "okay" on its own, said straight over the end of a short question of yapd's, isn't taken for an answer: "yes" is. An answer begun over the question's last word, or less than a quarter of a second after it, can be left with it: yapd stays quiet, so say it again.
+- "Of course." or "okay" on its own, said over a short question of yapd's, is let go as something Whisper makes up, with no "Sir?", and so is an answer begun over the question's last word: say it again.
