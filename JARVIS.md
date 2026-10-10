@@ -2,9 +2,9 @@
 
 A short list of what this branch changed and what yapd can do now. The commit log has the detail, including every fix that came out of review.
 
-Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite` and `yapd.before-followups.sqlite`.
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite` and `yapd.before-m3.sqlite`.
 
-Live on `dev` now: everything below except "Needs you". Rig's threads are followed, waiting on their first voice checks with you. Built, waiting on review and a first run with you: "Needs you", on this Mac and rig alike.
+Live on `dev` now: everything below. Rig's threads, and agents' questions read out and answered by voice, are waiting on their first voice checks with you. Being built: interrupting yapd from its first word.
 
 ## Talk to it (the shortcut)
 
