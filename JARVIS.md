@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite` and `yapd.before-interrupt.sqlite`.
 
-Live on `dev` now: everything below. Rig's threads, agents' questions read out and answered by voice, and interrupting yapd from its first word are waiting on their first voice checks with you.
+Live on `dev` now: everything below, except that talking over yapd's first seconds now stops it at once, which is built and waiting on review. Rig's threads and agents' questions read out and answered by voice are waiting on their first voice checks with you.
 
 ## Talk to it (the shortcut)
 
@@ -42,7 +42,7 @@ Live on `dev` now: everything below. Rig's threads, agents' questions read out a
 - Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message or an answer in your own words goes by voice or new work starts, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
-- You can interrupt from the first word of an update or an answer. Over yapd's first three seconds, "stop", "wait" or "skip" work at once; anything else you say makes it fall quiet and say "Sir?", and then you say it again.
+- You can interrupt from the first word of an update or an answer: it stops as soon as you're clearly talking, as anywhere in a line, and if only its own voice stopped it, it picks up again just before, without a word. Over an update's first three seconds, the model is told your first words may be yapd's own: a question or "okay, thanks" is acted on as usual, and a message that may be cut off gets "say that again".
 - "Who needs me?" and usage need no model call; a status question takes one, against a minute or more in the reverted attempt.
 
 ## Under the hood
@@ -73,15 +73,6 @@ Live on `dev` now: everything below. Rig's threads, agents' questions read out a
 - Codex asks questions only in Plan mode. T3 Code's own "resume session" question, when it brings back an old Claude session, is read out like an agent's.
 - Catching up, if yapd has to ask "which one?" about your follow-up, the next "what did I miss?" may say "Nothing else." though an update is still unheard.
 - After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
-- Over yapd's first three seconds, its own voice heard as wholly other words, like "is important." for "importer", can make it fall quiet and say "Sir?" as if you'd spoken. Nothing of it is ever taken.
-- Over those seconds, a "stop", "wait" or "skip" anywhere in what you say is taken on its own, like "Tell it to stop the migration." or "Skip the tests.", and nothing else you said then: say the rest again.
-- What you say over those seconds with some of yapd's own words in it, like "Tell it to fix the tests,", is let go and yapd talks on. Pause for more than about 0.7 s and go on once those seconds are over, and what you go on with is taken on its own: say it all again.
-- What you start within about 0.7 s of yapd's own voice last getting in, as those seconds end, is still heard as said over them, so with any of yapd's words in it, like the "PR" of "Tell it to open a PR.", it's let go, as yapd talks on: say it again.
-- Said over "Sir?" itself, "Sure." or "Sorry?" is taken for its own voice and let go: say it again once it has finished. Start "Sure, … once CI is green." over its end and run straight on, and none of it is taken: yapd says "Sir?" again. Pause after "Sure,", and only "once CI is green." is taken.
-- Once you've talked over "Sir?" twice, or it couldn't be said, it isn't said again: what you begin within about two seconds of your last words is let go, and yapd listens only its usual few seconds from then (eight after a question), however much is said meanwhile, even partway through a sentence, then moves on. Pause, then say it all again before that. Go on within a second or so of talking over the last "Sir?", and those seconds are up before a pause long enough is over, so nothing more you say there is taken: say it with the shortcut once yapd has moved on.
-- Talk over yapd's first three seconds, or over "Sir?", that goes on for half a minute with no pause of about 0.7 s, like a TV, is let go whole: yapd moves on with no "Sir?", and an update it fell quiet for isn't read to the end.
-- Those two seconds count from any voice the microphone hears, not only yours: a cough, someone else in the room or the TV just before your reply has it let go too.
-- When yapd falls quiet in its first seconds, "Sir?" plays in them too, and its own voice can get into the microphone: a reply you begin right as it ends, or straight after it when its voice is heard as other words, like "What?", or as nothing Whisper can make out, is heard as said over it, so you get "Sir?" again; after the second, pause about two seconds before you say it.
-- Over yapd's first three seconds, with it playing loud, a "stop", "wait" or "skip" is sometimes lost under its voice, as yapd talks on: 5 to 9 of 30 over loud playback in testing. Say it again.
-- A "stop" or "wait" on its own is taken for yapd's voice when yapd says "stopped" or "waiting" within a few seconds of it.
-- "Of course." or "okay" on its own, said over a short question of yapd's, is let go as something Whisper makes up, with no "Sir?", and so is an answer begun over the question's last word: say it again.
+- Over yapd's first three seconds, its own voice can stop it as if you'd spoken: it picks up again a second and a half back, without a word, so you may hear the start of a line twice.
+- Over those seconds, "Thank you." or "Bye." on its own, or only words yapd was saying then, like "Stop." over its "stopped" or "Open it." over its "opened", is taken for its own voice, and it picks up again: say it again, or "Okay, thanks." to end it.
+- Over those seconds, yapd's own voice heard as other words, like "is important." for its "importer", goes to the model as if you'd said it, which may ask you to say it again rather than pick up.
