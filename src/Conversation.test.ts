@@ -1009,6 +1009,8 @@ const overHelper = (
     readonly lagging?: readonly [number, number]
     /** Samples, at 24 kHz, of a file rendered for "Sir?", which then plays for as long as the file lasts and finishes by itself. */
     readonly sir?: Float32Array
+    /** Whether "Sir?" can't be rendered. */
+    readonly speechless?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -1164,14 +1166,16 @@ const overHelper = (
       }),
       Layer.succeed(Voice, {
         render: (text, path) =>
-          Effect.sync(() => void rendered.push(text)).pipe(
-            Effect.zipRight(options.rendering === undefined ? Effect.void : Effect.sleep(`${options.rendering} seconds`)),
-            Effect.zipRight(
-              options.sir === undefined || text !== Conversation.cue
-                ? Effect.void
-                : Effect.promise(() => Bun.write(path, wav(options.sir!, 24000))).pipe(Effect.zipRight(Effect.sync(() => void files.add(path)))),
-            ),
-          ),
+          options.speechless === true && text === Conversation.cue
+            ? Effect.fail(new ProcessError({ command: "kokoro", code: 1, stderr: "It couldn't render." }))
+            : Effect.sync(() => void rendered.push(text)).pipe(
+                Effect.zipRight(options.rendering === undefined ? Effect.void : Effect.sleep(`${options.rendering} seconds`)),
+                Effect.zipRight(
+                  options.sir === undefined || text !== Conversation.cue
+                    ? Effect.void
+                    : Effect.promise(() => Bun.write(path, wav(options.sir!, 24000))).pipe(Effect.zipRight(Effect.sync(() => void files.add(path)))),
+                ),
+              ),
       }),
     )
     const context = yield* Layer.build(layer)
@@ -3162,7 +3166,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
-  test("takes nothing said over \"Sir?\" either, saying it once more, then only listening, and takes what he says after that whole", async () => {
+  test("takes nothing said over \"Sir?\" either, saying it once more, then only listening, and takes what he says after that whole, once he's paused a while", async () => {
     const said = "Which PR was that?"
     const result = await overHelperScoped(
       Effect.gen(function* () {
@@ -3182,7 +3186,8 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.quiet
         yield* helper.wait(1)
         const asked = { commands: [...helper.commands], rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent] }
-        // Not asked a third time, and heard as after any line.
+        // Not asked a third time, and heard as after any line, once he's been quiet longer than he pauses going on with something.
+        yield* helper.talk(0, 20)
         yield* helper.talk(0.93, 15)
         yield* helper.quiet
         yield* helper.quiet
@@ -3200,6 +3205,60 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       replies: [said],
     })
   })
+
+  test("takes nothing he goes on with after a pause once \"Sir?\" has been talked over twice, or can't be said, and all of it once he's paused a while", async () => {
+    const again = "If the build breaks, revert it."
+    for (const speechless of [false, true]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper(
+            [[0.9, "Which PR was that?"], [0.91, "Which PR was that?"], [0.92, "If the build breaks,"], [0.93, "revert it."], [0.94, again]],
+            { speechless },
+          )
+          yield* helper.wait(0.5)
+          if (!speechless) {
+            yield* helper.talk(0.9, 15)
+            yield* helper.quiet
+            yield* helper.quiet
+            yield* helper.wait(1)
+            // Over "Sir?", which is said over its first seconds too.
+            yield* helper.talk(0.91, 15)
+            yield* helper.quiet
+            yield* helper.quiet
+            yield* helper.wait(1)
+          }
+          // Over "Sir?" once more, or over its first seconds when it can't be said.
+          yield* helper.talk(0.92, 20)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          // On with it after a pause of a second and a half.
+          yield* helper.talk(0, 6)
+          yield* helper.talk(0.93, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          const asked = { rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
+          // All of it again, after a pause longer than he makes going on with something.
+          yield* helper.talk(0, 20)
+          yield* helper.talk(0.94, 30)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { asked, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([speechless, result]).toEqual([
+        speechless,
+        {
+          asked: { rendered: speechless ? [] : ["Sir?", "Sir?"], responded: [], sent: [], replies: [] },
+          responded: [again],
+          sent: [again],
+          replies: [again],
+        },
+      ])
+    }
+  }, 30_000)
 
   test("takes nothing of what the user begins as \"Sir?\" ends, though that's only made out once it has", async () => {
     const again = "Which PR was that? The one for the docs site."
@@ -3257,6 +3316,7 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.quiet
         yield* helper.wait(1)
         const asked = { rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent] }
+        yield* helper.talk(0, 20)
         yield* helper.talk(0.94, 15)
         yield* helper.quiet
         yield* helper.quiet

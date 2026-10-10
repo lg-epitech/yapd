@@ -34,9 +34,10 @@ type Signal =
   /**
    * Might be the user, or with `echo`, yapd's own voice getting into the
    * microphone, as it can until the echo cancellation has learnt it: begun
-   * while yapd was `playing` something, as the microphone heard it.
+   * while yapd was `playing` something, as the microphone heard it, after
+   * `quiet` frames without a voice, as the voice detector counts them.
    */
-  | { readonly _tag: "Onset"; readonly echo: boolean; readonly playing: boolean }
+  | { readonly _tag: "Onset"; readonly echo: boolean; readonly playing: boolean; readonly quiet: number }
   /** They've finished. */
   | { readonly _tag: "Utterance"; readonly audio: Float32Array }
   /**
@@ -245,6 +246,13 @@ export const cut = (text: string, fraction: number) => {
 
 /** Frames of what may be yapd's own voice between each look at all of it so far, while it goes on, for a stop of his: about a second. */
 const glance = Math.round(rate / frame)
+/**
+ * Frames without a voice before what he begins, once `cue` has been said as
+ * many times as it's said, or can't be said, for it to be taken as said on
+ * its own, rather than as more of what he was saying over yapd: about two
+ * seconds, longer than he pauses going on with something.
+ */
+const breather = Math.round((2 * rate) / frame)
 /** Frames of quiet in it after which the last word said is over, so a look at all of it then hears that in full too: a fifth of a second. */
 const hush = 6
 /**
@@ -868,7 +876,7 @@ export const make = (options: {
               // As it starts, since by the time it's made out, yapd may well have learnt its own voice. Only
               // while it talks: what begins as it stops is far likelier him answering than the last of its voice.
               unsure = echo === "talking"
-              return { _tag: "Onset", echo: unsure, playing: unsure || echo === "playing" }
+              return { _tag: "Onset", echo: unsure, playing: unsure || echo === "playing", quiet: still }
             case "Speech":
               since = unsure ? 0 : undefined
               return event
@@ -955,9 +963,10 @@ export const make = (options: {
      * which what he says then stands in for. What he says over it may be its
      * own voice too, so it's told the same way: should that make it fall
      * quiet again, it's said once more, and after that he's only listened
-     * for, counting the times it was said already, `cued`. Saying nothing
-     * more, or once the microphone has gone, he's finished with it, as with a
-     * line nothing was said back to.
+     * for, counting the times it was said already, `cued`, taking only what
+     * he begins after a pause longer than he makes going on with something.
+     * Saying nothing more, or once the microphone has gone, he's finished
+     * with it, as with a line nothing was said back to.
      */
     const pardon = (hushed: Hushed, wait: Duration.DurationInput, cued = 0) =>
       Effect.gen(function* () {
@@ -985,11 +994,16 @@ export const make = (options: {
         return yield* rendered ? play(path, 0, Effect.succeed(ear), { text: cue, cue: true, wait }) : quietly(ear, wait)
       }).pipe(Effect.scoped)
 
-    /** Listens for `wait`, as once a line has been said to the end. */
+    /**
+     * Listens for `wait`, as once a line has been said to the end, in place of
+     * `cue`. What he begins before he's been quiet `breather` may be more of what
+     * he was saying over yapd, with no "Sir?" between to have him say it all
+     * again, so it's told as what he says over its first seconds.
+     */
     const quietly = (ear: Ear, wait: Duration.DurationInput) =>
       ear.deaf
         ? Effect.succeed<Listened>({ _tag: "Finished" })
-        : listen(nothing, ear, { text: "", from: 0, cue: false }, wait, Effect.void).pipe(Effect.scoped)
+        : listen(nothing, ear, { text: "", from: 0, cue: false, breather }, wait, Effect.void).pipe(Effect.scoped)
 
     /**
      * Listens over a line, `text` played from `from` seconds, and stops it as
@@ -1006,7 +1020,7 @@ export const make = (options: {
     const listen = (
       playback: Playback,
       ear: Ear,
-      line: { readonly text: string; readonly from: number; readonly cue: boolean },
+      line: { readonly text: string; readonly from: number; readonly cue: boolean; readonly breather?: number },
       wait: Duration.DurationInput,
       through: Effect.Effect<void>,
     ) =>
@@ -1228,8 +1242,8 @@ export const make = (options: {
               // been quiet a moment, which is only ever told, a part at a time, and never taken as he said it. Over "Sir?", that's
               // all he begins before it has been said to the end, as he may be going on with what he said before it, even when
               // it's said after its first seconds, or he began while it was still being rendered, or as it ended, though that's
-              // only made out once it has.
-              if (chain === undefined && (signal.echo || (line.cue && (playing || signal.playing)))) {
+              // only made out once it has. In its place, that's all he begins before he's paused long enough to be done with that.
+              if (chain === undefined && (signal.echo || (line.cue && (playing || signal.playing)) || signal.quiet < (line.breather ?? 0))) {
                 chain = {
                   at: yield* position,
                   part: undefined,
