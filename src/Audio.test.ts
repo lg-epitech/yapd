@@ -206,7 +206,7 @@ describe("Native audio", () => {
         yield* TestClock.adjust("1 second")
         yield* fake.frame(0)
         yield* flush
-        expect(yield* hear(microphone.value)).toBeUndefined()
+        expect(yield* hear(microphone.value)).toBe("playing")
         // Once it has rested, the next voice processor starts over.
         yield* fake.audio.rest
         yield* fake.audio.play("/tmp/after.wav")

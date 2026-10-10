@@ -1003,6 +1003,8 @@ const overHelper = (
     readonly responding?: number
     /** How long rendering what yapd says back takes, in seconds, as Kokoro does: at once unless said. */
     readonly rendering?: number
+    /** Frames of a value the voice detector takes so many milliseconds over each, so it runs behind what's heard after them. */
+    readonly lagging?: readonly [number, number]
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -1091,7 +1093,13 @@ const overHelper = (
       Layer.succeed(Persona.Persona, { lines: Effect.succeed(Persona.plain), onIt: () => Effect.succeed(Persona.plain.onIt), said: () => Effect.void }),
       Journal.memory,
       // Each frame holds the probability that it's speech.
-      Layer.succeed(Vad, { make: Effect.succeed((frame: Float32Array) => Effect.succeed(frame[0]!)) }),
+      Layer.succeed(Vad, {
+        make: Effect.succeed((frame: Float32Array) =>
+          options.lagging !== undefined && frame[0] === Math.fround(options.lagging[0])
+            ? Effect.promise(() => new Promise((resolve) => setTimeout(resolve, options.lagging![1]))).pipe(Effect.as(frame[0]!))
+            : Effect.succeed(frame[0]!),
+        ),
+      }),
       Layer.succeed(Transcriber, {
         transcribe: (audio) =>
           Effect.gen(function* () {
@@ -3124,6 +3132,38 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       replies: [said],
     })
   })
+
+  test("takes nothing of what the user begins as \"Sir?\" ends, though that's only made out once it has", async () => {
+    const again = "Which PR was that? The one for the docs site."
+    // "Sir?" said after its first three seconds, or over them.
+    for (const at of [2.2, 0.5]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          // The voice detector takes a tenth of a second over each frame of what he begins over the end of "Sir?".
+          const helper = yield* overHelper([[0.9, "Which PR was that?"], [0.95, "The one for the docs site."], [0.96, again]], { lagging: [0.95, 100] })
+          yield* helper.wait(at)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.talk(0.95, 10)
+          yield* helper.finish
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 1200)))
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          const asked = { rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent] }
+          yield* helper.finish
+          yield* helper.talk(0.96, 30)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { asked, responded: helper.responded, sent: helper.sent }
+        }),
+      )
+      expect([at, result]).toEqual([at, { asked: { rendered: ["Sir?", "Sir?"], responded: [], sent: [] }, responded: [again], sent: [again] }])
+    }
+  }, 30_000)
 
   test("says \"Sir?\" no more than twice for what the user said over them, though he stops the first and goes on", async () => {
     const said = "Which PR was that?"

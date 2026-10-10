@@ -76,10 +76,11 @@ export class Audio extends Context.Tag("yapd/Audio")<
 /**
  * How yapd's own voice may be in a frame from the microphone: "talking" while
  * it says its first seconds since the microphone came on, before the echo
- * cancellation has learnt its voice, and "fading" for a moment after it stops
- * talking, while the last of what it said is still on its way in.
+ * cancellation has learnt its voice, "playing" while it talks on after that,
+ * cancelled out, and "fading" for a moment after it stops talking, while the
+ * last of what it said is still on its way in.
  */
-export type Echo = "talking" | "fading"
+export type Echo = "talking" | "playing" | "fading"
 
 /** What the speaker and microphone are doing. The microphone is open while yapd speaks too, so that wins. */
 export type Doing = "idle" | "speaking" | "listening"
@@ -325,8 +326,8 @@ export const native = (
         const frame = new Float32Array(message.payload.buffer)
         // Passed on even while yapd's own voice may be in it, which whoever listens tells from the user by what's said.
         // Whether it may is told now, in order with what the helper says it played, since they may be running behind.
-        if (playingSince !== undefined && heard + now() - playingSince < learning) echoes.set(frame, "talking")
-        else if (playingSince === undefined && fading > 0) {
+        if (playingSince !== undefined) echoes.set(frame, heard + now() - playingSince < learning ? "talking" : "playing")
+        else if (fading > 0) {
           fading--
           echoes.set(frame, "fading")
         }

@@ -31,8 +31,12 @@ export interface Update {
 
 type Signal =
   | Exclude<Endpointer.Event, { readonly _tag: "Onset" | "Utterance" }>
-  /** Might be the user, or with `echo`, yapd's own voice getting into the microphone, as it can until the echo cancellation has learnt it. */
-  | { readonly _tag: "Onset"; readonly echo: boolean }
+  /**
+   * Might be the user, or with `echo`, yapd's own voice getting into the
+   * microphone, as it can until the echo cancellation has learnt it: begun
+   * while yapd was `playing` something, as the microphone heard it.
+   */
+  | { readonly _tag: "Onset"; readonly echo: boolean; readonly playing: boolean }
   /** They've finished. */
   | { readonly _tag: "Utterance"; readonly audio: Float32Array }
   /**
@@ -837,7 +841,7 @@ export const make = (options: {
               // As it starts, since by the time it's made out, yapd may well have learnt its own voice. Only
               // while it talks: what begins as it stops is far likelier him answering than the last of its voice.
               unsure = echo === "talking"
-              return { _tag: "Onset", echo: unsure }
+              return { _tag: "Onset", echo: unsure, playing: unsure || echo === "playing" }
             case "Speech":
               since = unsure ? 0 : undefined
               return event
@@ -1182,8 +1186,9 @@ export const make = (options: {
               // Begun over what may be its own voice, it carries on just as it was, as over all he says until he and yapd have both
               // been quiet a moment, which is only ever told, a part at a time, and never taken as he said it. Over "Sir?", that's
               // all he begins before it has been said to the end, as he may be going on with what he said before it, even when
-              // it's said after its first seconds, or he began while it was still being rendered.
-              if (chain === undefined && (signal.echo || (line.cue && playing))) {
+              // it's said after its first seconds, or he began while it was still being rendered, or as it ended, though that's
+              // only made out once it has.
+              if (chain === undefined && (signal.echo || (line.cue && (playing || signal.playing)))) {
                 chain = {
                   at: yield* position,
                   part: undefined,
@@ -1206,7 +1211,7 @@ export const make = (options: {
               chain.part = {
                 order: ++chain.parts,
                 at: yield* position,
-                after: line.cue && completed && !playing,
+                after: line.cue && completed && !playing && !signal.playing,
                 looking: undefined,
                 looked: undefined,
                 paused: undefined,
