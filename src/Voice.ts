@@ -210,16 +210,33 @@ export const join = (parts: ReadonlyArray<Float32Array>, rate: number) => {
 /** The start of what `join` makes with `part` first, which can play before the rest is rendered. */
 export const head = (part: Float32Array, rate: number) => place(part, rate, true, false)
 
+/** How long a stretch of a render is weighed at a time for whether it's still its voice: long enough that a click isn't. */
+const stretch = 0.04
+/** How often those stretches start, in seconds. */
+const step = 0.01
 /**
- * A rendered file without the quiet it trails off into after the last of its
- * voice, so whatever plays it is over as soon as its voice is: none when it
- * has no such quiet, or it isn't a WAV file of 16-bit or float samples.
+ * How far under the loudest stretch of a render, in decibels, a stretch is
+ * past its voice, like the lone click Kokoro can leave a tenth of a second
+ * after "Sir?" and the echoes the effect makes of it, all the softer for
+ * lasting a moment: a soft last sound of its voice is louder.
+ */
+const under = 30
+
+/**
+ * A rendered file without what it trails off into after the last of its
+ * voice, quiet or a click Kokoro left after it, so whatever plays it is over
+ * as soon as its voice is: none when there's nothing after its voice, or it
+ * isn't a WAV file of 16-bit or float samples. Its voice ends with the last
+ * stretch of it within `under` of the loudest, at the last sound in that
+ * stretch above Kokoro's padding.
  */
 export const clipped = (wav: Uint8Array): Uint8Array | undefined => {
   const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength)
   const name = (at: number) => String.fromCharCode(...wav.subarray(at, at + 4))
   if (wav.length < 12 || name(0) !== "RIFF" || name(8) !== "WAVE") return undefined
-  let format: { readonly code: number; readonly channels: number; readonly align: number; readonly bits: number } | undefined
+  let format:
+    | { readonly code: number; readonly channels: number; readonly rate: number; readonly align: number; readonly bits: number }
+    | undefined
   for (let at = 12; at + 8 <= wav.length; ) {
     const size = view.getUint32(at + 4, true)
     const body = at + 8
@@ -227,10 +244,16 @@ export const clipped = (wav: Uint8Array): Uint8Array | undefined => {
       const tag = view.getUint16(body, true)
       // An extensible one says which in its subformat.
       const code = tag === 0xfffe && size >= 26 && body + 26 <= wav.length ? view.getUint16(body + 24, true) : tag
-      format = { code, channels: view.getUint16(body + 2, true), align: view.getUint16(body + 12, true), bits: view.getUint16(body + 14, true) }
+      format = {
+        code,
+        channels: view.getUint16(body + 2, true),
+        rate: view.getUint32(body + 4, true),
+        align: view.getUint16(body + 12, true),
+        bits: view.getUint16(body + 14, true),
+      }
     } else if (name(at) === "data") {
       if (format === undefined || format.channels === 0 || format.align !== (format.channels * format.bits) / 8) return undefined
-      const { channels, align, bits } = format
+      const { channels, rate, align, bits } = format
       const sample =
         format.code === 1 && bits === 16
           ? (offset: number) => view.getInt16(offset, true) / 0x8000
@@ -239,11 +262,23 @@ export const clipped = (wav: Uint8Array): Uint8Array | undefined => {
             : undefined
       if (sample === undefined) return undefined
       const frames = Math.floor(Math.min(size, wav.length - body) / align)
-      const voiced = (frame: number) =>
-        Array.from({ length: channels }, (_, channel) => sample(body + frame * align + (channel * bits) / 8)).some((value) => Math.abs(value) >= silent)
-      let last = frames - 1
+      const samples = (frame: number) => Array.from({ length: channels }, (_, channel) => sample(body + frame * align + (channel * bits) / 8))
+      const voiced = (frame: number) => samples(frame).some((value) => Math.abs(value) >= silent)
+      // How loud each stretch is, from the power summed up to each frame.
+      const power = new Float64Array(frames + 1)
+      for (let frame = 0; frame < frames; frame++) {
+        power[frame + 1] = power[frame]! + samples(frame).reduce((sum, value) => sum + value * value, 0) / channels
+      }
+      if (frames === 0) return undefined
+      const width = Math.min(frames, Math.max(1, Math.round(stretch * rate)))
+      const hop = Math.max(1, Math.round(step * rate))
+      const starts = Array.from({ length: Math.floor((frames - width) / hop) + 1 }, (_, index) => index * hop).concat(frames - width)
+      const level = (start: number) => Math.sqrt((power[start + width]! - power[start]!) / width)
+      const loudest = Math.max(0, ...starts.map(level))
+      const end = starts.reduce((end, start) => (level(start) >= loudest * 10 ** (-under / 20) ? start + width : end), 0)
+      let last = end - 1
       while (last >= 0 && !voiced(last)) last--
-      if (last < 0 || last === frames - 1) return undefined
+      if (loudest < silent || last < 0 || last === frames - 1) return undefined
       const kept = (last + 1) * align
       // Without what came after it, and padded to an even length, as a WAV file's parts are.
       const clipped = new Uint8Array(body + kept + (kept % 2))
@@ -258,7 +293,7 @@ export const clipped = (wav: Uint8Array): Uint8Array | undefined => {
   return undefined
 }
 
-/** Cuts the quiet a rendered file trails off into, as `clipped` does, leaving it as it is when it can't. */
+/** Cuts what a rendered file trails off into after its voice, as `clipped` does, leaving it as it is when it can't. */
 export const clip = (path: string) =>
   Effect.tryPromise(async () => {
     const shorter = clipped(new Uint8Array(await Bun.file(path).arrayBuffer()))

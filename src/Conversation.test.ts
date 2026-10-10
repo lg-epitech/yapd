@@ -3506,6 +3506,57 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
+  test("takes a quick \"Yes.\" begun just after the voice of \"Sir?\" whole, though Kokoro left a click and its echoes after it, to a question as to an update", async () => {
+    // "Sir?" as Kokoro and the effect render it: its voice, fading out until 0.72 s, then a lone click at 0.83 s, echoed at
+    // 0.87 s and 0.9 s, and quiet to the end of its file.
+    const rate = 24000
+    const sir = new Float32Array(Math.round(0.997 * rate))
+    for (let index = 0; index < 0.75 * rate; index++) {
+      const at = index / rate
+      sir[index] = 0.17 * Math.sin(2 * Math.PI * 220 * at) * (at < 0.6 ? 1 : Math.exp(-(at - 0.6) / 0.03))
+    }
+    for (const [start, gain] of [[0.83, 1], [0.87, 0.25], [0.9, 0.15]] as const) {
+      for (let index = 0; index < 0.01 * rate; index++) {
+        sir[Math.round(start * rate) + index] = gain * 0.03 * Math.cos(2 * Math.PI * 3000 * (index / rate)) * Math.exp(-index / rate / 0.0015)
+      }
+    }
+    for (const asking of [false, true]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const answers: Array<string> = []
+          const helper = yield* overHelper([[0.9, "Yes."], [0.91, "Yes."]], { live: true, sir })
+          if (asking) {
+            yield* Fiber.interrupt(helper.fiber)
+            yield* Effect.fork(
+              helper.ask({
+                audio: "/tmp/question.wav",
+                spoken: "Send it again?",
+                answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+              }),
+            )
+          }
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 12)
+          yield* helper.quiet
+          yield* helper.quiet
+          while (helper.rendered.length === 0 || helper.plays.length < (asking ? 3 : 2)) yield* helper.talk(0, 1)
+          // A frame at a time, so he begins just where he does: 0.08 s after its voice, as quick as he answers.
+          while ((yield* helper.since) < 0.8) yield* helper.talk(0, 1)
+          for (let frame = 0; frame < 12; frame++) yield* helper.talk(0.91, 1)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { rendered: helper.rendered, responded: helper.responded, sent: helper.sent, answers }
+        }),
+      )
+      expect([asking, result]).toEqual([
+        asking,
+        asking
+          ? { rendered: ["Sir?"], responded: [], sent: [], answers: ["Yes."] }
+          : { rendered: ["Sir?", "Okay."], responded: ["Yes."], sent: ["Yes."], answers: [] },
+      ])
+    }
+  }, 30_000)
+
   test("takes nothing of what the user goes on with straight after \"Sir?\", having begun over it, though that's still being made out, and all of it when he says it again", async () => {
     const again = "If the tests fail, revert it."
     for (const delay of [0, 1]) {

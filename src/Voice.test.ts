@@ -96,6 +96,28 @@ describe("join", () => {
   })
 })
 
+/**
+ * "Sir?" as Kokoro and the Jarvis effect render it, at 24 kHz, over about a
+ * second: its voice, loudest at -18 dBFS and fading out from 0.6 s, then a
+ * lone click of a hundredth of a second peaking at -30 dBFS at 0.83 s, which
+ * the effect echoes 40 and 70 ms later, a quarter and a sixth as loud, and
+ * quiet to the end.
+ */
+const shapedSir = () => {
+  const rate = 24000
+  const sir = new Float32Array(Math.round(0.997 * rate))
+  for (let index = 0; index < 0.75 * rate; index++) {
+    const at = index / rate
+    sir[index] = 0.17 * Math.sin(2 * Math.PI * 220 * at) * (at < 0.6 ? 1 : Math.exp(-(at - 0.6) / 0.03))
+  }
+  for (const [start, gain] of [[0.83, 1], [0.87, 0.25], [0.9, 0.15]] as const) {
+    for (let index = 0; index < 0.01 * rate; index++) {
+      sir[Math.round(start * rate) + index] = gain * 0.03 * Math.cos(2 * Math.PI * 3000 * (index / rate)) * Math.exp(-index / rate / 0.0015)
+    }
+  }
+  return sir
+}
+
 describe("clipped", () => {
   /** Its voice, then its trailing quiet, a hundredth of a second at a time. */
   const sir = new Float32Array([...tone(0.84, 0.3), ...tone(0.06, 0.002), ...tone(0.1, 0)])
@@ -123,6 +145,30 @@ describe("clipped", () => {
     expect(Array.from(shorter.subarray(36, 48))).toEqual(Array.from(tags))
     expect(new DataView(shorter.buffer).getUint32(52, true)).toBe(168)
     expect(shorter.length).toBe(56 + 168)
+  })
+
+  test("cuts the click Kokoro leaves a tenth of a second after the voice of \"Sir?\", and the echoes the effect makes of it, as it renders", () => {
+    const rate = 24000
+    // Its voice, fading out over a tenth of a second from 0.6 s, as "Sir?" does, its last sound above Kokoro's padding at 0.72 s.
+    const sir = shapedSir()
+    const voiceless = sir.findLastIndex((sample, index) => index < 0.8 * rate && Math.abs(sample) >= 0.003)
+    expect(voiceless / rate).toBeCloseTo(0.72, 2)
+    // As it cut before: the last echo of the click still kept it going.
+    expect(sir.findLastIndex((sample) => Math.abs(sample) >= 0.003) / rate).toBeGreaterThan(0.9)
+    const shorter = clipped(wav(sir, rate))!
+    // At its last sound, as 16-bit samples have it, to within a millisecond.
+    expect(new DataView(shorter.buffer).getUint32(40, true) / 2 / rate).toBeCloseTo(voiceless / rate, 3)
+  })
+
+  test("keeps all of a voice that ends softly, like on an \"s\" or a breath", () => {
+    const rate = 24000
+    const voice = Array.from({ length: 0.6 * rate }, (_, index) => 0.17 * Math.sin((2 * Math.PI * 220 * index) / rate))
+    // Noise a sound like an "s" makes, 22 dB under the loudest of the voice, then a breath 27 dB under it.
+    const noise = (seconds: number, level: number) => Array.from({ length: seconds * rate }, (_, index) => level * Math.sqrt(3) * Math.sin(index * index))
+    const ending = [...voice, ...noise(0.12, 0.0095), ...noise(0.15, 0.0054)]
+    const file = new Float32Array([...ending, ...tone(0.2, 0, rate)])
+    const shorter = clipped(wav(file, rate))!
+    expect(new DataView(shorter.buffer).getUint32(40, true) / 2).toBeGreaterThan(ending.length - 0.005 * rate)
   })
 
   test("leaves alone what has no quiet after its voice, or is all quiet, or isn't a WAV file it can read", () => {
