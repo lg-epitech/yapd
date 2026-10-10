@@ -701,6 +701,8 @@ export interface Answer extends Omit<Question, "answer"> {
 /** How a line is said and listened over, as `speak` has it. */
 interface Playing {
   readonly text?: string
+  /** Whether it's `cue`, over which all he begins is told as over yapd's first seconds, however long it has talked. */
+  readonly cue?: boolean
   readonly wait?: Duration.DurationInput
   readonly begun?: Effect.Effect<void>
   readonly confirmed?: Effect.Effect<void>
@@ -883,7 +885,7 @@ export const make = (options: {
     /** Plays a line and listens over it, as `speak` does, leaving what's to be done once it has fallen quiet for him to whoever asked. */
     const play = (path: string, from: number, ear: Effect.Effect<Ear | undefined>, given: Playing = {}) =>
       Effect.gen(function* () {
-        const { text = "", wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void } = given
+        const { text = "", cue = false, wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void } = given
         const playback = yield* audio.play(path, from)
         yield* begun
         if (playback.confirmed) yield* confirmed
@@ -895,7 +897,7 @@ export const make = (options: {
           yield* played
           return { _tag: "Finished" } satisfies Listened
         }
-        return yield* listen(playback, listening, { text, from }, wait, played)
+        return yield* listen(playback, listening, { text, from, cue }, wait, played)
       }).pipe(Effect.scoped)
 
     /**
@@ -926,21 +928,22 @@ export const make = (options: {
           Effect.as(true),
           Effect.catchAll((error) => Effect.logWarning(`Could not say "${cue}"`, error).pipe(Effect.as(false))),
         )
-        return yield* rendered ? play(path, 0, Effect.succeed(ear), { text: cue, wait }) : quietly(ear, wait)
+        return yield* rendered ? play(path, 0, Effect.succeed(ear), { text: cue, cue: true, wait }) : quietly(ear, wait)
       }).pipe(Effect.scoped)
 
     /** Listens for `wait`, as once a line has been said to the end. */
     const quietly = (ear: Ear, wait: Duration.DurationInput) =>
       ear.deaf
         ? Effect.succeed<Listened>({ _tag: "Finished" })
-        : listen(nothing, ear, { text: "", from: 0 }, wait, Effect.void).pipe(Effect.scoped)
+        : listen(nothing, ear, { text: "", from: 0, cue: false }, wait, Effect.void).pipe(Effect.scoped)
 
     /**
      * Listens over a line, `text` played from `from` seconds, and stops it as
      * soon as the user talks over it. Talk he begins while yapd's own voice
-     * can still get into the microphone may be just that, so all he says from
-     * then until he and yapd have both been quiet a moment, a `Chain`, is
-     * never taken as he said it. It carries on just as it was over that, and
+     * can still get into the microphone may be just that, and talk he begins
+     * over `cue` the rest of what he said before it, so all he says from then
+     * until he and yapd have both been quiet a moment, a `Chain`, is never
+     * taken as he said it. It carries on just as it was over that, and
      * makes out each part he finishes, one at a time: a stop or wait of his,
      * heard in full too while he goes on, stops it, and is all that's taken,
      * to be replied to alone; what's clearly him makes it fall quiet,
@@ -949,7 +952,7 @@ export const make = (options: {
     const listen = (
       playback: Playback,
       ear: Ear,
-      line: { readonly text: string; readonly from: number },
+      line: { readonly text: string; readonly from: number; readonly cue: boolean },
       wait: Duration.DurationInput,
       through: Effect.Effect<void>,
     ) =>
@@ -1139,8 +1142,10 @@ export const make = (options: {
               speaking = true
               yield* stopLingering
               // Begun over what may be its own voice, it carries on just as it was, as over all he says until he and yapd have both
-              // been quiet a moment, which is only ever told, a part at a time, and never taken as he said it.
-              if (chain === undefined && signal.echo) {
+              // been quiet a moment, which is only ever told, a part at a time, and never taken as he said it. Over "Sir?", that's
+              // all he begins before it has been said to the end, as he may be going on with what he said before it, even when
+              // it's said after its first seconds, or he began while it was still being rendered.
+              if (chain === undefined && (signal.echo || (line.cue && playing))) {
                 chain = {
                   at: yield* position,
                   part: undefined,

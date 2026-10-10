@@ -1001,6 +1001,8 @@ const overHelper = (
     readonly live?: boolean
     /** How long working out what to do about what's said takes, in seconds, as a model call does: at once unless said. */
     readonly responding?: number
+    /** How long rendering what yapd says back takes, in seconds, as Kokoro does: at once unless said. */
+    readonly rendering?: number
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -1120,7 +1122,12 @@ const overHelper = (
           )
         },
       }),
-      Layer.succeed(Voice, { render: (text) => Effect.sync(() => void rendered.push(text)) }),
+      Layer.succeed(Voice, {
+        render: (text) =>
+          Effect.sync(() => void rendered.push(text)).pipe(
+            Effect.zipRight(options.rendering === undefined ? Effect.void : Effect.sleep(`${options.rendering} seconds`)),
+          ),
+      }),
     )
     const context = yield* Layer.build(layer)
     const made = yield* Conversation.make({
@@ -3031,6 +3038,49 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       replies: [said],
     })
   })
+
+  test("takes nothing of what the user goes on with over \"Sir?\", or while it's still being rendered, though it's said after its first seconds, and all of it when he says it again", async () => {
+    const again = "If the build breaks, revert it."
+    // Begun late in its first seconds, so "Sir?" is said after them, at once or a moment later, once it's rendered, or early, so
+    // it's said over them, but takes a moment to render: how far in he begins, for how many frames, and how long he pauses.
+    for (const [at, frames, pause, rendering] of [
+      [2.2, 20, 26, undefined],
+      [1.5, 30, 44, undefined],
+      [2.2, 20, 26, 0.3],
+      [0.5, 20, 42, 0.4],
+      [0.5, 20, 46, 0.4],
+    ] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "If the build breaks,"], [0.91, "revert it."], [0.92, again]], {
+            live: true,
+            ...(rendering === undefined ? {} : { rendering }),
+          })
+          yield* helper.wait(at)
+          yield* helper.talk(0.9, frames)
+          // Long enough that what he said over them is over before he goes on.
+          yield* helper.talk(0, pause)
+          yield* helper.talk(0.91, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          const asked = { rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
+          yield* helper.finish
+          yield* helper.talk(0.92, 40)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { asked, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([at, frames, pause, rendering, result]).toEqual([
+        at,
+        frames,
+        pause,
+        rendering,
+        { asked: { rendered: ["Sir?", "Sir?"], responded: [], sent: [], replies: [] }, responded: [again], sent: [again], replies: [again] },
+      ])
+    }
+  }, 30_000)
 
   test("lets go of what it's making out of what's said over \"Sir?\" when the update is cut off then, like by a dictation or yapd turned off", async () => {
     const result = await overHelperScoped(
