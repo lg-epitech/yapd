@@ -75,4 +75,4 @@ Live on `dev` now: everything below, except that talking over yapd's first secon
 - After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
 - Over yapd's first three seconds, its own voice can stop it as if you'd spoken: it picks up again a second and a half back, without a word, so you may hear the start of a line twice.
 - Over those seconds, "Thank you." or "Bye." on its own, or only words yapd was saying then, like "Stop." over its "stopped" or "Open it." over its "opened", is taken for its own voice, and it picks up again: say it again, or "Okay, thanks." to end it.
-- Over those seconds, yapd's own voice heard as other words, like "is important." for its "importer", goes to the model as if you'd said it, which may ask you to say it again rather than pick up.
+- Over those seconds, yapd's own voice heard as other words, like "is important." for its "importer", goes to the model, which is told it may be yapd's and picked up again in testing, but could still ask you to say it again, or take it for yours.
