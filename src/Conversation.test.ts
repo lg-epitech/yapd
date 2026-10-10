@@ -6,6 +6,7 @@ import {
   Context,
   Deferred,
   Effect,
+  Exit,
   Fiber,
   Layer,
   Option,
@@ -3426,6 +3427,31 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result.over).toBeLessThan(3 + 3.2)
     expect(result.stops).toBeLessThanOrEqual(2)
   }, 60_000)
+
+  test("says \"Sir?\" once the user has finished, though he went on over its first seconds for longer than the line it stopped would have lasted", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Which PR was that?"]], { live: true, duration: 2 })
+        yield* helper.wait(0.5)
+        // A second of talk at a time with 0.38 s between, for fourteen seconds: past where the two-second line, had it
+        // played on, would have been over ten seconds since.
+        for (let round = 0; round < 10; round++) {
+          yield* helper.talk(0.9, 31)
+          yield* helper.talk(0, 12)
+        }
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const asked = [...helper.rendered]
+        yield* helper.finish
+        yield* helper.talk(0, 100)
+        yield* helper.wait(1)
+        const exit = yield* Fiber.await(helper.fiber)
+        return { asked, ended: Exit.isSuccess(exit), responded: helper.responded, sent: helper.sent }
+      }),
+    )
+    expect(result).toEqual({ asked: ["Sir?"], ended: true, responded: [], sent: [] })
+  }, 30_000)
 
   test("takes nothing of what the user begins as \"Sir?\" ends, though that's only made out once it has", async () => {
     const again = "Which PR was that? The one for the docs site."

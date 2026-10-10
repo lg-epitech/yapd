@@ -544,13 +544,20 @@ export const native = (
               ),
             ).pipe(Effect.onError(() => stop))
 
-            // Should the helper wedge, the update still ends.
+            // Should the helper wedge, the update still ends. Stopped, it never finishes, which is no fault of the helper's.
             const deadline = Duration.seconds(Math.max(0, playback.duration - from) + 10)
             return {
               duration: playback.duration,
               confirmed: true,
               finished: Deferred.await(playback.finished).pipe(
-                Effect.timeoutFail({ duration: deadline, onTimeout: () => new AudioError({ message: "Playback never finished" }) }),
+                Effect.timeoutOption(deadline),
+                Effect.flatMap((finished) =>
+                  Option.isSome(finished)
+                    ? Effect.void
+                    : playback.stopped === undefined
+                      ? Effect.fail(new AudioError({ message: "Playback never finished" }))
+                      : Effect.never,
+                ),
               ),
               stop,
               volume: (level: number) =>
