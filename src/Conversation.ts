@@ -95,6 +95,8 @@ type Outcome =
        */
       readonly heard?: string
       readonly alone?: true
+      /** How many times `cue` has been said for it, when it's what he said once yapd fell quiet for him. */
+      readonly cued?: number
     }
 
 type Interrupted = Extract<Outcome, { readonly _tag: "Interrupted" }>
@@ -189,6 +191,10 @@ const lulling = "2 seconds"
 export const cue = "Sir?"
 /** How many times it's said for one interruption, after which he's only listened for. */
 const cues = 2
+/** What comes of a reply to a stop of his over yapd's first seconds that he went on from, which he's to say again. */
+const again = "again"
+/** What comes of saying `cue` for that, when he said nothing more. */
+const unanswered = "unanswered"
 
 /** Words a sentence hardly ever ends on. */
 const dangling = /\b(and|or|but|to|the|a|an|of|for|with|my|your|if|when|because)[.,]?$/i
@@ -907,15 +913,19 @@ export const make = (options: {
      * which what he says then stands in for. What he says over it may be its
      * own voice too, so it's told the same way: should that make it fall
      * quiet again, it's said once more, and after that he's only listened
-     * for. Saying nothing more, he's finished with it, as with a line nothing
-     * was said back to.
+     * for, counting the times it was said already, `cued`. Saying nothing
+     * more, or once the microphone has gone, he's finished with it, as with a
+     * line nothing was said back to.
      */
-    const pardon = (hushed: Hushed, wait: Duration.DurationInput) =>
+    const pardon = (hushed: Hushed, wait: Duration.DurationInput, cued = 0) =>
       Effect.gen(function* () {
-        for (let said = 0; ; said++) {
+        for (let said = cued; ; said++) {
+          if (hushed.ear.deaf) return { _tag: "Finished" } satisfies Outcome
           const listened: Listened = yield* said < cues ? asking(hushed.ear, wait) : quietly(hushed.ear, wait)
           if (listened._tag === "Hushed") continue
-          return listened._tag === "Finished" ? listened : ({ ...listened, at: hushed.at, duration: hushed.duration } satisfies Outcome)
+          return listened._tag === "Finished"
+            ? listened
+            : ({ ...listened, at: hushed.at, duration: hushed.duration, cued: Math.min(said + 1, cues) } satisfies Outcome)
         }
       })
 
@@ -1308,6 +1318,10 @@ export const make = (options: {
      * with a reply while they might still be talking. Their stop from over
      * yapd's first seconds is replied to `alone`, since nothing they said
      * around it is taken: nothing they say before the reply is added to it.
+     * Should they go on before then, what they say may be the rest of what
+     * they said over those seconds, so none of it is taken, and nor is their
+     * stop, which what they go on with takes the place of, as it does after
+     * a stop anywhere else: it comes to `again`, for them to say it again.
      */
     const settle = <R>(
       ear: Ear,
@@ -1332,10 +1346,12 @@ export const make = (options: {
 
           let speaking = false
           let carryingOn = false
+          /** Gone on from a stop replied to alone, so they're to say it again. */
+          let goneOn = false
           let held: R | undefined
           let more: Float32Array | undefined
           waiting: while (true) {
-            const signal = yield* (speaking || carryingOn)
+            const signal = yield* (speaking || carryingOn || goneOn)
               ? Queue.take(ear.signals).pipe(
                   Effect.timeout(patience),
                   Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
@@ -1344,7 +1360,7 @@ export const make = (options: {
             switch (signal._tag) {
               case "Replied":
                 // Once they carry on, even one that got in before it was stopped is out of date.
-                if (signal.id !== id || carryingOn) break
+                if (signal.id !== id || carryingOn || goneOn) break
                 // Only this call's replies carry its id.
                 if (!speaking) return { heard, reply: signal.reply as R }
                 held = signal.reply as R
@@ -1357,15 +1373,21 @@ export const make = (options: {
                 if (held !== undefined) return { heard, reply: held }
                 break
               case "Speech":
-                if (alone) break
+                if (alone) {
+                  goneOn = true
+                  held = undefined
+                  yield* Fiber.interrupt(fiber)
+                  break
+                }
                 carryingOn = true
                 held = undefined
                 yield* Fiber.interrupt(fiber)
                 break
               case "Utterance":
-                // Let go of, once they've finished it.
+                // Asked for again, once they've finished it.
                 if (alone) {
                   speaking = false
+                  if (goneOn) return again
                   if (held !== undefined) return { heard, reply: held }
                   break
                 }
@@ -1373,6 +1395,7 @@ export const make = (options: {
                 break waiting
               case "Deaf":
                 speaking = false
+                if (goneOn) return again
                 if (carryingOn) break waiting
                 if (held !== undefined) return { heard, reply: held }
                 break
@@ -1465,16 +1488,29 @@ export const make = (options: {
     /**
      * Takes in what the user said over a line, made out with `transcribe`
      * unless what's taken of it is known already, and works out a reply to
-     * it, as `settle` does: none when nothing came of what he said.
+     * it, as `settle` does: none when nothing came of what he said. Should he
+     * go on from his stop over its first seconds before it's replied to, it
+     * says `cue` for him to say it all again, listening `wait` after, and
+     * takes what he says then in its place: `unanswered` when that's nothing.
      */
     const heardOver = <R>(
       outcome: Interrupted,
+      wait: Duration.DurationInput,
       transcribe: (audio: Float32Array) => Effect.Effect<string>,
       respond: (heard: string, voiced: number) => Effect.Effect<R>,
     ) =>
       Effect.gen(function* () {
-        const first = outcome.heard ?? (yield* transcribe(outcome.audio))
-        return first === "" ? undefined : yield* settle(outcome.ear, first, outcome.audio, transcribe, respond, outcome.alone === true)
+        let interrupted = outcome
+        while (true) {
+          const first = interrupted.heard ?? (yield* transcribe(interrupted.audio))
+          if (first === "") return undefined
+          const settled = yield* settle(interrupted.ear, first, interrupted.audio, transcribe, respond, interrupted.alone === true)
+          if (settled !== again) return settled
+          const { at, duration, ear, cued } = interrupted
+          const asked = yield* pardon({ _tag: "Hushed", at, duration, ear }, wait, cued)
+          if (asked._tag === "Finished") return unanswered
+          interrupted = asked
+        }
       })
 
     /**
@@ -1510,7 +1546,7 @@ export const make = (options: {
             }
 
             const said = cut(text, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
-            const settled = yield* heardOver(outcome, unlogged, (heard) =>
+            const settled = yield* heardOver(outcome, linger, unlogged, (heard) =>
               responder
                 .respond({
                   project: update.project,
@@ -1528,6 +1564,8 @@ export const make = (options: {
                   ),
                 ),
             )
+            // Asked to say it again, he said nothing more.
+            if (settled === unanswered) return
             if (settled === undefined) {
               if (after) return
               carryOn()
@@ -1611,7 +1649,9 @@ export const make = (options: {
           begun = Effect.void
           confirmed = Effect.void
           if (outcome._tag === "Finished") return false
-          const settled = yield* heardOver(outcome, makeOut, respond)
+          const settled = yield* heardOver(outcome, wait, makeOut, respond)
+          // Asked to say it again, he said nothing more, which leaves a question unanswered.
+          if (settled === unanswered) return false
           const reply = settled === undefined ? Option.none() : settled.reply
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.

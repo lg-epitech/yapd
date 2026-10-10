@@ -2717,22 +2717,34 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ commands: ["play", "stop"], responded: ["Wait."], sent: [], replies: ["Wait."] })
   })
 
-  test("takes only the stop of his it ran into, never what he goes on with straight after", async () => {
+  test("takes only the stop of his it ran into, never what he goes on with straight after, but says \"Sir?\" for that rather than drop it, and takes it whole then", async () => {
+    const said = "Tell it to open a PR."
     const result = await overHelperScoped(
       Effect.gen(function* () {
-        const helper = yield* overHelper([[0.8, "Over in yapd."], [0.9, "Stop."], [0.91, "Tell it to open a PR."]], { live: true, responding: 2, intent: "dismiss" })
+        const helper = yield* overHelper([[0.8, "Over in yapd."], [0.9, "Stop."], [0.91, said], [0.92, said]], { live: true, responding: 2, intent: "dismiss" })
         yield* helper.wait(0.3)
         yield* helper.talk(0.8, 15)
         yield* helper.talk(0.9, 8)
         yield* helper.quiet
+        // Just after what he said over them is over, while it works out what to do about his stop.
         yield* helper.talk(0, 4)
         yield* helper.talk(0.91, 20)
         yield* helper.quiet
+        yield* helper.wait(1)
+        const asked = { commands: [...helper.commands], responded: [...helper.responded], rendered: [...helper.rendered], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
+        yield* helper.finish
+        yield* helper.talk(0.92, 20)
+        yield* helper.quiet
         yield* helper.wait(3)
-        return { commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        return { asked, responded: helper.responded, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({ commands: ["play", "stop"], responded: ["Stop."], sent: [], replies: ["Stop."] })
+    // Neither his stop, which what he went on with takes the place of, nor that is noted, until he says it again.
+    expect(result).toEqual({
+      asked: { commands: ["play", "stop", "play"], responded: ["Stop."], rendered: ["Sir?"], sent: [], replies: [] },
+      responded: ["Stop.", said],
+      replies: [said],
+    })
   })
 
   test("lets go of what the user says straight on from its own voice heard as words of their own, when he says a word of its too, carrying on, and takes it when he says it again", async () => {
@@ -2791,11 +2803,12 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   })
 
-  test("takes only the stop of what the user said over them, never adding what he goes on with before it has worked out what to do, however long he pauses first", async () => {
+  test("never adds what the user goes on with to the stop of what he said over them before it has worked out what to do, however long he pauses first, but says \"Sir?\" for all of it", async () => {
+    const again = "Wait for the tests to pass, then merge it."
     const result = await overHelperScoped(
       Effect.gen(function* () {
         // Whisper takes half a second, and working out what to do two.
-        const helper = yield* overHelper([[0.9, "Wait for the tests to pass,"], [0.91, "then merge it."]], {
+        const helper = yield* overHelper([[0.9, "Wait for the tests to pass,"], [0.91, "then merge it."], [0.92, again]], {
           live: true,
           delays: [0.5],
           responding: 2,
@@ -2811,11 +2824,20 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         yield* helper.talk(0, 34)
         yield* helper.talk(0.91, 15)
         yield* helper.quiet
+        yield* helper.wait(1)
+        const asked = { commands: [...helper.commands], rendered: [...helper.rendered], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
+        yield* helper.finish
+        yield* helper.talk(0.92, 40)
+        yield* helper.quiet
         yield* helper.wait(3)
-        return { commands: helper.commands, sent: helper.sent, replies: yield* helper.replies }
+        return { asked, responded: helper.responded, replies: yield* helper.replies }
       }),
     )
-    expect(result).toEqual({ commands: ["play", "stop"], sent: [], replies: ["Wait."] })
+    expect(result).toEqual({
+      asked: { commands: ["play", "stop", "play"], rendered: ["Sir?"], sent: [], replies: [] },
+      responded: ["Wait.", again],
+      replies: [again],
+    })
   })
 
   test("takes only the stop of what the user said over them, never adding what he says after the rest of it, before it has worked out what to do", async () => {
@@ -2928,30 +2950,94 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toMatchObject({ responded: [again], sent: [again], replies: [again] })
   })
 
-  test("takes only the stop of \"Wait, hold off for now,\" over them, never \"then merge it.\" after a pause, however long, before it has worked out what to do", async () => {
-    // Within a moment, while what he says over them goes on, and after that, while it works out what to do.
-    for (const pause of [16, 38]) {
-      const result = await overHelperScoped(
-        Effect.gen(function* () {
-          // Working out what to do takes two seconds, as a model call does.
-          const helper = yield* overHelper([[0.9, "Wait, hold off for now,"], [0.91, "then merge it."]], { live: true, responding: 2, intent: "dismiss" })
-          yield* helper.wait(0.5)
-          yield* helper.talk(0.9, 40)
-          const stopped = [...helper.commands]
-          yield* helper.talk(0, pause)
-          yield* helper.talk(0.91, 15)
-          yield* helper.quiet
-          yield* helper.wait(3)
-          return { stopped, commands: helper.commands, responded: helper.responded, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
-        }),
-      )
-      // Stopped at once for the "Wait", heard about a second in, which is all that's worked out from, or noted.
-      expect([pause, result]).toEqual([
-        pause,
-        { stopped: ["play", "stop"], commands: ["play", "stop"], responded: ["Wait."], rendered: [], sent: [], replies: ["Wait."] },
-      ])
-    }
-  }, 30_000)
+  test("takes only the stop of \"Wait, hold off for now,\" over them, never \"then merge it.\" said within a moment, while what he says over them goes on", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Working out what to do takes two seconds, as a model call does.
+        const helper = yield* overHelper([[0.9, "Wait, hold off for now,"], [0.91, "then merge it."]], { live: true, responding: 2, intent: "dismiss" })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 40)
+        const stopped = [...helper.commands]
+        yield* helper.talk(0, 16)
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { stopped, commands: helper.commands, responded: helper.responded, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    // Stopped at once for the "Wait", heard about a second in, which is all that's worked out from, or noted.
+    expect(result).toEqual({ stopped: ["play", "stop"], commands: ["play", "stop"], responded: ["Wait."], rendered: [], sent: [], replies: ["Wait."] })
+  })
+
+  test("never adds \"then merge it.\", said once what the user said over them is over, to the stop of \"Wait, hold off for now,\" before it has worked out what to do, but says \"Sir?\" for all of it", async () => {
+    const again = "Wait, hold off for now, then merge it."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Working out what to do takes two seconds, as a model call does.
+        const helper = yield* overHelper([[0.9, "Wait, hold off for now,"], [0.91, "then merge it."], [0.92, again]], { live: true, responding: 2, intent: "dismiss" })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 40)
+        yield* helper.talk(0, 38)
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const asked = { commands: [...helper.commands], responded: [...helper.responded], rendered: [...helper.rendered], sent: [...helper.sent], replies: [...(yield* helper.replies)] }
+        yield* helper.finish
+        yield* helper.talk(0.92, 40)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { asked, responded: helper.responded, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({
+      asked: { commands: ["play", "stop", "play"], responded: ["Wait."], rendered: ["Sir?"], sent: [], replies: [] },
+      responded: ["Wait.", again],
+      replies: [again],
+    })
+  })
+
+  test("says \"Sir?\" rather than drop an answer the user gives once his wait over a question's first seconds is over, before it has worked out what to do about that, and takes the answer whole then", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const heard: Array<string> = []
+        const helper = yield* overHelper([[0.9, "Hold on."], [0.91, "The docs site."], [0.92, "The docs site."]], { live: true, duration: 3.5 })
+        yield* Fiber.interrupt(helper.fiber)
+        const asking = yield* Effect.fork(
+          helper.ask({
+            audio: "/tmp/question.wav",
+            spoken: "Which one, sir: yapd or the docs site?",
+            // Working out what's meant takes two seconds, as a model call does, and only naming an option answers it.
+            answer: (said) =>
+              Effect.sync(() => void heard.push(said)).pipe(
+                Effect.zipRight(Effect.sleep("2 seconds")),
+                Effect.as(said.includes("docs") ? Option.some(Effect.sync(() => void answers.push(said))) : Option.none()),
+              ),
+          }),
+        )
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 12)
+        yield* helper.quiet
+        // Once what he said over them is over.
+        yield* helper.talk(0, 10)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const asked = { rendered: [...helper.rendered], heard: [...heard], answers: [...answers] }
+        yield* helper.finish
+        yield* helper.talk(0.92, 20)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { asked, answered: yield* Fiber.join(asking), heard, answers }
+      }),
+    )
+    expect(result).toEqual({
+      asked: { rendered: ["Sir?"], heard: ["Hold on."], answers: [] },
+      answered: true,
+      heard: ["Hold on.", "The docs site."],
+      answers: ["The docs site."],
+    })
+  })
 
   test("takes nothing of \"Tell it to fix the tests,\", \"and wait for CI.\" and \"Then merge it.\", begun over them with pauses between, but the stop in them", async () => {
     const result = await overHelperScoped(
@@ -3036,6 +3122,45 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       responded: [said],
       sent: [said],
       replies: [said],
+    })
+  })
+
+  test("says \"Sir?\" no more than twice for what the user said over them, though he stops the first and goes on", async () => {
+    const said = "Which PR was that?"
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Working out what to do takes two seconds, as a model call does.
+        const helper = yield* overHelper([[0.9, said], [0.91, "Wait."], [0.92, said], [0.93, said], [0.94, said]], { responding: 2 })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        // Over "Sir?", which stops it, then on from that before it has worked out what to do.
+        yield* helper.talk(0.91, 10)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.talk(0.92, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        // Over it once more.
+        yield* helper.talk(0.93, 15)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const asked = { rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent] }
+        yield* helper.talk(0.94, 15)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return { asked, rendered: helper.rendered, responded: helper.responded, sent: helper.sent }
+      }),
+    )
+    expect(result).toEqual({
+      asked: { rendered: ["Sir?", "Sir?"], responded: ["Wait."], sent: [] },
+      rendered: ["Sir?", "Sir?", "Okay."],
+      responded: ["Wait.", said],
+      sent: [said],
     })
   })
 
