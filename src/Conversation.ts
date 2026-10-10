@@ -105,6 +105,8 @@ type Outcome =
       readonly alone?: true
       /** How many times `cue` has been said for it, when it's what he said once yapd fell quiet for him. */
       readonly cued?: number
+      /** When he's no longer listened for, once `cue` won't be said again, which nothing he says after moves. */
+      readonly until?: number
     }
 
 type Interrupted = Extract<Outcome, { readonly _tag: "Interrupted" }>
@@ -972,10 +974,10 @@ export const make = (options: {
      * nothing more, or once the microphone has gone, he's finished with it,
      * as with a line nothing was said back to.
      */
-    const pardon = (hushed: Hushed, wait: Duration.DurationInput, cued = 0) =>
+    const pardon = (hushed: Hushed, wait: Duration.DurationInput, cued = 0, due?: number) =>
       Effect.gen(function* () {
-        /** When he's no longer listened for, once "Sir?" has been said as often as it is. */
-        let until: number | undefined
+        /** When he's no longer listened for, once "Sir?" has been said as often as it is: as it was, `due`, when it already had been. */
+        let until = due
         for (let said = cued; ; said++) {
           if (hushed.ear.deaf) return { _tag: "Finished" } satisfies Outcome
           if (said >= cues) until ??= (yield* Clock.currentTimeMillis) + Duration.toMillis(wait)
@@ -983,7 +985,13 @@ export const make = (options: {
           if (listened._tag === "Hushed") continue
           return listened._tag === "Finished"
             ? listened
-            : ({ ...listened, at: hushed.at, duration: hushed.duration, cued: Math.min(said + 1, cues) } satisfies Outcome)
+            : ({
+                ...listened,
+                at: hushed.at,
+                duration: hushed.duration,
+                cued: Math.min(said + 1, cues),
+                ...(until === undefined ? {} : { until }),
+              } satisfies Outcome)
         }
       })
 
@@ -1628,8 +1636,9 @@ export const make = (options: {
           if (first === "") return undefined
           const settled = yield* settle(interrupted.ear, first, interrupted.audio, transcribe, respond, interrupted.alone === true)
           if (settled !== again) return settled
-          const { at, duration, ear, cued } = interrupted
-          const asked = yield* pardon({ _tag: "Hushed", at, duration, ear }, wait, cued)
+          // Listened for no longer than he was, once "Sir?" won't be said again, however often he goes on from a stop.
+          const { at, duration, ear, cued, until } = interrupted
+          const asked = yield* pardon({ _tag: "Hushed", at, duration, ear }, wait, cued, until)
           if (asked._tag === "Finished") return unanswered
           interrupted = asked
         }
