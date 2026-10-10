@@ -3260,6 +3260,44 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
+  test("listens only so long once \"Sir?\" has been talked over twice, however much talk with short pauses keeps coming, like a TV", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper(
+          [[0.9, "Which PR was that?"], [0.91, "Which PR was that?"], [0.92, "Which PR was that?"], [0.93, "So I told Sam the release moved to Friday."]],
+          { live: true },
+        )
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        // Over "Sir?", then over it once more, until that's over, but not for as long as a breather.
+        for (const value of [0.91, 0.92]) {
+          while (helper.rendered.length < (value === 0.91 ? 1 : 2)) yield* helper.talk(0, 1)
+          yield* helper.talk(value, 15)
+          yield* helper.quiet
+        }
+        yield* helper.talk(0, 25)
+        const ranOut = yield* Clock.currentTimeMillis
+        // Then a second of talk at a time, with 1.3 s between, a dozen times, until it's no longer listening.
+        let over: number | undefined
+        for (let round = 0; round < 12 && over === undefined; round++) {
+          yield* helper.talk(0.93, 31)
+          for (let frames = 0; frames < 41 && over === undefined; frames += 4) {
+            yield* helper.talk(0, 4)
+            if (Option.isSome(yield* Fiber.poll(helper.fiber))) over = ((yield* Clock.currentTimeMillis) - ranOut) / 1000
+          }
+        }
+        return { over, rendered: helper.rendered, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ over: result.over, rendered: ["Sir?", "Sir?"], responded: [], sent: [], replies: [] })
+    // About the 3 s it listens after an update, give or take one round of talk, once "Sir?" won't be said again.
+    expect(result.over).toBeGreaterThan(3)
+    expect(result.over).toBeLessThan(3 + 2.4)
+  }, 60_000)
+
   test("takes nothing of what the user begins as \"Sir?\" ends, though that's only made out once it has", async () => {
     const again = "Which PR was that? The one for the docs site."
     // "Sir?" said after its first three seconds, or over them.

@@ -1,4 +1,4 @@
-import { Clock, type Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
+import { Clock, Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, AudioError, type Echo, type Playback } from "./Audio.ts"
@@ -964,15 +964,20 @@ export const make = (options: {
      * own voice too, so it's told the same way: should that make it fall
      * quiet again, it's said once more, and after that he's only listened
      * for, counting the times it was said already, `cued`, taking only what
-     * he begins after a pause longer than he makes going on with something.
-     * Saying nothing more, or once the microphone has gone, he's finished
-     * with it, as with a line nothing was said back to.
+     * he begins after a pause longer than he makes going on with something,
+     * for only `wait` from once it won't be said again, however much he says
+     * meanwhile, like a TV that never pauses that long. Saying
+     * nothing more, or once the microphone has gone, he's finished with it,
+     * as with a line nothing was said back to.
      */
     const pardon = (hushed: Hushed, wait: Duration.DurationInput, cued = 0) =>
       Effect.gen(function* () {
+        /** When he's no longer listened for, once "Sir?" has been said as often as it is. */
+        let until: number | undefined
         for (let said = cued; ; said++) {
           if (hushed.ear.deaf) return { _tag: "Finished" } satisfies Outcome
-          const listened: Listened = yield* said < cues ? asking(hushed.ear, wait) : quietly(hushed.ear, wait)
+          if (said >= cues) until ??= (yield* Clock.currentTimeMillis) + Duration.toMillis(wait)
+          const listened: Listened = yield* until === undefined ? asking(hushed.ear, wait) : quietly(hushed.ear, wait, until)
           if (listened._tag === "Hushed") continue
           return listened._tag === "Finished"
             ? listened
@@ -996,14 +1001,15 @@ export const make = (options: {
 
     /**
      * Listens for `wait`, as once a line has been said to the end, in place of
-     * `cue`. What he begins before he's been quiet for a `breather` may be
-     * more of what he was saying over yapd, with no "Sir?" between to have him
-     * say it all again, so it's told as what he says over its first seconds.
+     * `cue`, or only `until` then, by the clock, when that's given. What he
+     * begins before he's been quiet for a `breather` may be more of what he
+     * was saying over yapd, with no "Sir?" between to have him say it all
+     * again, so it's told as what he says over its first seconds.
      */
-    const quietly = (ear: Ear, wait: Duration.DurationInput) =>
+    const quietly = (ear: Ear, wait: Duration.DurationInput, until?: number) =>
       ear.deaf
         ? Effect.succeed<Listened>({ _tag: "Finished" })
-        : listen(nothing, ear, { text: "", from: 0, cue: false, breather }, wait, Effect.void).pipe(Effect.scoped)
+        : listen(nothing, ear, { text: "", from: 0, cue: false, breather, until }, wait, Effect.void).pipe(Effect.scoped)
 
     /**
      * Listens over a line, `text` played from `from` seconds, and stops it as
@@ -1020,7 +1026,7 @@ export const make = (options: {
     const listen = (
       playback: Playback,
       ear: Ear,
-      line: { readonly text: string; readonly from: number; readonly cue: boolean; readonly breather?: number },
+      line: { readonly text: string; readonly from: number; readonly cue: boolean; readonly breather?: number; readonly until?: number | undefined },
       wait: Duration.DurationInput,
       through: Effect.Effect<void>,
     ) =>
@@ -1072,7 +1078,9 @@ export const make = (options: {
         const startLingering = Effect.gen(function* () {
           yield* stopLingering
           const id = fresh()
-          const fiber = yield* Effect.sleep(wait).pipe(
+          // Never longer than `until`, however often he's begun and finished since.
+          const lasting = line.until === undefined ? wait : Duration.millis(Math.max(0, line.until - (yield* Clock.currentTimeMillis)))
+          const fiber = yield* Effect.sleep(lasting).pipe(
             Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })),
             Effect.asVoid,
             Effect.forkScoped,
