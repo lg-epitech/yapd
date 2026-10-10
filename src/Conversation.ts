@@ -129,15 +129,16 @@ interface Chain {
   readonly at: number
   /**
    * The part he's saying now, while he is: where it comes in what he said,
-   * how far into the line he began it, the look at it so far under way, for
-   * a stop of his, the stop a look found, which yapd stopped for, and the
-   * last look as he paused, how much it had, and what it came to, once it's
-   * told.
+   * how far into the line he began it, whether he began it once `cue` had
+   * been said to the end, the look at it so far under way, for a stop of
+   * his, the stop a look found, which yapd stopped for, and the last look as
+   * he paused, how much it had, and what it came to, once it's told.
    */
   part:
     | {
         readonly order: number
         readonly at: number
+        readonly after: boolean
         looking: number | undefined
         looked: string | undefined
         paused: { readonly id: number; readonly samples: number; whole: Verdict | undefined } | undefined
@@ -147,6 +148,12 @@ interface Chain {
   parts: number
   /** Parts he's finished that are still being made out, by the id of the look at all of each, with where each comes, where he began it and its audio. */
   readonly checking: Map<number, Part>
+  /**
+   * Parts he began once `cue` had been said to the end, with nothing he said
+   * over it known to be him: held, and not made out, as his reply to it,
+   * should all he said over it turn out to be only its own voice.
+   */
+  held: Array<Part>
   /** His first stop or wait in it, as he said them, with the part it's in. */
   stop: (Part & { readonly said: string }) | undefined
   /** How far into the line he began the first part that was clearly him, if one was. */
@@ -191,6 +198,10 @@ const lulling = "2 seconds"
 export const cue = "Sir?"
 /** How many times it's said for one interruption, after which he's only listened for. */
 const cues = 2
+/** Words Whisper writes for `cue` getting into the microphone as it's said, which say nothing of who said them over it. */
+const sirs: ReadonlySet<string> = new Set(["sir", "sirs", "sire", "sure", "siri", "sorry", "serve", "stir", "sur", "ser", "cer", "sear", "seer"])
+/** What was heard over `cue`, less the words that may be its own voice. */
+const unsaid = (heard: string) => heard.replace(/[\p{L}']+/gu, (word) => (sirs.has(word.toLowerCase()) ? "" : word))
 /** What comes of a reply to a stop of his over yapd's first seconds that he went on from, which he's to say again. */
 const again = "again"
 /** What comes of saying `cue` for that, when he said nothing more. */
@@ -1082,6 +1093,8 @@ export const make = (options: {
             yield* transcriber.transcribe(audio).pipe(
               Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
               whisper.withPermits(1),
+              // Over "Sir?", what's like it is its own voice, so it's told by the rest.
+              Effect.map((heard) => (line.cue ? unsaid(heard) : heard)),
               Effect.flatMap((heard) =>
                 Queue.offer(signals, {
                   _tag: "Looked",
@@ -1102,9 +1115,13 @@ export const make = (options: {
             if (verdict.whose === "unclear") return yield* Effect.logInfo("Carried on over what may be its own voice")
             if (verdict.whose === "stop") {
               if (chain.stop === undefined || part.order < chain.stop.order) chain.stop = { ...part, said: verdict.stop }
+              // Nothing else he said counts, what he began once "Sir?" was over too.
+              chain.held = []
               yield* Effect.logInfo(`Heard him stop it over its first seconds, taking only that: ${verdict.stop}`)
             } else {
               chain.his = Math.min(chain.his ?? part.at, part.at)
+              // What he began once "Sir?" was over may go on from what he said over it, so it's made out with it, for a stop.
+              for (const reply of chain.held.splice(0)) chain.checking.set(yield* look(reply.audio, chain.at, "whole"), reply)
               yield* Effect.logInfo("Heard him over its first seconds, so it falls quiet for him to say it again")
             }
             if (playing) yield* halt
@@ -1124,9 +1141,20 @@ export const make = (options: {
          * or all of it let go, as if nothing had been said, picking up from
          * before he began should yapd have stopped for a stop that turned out
          * to be its own words. None until then, nor when it just carries on.
+         * Over "Sir?", once all he said over it has turned out to be its own
+         * voice, what he began after it is his reply to it, taken whole as
+         * soon as he's finished.
          */
         const close = Effect.gen(function* () {
-          if (chain === undefined || speaking || chain.checking.size > 0 || !(chain.silent || deaf)) return undefined
+          if (chain === undefined || speaking || chain.checking.size > 0) return undefined
+          // All he said over "Sir?" was only its own voice, so what he began once it was said to the end is his reply to it, taken whole.
+          if (chain.held.length > 0 && chain.stop === undefined && chain.his === undefined) {
+            const audio = Endpointer.concat(chain.held.map((part) => part.audio))
+            yield* stopLulling
+            chain = undefined
+            return { _tag: "Interrupted", at: playback.duration, duration: playback.duration, audio, ear } satisfies Listened
+          }
+          if (!(chain.silent || deaf)) return undefined
           const { at, stop, his } = chain
           yield* stopLulling
           chain = undefined
@@ -1161,6 +1189,7 @@ export const make = (options: {
                   part: undefined,
                   parts: 0,
                   checking: new Map(),
+                  held: [],
                   stop: undefined,
                   his: undefined,
                   silent: false,
@@ -1174,7 +1203,14 @@ export const make = (options: {
               }
               yield* stopLulling
               chain.silent = false
-              chain.part = { order: ++chain.parts, at: yield* position, looking: undefined, looked: undefined, paused: undefined }
+              chain.part = {
+                order: ++chain.parts,
+                at: yield* position,
+                after: line.cue && completed && !playing,
+                looking: undefined,
+                looked: undefined,
+                paused: undefined,
+              }
               break
             case "Speech":
               yield* stopLingering
@@ -1212,7 +1248,9 @@ export const make = (options: {
                 // Said nothing more since he paused, the look then has all of it, and is told as that, once it's back.
                 const paused = part.paused !== undefined && signal.audio.length <= part.paused.samples ? part.paused : undefined
                 const finished = { order: part.order, at: part.at, audio: signal.audio }
-                if (paused?.whole !== undefined) yield* told(paused.whole, finished)
+                // Begun once "Sir?" was over, with nothing over it known to be him, it's held for his reply until that's known.
+                if (part.after && chain.his === undefined) chain.held.push(finished)
+                else if (paused?.whole !== undefined) yield* told(paused.whole, finished)
                 else chain.checking.set(paused?.id ?? (yield* look(signal.audio, chain.at, "whole", part.looked)), finished)
               }
               const closed = yield* close

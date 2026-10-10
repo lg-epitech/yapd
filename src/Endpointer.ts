@@ -125,7 +125,8 @@ export class Endpointer {
   }
 }
 
-const concat = (frames: ReadonlyArray<Float32Array>) => {
+/** Audio in one piece, in order. */
+export const concat = (frames: ReadonlyArray<Float32Array>) => {
   const audio = new Float32Array(frames.reduce((length, frame) => length + frame.length, 0))
   let offset = 0
   for (const frame of frames) {

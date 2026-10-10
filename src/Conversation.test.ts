@@ -3164,6 +3164,92 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     })
   })
 
+  test("lets go of its own \"Sir?\" getting into the microphone, heard as a word like it, like \"Sure.\", rather than say it again", async () => {
+    for (const echo of ["Sure.", "Sir.", "Sorry?", "Siri?", "Stir.", "Serve."]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "Which PR was that?"], [0.85, echo]])
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          // "Sir?", said over its first seconds too, getting into the microphone.
+          yield* helper.talk(0.85, 10)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.finish
+          yield* helper.wait(4)
+          const exit = yield* Fiber.poll(helper.fiber)
+          return { rendered: helper.rendered, done: Option.isSome(exit), responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([echo, result]).toEqual([echo, { rendered: ["Sir?"], done: true, responded: [], sent: [], replies: [] }])
+    }
+  }, 30_000)
+
+  test("takes the user's reply straight after \"Sir?\" whole, though its own voice got into the microphone over it, and is still being made out once he's begun", async () => {
+    const said = "Merge it."
+    // Whisper makes out its own voice at once, or only once he has finished.
+    for (const delay of [0, 1]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "Which PR was that?"], [0.85, "Sir."], [0.91, said]], { delays: [0, delay] })
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          // "Sir?", said over its first seconds too, getting into the microphone, and him a third of a second after it ends.
+          yield* helper.talk(0.85, 10)
+          yield* helper.finish
+          yield* helper.talk(0, 10)
+          yield* helper.talk(0.91, 15)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { rendered: helper.rendered, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([delay, result]).toEqual([delay, { rendered: ["Sir?", "Okay."], responded: [said], sent: [said], replies: [said] }])
+    }
+  }, 30_000)
+
+  test("takes nothing of what the user goes on with straight after \"Sir?\", having begun over it, though that's still being made out, and all of it when he says it again", async () => {
+    const again = "If the tests fail, revert it."
+    for (const delay of [0, 1]) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "Which PR was that?"], [0.92, "If the tests fail,"], [0.93, "revert it."], [0.94, again]], {
+            delays: [0, delay],
+          })
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          // Over the end of "Sir?", and on a third of a second after it.
+          yield* helper.talk(0.92, 10)
+          yield* helper.finish
+          yield* helper.talk(0.92, 10)
+          yield* helper.talk(0, 10)
+          yield* helper.talk(0.93, 15)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          const asked = { rendered: [...helper.rendered], responded: [...helper.responded], sent: [...helper.sent] }
+          yield* helper.finish
+          yield* helper.talk(0.94, 30)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { asked, responded: helper.responded, sent: helper.sent }
+        }),
+      )
+      expect([delay, result]).toEqual([delay, { asked: { rendered: ["Sir?", "Sir?"], responded: [], sent: [] }, responded: [again], sent: [again] }])
+    }
+  }, 30_000)
+
   test("takes nothing of what the user goes on with over \"Sir?\", or while it's still being rendered, though it's said after its first seconds, and all of it when he says it again", async () => {
     const again = "If the build breaks, revert it."
     // Begun late in its first seconds, so "Sir?" is said after them, at once or a moment later, once it's rendered, or early, so
