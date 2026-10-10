@@ -6,7 +6,9 @@ import { tmpdir } from "node:os"
 import * as Path from "node:path"
 import * as Config from "./Config.ts"
 import { ProcessError } from "./Process.ts"
+import { wav } from "./Dictation.ts"
 import {
+  clipped,
   early,
   ffmpeg,
   head,
@@ -91,6 +93,45 @@ describe("join", () => {
     const whole = join([first, rest, rest], 100)
     expect(start.length).toBeLessThan(whole.length)
     expect(Array.from(whole.subarray(0, start.length))).toEqual(Array.from(start))
+  })
+})
+
+describe("clipped", () => {
+  /** Its voice, then its trailing quiet, a hundredth of a second at a time. */
+  const sir = new Float32Array([...tone(0.84, 0.3), ...tone(0.06, 0.002), ...tone(0.1, 0)])
+
+  test("cuts the quiet a render trails off into after the last of its voice, written as 16-bit samples or as floats", async () => {
+    const floats = new Uint8Array(await new RawAudio(sir, 100).toBlob().arrayBuffer())
+    for (const file of [wav(sir, 100), floats]) {
+      const shorter = clipped(file)!
+      const view = new DataView(shorter.buffer)
+      const size = view.getUint32(40, true)
+      expect(size / (file === floats ? 4 : 2)).toBe(84)
+      expect(shorter.length).toBe(44 + size)
+      expect(view.getUint32(4, true)).toBe(shorter.length - 8)
+      expect(Array.from(shorter.subarray(8, 40))).toEqual(Array.from(file.subarray(8, 40)))
+      expect(Array.from(shorter.subarray(44))).toEqual(Array.from(file.subarray(44, 44 + size)))
+    }
+  })
+
+  test("keeps whatever comes before its samples, like a list of tags", () => {
+    const file = wav(sir, 100)
+    const tags = new Uint8Array([..."LIST"].map((letter) => letter.charCodeAt(0)).concat([3, 0, 0, 0, 1, 2, 3, 0]))
+    const tagged = new Uint8Array([...file.subarray(0, 36), ...tags, ...file.subarray(36)])
+    new DataView(tagged.buffer).setUint32(4, tagged.length - 8, true)
+    const shorter = clipped(tagged)!
+    expect(Array.from(shorter.subarray(36, 48))).toEqual(Array.from(tags))
+    expect(new DataView(shorter.buffer).getUint32(52, true)).toBe(168)
+    expect(shorter.length).toBe(56 + 168)
+  })
+
+  test("leaves alone what has no quiet after its voice, or is all quiet, or isn't a WAV file it can read", () => {
+    expect(clipped(wav(new Float32Array(tone(1, 0.3)), 100))).toBeUndefined()
+    expect(clipped(wav(new Float32Array(tone(1, 0)), 100))).toBeUndefined()
+    expect(clipped(new TextEncoder().encode("Not a WAV file at all."))).toBeUndefined()
+    const eightBit = wav(sir, 100)
+    new DataView(eightBit.buffer).setUint16(34, 8, true)
+    expect(clipped(eightBit)).toBeUndefined()
   })
 })
 

@@ -210,6 +210,61 @@ export const join = (parts: ReadonlyArray<Float32Array>, rate: number) => {
 /** The start of what `join` makes with `part` first, which can play before the rest is rendered. */
 export const head = (part: Float32Array, rate: number) => place(part, rate, true, false)
 
+/**
+ * A rendered file without the quiet it trails off into after the last of its
+ * voice, so whatever plays it is over as soon as its voice is: none when it
+ * has no such quiet, or it isn't a WAV file of 16-bit or float samples.
+ */
+export const clipped = (wav: Uint8Array): Uint8Array | undefined => {
+  const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength)
+  const name = (at: number) => String.fromCharCode(...wav.subarray(at, at + 4))
+  if (wav.length < 12 || name(0) !== "RIFF" || name(8) !== "WAVE") return undefined
+  let format: { readonly code: number; readonly channels: number; readonly align: number; readonly bits: number } | undefined
+  for (let at = 12; at + 8 <= wav.length; ) {
+    const size = view.getUint32(at + 4, true)
+    const body = at + 8
+    if (name(at) === "fmt " && size >= 16 && body + 16 <= wav.length) {
+      const tag = view.getUint16(body, true)
+      // An extensible one says which in its subformat.
+      const code = tag === 0xfffe && size >= 26 && body + 26 <= wav.length ? view.getUint16(body + 24, true) : tag
+      format = { code, channels: view.getUint16(body + 2, true), align: view.getUint16(body + 12, true), bits: view.getUint16(body + 14, true) }
+    } else if (name(at) === "data") {
+      if (format === undefined || format.channels === 0 || format.align !== (format.channels * format.bits) / 8) return undefined
+      const { channels, align, bits } = format
+      const sample =
+        format.code === 1 && bits === 16
+          ? (offset: number) => view.getInt16(offset, true) / 0x8000
+          : format.code === 3 && bits === 32
+            ? (offset: number) => view.getFloat32(offset, true)
+            : undefined
+      if (sample === undefined) return undefined
+      const frames = Math.floor(Math.min(size, wav.length - body) / align)
+      const voiced = (frame: number) =>
+        Array.from({ length: channels }, (_, channel) => sample(body + frame * align + (channel * bits) / 8)).some((value) => Math.abs(value) >= silent)
+      let last = frames - 1
+      while (last >= 0 && !voiced(last)) last--
+      if (last < 0 || last === frames - 1) return undefined
+      const kept = (last + 1) * align
+      // Without what came after it, and padded to an even length, as a WAV file's parts are.
+      const clipped = new Uint8Array(body + kept + (kept % 2))
+      clipped.set(wav.subarray(0, body + kept))
+      const written = new DataView(clipped.buffer)
+      written.setUint32(at + 4, kept, true)
+      written.setUint32(4, clipped.length - 8, true)
+      return clipped
+    }
+    at = body + size + (size % 2)
+  }
+  return undefined
+}
+
+/** Cuts the quiet a rendered file trails off into, as `clipped` does, leaving it as it is when it can't. */
+export const clip = (path: string) =>
+  Effect.tryPromise(async () => {
+    const shorter = clipped(new Uint8Array(await Bun.file(path).arrayBuffer()))
+    if (shorter !== undefined) await Bun.write(path, shorter)
+  }).pipe(Effect.ignore)
+
 /** Words a first part has at least, when there are enough sentences, so it plays for longer than the rest takes to render. */
 const enough = 6
 

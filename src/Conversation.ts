@@ -11,7 +11,7 @@ import { enough, gist, hallucinated, type Line, type Reply, Responder } from "./
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
-import { extension, Voice } from "./Voice.ts"
+import { clip, extension, Voice } from "./Voice.ts"
 
 /** An update, rendered and ready to be read out. */
 export interface Update {
@@ -958,6 +958,8 @@ export const make = (options: {
         const path = join(options.dir, `${crypto.randomUUID()}${extension}`)
         yield* Effect.addFinalizer(() => Effect.promise(() => rm(path, { force: true })))
         const rendered = yield* voice.render(cue, path).pipe(
+          // Played only as long as its voice lasts, so what he begins once that's over, to him after it, is heard as after it.
+          Effect.zipRight(clip(path)),
           Effect.as(true),
           Effect.catchAll((error) => Effect.logWarning(`Could not say "${cue}"`, error).pipe(Effect.as(false))),
         )

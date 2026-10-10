@@ -17,10 +17,12 @@ import {
   TestClock,
   TestContext,
 } from "effect"
+import { readFileSync } from "node:fs"
 import { Audio, AudioError, native } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
 import { between, cut, stopIn, together, unfinished, whose } from "./Conversation.ts"
+import { wav } from "./Dictation.ts"
 import { defaults } from "./Endpointer.ts"
 import { Relays } from "./Relay.ts"
 import * as Helper from "./Helper.ts"
@@ -1005,10 +1007,19 @@ const overHelper = (
     readonly rendering?: number
     /** Frames of a value the voice detector takes so many milliseconds over each, so it runs behind what's heard after them. */
     readonly lagging?: readonly [number, number]
+    /** Samples, at 24 kHz, of a file rendered for "Sir?", which then plays for as long as the file lasts and finishes by itself. */
+    readonly sir?: Float32Array
   } = {},
 ) =>
   Effect.gen(function* () {
-    const runSync = Runtime.runSync(yield* Effect.runtime<never>())
+    const runtime = yield* Effect.runtime<never>()
+    const runSync = Runtime.runSync(runtime)
+    /** Files rendered for "Sir?", which play for as long as they last. */
+    const files = new Set<string>()
+    /** Lines finishing by themselves as they play. */
+    const finishing: Array<Fiber.RuntimeFiber<void>> = []
+    /** When each line started playing, by the clock. */
+    const starts: Array<number> = []
     const commands: Array<string> = []
     /** Where each line was played from, in seconds. */
     const plays: Array<number> = []
@@ -1042,7 +1053,7 @@ const overHelper = (
     }
     const send = (event: object) => write(Helper.encode(event))
     const now = () => runSync(Clock.currentTimeMillis)
-    yield* Effect.addFinalizer(() => Effect.sync(() => connection?.terminate()))
+    yield* Effect.addFinalizer(() => Effect.sync(() => connection?.terminate()).pipe(Effect.zipRight(Fiber.interruptAll(finishing))))
     const launch = (path: string) =>
       Effect.tryPromise({
         try: () =>
@@ -1059,6 +1070,7 @@ const overHelper = (
                   const command = JSON.parse(new TextDecoder().decode(message.payload)) as {
                     readonly type: string
                     readonly id?: string
+                    readonly path?: string
                     readonly from?: number
                   }
                   commands.push(command.type)
@@ -1067,7 +1079,27 @@ const overHelper = (
                     running = true
                     playing = { id: command.id ?? "", since: now(), from: command.from ?? 0 }
                     plays.push(playing.from)
-                    send({ type: "playing", id: command.id, duration: options.duration ?? 10 })
+                    starts.push(playing.since)
+                    // As long as its samples last, as the WAV file says.
+                    const file = command.path !== undefined && files.has(command.path) ? readFileSync(command.path) : undefined
+                    const lasting = file === undefined ? undefined : new DataView(file.buffer, file.byteOffset).getUint32(40, true) / 2 / 24000
+                    send({ type: "playing", id: command.id, duration: lasting ?? options.duration ?? 10 })
+                    if (lasting !== undefined) {
+                      const id = playing.id
+                      finishing.push(
+                        Runtime.runFork(runtime)(
+                          Effect.sleep(`${Math.round(lasting * 1000)} millis`).pipe(
+                            Effect.zipRight(
+                              Effect.sync(() => {
+                                if (playing?.id !== id) return
+                                send({ type: "finished", id })
+                                playing = undefined
+                              }),
+                            ),
+                          ),
+                        ),
+                      )
+                    }
                   } else if (command.type === "stop") {
                     send({
                       type: "stopped",
@@ -1131,9 +1163,14 @@ const overHelper = (
         },
       }),
       Layer.succeed(Voice, {
-        render: (text) =>
+        render: (text, path) =>
           Effect.sync(() => void rendered.push(text)).pipe(
             Effect.zipRight(options.rendering === undefined ? Effect.void : Effect.sleep(`${options.rendering} seconds`)),
+            Effect.zipRight(
+              options.sir === undefined || text !== Conversation.cue
+                ? Effect.void
+                : Effect.promise(() => Bun.write(path, wav(options.sir!, 24000))).pipe(Effect.zipRight(Effect.sync(() => void files.add(path)))),
+            ),
           ),
       }),
     )
@@ -1183,6 +1220,8 @@ const overHelper = (
       responded,
       rendered,
       interrupted: () => interrupted,
+      /** Seconds since the last line started playing, by the clock. */
+      since: Effect.sync(() => (now() - (starts.at(-1) ?? 0)) / 1000),
       talk,
       quiet: talk(0, defaults.silence),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
@@ -3329,6 +3368,52 @@ describe("Over its first words, while yapd's own voice can still get into the mi
         }),
       )
       expect([delay, result]).toEqual([delay, { rendered: ["Sir?", "Okay."], responded: [said], sent: [said], replies: [said] }])
+    }
+  }, 30_000)
+
+  test("takes a quick reply begun just after the voice of \"Sir?\" whole, though its file goes on a moment in quiet, to a question as to an update, but nothing begun over its voice", async () => {
+    // "Sir?" as it's rendered: its voice, then a sixth of a second of quiet.
+    const sir = new Float32Array(24000).fill(0.3, 0, 20160)
+    // Whether it's a question, and how far into "Sir?" he answers, as the microphone hears him: a twentieth of a second after
+    // its voice ends, or a tenth before.
+    for (const [asking, at] of [[false, 0.86], [true, 0.86], [false, 0.7], [true, 0.7]] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const answers: Array<string> = []
+          const helper = yield* overHelper([[0.9, "Yes."], [0.91, "Yes."]], { live: true, sir })
+          if (asking) {
+            yield* Fiber.interrupt(helper.fiber)
+            yield* Effect.fork(
+              helper.ask({
+                audio: "/tmp/question.wav",
+                spoken: "Send it again?",
+                answer: (heard) => Effect.succeed(Option.some(Effect.sync(() => void answers.push(heard)))),
+              }),
+            )
+          }
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 12)
+          yield* helper.quiet
+          yield* helper.quiet
+          while (helper.rendered.length === 0 || helper.plays.length < (asking ? 3 : 2)) yield* helper.talk(0, 1)
+          // A frame at a time, so he begins just where he does.
+          while ((yield* helper.since) < at) yield* helper.talk(0, 1)
+          for (let frame = 0; frame < 12; frame++) yield* helper.talk(0.91, 1)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { rendered: helper.rendered, responded: helper.responded, sent: helper.sent, answers }
+        }),
+      )
+      const taken = at > 0.84
+      expect([asking, at, result]).toEqual([
+        asking,
+        at,
+        !taken
+          ? { rendered: ["Sir?", "Sir?"], responded: [], sent: [], answers: [] }
+          : asking
+            ? { rendered: ["Sir?"], responded: [], sent: [], answers: ["Yes."] }
+            : { rendered: ["Sir?", "Okay."], responded: ["Yes."], sent: ["Yes."], answers: [] },
+      ])
     }
   }, 30_000)
 
