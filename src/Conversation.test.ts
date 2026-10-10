@@ -3164,6 +3164,83 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     })
   })
 
+  test("picks up from before where the user began over them when what he says after \"Sir?\" wasn't meant for it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Tell it to deploy."], [0.91, "Sam, are you coming?"]], { intent: "resume" })
+        yield* helper.wait(2)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        yield* helper.finish
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { plays: helper.plays, rendered: helper.rendered, responded: helper.responded, sent: helper.sent }
+      }),
+    )
+    // The update, "Sir?", then the update again from a second and a half before where he began, two seconds in.
+    expect(result).toEqual({ plays: [0, 0, 0.5], rendered: ["Sir?"], responded: ["Sam, are you coming?"], sent: [] })
+  })
+
+  test("asks a question again when what the user says after \"Sir?\" isn't an answer, rather than leave it unanswered", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const answers: Array<string> = []
+        const helper = yield* overHelper(
+          [[0.9, "Neither, start a new project."], [0.91, "Sam, one moment."], [0.92, "Neither, start a new project."]],
+          { duration: 3.5 },
+        )
+        yield* Fiber.interrupt(helper.fiber)
+        const asking = yield* Effect.fork(
+          helper.ask({
+            audio: "/tmp/question.wav",
+            spoken: "Which one, sir: yapd or the docs site?",
+            answer: (heard) => Effect.succeed(heard.startsWith("Sam,") ? Option.none() : Option.some(Effect.sync(() => void answers.push(heard)))),
+          }),
+        )
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        yield* helper.finish
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const asked = { plays: helper.plays.length, rendered: [...helper.rendered], answers: [...answers] }
+        yield* helper.finish
+        yield* helper.talk(0.92, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { asked, answered: yield* Fiber.join(asking), answers }
+      }),
+    )
+    // The update, given up on, the question, "Sir?", and the question again.
+    expect(result).toEqual({ asked: { plays: 4, rendered: ["Sir?"], answers: [] }, answered: true, answers: ["Neither, start a new project."] })
+  })
+
+  test("makes out all the user said over them again once he's said more since a look as he paused, so a stop he says after that is heard", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Whisper takes five seconds over the look as he paused.
+        const helper = yield* overHelper([[0.9, "Tell it to deploy."], [0.91, "Stop."]], { delays: [5], intent: "dismiss" })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 10)
+        // Long enough for a look at all he's said so far.
+        yield* helper.talk(0, 7)
+        yield* helper.talk(0.91, 10)
+        yield* helper.quiet
+        yield* helper.wait(5)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, rendered: helper.rendered, responded: helper.responded, replies: yield* helper.replies }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "stop"], rendered: [], responded: ["Stop."], replies: ["Stop."] })
+  })
+
   test("lets go of its own \"Sir?\" getting into the microphone, heard as a word like it, like \"Sure.\", rather than say it again", async () => {
     for (const echo of ["Sure.", "Sir.", "Sorry?", "Siri?", "Stir.", "Serve."]) {
       const result = await overHelperScoped(
