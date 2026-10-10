@@ -1248,7 +1248,10 @@ export const make = (options: {
          * soon as he's finished.
          */
         const close = Effect.gen(function* () {
-          if (chain === undefined || speaking || chain.checking.size > 0 || chain.waiting.size > 0) return undefined
+          if (chain === undefined) return undefined
+          // Gone on too long while yapd talked, and yapd stopped for him since, it's over, as once yapd has said all it was saying.
+          if (chain.overran && !playing) return { _tag: "Finished" } satisfies Listened
+          if (speaking || chain.checking.size > 0 || chain.waiting.size > 0) return undefined
           // All he said over "Sir?" was only its own voice, so what he began once it was said to the end is his reply to it, taken whole.
           if (chain.held.length > 0 && chain.holding && chain.stop === undefined) {
             const audio = Endpointer.concat(chain.held.map((part) => part.audio))
@@ -1276,6 +1279,8 @@ export const make = (options: {
         })
 
         while (true) {
+          // Stopped for him once what he said had gone on too long, as by a look at it, nothing more of it is waited for.
+          if (chain?.overran === true && !playing) return { _tag: "Finished" } satisfies Listened
           const signal = yield* next
           switch (signal._tag) {
             case "Onset":

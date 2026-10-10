@@ -3536,6 +3536,54 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 180_000)
 
+  test("moves on, taking nothing and saying no \"Sir?\", once talk over a long line that went on half a minute with no pause long enough to end it has it fall quiet", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        // Past its first seconds, each part ends only as the microphone takes no more in one go, half a minute on, so the one
+        // that has it fall quiet may have some of yapd's words in it too, which is heard as clearly him.
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass now"], [0.91, "So I told Sam the release moved to Friday."]], {
+          live: true,
+          duration: 100,
+          whole: [[0.8, 0.91], "So I told Sam the release moved to Friday."],
+        })
+        yield* helper.wait(0.5)
+        const began = yield* Clock.currentTimeMillis
+        let ended: number | undefined
+        let quiet: number | undefined
+        const step = (value: number, count: number) =>
+          Effect.gen(function* () {
+            for (let frames = 0; frames < count && ended === undefined; frames += 4) {
+              yield* helper.talk(value, Math.min(4, count - frames))
+              const now = ((yield* Clock.currentTimeMillis) - began) / 1000
+              if (quiet === undefined && helper.commands.includes("stop")) quiet = now
+              if (Option.isSome(yield* Fiber.poll(helper.fiber))) ended = now
+            }
+          })
+        // A second of talk at a time with 0.38 s between: what may be yapd's own words for 32 s, then clearly not, until 96 s.
+        for (let round = 0; round < 70 && ended === undefined; round++) {
+          const now = ((yield* Clock.currentTimeMillis) - began) / 1000
+          yield* step(now < 32 ? 0.8 : 0.91, 31)
+          yield* step(0, 12)
+        }
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const exit = yield* Fiber.poll(helper.fiber)
+        return {
+          ended,
+          quiet,
+          finished: Option.isSome(exit) && Exit.isSuccess(exit.value),
+          rendered: helper.rendered,
+          responded: helper.responded,
+          sent: helper.sent,
+        }
+      }),
+    )
+    expect(result).toEqual({ ended: result.ended, quiet: result.quiet, finished: true, rendered: [], responded: [], sent: [] })
+    // It falls quiet once that's clearly him, a minute in, and moves on then, rather than listen while it goes on.
+    expect(result.quiet).toBeGreaterThan(32)
+    expect(result.ended! - result.quiet!).toBeLessThan(1)
+  }, 180_000)
+
   test("takes nothing of what the user begins as \"Sir?\" ends, though that's only made out once it has", async () => {
     const again = "Which PR was that? The one for the docs site."
     // "Sir?" said after its first three seconds, or over them.
