@@ -398,9 +398,10 @@ describe("Brain", () => {
     expect(told).toContain(
       `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around «${echo}», misheard or not, and his first word may be lost under yours.`,
     )
-    expect(told).toContain(`If it may all be your words, it's "resume".`)
+    expect(told).toContain(`Words that sound like yours there are yours, however they came out,`)
+    expect(told).toContain(`If nothing surely his is left, it's "resume", never "dismiss" or a yes.`)
     expect(told).toContain(`with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again.`)
-    expect(told.endsWith(`A question or a dismissal goes as usual.\n\nWHAT HE SAID, answering your question:\nStop it.`)).toBe(true)
+    expect(told.endsWith(`A question or a dismissal of his goes as usual.\n\nWHAT HE SAID, answering your question:\nStop it.`)).toBe(true)
     expect(Brain.prompt(over("Stop it.", { subject: busy, open: Option.some(confirming) }, false), Option.none())).not.toContain("your own voice")
   })
 

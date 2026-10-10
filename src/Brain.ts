@@ -2066,7 +2066,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     ...(situation.utterance.echo === undefined
       ? []
       : [
-          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${fenced(situation.utterance.echo, 400)}, misheard or not, and his first word may be lost under yours. Leave any words that may be yours out of what you act on, and never turn them into words of his. If it may all be your words, it's "resume". If what's for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal goes as usual.`,
+          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${fenced(situation.utterance.echo, 400)}, misheard or not, and his first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "The teaser is important." for "the Tezos importer", or "Stop it." for "Stop the…": take them all out, and never act on them or turn them into words of his. If nothing surely his is left, it's "resume", never "dismiss" or a yes. If what's left for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal of his goes as usual.`,
         ]),
     `WHAT HE SAID, ${how(situation)}:\n${situation.utterance.heard}`,
   ].join("\n\n")
