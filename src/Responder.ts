@@ -80,7 +80,7 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo }: Interrup
     ...(echo === undefined
       ? []
       : [
-          `They began while your own voice could still get into their microphone, so the first words heard may be yours, from around "${echo}", or their first word may be lost under it. If a message for the agent sounds cut off, or its meaning hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.`,
+          `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "${echo}", misheard or not, and their first word may be lost under yours. If it may all be your words, it's "resume". If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.`,
         ]),
     `What the user just said:\n${heard}`,
   ].join("\n\n")
