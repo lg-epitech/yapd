@@ -75,6 +75,8 @@ type Signal =
   | { readonly _tag: "Lulled"; readonly id: number }
   /** He's no longer listened for, once "Sir?" won't be said again, however much he's said since. */
   | { readonly _tag: "Due"; readonly id: number }
+  /** What he's said over yapd's first seconds, or over "Sir?", has gone on too long without a pause to be anything but a TV's. */
+  | { readonly _tag: "Overran"; readonly id: number }
 
 /**
  * The microphone for a whole update, so nothing the user says is missed
@@ -135,6 +137,7 @@ interface Part {
  * can only stop yapd.
  */
 interface Chain {
+  readonly id: number
   /** How far into the line he began. */
   readonly at: number
   /**
@@ -177,6 +180,8 @@ interface Chain {
   lull: boolean
   /** The wait for that, should the microphone never tell, under way. */
   lulling: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
+  /** Whether it's gone on `unbroken` for as long as it may, while yapd was still talking, so it's over once yapd is. */
+  overran: boolean
 }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
@@ -207,6 +212,13 @@ const settling = Endpointer.defaults.silence
  * about half a second: long enough that it always does first when it can.
  */
 const lulling = "2 seconds"
+/**
+ * How long all he says over yapd's first seconds, or over "Sir?", can go on
+ * with no pause long enough to end it, before it's taken for a TV that never
+ * pauses, and yapd moves on: as long as the longest the microphone takes
+ * anything said in one go.
+ */
+const unbroken = "30 seconds"
 /** What yapd says once it has fallen quiet for what he said over its first seconds, for him to say it again. */
 export const cue = "Sir?"
 /** How many times it's said for one interruption, after which he's only listened for. */
@@ -1267,7 +1279,10 @@ export const make = (options: {
               // it's said after its first seconds, or he began while it was still being rendered, or as it ended, though that's
               // only made out once it has. Listening in its place, that's all he begins before he's paused for a breather.
               if (chain === undefined && (signal.echo || (line.cue && (playing || signal.playing)) || signal.quiet < (line.breather ?? 0))) {
+                const begun = fresh()
+                yield* Effect.sleep(unbroken).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Overran", id: begun })), Effect.forkScoped)
                 chain = {
+                  id: begun,
                   at: yield* position,
                   part: undefined,
                   parts: 0,
@@ -1279,6 +1294,7 @@ export const make = (options: {
                   silent: false,
                   lull: false,
                   lulling: undefined,
+                  overran: false,
                 }
               }
               if (chain === undefined) {
@@ -1387,8 +1403,9 @@ export const make = (options: {
               // Heard already, as it finished. Also arrives for a playback the user stopped, which is already dealt with.
               if (signal.id !== id || !playing) break
               playing = false
-              // What he says over its first seconds decides how it ends, once that's over.
+              // What he says over its first seconds decides how it ends, once that's over, unless it's gone on too long already.
               if (chain !== undefined) {
+                if (chain.overran) return { _tag: "Finished" } satisfies Listened
                 yield* fellQuiet
                 break
               }
@@ -1406,6 +1423,7 @@ export const make = (options: {
                   yield* fellQuiet
                 }
                 broken = signal.error
+                if (chain?.overran === true) return yield* Effect.fail(signal.error)
                 break
               }
               // As without a microphone: cut short, it wasn't heard, and there's nothing to wait for a reply to.
@@ -1415,6 +1433,18 @@ export const make = (options: {
               if (signal.id !== lingering?.id) break
               if (broken !== undefined) return yield* Effect.fail(broken)
               return { _tag: "Finished" } satisfies Listened
+            case "Overran": {
+              if (chain?.id !== signal.id) break
+              // His reply begun once "Sir?" was over is heard out, as all he says is, for as long as the microphone takes it.
+              if (chain.holding && (chain.held.length > 0 || chain.part?.after === true)) break
+              // None of it is taken, so yapd moves on, taking nothing of what's still being said: once it's said all it was saying.
+              if (playing) {
+                chain.overran = true
+                break
+              }
+              if (broken !== undefined) return yield* Effect.fail(broken)
+              return { _tag: "Finished" } satisfies Listened
+            }
             case "Due":
               // What he began once he'd paused for a breather is heard out, as in any wait. Nothing else he's said counts.
               if (signal.id !== id || (chain === undefined && speaking)) break
@@ -1532,6 +1562,7 @@ export const make = (options: {
               case "Broke":
               case "Lingered":
               case "Due":
+              case "Overran":
               case "Partial":
               case "Looked":
               case "Silent":

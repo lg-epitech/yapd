@@ -3453,6 +3453,63 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ asked: ["Sir?"], ended: true, responded: [], sent: [] })
   }, 30_000)
 
+  test("moves on, taking nothing, once talk over its first seconds or over \"Sir?\" has gone on half a minute with no pause long enough to end it, like a TV", async () => {
+    // Talk clearly not yapd's over its first seconds, that it falls quiet for, or over "Sir?" once it has, or yapd's own
+    // words over a line that lasts longer than that, which it says to the end.
+    for (const over of ["line", "cue", "playing"] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper(
+            [[0.9, "Which PR was that?"], [0.91, "So I told Sam the release moved to Friday."], [0.8, "Over in yapd, the tests pass now"]],
+            { live: true, duration: over === "playing" ? 35 : 10 },
+          )
+          yield* helper.wait(0.5)
+          if (over === "cue") {
+            yield* helper.talk(0.9, 15)
+            yield* helper.quiet
+            yield* helper.quiet
+            while (helper.rendered.length === 0) yield* helper.talk(0, 1)
+          }
+          const began = yield* Clock.currentTimeMillis
+          let ended: number | undefined
+          let finished = false
+          const step = (value: number, count: number) =>
+            Effect.gen(function* () {
+              for (let frames = 0; frames < count && ended === undefined; frames += 4) {
+                yield* helper.talk(value, Math.min(4, count - frames))
+                // The long line plays to the end.
+                if (over === "playing" && !finished && (yield* helper.since) >= 35) {
+                  finished = true
+                  yield* helper.finish
+                }
+                if (Option.isSome(yield* Fiber.poll(helper.fiber))) ended = ((yield* Clock.currentTimeMillis) - began) / 1000
+              }
+            })
+          // A second of talk at a time with 0.38 s between, for up to forty-five seconds.
+          for (let round = 0; round < 33 && ended === undefined; round++) {
+            yield* step(over === "line" ? 0.9 : over === "cue" ? 0.91 : 0.8, 31)
+            yield* step(0, 12)
+          }
+          const exit = yield* Fiber.await(helper.fiber)
+          return {
+            ended,
+            finished: Exit.isSuccess(exit),
+            stopped: helper.commands.filter((command) => command === "stop").length,
+            rendered: helper.rendered,
+            responded: helper.responded,
+            sent: helper.sent,
+          }
+        }),
+      )
+      expect([over, result]).toEqual([
+        over,
+        { ended: result.ended, finished: true, stopped: { line: 1, cue: 2, playing: 0 }[over], rendered: over === "cue" ? ["Sir?"] : [], responded: [], sent: [] },
+      ])
+      // Half a minute from when he began, or once its line has been said to the end, should that be later.
+      expect([over, result.ended! >= (over === "playing" ? 34.5 : 30) && result.ended! < (over === "playing" ? 35.5 : 31)]).toEqual([over, true])
+    }
+  }, 180_000)
+
   test("takes nothing of what the user begins as \"Sir?\" ends, though that's only made out once it has", async () => {
     const again = "Which PR was that? The one for the docs site."
     // "Sir?" said after its first three seconds, or over them.
@@ -3751,6 +3808,31 @@ describe("Over its first words, while yapd's own voice can still get into the mi
       expect([delay, result]).toEqual([delay, { rendered: ["Sir?", "Okay."], responded: [said], sent: [said], replies: [said] }])
     }
   }, 30_000)
+
+  test("takes the user's reply straight after \"Sir?\" whole, though its own voice got into the microphone over it half a minute before he's finished", async () => {
+    const said = "Merge it."
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Which PR was that?"], [0.85, "Sir."], [0.91, said]])
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 15)
+        yield* helper.quiet
+        yield* helper.quiet
+        yield* helper.wait(1)
+        yield* helper.talk(0.85, 10)
+        yield* helper.finish
+        yield* helper.talk(0, 10)
+        // He's still saying it half a minute on.
+        yield* helper.talk(0.91, 15)
+        yield* helper.wait(31)
+        yield* helper.talk(0.91, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { rendered: helper.rendered, responded: helper.responded, sent: helper.sent }
+      }),
+    )
+    expect(result).toEqual({ rendered: ["Sir?", "Okay."], responded: [said], sent: [said] })
+  })
 
   test("takes a quick reply begun just after the voice of \"Sir?\" whole, though its file goes on a moment in quiet, to a question as to an update, but nothing begun over its voice", async () => {
     // "Sir?" as it's rendered: its voice, then a sixth of a second of quiet.
