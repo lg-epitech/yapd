@@ -996,9 +996,9 @@ export const make = (options: {
 
     /**
      * Listens for `wait`, as once a line has been said to the end, in place of
-     * `cue`. What he begins before he's been quiet `breather` may be more of what
-     * he was saying over yapd, with no "Sir?" between to have him say it all
-     * again, so it's told as what he says over its first seconds.
+     * `cue`. What he begins before he's been quiet for a `breather` may be
+     * more of what he was saying over yapd, with no "Sir?" between to have him
+     * say it all again, so it's told as what he says over its first seconds.
      */
     const quietly = (ear: Ear, wait: Duration.DurationInput) =>
       ear.deaf
@@ -1242,7 +1242,7 @@ export const make = (options: {
               // been quiet a moment, which is only ever told, a part at a time, and never taken as he said it. Over "Sir?", that's
               // all he begins before it has been said to the end, as he may be going on with what he said before it, even when
               // it's said after its first seconds, or he began while it was still being rendered, or as it ended, though that's
-              // only made out once it has. In its place, that's all he begins before he's paused long enough to be done with that.
+              // only made out once it has. Listening in its place, that's all he begins before he's paused for a breather.
               if (chain === undefined && (signal.echo || (line.cue && (playing || signal.playing)) || signal.quiet < (line.breather ?? 0))) {
                 chain = {
                   at: yield* position,
