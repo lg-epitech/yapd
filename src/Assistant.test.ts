@@ -576,9 +576,9 @@ const assistant = (
           yield* flush
         }),
       /** Said over or right after the question, as the conversation takes it: worked out, then acted on. */
-      answer: (heard: string, to = questions().at(-1)) =>
+      answer: (heard: string, to = questions().at(-1), echo?: string) =>
         Effect.gen(function* () {
-          const taken = yield* to!.question!.answer(heard, 1)
+          const taken = yield* to!.question!.answer(heard, 1, echo)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)
@@ -586,9 +586,9 @@ const assistant = (
       /** Nothing was said in the time the question leaves for an answer. */
       unanswered: (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush)),
       /** Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on, unless it isn't taken. */
-      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer")) =>
+      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer"), echo?: string) =>
         Effect.gen(function* () {
-          const taken = yield* to!.followUp!(heard, voiced)
+          const taken = yield* to!.followUp!(heard, voiced, echo)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)
@@ -4164,6 +4164,36 @@ describe("Assistant", () => {
     expect(result.questions).toBe(2)
     expect(result.open).toEqual(Option.none())
     expect(result.closed).toEqual(["dropped: unclear", "dropped: unclear"])
+  })
+
+  test("said over the first seconds of its question or answer, the model is told it may be yapd's own voice, and taking it for that leaves the question open", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const told: Array<string | undefined> = []
+        const { dictate, answer, followUp, spoken, open } = yield* assistant((situation) => {
+          told.push(situation.utterance.echo)
+          if (situation.utterance.echo !== undefined) return Brain.decision({ act: "resume", pending: Option.isNone(situation.open) ? "" : "answers" })
+          return situation.utterance.heard.startsWith("Who")
+            ? Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+            : Brain.decision({ act: "answer", target: handle(situation, mina), sure: "low", others: handle(situation, tezos), spoken: "Filed." })
+        })
+        yield* dictate("Who needs me?")
+        // yapd's own "Two threads" heard as other words, over its answer.
+        const followed = yield* followUp("Two fred.", 0.3, undefined, "Two threads need you, sir.")
+        yield* dictate("Can you please tell me what's the status on MiNAS SV2?")
+        const asked = spoken().at(-1)!
+        // And its own "Open Mina" over its question.
+        const taken = yield* answer("Oven Mina.", undefined, asked)
+        return { followed, taken, open: Option.isSome(yield* open), told }
+      }),
+    )
+    expect(result).toEqual({
+      followed: false,
+      taken: false,
+      open: true,
+      // "Who needs me?" needs no model.
+      told: ["Two threads need you, sir.", undefined, "Open Mina SSV2 Bug Tickets or Migrate Tezos Integration, sir?"],
+    })
   })
 
   test("a second clarification closes the request instead of asking again", async () => {

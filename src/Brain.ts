@@ -1322,6 +1322,12 @@ const asksHim = (situation: Pick<Situation, "subject" | "desk">) => {
  * It only ever accepts: anything else goes to the model.
  */
 export const fast = (situation: Situation, lines: Lines): Decision | undefined => {
+  const decided = glimpsed(situation, lines)
+  // Begun while yapd's own voice could still get into the microphone, a yes or a name to act on may be its own words: the model weighs that.
+  return decided !== undefined && situation.utterance.echo !== undefined && writes.has(decided.act) ? undefined : decided
+}
+
+const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   const { utterance, open, desk, subject } = situation
   const heard = gist(utterance.heard)
   const over = repeating(heard)
@@ -2057,6 +2063,11 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
       onNone: () => [],
       onSome: (second) => [`${detail(desk, second)}\nThis is your second look: answer now, with "answer". Don't look or find again.`],
     }),
+    ...(situation.utterance.echo === undefined
+      ? []
+      : [
+          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${fenced(situation.utterance.echo, 400)}, misheard or not, and his first word may be lost under yours. Leave any words that may be yours out of what you act on, and never turn them into words of his. If it may all be your words, it's "resume". If what's for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal goes as usual.`,
+        ]),
     `WHAT HE SAID, ${how(situation)}:\n${situation.utterance.heard}`,
   ].join("\n\n")
 }

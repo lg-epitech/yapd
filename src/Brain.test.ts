@@ -373,6 +373,37 @@ describe("Brain", () => {
     })
   })
 
+  test("said over yapd's first seconds, a yes or words to stop a thread go to the model, told they may be yapd's own, while a dismissal is taken at once", () => {
+    const busy: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
+    const confirming: Assistant.Open = {
+      ...which([ref(tezos)]),
+      kind: "confirm",
+      decision: Brain.decision({ act: "stop", target: "t1", sure: "medium" }),
+      asked: "Stop Migrate Tezos Integration, sir?",
+      about: "stop Migrate Tezos Integration",
+    }
+    const echo = "Stop Migrate Tezos Integration, sir?"
+    const over = (heard: string, overrides: Partial<Brain.Situation>, echoed: boolean) => {
+      const given = situation(heard, overrides)
+      return { ...given, utterance: { ...given.utterance, via: "reply" as const, ...(echoed ? { echo } : {}) } }
+    }
+    // Begun once its own voice was learnt, as ever.
+    expect(Brain.fast(over("Stop working.", { subject: busy }, false), lines)?.act).toBe("stop")
+    expect(Brain.fast(over("Yes.", { subject: busy, open: Option.some(confirming) }, false), lines)?.act).toBe("stop")
+    // Begun while it could still get into the microphone, the model weighs whether it was yapd's own "Stop Migrate…" or "sir".
+    expect(Brain.fast(over("Stop working.", { subject: busy }, true), lines)).toBeUndefined()
+    expect(Brain.fast(over("Yes.", { subject: busy, open: Option.some(confirming) }, true), lines)).toBeUndefined()
+    expect(Brain.fast(over("Enough.", { subject: busy, open: Option.some(confirming) }, true), lines)).toMatchObject({ act: "dismiss", pending: "answers" })
+    const told = Brain.prompt(over("Stop it.", { subject: busy, open: Option.some(confirming) }, true), Option.none())
+    expect(told).toContain(
+      `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around «${echo}», misheard or not, and his first word may be lost under yours.`,
+    )
+    expect(told).toContain(`If it may all be your words, it's "resume".`)
+    expect(told).toContain(`with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again.`)
+    expect(told.endsWith(`A question or a dismissal goes as usual.\n\nWHAT HE SAID, answering your question:\nStop it.`)).toBe(true)
+    expect(Brain.prompt(over("Stop it.", { subject: busy, open: Option.some(confirming) }, false), Option.none())).not.toContain("your own voice")
+  })
+
   test("a write only fairly sure of its thread is confirmed on the focus thread when it's a stop, and asked about or left elsewhere", () => {
     const listed = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!
     const on: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }

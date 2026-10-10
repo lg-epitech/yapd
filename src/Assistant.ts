@@ -33,6 +33,12 @@ export interface Utterance {
   readonly voiced: number
   /** How many times yapd had been turned on or off when it was said, as its shortcut was pressed for a dictation, so nothing is done for it after. */
   readonly turns: number
+  /**
+   * What yapd was saying around when he began, when that was while its own
+   * voice could still get into the microphone: the first words heard may be
+   * some of it, or his first word lost under it.
+   */
+  readonly echo?: string
 }
 
 /** What a thread asks of the user, which a short answer can settle. */
@@ -1801,7 +1807,9 @@ export const make = (options: {
      */
     const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
-        const utterance: Utterance = { ...thought.utterance, heard: thought.decision.rest }
+        // What he went on to say after, which yapd's own voice was never in.
+        const { echo: _, ...before } = thought.utterance
+        const utterance: Utterance = { ...before, heard: thought.decision.rest }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
@@ -2675,11 +2683,11 @@ export const make = (options: {
      */
     const listen =
       (open: Open) =>
-      (heard: string, voiced: number): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (heard: string, voiced: number, echo?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
-        const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
+        const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...(echo === undefined ? {} : { echo }) }
         /**
          * What it asked was dealt with in T3 Code meanwhile, so a late answer to
          * it does nothing, and he's told so: it's noted, but not in his words
@@ -2699,7 +2707,8 @@ export const make = (options: {
         })
         if (gone.has(open.id)) return Option.some(late)
         const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open }, [{ speaker: "yapd", text: open.asked }])
-        if (thought.source === "fast" && thought.decision.act === "resume") return Option.none()
+        // Taken by the model for yapd's own voice, over its first seconds, it's asked on from just before, as when only that was heard.
+        if ((thought.source === "fast" || echo !== undefined) && thought.decision.act === "resume") return Option.none()
         // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
         if (Brain.murmured(thought.decision, utterance)) {
           yield* Effect.logInfo(`Not taking "${heard}" as the answer, with only ${voiced.toFixed(2)} s of speech`)
@@ -2719,11 +2728,11 @@ export const make = (options: {
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>) =>
-      (heard: string, voiced: number): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (heard: string, voiced: number, echo?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
-          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns }
+          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...(echo === undefined ? {} : { echo }) }
           const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {
