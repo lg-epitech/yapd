@@ -2153,7 +2153,8 @@ describe("Assistant", () => {
         }),
       )
     expect(await telling("Mainnet.")).toEqual({ spoken: ["On it, sir. It was waiting on a question, so that's its answer."], sent: [{ answers: { network: "main" } }] })
-    expect(await telling("Use the devnet instead.")).toEqual({ spoken: [expect.stringMatching(/^(On it|Right away|Very good)/)], sent: [{ text: "Use the devnet instead." }] })
+    // Not its answer, it waits in the thread's queue till the question's dealt with, since steering it in would cancel the question.
+    expect(await telling("Use the devnet instead.")).toEqual({ spoken: ["It's waiting on you for something, sir, so that will go once it's dealt with."], sent: [{ text: "Use the devnet instead." }] })
   })
 
   test("a message for now to a thread waiting on a question in parts answers the part he'd got to, and the rest are asked before anything goes, never sent as skipped", async () => {
@@ -2267,7 +2268,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes, and the question is asked again after", async () => {
+  test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes in the queue behind it, and the question is asked again after", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>
       run(
@@ -2288,7 +2289,7 @@ describe("Assistant", () => {
     const back = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
     for (const items of [form, message]) {
       expect(await telling(items, "Use the devnet instead.")).toEqual({
-        spoken: [expect.stringMatching(/^(On it|Right away|Very good)/), back],
+        spoken: ["It's waiting on you for something, sir, so that will go once it's dealt with.", back],
         sent: [{ text: "Use the devnet instead." }],
         open: true,
       })
@@ -2333,7 +2334,7 @@ describe("Assistant", () => {
         }),
       )
     expect(await cut((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" }))).toEqual({
-      spoken: [expect.stringMatching(/^(On it|Right away|Very good)/), last],
+      spoken: ["It's waiting on you for something, sir, so that will go once it's dealt with.", last],
       sent: [{ text: "Start with mainnet." }],
     })
     expect(await cut((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Start with mainnet." }))).toEqual({ spoken: [last], sent: [] })

@@ -45,9 +45,9 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //          "Beta", "Gamma"; multi-select), then to reply with the tool's
 //          result word for word. While it waits, it notes when the shell
 //          showed the request against when /bounded had its card, the card
-//          itself, the run's status, and the arguments of its own Claude
-//          process (`ps -ax -o args`, only the lines with its own session's
-//          id). Answers {colour: "Blue (Recommended)", extras: ["Alpha",
+//          itself, the run's status, and its own Claude process's program
+//          and flag names, never their values, which can hold a token (`ps
+//          -ax -o args`, only the lines with its own session's id). Answers {colour: "Blue (Recommended)", extras: ["Alpha",
 //          "Gamma"]}, as the card writes them, and keeps Claude's reply.
 //       B. The same, answered {colour: "Green please", extras: ["Beta"]}.
 //       C. The same, answered with no answers at all; then the colour part
@@ -59,9 +59,11 @@ import * as T3CodeServer from "../src/T3CodeServer.ts"
 //          and, if the question still waits, answers it "Red".
 //       E. The colour part alone, then the run stopped while it waits, as
 //          "stop" sends it, then answered "Red".
-//       G. The colour part alone, with "Red" given an empty description; it
-//          notes whether the question shows at all, and answers "Red".
 //       H. Both parts again, only the colour one answered, "Red".
+//       G. Last, the colour part alone, with "Red" given an empty
+//          description; it notes whether the question shows at all, and
+//          answers "Red". T3 Code fails the turn for it and leaves the thread
+//          unable to start another, so nothing can come after it.
 //     and on the Codex thread:
 //       F. Plan mode (thread.interaction-mode.set), then asks Codex to use
 //          request_user_input once for the colour, with "Red" and "Blue",
@@ -437,11 +439,20 @@ const knownOf = (asked: Option.Option<T3Actions.Request>, run: string, requestId
   }
 }
 
-/** Only the lines of its own agent's process: those naming its own session. */
+/**
+ * Only the lines of its own agent's process, those naming its own session,
+ * and of each only the program and its flags' names: their values can hold
+ * secrets, like the token T3 Code gives its own MCP server.
+ */
 const processes = (projection: Projection) => {
   const own = T3Actions.natives(projection.providerThreads)
   const listed = Bun.spawnSync(["ps", "-ax", "-o", "args"]).stdout.toString().split("\n")
-  return listed.filter((line) => /claude/i.test(line) && own.some((id) => line.includes(id))).map((line) => line.slice(0, 600))
+  return listed
+    .filter((line) => /claude/i.test(line) && own.some((id) => line.includes(id)))
+    .map((line) => {
+      const [program = "", ...rest] = line.trim().split(/\s+/)
+      return [program.split("/").at(-1) ?? "", ...rest.filter((word) => /^--?[a-z][\w-]*$/i.test(word))].join(" ")
+    })
 }
 
 /**
@@ -574,8 +585,9 @@ const probe = (project: string) =>
           return { afterStop: requestOf(projection, requestId) ?? null, lateAnswer: Either.isRight(late) ? "taken" : "turned down" }
         }),
       )
-      report.G = yield* step(connection, claudeUse, stamp, "G", (known) => built(known).G1, (known) => built(known).G2)
       report.H = yield* step(connection, claudeUse, stamp, "H", (known) => built(known).H1, (known) => built(known).H2)
+      // Last: T3 Code takes no question with an option described by nothing, fails the turn, and leaves the thread unable to start another.
+      report.G = yield* step(connection, claudeUse, stamp, "G", (known) => built(known).G1, (known) => built(known).G2)
     }
 
     if (codex !== undefined) {

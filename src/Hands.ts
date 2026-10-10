@@ -438,9 +438,14 @@ const answered = (thread: T3Live.Thread, at: number, own: Option.Option<{ readon
 /** Whether it's in the middle of something a message would go into, or wait behind. */
 const busy = (thread: T3Live.Thread) => T3Live.busy(thread) || thread.activityRunStatus === "waiting"
 
-/** What its turn under way is waiting on, if it is: a turn waiting takes nothing in, so what's sent waits behind it. */
+/**
+ * What its turn under way is waiting on, if it is: a turn finishing off takes
+ * nothing in, and one waiting on him for something, which T3 Code shows as
+ * still running, drops what it waits on for a message steered into it, so
+ * what's sent waits behind it either way.
+ */
 const waits = (thread: T3Live.Thread): Waiting | undefined =>
-  thread.activityRunStatus !== "waiting" ? undefined : thread.pendingRuntimeRequest === null ? "finishing" : "asked"
+  thread.pendingRuntimeRequest !== null && busy(thread) ? "asked" : thread.activityRunStatus === "waiting" ? "finishing" : undefined
 
 /** How long, once a turn's been stopped to be told something in its place, the live view has to show it stopped before it's told. */
 const stopping = "15 seconds"
@@ -566,19 +571,14 @@ export const make = (options: {
   const landed = (row: Ledger.Row, actions: T3Actions.Actions): Effect.Effect<boolean, T3CodeServer.Trouble> => {
     const sent = command(row.body)
     if (row.messageId !== null && row.kind === "message") return actions.has(row.thread, row.messageId)
-    // An answer got there once the thread no longer waits on what it answered, even behind something newer it asked. A thread the live
-    // view doesn't have, like rig's while it can't be reached, is read from its T3 Code instead, which fails the look when that can't
-    // be reached either: one that can't be seen is never taken for one that waits on nothing.
+    // An answer got there once T3 Code has what it answered resolved, rather than cancelled, as stopping the run or a message steered in
+    // does to it, even behind something newer it asked. It's read from the thread's T3 Code, which fails the look when that can't be
+    // reached: one that can't be seen is never taken for one that waits on nothing. Still waiting on it, as the live view has it, it
+    // didn't.
     if (Option.isSome(sent) && (sent.value._tag === "Decide" || sent.value._tag === "Answer")) {
       const { requestId } = sent.value
-      const read = Effect.map(actions.detail(row.thread, requestId), ({ pending }) => !pending.includes(requestId))
-      return Effect.flatMap(threads.find(refOf(row)), (thread) => {
-        if (Option.isNone(thread)) return read
-        const pending = thread.value.pendingRuntimeRequest
-        if (pending === null) return Effect.succeed(true)
-        if (pending.id === requestId) return Effect.succeed(false)
-        return read
-      })
+      const read = Effect.map(actions.detail(row.thread, requestId), ({ pending, resolved }) => !pending.includes(requestId) && resolved(requestId))
+      return Effect.flatMap(threads.find(refOf(row)), (thread) => (Option.getOrUndefined(thread)?.pendingRuntimeRequest?.id === requestId ? Effect.succeed(false) : read))
     }
     if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)
     if (Option.isSome(sent) && sent.value._tag === "Cancel") {
@@ -925,7 +925,8 @@ export const make = (options: {
         if (Option.isSome(made)) return made.value
       }
       if (act.how === "restart") return yield* restart(step, act, reached.right, digest, wanted)
-      // T3 Code takes a message into a turn only while it's at it, and turns one down for a turn that's waiting, so it goes in the queue behind it.
+      // T3 Code takes a message into a turn only while it's at it, turns one down for a turn finishing off, and drops what a turn waits on him
+      // for to take one in, so then it goes in the queue behind it.
       const waiting = act.how === "now" ? waits(reached.right.thread) : undefined
       const how = waiting === undefined ? act.how : "after"
       const sent = yield* once(step, "message", to, ({ messageId }) => ({ _tag: "Send", text, messageId: messageId ?? "", how }), reached.right, wanted, digest)
