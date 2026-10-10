@@ -73,6 +73,8 @@ type Signal =
   | { readonly _tag: "Silent"; readonly faded: boolean }
   /** The microphone never told the last of yapd's voice had stopped coming in, which by now it has. */
   | { readonly _tag: "Lulled"; readonly id: number }
+  /** He's no longer listened for, once "Sir?" won't be said again, however much he's said since. */
+  | { readonly _tag: "Due"; readonly id: number }
 
 /**
  * The microphone for a whole update, so nothing the user says is missed
@@ -1054,6 +1056,11 @@ export const make = (options: {
           Effect.forkScoped,
         )
 
+        // Listening in place of "Sir?" ends then, however much talk he's begun and finished since, or is still in.
+        if (line.until !== undefined) {
+          yield* Effect.sleep(Math.max(0, line.until - began)).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Due", id })), Effect.forkScoped)
+        }
+
         let playing = true
         /** Between an onset and the end of what the user said. */
         let speaking = false
@@ -1400,6 +1407,10 @@ export const make = (options: {
               if (signal.id !== lingering?.id) break
               if (broken !== undefined) return yield* Effect.fail(broken)
               return { _tag: "Finished" } satisfies Listened
+            case "Due":
+              // What he began once he'd paused for a breather is heard out, as in any wait. Nothing else he's said counts.
+              if (signal.id !== id || (chain === undefined && speaking)) break
+              return { _tag: "Finished" } satisfies Listened
             case "Deaf": {
               deaf = true
               // Nothing more of what he says over its first seconds can be heard, so it's over once what was is made out.
@@ -1512,6 +1523,7 @@ export const make = (options: {
               case "Finished":
               case "Broke":
               case "Lingered":
+              case "Due":
               case "Partial":
               case "Looked":
               case "Silent":
