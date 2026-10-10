@@ -3329,6 +3329,41 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     }
   }, 30_000)
 
+  test("hears out a reply begun after a breather once \"Sir?\" has been talked over twice, though it goes on past when it stops listening, and takes it whole", async () => {
+    const reply = "Which PR was that, the one for the docs site or the one for yapd itself?"
+    // How long he pauses once he's finished over the last "Sir?", and how long his reply lasts, in frames: begun 1.6 s or
+    // 2.2 s after that, and on past the 3 s it listens from then.
+    for (const [pause, lasting] of [[50, 60], [70, 42]] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper(
+            [[0.9, "Which PR was that?"], [0.91, "Which PR was that?"], [0.92, "Which PR was that?"], [0.93, reply]],
+            { live: true },
+          )
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, 15)
+          yield* helper.quiet
+          yield* helper.quiet
+          yield* helper.wait(1)
+          for (const value of [0.91, 0.92]) {
+            while (helper.rendered.length < (value === 0.91 ? 1 : 2)) yield* helper.talk(0, 1)
+            yield* helper.talk(value, 15)
+            yield* helper.quiet
+          }
+          const ranOut = yield* Clock.currentTimeMillis
+          yield* helper.talk(0, pause)
+          yield* helper.talk(0.93, lasting)
+          const after = ((yield* Clock.currentTimeMillis) - ranOut) / 1000
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { after, rendered: helper.rendered, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([pause, result]).toEqual([pause, { after: result.after, rendered: ["Sir?", "Sir?", "Okay."], responded: [reply], sent: [reply], replies: [reply] }])
+      expect(result.after).toBeGreaterThan(3)
+    }
+  }, 60_000)
+
   test("listens only so long once \"Sir?\" has been talked over twice, however much talk with short pauses keeps coming, like a TV", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
