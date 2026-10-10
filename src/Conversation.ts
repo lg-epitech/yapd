@@ -57,11 +57,12 @@ type Signal =
   | { readonly _tag: "Replied"; readonly id: number; readonly reply: unknown }
   /**
    * What Whisper's words for some of what he said over yapd's first seconds
-   * come to: the stop of his a look at what he's said so far found, and what
-   * all of it comes to, once he's finished, or as he paused, should he say
-   * no more.
+   * come to: the stop of his a look at what he's said so far found, or one it
+   * heard only as the last word, `ending`, which the audio may cut through,
+   * and what all of it comes to, once he's finished, or as he paused, should
+   * he say no more.
    */
-  | { readonly _tag: "Looked"; readonly id: number; readonly stop: string | undefined; readonly whole?: Verdict }
+  | { readonly _tag: "Looked"; readonly id: number; readonly stop: string | undefined; readonly ending?: string | undefined; readonly whole?: Verdict }
   /**
    * He's been quiet about as long as ends what he says, as the microphone
    * hears it, and none of yapd's voice is still coming in once it stopped:
@@ -135,8 +136,9 @@ interface Chain {
    * The part he's saying now, while he is: where it comes in what he said,
    * how far into the line he began it, whether he began it once `cue` had
    * been said to the end, the look at it so far under way, for a stop of
-   * his, the stop a look found, which yapd stopped for, and the last look as
-   * he paused, how much it had, and what it came to, once it's told.
+   * his, the stop a look found, which yapd stopped for, the one a look heard
+   * only as the last word, which all of it is to bear out, and the last look
+   * as he paused, how much it had, and what it came to, once it's told.
    */
   part:
     | {
@@ -145,6 +147,7 @@ interface Chain {
         readonly after: boolean
         looking: number | undefined
         looked: string | undefined
+        ending: string | undefined
         paused: { readonly id: number; readonly samples: number; whole: Verdict | undefined } | undefined
       }
     | undefined
@@ -685,14 +688,30 @@ type Verdict =
   | { readonly whose: "unclear"; readonly unheard?: true }
 
 /**
+ * Whether Whisper, hearing all of what was said over a line yapd was
+ * `saying`, heard a word the last word of a `stop` may have been the start of,
+ * cut through by a look at some of it, like its "storage" for "stop": any
+ * word starting as that does.
+ */
+const cutThrough = (stop: string, heard: string, saying: string) => {
+  const last = vocabulary(stop).at(-1)
+  return last !== undefined && wordsOf(heard, vocabulary(saying)).some((word) => word.startsWith(last.slice(0, 2)))
+}
+
+/**
  * What all of something said over a line yapd was `saying`, before the echo
  * cancellation had learnt its voice, comes to: a stop or wait of his,
  * wherever it comes, or else the one a look at some of it found, `looked`,
- * unless Whisper hearing all of it took that for words of yapd's; else him,
- * when it's clearly him; else unclear.
+ * unless Whisper hearing all of it took that for words of yapd's, or the one
+ * a look heard only as the last word, `ending`, unless Whisper hearing all of
+ * it heard nothing, or took that for words of yapd's, or for the start of one;
+ * else him, when it's clearly him; else unclear.
  */
-const judge = (heard: string, saying: string, looked?: string): Verdict => {
-  const stop = stopIn(heard, saying) ?? (looked === undefined || mistaken(looked, heard, saying) ? undefined : looked)
+const judge = (heard: string, saying: string, looked?: string, ending?: string): Verdict => {
+  const stop =
+    stopIn(heard, saying) ??
+    (looked === undefined || mistaken(looked, heard, saying) ? undefined : looked) ??
+    (ending === undefined || heard.trim() === "" || mistaken(ending, heard, saying) || cutThrough(ending, heard, saying) ? undefined : ending)
   if (stop !== undefined) return { whose: "stop", stop }
   return whose(heard, saying) === "his" ? { whose: "his" } : { whose: "unclear" }
 }
@@ -1098,9 +1117,10 @@ export const make = (options: {
          * last word, which the audio may cut through; once he's `paused`, his
          * stop in all of it, and what all of it comes to, should he say no
          * more; and once he's finished, what all of it comes to, `whole`, with
-         * the stop a look at some of it found, `looked`.
+         * the stop a look at some of it found, `looked`, or heard only as the
+         * last word, `ending`.
          */
-        const look = (audio: Float32Array, at: number, how: "soFar" | "paused" | "whole", looked?: string) =>
+        const look = (audio: Float32Array, at: number, how: "soFar" | "paused" | "whole", looked?: string, ending?: string) =>
           Effect.gen(function* () {
             const id = fresh()
             const saying = between(line.text, playback.duration, at - reach, (yield* position) + reach)
@@ -1110,11 +1130,13 @@ export const make = (options: {
               Effect.flatMap((heard) => {
                 // Over "Sir?", what's like it is its own voice, so it's told by the rest.
                 const told = line.cue ? unsaid(heard) : heard
-                const whole = judge(told, saying, looked)
+                const whole = judge(told, saying, looked, ending)
+                const stop = how === "whole" ? undefined : stopIn(how === "soFar" ? cutShort(told) : told, saying)
                 return Queue.offer(signals, {
                   _tag: "Looked",
                   id,
-                  stop: how === "whole" ? undefined : stopIn(how === "soFar" ? cutShort(told) : told, saying),
+                  stop,
+                  ...(how === "soFar" && stop === undefined ? { ending: stopIn(told, saying) } : {}),
                   ...(how === "soFar" ? {} : { whole: whole.whose === "unclear" && heard.trim() === "" ? { whose: "unclear", unheard: true } : whole }),
                 })
               }),
@@ -1234,6 +1256,7 @@ export const make = (options: {
                 after: line.cue && completed && !playing && !signal.playing,
                 looking: undefined,
                 looked: undefined,
+                ending: undefined,
                 paused: undefined,
               }
               break
@@ -1244,7 +1267,7 @@ export const make = (options: {
             case "Partial":
               // One look at a time, while there's still something to stop for him.
               if (chain?.part === undefined || chain.part.looking !== undefined || !playing) break
-              chain.part.looking = yield* look(signal.audio, chain.at, signal.paused === true ? "paused" : "soFar", chain.part.looked)
+              chain.part.looking = yield* look(signal.audio, chain.at, signal.paused === true ? "paused" : "soFar", chain.part.looked, chain.part.ending)
               chain.part.paused = signal.paused === true ? { id: chain.part.looking, samples: signal.audio.length, whole: undefined } : undefined
               break
             case "Abandoned": {
@@ -1276,7 +1299,7 @@ export const make = (options: {
                 // Begun once "Sir?" was over, with nothing over it known to be him, it's held for his reply until that's known.
                 if (part.after && chain.holding) chain.held.push(finished)
                 else if (paused?.whole !== undefined) yield* told(paused.whole, finished)
-                else chain.checking.set(paused?.id ?? (yield* look(signal.audio, chain.at, "whole", part.looked)), finished)
+                else chain.checking.set(paused?.id ?? (yield* look(signal.audio, chain.at, "whole", part.looked, part.ending)), finished)
               }
               const closed = yield* close
               if (closed !== undefined) return closed
@@ -1288,6 +1311,8 @@ export const make = (options: {
               if (part?.looking === signal.id) {
                 part.looking = undefined
                 if (part.paused?.id === signal.id) part.paused.whole = signal.whole
+                // Heard only as the last word, it's not stopped for, but kept for all of it to bear out.
+                part.ending ??= signal.ending
                 if (signal.stop === undefined) break
                 yield* Effect.logInfo(`Stopping for him over its first seconds: ${signal.stop}`)
                 part.looked ??= signal.stop

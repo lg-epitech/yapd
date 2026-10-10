@@ -2176,6 +2176,35 @@ describe("Over its first words, while yapd's own voice can still get into the mi
     expect(result).toEqual({ commands: ["play"], sent: [], replies: [] })
   })
 
+  test("stops for a stop of his a look about a second in heard only as the last word, once all of it bears that out, though Whisper hears only yapd's voice in all of it", async () => {
+    for (const [spoken, looked, whole, stop] of [
+      [long.spoken, "Wait.", "and the PR.", "Wait."],
+      [
+        "Two threads need you, sir. The Tezos importer asks which fee table to use, and the pull request on yapd is ready for review.",
+        "Two threads need to skip.",
+        "Two threads need a T-ZO's importer.",
+        "Skip.",
+      ],
+    ] as const) {
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.8, looked], [0.81, ""]], { spoken, whole: [[0.8, 0.81], whole], live: true, intent: "dismiss" })
+          yield* helper.wait(0.3)
+          // A look about a second in, which hears his stop as the last word, then its own voice going on.
+          yield* helper.talk(0.8, 36)
+          const looking = [...helper.commands]
+          yield* helper.talk(0.81, 10)
+          yield* helper.quiet
+          // The microphone goes on hearing quiet, as the last of its voice stops coming in.
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { looking, commands: helper.commands, responded: helper.responded, sent: helper.sent, replies: yield* helper.replies }
+        }),
+      )
+      expect([stop, result]).toEqual([stop, { looking: ["play"], commands: ["play", "stop"], responded: [stop], sent: [], replies: [stop] }])
+    }
+  })
+
   test("lets go of the user's words run on from its own voice, carrying on, and passes them on whole when he says them again after them", async () => {
     const said = "Don't merge it until the review is done."
     const result = await overHelperScoped(
