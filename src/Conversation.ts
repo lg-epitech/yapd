@@ -71,6 +71,8 @@ type Outcome =
        * some of that, or his first word lost under it.
        */
       readonly echo?: string
+      /** How far into the line he began, then. */
+      readonly onset?: number
     }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
@@ -83,6 +85,16 @@ const patience = "40 seconds"
 const ducked = 0.25
 /** How far back to pick up after talk that wasn't meant for yapd. */
 const rewind = 1.5
+/** How far back to pick up after only its own voice stopped it, or what may have been: just before, so the same opening isn't heard again and again. */
+const before = 0.3
+/**
+ * How long speech can go on past where yapd stopped and still be only its
+ * own voice dying away, in the room and in the voice detector: more than
+ * that, someone else was talking.
+ */
+const overhang = 0.25
+/** How near its end a line can be stopped and still count as said, with nothing of it left to go back to. */
+const ending = 0.3
 /** Talk that wasn't meant for yapd, after which the rest of an update plays without listening, say for a TV. */
 const misses = 3
 /** How long to wait for the rest when the user trails off, before working out a reply. */
@@ -455,9 +467,11 @@ export interface Question {
    * Works out what the user meant by what they said, and how many seconds of
    * it were speech, which may be called again with all of it if they carry
    * on. What it returns is run once they've stopped, and none means it
-   * wasn't an answer.
+   * wasn't an answer. With `echo`, what yapd was saying around when they
+   * began, while its own voice could still get into the microphone: the
+   * first words heard may be some of it, or their first word lost under it.
    */
-  readonly answer: (heard: string, voiced: number) => Effect.Effect<Option.Option<Effect.Effect<void>>>
+  readonly answer: (heard: string, voiced: number, echo?: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
 
 /** An answer to what the user asked yapd, rendered and ready to be said, which they can follow up as they can an update. */
@@ -684,7 +698,9 @@ export const make = (options: {
                 audio: signal.audio,
                 ear,
                 // To where it stopped, or where he began, should the helper put that a moment before.
-                ...(echoing === undefined ? {} : { echo: between(text, playback.duration, echoing - reach, Math.max(at, echoing) + reach) }),
+                ...(echoing === undefined
+                  ? {}
+                  : { echo: between(text, playback.duration, echoing - reach, Math.max(at, echoing) + reach), onset: Math.min(at, echoing) }),
               } satisfies Outcome
             }
             case "Finished":
@@ -869,15 +885,28 @@ export const make = (options: {
       unlogged(audio, terms).pipe(Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))))
 
     /**
-     * Whether what he said over a line, begun while yapd's own voice could
-     * still get into the microphone, heard as `first`, was only that, as
-     * `own` tells, so yapd stopped for itself: it picks up again then, saying
-     * nothing and asking nobody, as that does no harm.
+     * What's known of yapd's own voice in what he said over a line, heard as
+     * `first`: whether it was only that, as `own` tells, so yapd stopped for
+     * itself and picks up again, saying nothing and asking nobody, as that
+     * does no harm; or else what it was saying around when he began, which
+     * some of what was heard may be. Neither for what he began once its own
+     * voice was learnt. Speech that went on past where it stopped is someone
+     * else's, which its own voice dying away can't be, so only nothing, or
+     * what Whisper makes up, is taken for its own then; and when it had said
+     * all of it by then, its own voice can only be its last word or so
+     * before him, as after any line, so the model isn't told.
      */
-    const itself = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) =>
-      outcome.echo !== undefined && own(first, outcome.echo)
-        ? Effect.as(Effect.logInfo("Stopped for its own voice over its first seconds, so it picks up again"), true)
-        : Effect.succeed(false)
+    const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) =>
+      Effect.gen(function* () {
+        const { echo, onset = outcome.at } = outcome
+        if (echo === undefined) return { itself: false }
+        const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
+        if (own(first, "") || (!past && own(first, echo))) {
+          yield* Effect.logInfo("Stopped for its own voice over its first seconds, so it picks up again")
+          return { itself: true }
+        }
+        return { itself: false, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
+      })
 
     /**
      * Reads an update out and talks it over. `through` runs as soon as the
@@ -911,10 +940,11 @@ export const make = (options: {
             }
 
             const first = yield* unlogged(outcome.audio)
+            const { itself, echo } = yield* whose(outcome, first)
             // Not talk that wasn't meant for yapd, which it stops listening after so much of: only over its first seconds.
-            if (yield* itself(outcome, first)) {
+            if (itself) {
               if (after) return
-              from = Math.max(from, outcome.at - rewind)
+              from = Math.max(from, outcome.at - before)
               continue
             }
             if (first === "") {
@@ -932,7 +962,7 @@ export const make = (options: {
                   needsYou: update.needsYou,
                   lines: [...lines, { speaker: "yapd", text: said }],
                   heard,
-                  ...(outcome.echo === undefined ? {} : { echo: outcome.echo }),
+                  ...(echo === undefined ? {} : { echo }),
                 })
                 .pipe(
                   Effect.catchAll((error) =>
@@ -966,7 +996,9 @@ export const make = (options: {
             if (reply.intent === "dismiss") return
             if (reply.intent === "resume") {
               if (after) return
-              carryOn()
+              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
+              if (echo === undefined) carryOn()
+              else from = Math.max(from, outcome.at - before)
               continue
             }
 
@@ -1021,8 +1053,11 @@ export const make = (options: {
           if (outcome._tag === "Finished") return false
           const first = yield* hear(outcome.audio)
           // Its own voice, over its first seconds, is no answer, nor talk that wasn't meant for yapd.
-          const echoed = yield* itself(outcome, first)
-          const reply = echoed || first === "" ? Option.none() : (yield* settle(outcome.ear, first, outcome.audio, hear, respond)).reply
+          const { itself, echo } = yield* whose(outcome, first)
+          const reply =
+            itself || first === ""
+              ? Option.none()
+              : (yield* settle(outcome.ear, first, outcome.audio, hear, (heard, voiced) => respond(heard, voiced, echo))).reply
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(reply.value)
@@ -1030,7 +1065,12 @@ export const make = (options: {
           }
           // Talk that wasn't meant for yapd, once all of it was said, ends it: a question is left unanswered.
           if (outcome.at >= outcome.duration) return false
-          if (!echoed) missed++
+          // Nor is what may have been its own voice, as `respond` was told, which is picked up just before.
+          if (itself || echo !== undefined) {
+            from = Math.max(from, outcome.at - before)
+            continue
+          }
+          missed++
           from = Math.max(from, outcome.at - rewind)
         }
       }).pipe(Effect.scoped)

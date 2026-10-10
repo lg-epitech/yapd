@@ -80,7 +80,7 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo }: Interrup
     ...(echo === undefined
       ? []
       : [
-          `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "${echo}", misheard or not, and their first word may be lost under yours. If it may all be your words, it's "resume". If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.`,
+          `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "${echo}", misheard or not, and their first word may be lost under yours. Leave any words that may be yours out of the message, and never turn them into words of theirs. If it may all be your words, it's "resume". If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.`,
         ]),
     `What the user just said:\n${heard}`,
   ].join("\n\n")
@@ -161,7 +161,8 @@ export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): 
   const said = gist(interruption.heard)
   if (said === "") return Effect.succeed(undefined)
   if (enough.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
-  if (asked(interruption)) {
+  // Begun while yapd's own voice could still get into the microphone, a yes may be its own words, like its "sir?" heard as "Sure.": the model weighs that.
+  if (asked(interruption) && interruption.echo === undefined) {
     // Only picked: it's noted as said once it's passed on, since he may yet carry on talking and this reply be dropped.
     return agreed.has(said)
       ? Effect.map(onIt, (spoken) => ({ intent: "send", spoken, message: typed(interruption.heard) }))
