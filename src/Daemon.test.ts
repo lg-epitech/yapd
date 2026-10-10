@@ -2360,6 +2360,34 @@ describe("Daemon", () => {
     expect(result.told).toEqual(["It's on your screen. Nothing's running."])
   })
 
+  test.each([
+    ["a dictation", "as he talks over an update's first seconds"],
+    ["a dictation", "as it says \"Sir?\" for him to say it again"],
+    ["turning yapd off", "as he talks over an update's first seconds"],
+    ["turning yapd off", "as it says \"Sir?\" for him to say it again"],
+  ] as const)("sends and notes nothing he said when %s cuts in %s", async (cut, when) => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Its own voice can get in for as long as he talks, as before the echo cancellation has learnt it.
+        const { finish, talk, wait, dictate, toggle, followUps, responded, played, journal } = yield* make("Tell it to deploy.", { echoing: 60 })
+        yield* finish("a", "The PR is ready.")
+        yield* talk
+        // Clearly him, so it fell quiet, and asks once the last of its voice can no longer be coming in.
+        if (when.includes("Sir?")) yield* wait(3)
+        const before = [...played]
+        if (cut === "a dictation") {
+          const dictation = yield* dictate
+          yield* wait(1)
+          yield* Scope.close(dictation, Exit.void)
+        } else yield* toggle(false)
+        yield* wait(30)
+        return { before, followUps: [...followUps], responded: [...responded], replies: yield* journal.since(0, { kinds: ["reply"] }) }
+      }),
+    )
+    expect(result.before).toEqual(when.includes("Sir?") ? ["yapd. The PR is ready.", "Sir?"] : ["yapd. The PR is ready."])
+    expect(result).toMatchObject({ followUps: [], responded: [], replies: [] })
+  })
+
   test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s said in other words in its place tells its own voice getting into the microphone by those, so it's never what he said", async (_, kind) => {
     const result = await run(
       Effect.gen(function* () {
