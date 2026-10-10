@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite"
 import { Clock, Context, Data, type Duration, Effect, Either, Option, Stream } from "effect"
+import { realpath } from "node:fs/promises"
 import { english, speakable } from "./Condenser.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import type * as Store from "./Store.ts"
@@ -34,6 +35,8 @@ export interface Listed {
   readonly called: string
   /** Its project's name, as it's said. */
   readonly project: string
+  /** Where it works: its worktree, or its project's folder. */
+  readonly directory: Option.Option<string>
   readonly thread: T3Live.Thread
   readonly state: State
   /** When it got to that state, in ms. */
@@ -103,6 +106,23 @@ export class Threads extends Context.Tag("yapd/Threads")<
     readonly refreshUsage: Effect.Effect<void>
     /** Notes work yapd started, so it's known by what it's about. What's noted is only ever filled in. */
     readonly keep: (ref: Ref, started: { readonly prompt: string; readonly dictated: string; readonly description: string }) => Effect.Effect<void>
+    /**
+     * The thread a hook on `machine` came from, found by the agent's own id
+     * for its session among the threads working in its directory, and only
+     * for this machine's hooks while its T3 Code is followed (I11). None
+     * otherwise, which keeps its update on the way hooks have always gone.
+     * Never fails.
+     */
+    readonly link: (machine: string, session: string, cwd: string) => Effect.Effect<Option.Option<Ref>>
+    /** The agent's own ids for a thread's conversations, which its hooks report as their session. */
+    readonly sessions: (ref: Ref) => Effect.Effect<ReadonlyArray<string>, ThreadsError>
+    /**
+     * Whether a thread still waits on him for this request: as T3 Code's
+     * summary of it shows, which is only the newest, or, while that shows
+     * another, as T3 Code's own record of each says, since one asked
+     * alongside a newer one still waits. Not, when that can't be read.
+     */
+    readonly waiting: (ref: Ref, requestId: string) => Effect.Effect<boolean>
   }
 >() {}
 
@@ -261,14 +281,15 @@ export const shortlist = (input: {
   return [...ranked.slice(0, most), ...named]
     .map(({ seen, thread, doing }, index): Listed => {
       const { machine, here, view, started, said } = seen
-      const project = view.projects.get(thread.projectId)?.title ?? ""
+      const project = view.projects.get(thread.projectId)
       const own = started.get(thread.id)
       return {
         handle: `t${index + 1}`,
         ref: { machine, id: thread.id },
         here,
-        called: called(thread.title, own?.description, project, time(thread.createdAt) ?? now, now),
-        project: spoken(project),
+        called: called(thread.title, own?.description, project?.title ?? "", time(thread.createdAt) ?? now, now),
+        project: spoken(project?.title ?? ""),
+        directory: Option.fromNullable(thread.worktreePath ?? project?.workspaceRoot),
         thread,
         state: doing,
         since: since(thread, doing),
@@ -409,6 +430,9 @@ export interface Usage {
   readonly providers: T3Actions.Usage
 }
 
+/** Threads read at most to link one hook: those that ran in its directory lately, since its own just did. */
+const linkable = 8
+
 /** What the user said they'd been told, as far back as the desk looks for it. */
 const latest = (entries: ReadonlyArray<Kept>, machine: string) => {
   const said = new Map<string, { readonly at: number; readonly said: string }>()
@@ -545,6 +569,72 @@ export const make = (options: {
       return limit === undefined ? Effect.map(asked, Option.some) : Effect.timeoutOption(asked, limit)
     }
 
+    const sessions = (ref: Ref) =>
+      Effect.flatMap(reach(ref), (actions) =>
+        actions.sessions(ref.id).pipe(Effect.mapError((error) => new ThreadsError({ reason: T3Actions.reason(error), cause: error }))),
+      )
+
+    /** Which thread each agent conversation read so far is behind, by the agent's own id for it, for as long as yapd runs. */
+    const owners = new Map<string, string>()
+    /** When each thread read for its conversations was last updated then: it only has new ones once it has run again. */
+    const read = new Map<string, string>()
+    /** Directories as they really are, links followed, as each was first looked at. */
+    const real = new Map<string, string>()
+    const canonical = (path: string) =>
+      Effect.suspend(() => {
+        const known = real.get(path)
+        if (known !== undefined) return Effect.succeed(known)
+        return Effect.promise(() => realpath(path).catch(() => path)).pipe(Effect.tap((resolved) => Effect.sync(() => real.set(path, resolved))))
+      })
+
+    const link = (from: string, session: string, cwd: string) =>
+      Effect.gen(function* () {
+        const unlinked = (why: string) => Effect.as(Effect.logInfo(`Not linked: ${why}`), Option.none<Ref>())
+        const linked = (thread: T3Live.Thread) => Effect.as(Effect.logInfo(`Linked to "${thread.title}"`), Option.some<Ref>({ machine, id: thread.id }))
+        // Only this machine's hooks, whose directories can be looked at here.
+        if (from !== machine) return yield* unlinked(`${from}'s hooks aren't linked from here`)
+        const view = yield* options.live.view
+        if (Option.isNone(view)) return yield* unlinked("T3 Code isn't followed right now")
+        const { threads, projects } = view.value
+        const owner = threads.get(owners.get(session) ?? "")
+        if (owner !== undefined && !subagent(owner)) return yield* linked(owner)
+        // A subagent's own conversation is its provider's to talk to, so its hooks keep to their old way.
+        const here = yield* canonical(cwd)
+        // In its directory, or one it holds, since the agent may have gone into a folder of it: the nearest first, then the newest.
+        const candidates = (yield* Effect.forEach(
+          [...threads.values()].filter((thread) => !subagent(thread)),
+          (thread) => {
+            const directory = thread.worktreePath ?? projects.get(thread.projectId)?.workspaceRoot
+            if (directory === undefined) return Effect.succeed([])
+            return Effect.map(canonical(directory), (real) => (real === here || here.startsWith(real.endsWith("/") ? real : `${real}/`) ? [{ thread, depth: real.length }] : []))
+          },
+        ))
+          .flat()
+          .toSorted((one, other) => other.depth - one.depth || (time(other.thread.updatedAt) ?? 0) - (time(one.thread.updatedAt) ?? 0))
+          .map(({ thread }) => thread)
+          .slice(0, linkable)
+        for (const thread of candidates.filter(({ id, updatedAt }) => read.get(id) !== updatedAt)) {
+          const found = yield* Effect.either(sessions({ machine, id: thread.id }))
+          if (Either.isLeft(found)) {
+            yield* Effect.logWarning(`Could not read which sessions "${thread.title}" has: ${found.left.reason}`)
+            continue
+          }
+          read.set(thread.id, thread.updatedAt)
+          for (const native of found.right) owners.set(native, thread.id)
+          if (found.right.includes(session)) return yield* linked(thread)
+        }
+        return yield* unlinked(candidates.length === 0 ? "no thread in T3 Code works in this directory or one holding it" : "no thread in this directory, or one holding it, has this session")
+      }).pipe(
+        Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not link a hook to its thread", cause), Option.none<Ref>())),
+        Effect.annotateLogs({ session }),
+      )
+
+    const find = (ref: Ref) =>
+      Option.match(Option.fromNullable(linked(ref.machine)), {
+        onNone: () => Effect.succeed(Option.none<T3Live.Thread>()),
+        onSome: ({ live }) => Effect.map(live.view, Option.flatMap((view) => Option.fromNullable(view.threads.get(ref.id)))),
+      })
+
     /** When usage was last asked for, so a T3 Code that doesn't answer isn't asked on every request. */
     let tried = Number.NEGATIVE_INFINITY
     const refresh = Option.match(options.actions, {
@@ -584,11 +674,7 @@ export const make = (options: {
           const threads = shortlist({ machine, view: own, ...noted(machine), others, focus, pending, found, heard, most, more, now })
           return { threads, away }
         }),
-      find: (ref) =>
-        Option.match(Option.fromNullable(linked(ref.machine)), {
-          onNone: () => Effect.succeed(Option.none()),
-          onSome: ({ live }) => Effect.map(live.view, Option.flatMap((view) => Option.fromNullable(view.threads.get(ref.id)))),
-        }),
+      find,
       unseen: (name) =>
         Option.match(Option.fromNullable(linked(name)), {
           onNone: () => Effect.succeed(Option.some(`I can't see ${name}'s threads.`)),
@@ -660,5 +746,17 @@ export const make = (options: {
               .run(ref.machine, ref.id, work.prompt, work.dictated, work.description.trim() === "" ? null : work.description.trim(), at)
           })
         }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not note the work I started", error))),
+      link,
+      sessions,
+      waiting: (ref, requestId) =>
+        Effect.gen(function* () {
+          // On whichever machine it's on, as that machine's T3 Code last showed it.
+          const pending = Option.flatMap(yield* find(ref), (thread) => Option.fromNullable(thread.pendingRuntimeRequest))
+          if (Option.isNone(pending)) return false
+          if (pending.value.id === requestId) return true
+          const read = yield* Effect.either(Effect.flatMap(reach(ref), (actions) => actions.detail(ref.id, requestId)))
+          if (Either.isLeft(read)) yield* Effect.logWarning(`Could not read whether it still waits on ${requestId}`, read.left)
+          return Either.isRight(read) && read.right.pending.includes(requestId)
+        }),
     } satisfies Threads["Type"]
   })

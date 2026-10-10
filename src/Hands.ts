@@ -28,6 +28,26 @@ export type Act =
   | { readonly _tag: "Stop"; readonly to: Threads.Ref }
   /** Takes back what was just done: a stop, by letting the thread carry on, or a message, by withdrawing it. */
   | { readonly _tag: "Undo"; readonly to: Option.Option<Threads.Ref>; readonly carry: boolean }
+  /** Allows, or turns down, what the thread waits on him for: only `requestId`, the request he heard. Never for always. */
+  | { readonly _tag: "Decide"; readonly to: Threads.Ref; readonly requestId: string; readonly decision: Decision }
+  /**
+   * Answers the thread's question, only `requestId`, the one he heard, by its
+   * questions' ids, with the option he picked, said back, when he picked one;
+   * `as` "message" when what he said was a message for the thread, which went
+   * as the answer, since the thread was waiting on it, and "left" when it went
+   * as the answer to a part once he let the rest of the question go.
+   */
+  | {
+      readonly _tag: "Reply"
+      readonly to: Threads.Ref
+      readonly requestId: string
+      readonly answers: Readonly<Record<string, string | ReadonlyArray<string>>>
+      readonly said: Option.Option<string>
+      readonly as?: "answer" | "message" | "left"
+    }
+
+/** What an approval is answered with by voice: allowed, for the rest of the thread's work when he says so, or turned down. */
+export type Decision = "accept" | "acceptForSession" | "decline"
 
 /**
  * For a message in place of the turn under way, done as a stop, as a step of
@@ -66,9 +86,11 @@ export type Outcome =
   | { readonly _tag: "Twin"; readonly row: Ledger.Row }
   /** The message to withdraw was read already, so it can only be told to ignore it. */
   | { readonly _tag: "Read"; readonly row: Ledger.Row }
+  /** What it answers no longer waits on him, as when it was dealt with in T3 Code meanwhile: nothing's done, and nothing's said. */
+  | { readonly _tag: "Moot" }
 
 /** What came of a step that was written down: gone, turned down, never sent or unknown. */
-type Went = Exclude<Outcome, { readonly _tag: "Twin" | "Read" }>
+type Went = Exclude<Outcome, { readonly _tag: "Twin" | "Read" | "Moot" }>
 
 /** What a message in the queue waits on: the turn under way, for something it asked him, or its last bits of work; or the queue, on hold. */
 export type Waiting = "asked" | "finishing" | "held"
@@ -118,7 +140,21 @@ export class Hands extends Context.Tag("yapd/Hands")<
      * once yapd was turned off since it was said, however long a look at the
      * thread before it took (I8).
      */
-    readonly run: (step: Step, act: Act, options?: { readonly twice?: boolean; readonly wanted?: Effect.Effect<boolean> }) => Effect.Effect<Outcome>
+    readonly run: (
+      step: Step,
+      act: Act,
+      options?: {
+        readonly twice?: boolean
+        readonly wanted?: Effect.Effect<boolean>
+        /**
+         * For a message that answers what a thread said at this time, in ms:
+         * held back once the thread was given something else since, other
+         * than by yapd, like a message he typed in T3 Code or a turn that
+         * started after it.
+         */
+        readonly since?: number
+      },
+    ) => Effect.Effect<Outcome>
     /**
      * His yes to sending it again: the same step once more, under the same
      * ids, and never after that (I2). At another time than it first went,
@@ -149,6 +185,13 @@ export class Hands extends Context.Tag("yapd/Hands")<
     readonly reconcileOn: (on: (machine: string) => boolean) => Effect.Effect<Reconciled>
     /** A message a restart found didn't get there, while it's still to be offered: nothing came of it since, and it's recent enough to. */
     readonly still: (commandId: string) => Effect.Effect<Option.Option<Ledger.Row>>
+    /**
+     * Whether a message he'd send a thread would be held back as it could give
+     * a secret away: it waits on one, or on a question he'd type one into and
+     * this looks like one. Asked before his words are kept or logged anywhere,
+     * so that, held back, they never are.
+     */
+    readonly keeps: (to: Threads.Ref, text: string) => Effect.Effect<boolean>
   }
 >() {}
 
@@ -198,6 +241,48 @@ const unchecked = "I couldn't check it's still in the thread"
 export const carryOn = "Please carry on where you left off."
 /** What a thread that read a message already is told when it's taken back. */
 export const ignore = (text: string) => `Please ignore my last message ("${text.trim()}") and carry on as you were.`
+/** Why a message answering what a thread said wasn't sent: it was given something else since. */
+export const given = "It's been given something else since, so I held that back."
+/** Why an approval or an answer wasn't sent: T3 Code says it was dealt with just before. */
+const answeredElsewhere = "It was answered in T3 Code just before."
+/** Why a secret isn't given by voice. */
+const secretive = "It's waiting on a secret, which I never give by voice: it needs T3 Code."
+/** Why a message isn't sent to a thread waiting on a secret, which it could be in other words. */
+const withheld = "It's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code."
+/** Why a message isn't sent to a thread waiting on a question that couldn't be read, which could be for a secret. */
+const unread = "It's waiting on you for something I couldn't read, so I held that back in case it's a secret."
+/**
+ * Why what he said isn't sent as an answer in his own words, or to a thread
+ * waiting on a question he'd type an answer to: it looks like a secret, like
+ * a code or a key, whatever the question said it was for.
+ */
+const revealed = "That sounds like a secret, and I never give one by voice, so it needs T3 Code."
+/** Whether what he said wasn't sent since it could give a secret away, so his words aren't kept anywhere either. */
+export const guarded = (outcome: Outcome) => "reason" in outcome && [secretive, withheld, unread, revealed].includes(outcome.reason)
+/** Why an approval or an answer isn't sent when what the thread waits on isn't what it answers. */
+const mismatched = "It isn't waiting on that kind of answer, so it needs T3 Code."
+/** Why an answer isn't sent when T3 Code takes it as a message, which needs every part it needs. */
+const incomplete = "It needs an answer to every part, so it needs T3 Code."
+/** Why another answer to the same request isn't sent while an earlier, different one may have got there. */
+const answeredBefore = "Your earlier answer may already have got there, so this one needs T3 Code."
+/** Why another answer to the same request isn't sent once an earlier, different one went. */
+const answeredAlready = "I sent it your earlier answer already, so this one needs T3 Code."
+/** How far back an earlier answer to the same request is looked for. */
+const answering = 24 * 60 * 60_000
+/** Why an answer that never left yapd was put aside: he answered differently since, which goes in its place. */
+const replaced = "He answered it differently since."
+/** Why a step never went: what it was to send couldn't be read back. */
+const unreadable = "I couldn't read back what to send."
+/** Why the same answer isn't sent again once an earlier one was given up on without knowing whether it got there. */
+const unconfirmedAnswer = "I couldn't confirm your earlier answer got there, so I won't risk sending it again: it needs T3 Code."
+
+/**
+ * Whether an answer that was given up on may still have got there: sent
+ * once more already and still not found, or left unconfirmed by a restart.
+ * Only one that never left yapd, put aside for a different one or never
+ * readable to send, was given up on safely.
+ */
+const unsettled = (row: Pick<Ledger.Row, "state" | "reason">) => row.state === "abandoned" && ![replaced, unreadable].includes(row.reason ?? "")
 
 /**
  * The commands kept in the ledger, read back to send again. A stop to tell a
@@ -210,8 +295,26 @@ const Body = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("Stop"), then: Schema.optionalWith(Schema.String, { exact: true }) }),
   Schema.Struct({ _tag: Schema.Literal("Resume"), then: Schema.optionalWith(Schema.String, { exact: true }) }),
   Schema.Struct({ _tag: Schema.Literal("Cancel"), runId: Schema.String, messageId: Schema.optionalWith(Schema.String, { exact: true }) }),
+  Schema.Struct({ _tag: Schema.Literal("Decide"), requestId: Schema.String, decision: Schema.Literal("accept", "acceptForSession", "decline") }),
+  Schema.Struct({
+    _tag: Schema.Literal("Answer"),
+    requestId: Schema.String,
+    answers: Schema.Record({ key: Schema.String, value: Schema.Union(Schema.String, Schema.Array(Schema.String)) }),
+  }),
 )
 const command = Schema.decodeUnknownOption(Body)
+
+/** Answers to a request's questions in an order that doesn't depend on how they were put together. */
+const ordered = (answers: Readonly<Record<string, string | ReadonlyArray<string>>>) =>
+  JSON.stringify(Object.keys(answers).toSorted().map((key) => [key, answers[key]]))
+
+/** Whether what's in the ledger answers a request as this does: the same decision, or the same answers. */
+const alike = (body: unknown, act: Extract<Act, { readonly _tag: "Decide" | "Reply" }>) =>
+  Option.exists(command(body), (sent) =>
+    act._tag === "Decide"
+      ? sent._tag === "Decide" && sent.decision === act.decision
+      : sent._tag === "Answer" && ordered(sent.answers) === ordered(act.answers),
+  )
 
 /** New work in the ledger as it was asked for. */
 const request = Schema.decodeUnknownOption(Launcher.Request)
@@ -230,6 +333,9 @@ const reasons: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bno running provider turn\b/i, "It isn't at a point where it can take that yet."],
   // It stops only a run with something going in it: one that ended just before the stop got there has nothing to stop.
   [/\bis not interruptible\b/i, "It isn't doing anything right now."],
+  // An approval or a question answered in T3 Code's app just before; or one that ended with its run, or as T3 Code restarted.
+  [/\bis resolved\b/i, answeredElsewhere],
+  [/\bis (expired|cancelled)\b/i, "It isn't waiting on that any more."],
   // It acts on a thread only while it's neither archived nor deleted.
   [/\bthread\b.*\bis not active\b/i, "It's been archived or deleted."],
   // It lets go of a queue only once a turn that ran into a usage limit is carried on, from T3 Code's app.
@@ -460,6 +566,20 @@ export const make = (options: {
   const landed = (row: Ledger.Row, actions: T3Actions.Actions): Effect.Effect<boolean, T3CodeServer.Trouble> => {
     const sent = command(row.body)
     if (row.messageId !== null && row.kind === "message") return actions.has(row.thread, row.messageId)
+    // An answer got there once the thread no longer waits on what it answered, even behind something newer it asked. A thread the live
+    // view doesn't have, like rig's while it can't be reached, is read from its T3 Code instead, which fails the look when that can't
+    // be reached either: one that can't be seen is never taken for one that waits on nothing.
+    if (Option.isSome(sent) && (sent.value._tag === "Decide" || sent.value._tag === "Answer")) {
+      const { requestId } = sent.value
+      const read = Effect.map(actions.detail(row.thread, requestId), ({ pending }) => !pending.includes(requestId))
+      return Effect.flatMap(threads.find(refOf(row)), (thread) => {
+        if (Option.isNone(thread)) return read
+        const pending = thread.value.pendingRuntimeRequest
+        if (pending === null) return Effect.succeed(true)
+        if (pending.id === requestId) return Effect.succeed(false)
+        return read
+      })
+    }
     if (row.kind === "stop") return Effect.map(actions.running(row.thread), (running) => !running)
     if (Option.isSome(sent) && sent.value._tag === "Cancel") {
       // Withdrawn, T3 Code drops the run, and its message, from the thread, or shows it cancelled. One that started meanwhile is being read,
@@ -623,8 +743,8 @@ export const make = (options: {
       const what = doing[row.kind]
       const read = command(row.body)
       if (Option.isNone(read)) {
-        yield* ledger.settle(row.commandId, "abandoned", { reason: "I couldn't read back what to send." })
-        return yield* failing({ _tag: "NotSent", reason: "I couldn't read back what to send.", again: Option.none() }, what)
+        yield* ledger.settle(row.commandId, "abandoned", { reason: unreadable })
+        return yield* failing({ _tag: "NotSent", reason: unreadable, again: Option.none() }, what)
       }
       const sent = read.value._tag === "Send" && at !== undefined ? { ...read.value, how: at } : read.value
       const how = sent._tag === "Send" ? sent.how : "now"
@@ -739,7 +859,42 @@ export const make = (options: {
       return Option.some<Outcome>({ _tag: "Twin", row })
     })
 
-  const message = (step: Step, act: Extract<Act, { readonly _tag: "Message" }>, twice: boolean, wanted: Effect.Effect<boolean>) =>
+  /**
+   * Whether a thread was given something else since `since`, other than by
+   * yapd: a message typed after it, later than yapd's own last one, or a
+   * turn that started after it, like one he queued while it ran, with
+   * nothing sent by yapd since.
+   */
+  const moved = (to: Threads.Ref, thread: T3Live.Thread, since: number) =>
+    Effect.gen(function* () {
+      const after = (iso: string | null, than: number) => iso !== null && Date.parse(iso) > than
+      const ours = (yield* ledger.steps(since, { kinds: ["message"], machine: to.machine, thread: to.id })).at(-1)?.at
+      if (after(thread.latestUserMessageAt, since + 1000) && (ours === undefined || after(thread.latestUserMessageAt, ours + 2000))) return true
+      return ours === undefined && after(thread.latestRunStartedAt, since + 1000)
+    })
+
+  /**
+   * Why nothing may be sent to a thread as it is, if that's so: it waits on a
+   * secret, which T3 Code says, or a question that asks him to type one in,
+   * which only its turn items say, and which unread could be one; or on a
+   * question with nothing to pick from, however it's worded, and `text`
+   * looks like a secret, which it could be asking for in other words.
+   */
+  const keeping = (to: Threads.Ref, reached: { readonly actions: T3Actions.Actions; readonly thread: T3Live.Thread }, text: string) =>
+    Effect.gen(function* () {
+      const pending = reached.thread.pendingRuntimeRequest
+      if (pending === null) return undefined
+      if (T3Actions.secret(pending.id)) return withheld
+      if (pending.kind !== "user_input") return undefined
+      const read = yield* Effect.either(reached.actions.detail(to.id, pending.id))
+      if (Either.isLeft(read)) return unread
+      const request = read.right.request
+      if (Option.exists(request, ({ _tag }) => _tag === "Secret")) return withheld
+      const open = Option.exists(request, (request) => request._tag === "Question" && request.questions.some(({ options }) => options.length === 0))
+      return open && T3Actions.revealing(text) ? revealed : undefined
+    })
+
+  const message = (step: Step, act: Extract<Act, { readonly _tag: "Message" }>, twice: boolean, wanted: Effect.Effect<boolean>, since?: number) =>
     Effect.gen(function* () {
       const { to, text } = act
       const { commandId } = Ledger.ids(step.utterance, step.step, true)
@@ -757,6 +912,11 @@ export const make = (options: {
       if (Option.isSome(before)) return settled(before.value)
       const reached = yield* reach(to)
       if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing.message)
+      // Waiting on a secret, it's sent nothing by voice, since what he says could be the secret in other words; nor what looks like one, to a question he'd type into.
+      const kept = yield* keeping(to, reached.right, text)
+      if (kept !== undefined) return yield* failing({ _tag: "Refused", reason: kept } satisfies Outcome, doing.message)
+      // An answer to what it said then, which it's moved on from: held back, never written down, so the same words later are new.
+      if (since !== undefined && (yield* moved(to, reached.right.thread, since))) return yield* failing({ _tag: "Refused", reason: given } satisfies Outcome, doing.message)
       const digest = Ledger.digest(text)
       if (!twice) {
         const now = yield* Clock.currentTimeMillis
@@ -923,6 +1083,113 @@ export const make = (options: {
     })
 
   /**
+   * Allows, turns down or answers what a thread waits on him for, only while
+   * it's still the very request he heard: dealt with in T3 Code meanwhile,
+   * nothing is done or said. Only an approval is allowed and only a question
+   * answered, since T3 Code takes either for both and the agent would never
+   * get it, and a secret never is. Once per request: an earlier step for it
+   * that went stands, and one that may not have goes once more under its
+   * own ids, on this yes of his, never under new ones (I2); once that's been
+   * given up on still unconfirmed, or a restart couldn't confirm it, it's
+   * never sent again, and he's told so. That's only for the same answer: a
+   * different one goes under its own ids only once the earlier never left
+   * yapd, and is otherwise left to T3 Code, so what's sent is always what he
+   * said last, and what's said is what was sent.
+   */
+  const respond = (step: Step, act: Extract<Act, { readonly _tag: "Decide" | "Reply" }>, wanted: Effect.Effect<boolean>) =>
+    Effect.gen(function* () {
+      const kind = act._tag === "Decide" ? "decide" : "reply"
+      const before = yield* ledger.get(Ledger.ids(step.utterance, step.step, false).commandId)
+      if (Option.isSome(before)) return settled(before.value)
+      const reached = yield* reach(act.to)
+      if (Either.isLeft(reached)) return yield* failing({ _tag: "Refused", reason: reached.left } satisfies Outcome, doing[kind])
+      const { actions, thread } = reached.right
+      const moot = Effect.as(Effect.logInfo(`Not answering ${act.requestId}, since it no longer waits on it`), { _tag: "Moot" } satisfies Outcome)
+      // Waiting on nothing, it was dealt with; waiting on something else, it may still wait on this one too, asked alongside it, which only a read can say.
+      if (thread.pendingRuntimeRequest === null) return yield* moot
+      const read = yield* Effect.either(actions.detail(act.to.id, act.requestId))
+      if (Either.isLeft(read)) {
+        return yield* failing({ _tag: "NotSent", reason: plainly(T3Actions.reason(read.left)), again: Option.none() } satisfies Outcome, doing[kind])
+      }
+      if (thread.pendingRuntimeRequest.id !== act.requestId && !read.right.pending.includes(act.requestId)) return yield* moot
+      const request = read.right.request
+      if (Option.exists(request, ({ _tag }) => _tag === "Secret")) return yield* failing({ _tag: "Refused", reason: secretive } satisfies Outcome, doing[kind])
+      const question = Option.getOrUndefined(Option.filter(request, (request) => request._tag === "Question"))
+      const questions = question?._tag === "Question" ? question.questions : []
+      // An answer in his own words that looks like a secret isn't given by voice, whatever the question said it was for, even beside an
+      // option he picked for another part: only what's one of its part's options, as it takes it, is never his own words.
+      const offered = (id: string, value: string) => questions.some((asked) => asked.id === id && asked.options.some((option) => T3Actions.choice(option) === value))
+      if (act._tag === "Reply" && Object.entries(act.answers).some(([id, value]) => [value].flat().some((given) => !offered(id, given) && T3Actions.revealing(given)))) {
+        return yield* failing({ _tag: "Refused", reason: revealed } satisfies Outcome, doing[kind])
+      }
+      const fits = Option.exists(request, (request) =>
+        act._tag === "Decide" ? request._tag === "Approval" && request.decisions.some(({ decision }) => decision === act.decision) : request._tag === "Question",
+      )
+      // T3 Code takes an answer under a key the question doesn't have without a word, and the agent never gets it.
+      const unasked = act._tag === "Reply" && Object.keys(act.answers).some((id) => !questions.some((asked) => asked.id === id))
+      if (!fits || unasked) return yield* failing({ _tag: "Refused", reason: mismatched } satisfies Outcome, doing[kind])
+      // Taken as a message to the thread, each part is one string, and every part it needs has one.
+      const message = question?._tag === "Question" && question.mode === "message"
+      if (act._tag === "Reply" && message && questions.some(({ id, required }) => required && [act.answers[id] ?? []].flat().join("").trim() === "")) {
+        return yield* failing({ _tag: "Refused", reason: incomplete } satisfies Outcome, doing[kind])
+      }
+      const answer = act._tag === "Reply" && message ? { ...act, answers: Object.fromEntries(Object.entries(act.answers).map(([id, value]) => [id, [value].flat().join(", ")])) } : act
+      const now = yield* Clock.currentTimeMillis
+      const latest = (yield* ledger.steps(now - answering, { kinds: [kind], machine: act.to.machine, thread: act.to.id })).findLast((row) =>
+        Option.exists(command(row.body), (body) => (body._tag === "Decide" || body._tag === "Answer") && body.requestId === act.requestId),
+      )
+      // A different answer from one that never left yapd takes its place; from one that went, or may have, even given up on since, it would
+      // contradict what T3 Code may have.
+      if (latest !== undefined && !alike(latest.body, answer)) {
+        if (latest.state === "failed") {
+          yield* ledger.settle(latest.commandId, "abandoned", { reason: replaced, from: ["failed"] })
+        } else if (latest.state !== "refused" && (latest.state !== "abandoned" || unsettled(latest))) {
+          return yield* failing({ _tag: "Refused", reason: latest.state === "sent" ? answeredAlready : answeredBefore } satisfies Outcome, doing[kind])
+        }
+      }
+      const earlier = latest !== undefined && alike(latest.body, answer) ? latest : undefined
+      if (earlier?.state === "sent") return settled(earlier)
+      /** The same answer, given up on without knowing whether it got there: it's never sent again, under its own ids or new ones. */
+      const unconfirmed = failing({ _tag: "Unknown", reason: unconfirmedAnswer, again: Option.none() } satisfies Outcome, doing[kind])
+      if (earlier !== undefined && unsettled(earlier)) return yield* unconfirmed
+      /** The answer as a step of its own, under this request's ids. */
+      const fresh = once(
+        step,
+        kind,
+        act.to,
+        () =>
+          answer._tag === "Decide"
+            ? { _tag: "Decide", requestId: answer.requestId, decision: answer.decision }
+            : { _tag: "Answer", requestId: answer.requestId, answers: answer.answers },
+        reached.right,
+        wanted,
+      )
+      /**
+       * The same answer once more, under the ids it first went under, on this
+       * yes of his, while that's still `wanted`: looked at as it's taken to
+       * send, so once yapd was turned off since he said it, however long the
+       * look at the thread took, nothing is sent and it stays as it was (I8).
+       */
+      const resend = (earlier: Ledger.Row) =>
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (!(yield* wanted)) return yield* failing({ _tag: "NotSent", reason: switchedOff, again: Option.none() } satisfies Outcome, doing[kind])
+            const taken = yield* ledger.resending(earlier.commandId)
+            // Taken just before, as by another yes, or come to something since: what it came to stands, and it never goes under new ids.
+            if (Option.isNone(taken)) {
+              const now = yield* ledger.get(earlier.commandId)
+              if (Option.isSome(now) && ["sent", "refused", "failed"].includes(now.value.state)) return settled(now.value)
+              return yield* unconfirmed
+            }
+            yield* Effect.logInfo(`Answering ${act.requestId} once more under ${taken.value.commandId}, as you said`)
+            return yield* dispatch(taken.value, reached.right, true)
+          }),
+        )
+      const outcome: Went = earlier === undefined || earlier.state === "refused" || earlier.state === "abandoned" ? yield* fresh : yield* resend(earlier)
+      return outcome._tag === "Refused" && outcome.reason === answeredElsewhere ? ({ _tag: "Moot" } satisfies Outcome) : outcome
+    })
+
+  /**
    * Withdraws the message just sent while it's still in the queue; once it's
    * been read, it can only be told to ignore it. It's only ever the last thing
    * done, never anything before it.
@@ -1083,7 +1350,10 @@ export const make = (options: {
       const wanted = options.wanted ?? Effect.succeed(true)
       switch (act._tag) {
         case "Message":
-          return message(step, act, options.twice === true, wanted)
+          return message(step, act, options.twice === true, wanted, options.since)
+        case "Decide":
+        case "Reply":
+          return respond(step, act, wanted)
         case "Stop":
           return stop(step, act.to, wanted)
         case "Undo":
@@ -1126,6 +1396,11 @@ export const make = (options: {
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
         return Option.filter(yield* ledger.get(commandId), (row) => Ledger.offerable(row) && now - row.at <= recent)
+      }),
+    keeps: (to, text) =>
+      Effect.gen(function* () {
+        const reached = yield* reach(to)
+        return Either.isRight(reached) && (yield* keeping(to, reached.right, text)) !== undefined
       }),
     reconcile: reconciling(() => true),
     reconcileOn: reconciling,
@@ -1187,6 +1462,12 @@ export const done = (
       ? `${it} waiting on you for something${addressed(lines)}, so that will go once it's dealt with.`
       : `${it} finishing something off${addressed(lines)}, so that will go once it's done.`
   }
+  // A message that went as the answer to what the thread was waiting on, which he's told, since it's not what he asked for.
+  if (act._tag === "Reply" && act.as === "message") return `${naming(lines.onIt, called)} It was waiting on a question, so that's its answer.`
+  // A message taken as the answer to a part of a question, which went once he let the rest of it go, maybe with no word of his.
+  if (act._tag === "Reply" && act.as === "left") {
+    return `Your message went ${Option.match(called, { onNone: () => "", onSome: (name) => `to ${name} ` })}as its answer${addressed(lines)}, with the rest of the question left out.`
+  }
   return naming(
     act._tag === "Stop"
       ? lines.stopped
@@ -1194,9 +1475,15 @@ export const done = (
         ? act.carry
           ? lines.carrying
           : `Withdrawn${addressed(lines)}.`
-        : how === "queued"
-          ? lines.queued
-          : lines.onIt,
+        : act._tag === "Decide"
+          ? act.decision === "decline"
+            ? lines.declined
+            : lines.approved
+          : act._tag === "Reply"
+            ? Option.match(act.said, { onNone: () => lines.onIt, onSome: (said) => `${capital(said)} it is${addressed(lines)}.` })
+            : how === "queued"
+              ? lines.queued
+              : lines.onIt,
     called,
   )
 }
@@ -1205,18 +1492,23 @@ export const done = (
  * Whether what's said once it's done is the line for going ahead, which he
  * can have lines of his own for, a different one each time: for a message
  * that went in as asked, not one that waits, was told to a turn stopped for
- * it, or whose turn has ended since.
+ * it, or whose turn has ended since; and for an answer to a thread's question
+ * that isn't said back as the option he picked, like one in his own words or
+ * a message that went as its answer.
  */
 export const goesAhead = (
   act: Act,
   how: Ledger.How,
   as: { readonly waiting?: Waiting; readonly stopped?: boolean | "ended"; readonly ended?: Ended } = {},
-) => act._tag === "Message" && how !== "queued" && as.stopped !== true && as.ended === undefined && as.waiting === undefined
+) =>
+  act._tag === "Reply"
+    ? act.as === "message" || (act.as !== "left" && Option.isNone(act.said))
+    : act._tag === "Message" && how !== "queued" && as.stopped !== true && as.ended === undefined && as.waiting === undefined
 
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
 /** A reason as it's said after a colon: lowercase, unless it starts with "I" or a name like T3 Code. */
-const after = (reason: string) => (/^(I\b|I'|[A-Z][A-Z\d])/.test(reason) ? reason : `${reason.charAt(0).toLowerCase()}${reason.slice(1)}`)
+export const after = (reason: string) => (/^(I\b|I'|[A-Z][A-Z\d])/.test(reason) ? reason : `${reason.charAt(0).toLowerCase()}${reason.slice(1)}`)
 
 /** What's said when it didn't go, with why, and whether to send it again when it may. */
 export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: string }>, lines: Lines, called: Option.Option<string>) => {
@@ -1226,6 +1518,8 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
   const asking = "again" in outcome && Option.isSome(outcome.again) ? ` ${unaddressed(lines.again, lines)}` : ""
   switch (act._tag) {
     case "Message":
+      // Given something else since what it answers, it's held back, which is as he'd want.
+      if (outcome.reason === given) return `You've given ${name ?? "it"} something else since${sir}, so I held that back.`
       // In place of the turn under way, done as a stop first: the stop that didn't go, so the message never went, or what came of the message after it, which may never have been sent.
       if (outcome.stopped === false) {
         return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} stopped${sir}, so I didn't tell it.` : `I couldn't stop ${name ?? "it"} to tell it that${sir}: ${reason}`
@@ -1264,12 +1558,25 @@ export const failed = (act: Act, outcome: Extract<Outcome, { readonly reason: st
           : `I couldn't get ${name ?? "it"} going again${sir}: ${reason}${asking}`
       }
       return outcome._tag === "Unknown" ? `I couldn't confirm it was withdrawn${sir}.` : `I couldn't take that back${sir}: ${reason}`
+    case "Decide":
+    case "Reply": {
+      const answer = act._tag === "Reply" ? "your answer" : act.decision === "decline" ? "your no" : "your go-ahead"
+      // Not known to have got there, and not risked again, it's T3 Code's to show, which he's told plainly.
+      if (outcome.reason === unconfirmedAnswer) return `I couldn't confirm ${name ?? "it"} got ${answer} before${sir}, so I won't risk sending it again: it needs T3 Code.`
+      return outcome._tag === "Unknown" ? `I couldn't confirm ${name ?? "it"} got ${answer}${sir}.` : `I couldn't get ${answer} to ${name ?? "it"}${sir}: ${reason}`
+    }
   }
 }
 
 /** That the same words went to the same thread lately: "I sent that a minute ago, sir." */
 export const sentBefore = (sent: number, now: number, lines: Lines, called: Option.Option<string>) =>
   `I sent that${Option.match(called, { onNone: () => "", onSome: (name) => ` to ${name}` })} ${ago(now - sent)}${addressed(lines)}.`
+
+/** That the same words may not have got to the same thread when they went lately, said instead of offering to send them again. */
+export const unconfirmedBefore = (lines: Lines) => `I couldn't confirm that got there before${addressed(lines)}, so I haven't sent it again.`
+
+/** That the same words never left yapd when they went to the same thread lately, said instead of offering to send them again, which dictating them does. */
+export const unsentBefore = (lines: Lines) => `That didn't get there before${addressed(lines)}, so I haven't sent it: say it to me with the shortcut to send it again.`
 
 /** What `twice` asks on its own, after saying the same words went lately. */
 export const twiceAsks = "Again?"
@@ -1310,7 +1617,9 @@ export const unsure = (
   const what =
     row.kind === "stop"
       ? `${name ?? "the work"} stopped`
-      : row.kind === "start"
+      : row.kind === "decide" || row.kind === "reply"
+        ? `your answer${name === undefined ? "" : ` to ${name}`} got there`
+        : row.kind === "start"
         ? "the new work you asked for started"
         : Option.exists(sent, ({ _tag }) => _tag === "Resume")
           ? `${name ?? "the work"} was going again`

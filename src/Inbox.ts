@@ -69,7 +69,7 @@ export interface Notice {
    * when it can't be asked in full, like when the audio helper quits midway,
    * what undoes its `saying`, since it counts as never said.
    */
-  readonly question?: Pick<Question, "answer"> & { readonly unanswered: Effect.Effect<void>; readonly unsaid: Effect.Effect<void> }
+  readonly question?: Pick<Question, "answer" | "through" | "terms"> & { readonly unanswered: Effect.Effect<void>; readonly unsaid: Effect.Effect<void> }
   /**
    * For an answer: what to make of what the user says over it, or right
    * after it's said to the end, while the microphone stays open as after an

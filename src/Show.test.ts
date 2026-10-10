@@ -29,6 +29,7 @@ const listed: Threads.Listed = {
   here: true,
   called: "the build cleanup",
   project: "yapd",
+  directory: Option.none(),
   thread: waiting,
   state: "approval",
   since: Date.parse("2026-10-08T21:55:00.000Z"),
@@ -45,7 +46,8 @@ const approval = (what: string): T3Actions.Request => ({ _tag: "Approval", id: "
 const question = (asked: string, labels: ReadonlyArray<string>): T3Actions.Request => ({
   _tag: "Question",
   id: "r2",
-  questions: [{ id: "q1", header: "", question: asked, options: labels.map((label) => ({ label, description: "" })), multiSelect: false, allowCustomAnswer: true }],
+  questions: [{ id: "q1", header: "", question: asked, options: labels.map((label) => ({ label, description: "" })), multiSelect: false, allowCustomAnswer: true, required: true }],
+  mode: "live",
 })
 
 const detail = (what: string, request: T3Actions.Request = approval(what)): T3Actions.Detail => ({
@@ -53,6 +55,7 @@ const detail = (what: string, request: T3Actions.Request = approval(what)): T3Ac
   runs: [],
   request: Option.some(request),
   plan: Option.none(),
+  pending: [request.id],
 })
 
 const lines: Persona.Lines = { ...Persona.plain, address: "sir" }

@@ -360,7 +360,7 @@ const resentLater = (again: "kept" | "lost", meanwhile: (bounded: Bounded) => Bo
         said:
           outcome._tag === "Done"
             ? Hands.done(message, outcome.how, lines, Option.none(), outcome)
-            : outcome._tag === "Twin" || outcome._tag === "Read"
+            : outcome._tag === "Twin" || outcome._tag === "Read" || outcome._tag === "Moot"
               ? outcome._tag
               : Hands.failed(message, outcome, lines, Option.none()),
         noted: Option.getOrNull(Option.map(yield* ledger.get("yapd:u1:0"), ({ state, how, reason }) => ({ state, how, reason }))),
@@ -2567,6 +2567,291 @@ describe("Hands", () => {
     )
     expect(result.outcomes).toEqual(["Done", "Done", "Done"])
     expect(result.dispatched).toEqual(["yapd:u1:0", "yapd:u2:0", "yapd:u3:0", "yapd:u4:0", "yapd:u5:0", "yapd:u6:0"])
+  })
+
+  test("a message to a thread waiting on a secret, or on a question asking him to type one in, is never sent, and one to a thread asking anything else goes", async () => {
+    const asking = (id: string) => thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id, kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const { send, becomes, bounded, reads, dispatched } = yield* hands({ thread: asking("turn-item:secret-request:t-tezos:stripe"), runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        bounded.turnItems.push(
+          { type: "secret_request", id: "turn-item:secret-request:t-tezos:stripe", status: "waiting", label: "Stripe API key" },
+          { type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question: "Paste your OpenAI API key." }] },
+          { type: "user_input_request", status: "waiting", requestId: "q2", questions: [{ id: "net", header: "Network", question: "Which network first?", options: [{ label: "Mainnet" }] }] },
+        )
+        const secret = yield* send("u1", "The Stripe key is sk test four two.")
+        becomes(asking("q1"))
+        const typed = yield* send("u2", "The key is sk proj one two three.")
+        reads(false)
+        const unread = yield* send("u3", "The key is sk proj one two three.")
+        reads(true)
+        becomes(asking("q2"))
+        const asked = yield* send("u4", "Start with mainnet.")
+        const why = (outcome: Hands.Outcome) => ("reason" in outcome ? outcome.reason : outcome._tag)
+        return { outcomes: [why(secret), why(typed), why(unread), asked._tag], dispatched: dispatched.map(({ text }) => text) }
+      }),
+    )
+    expect(result.outcomes).toEqual([
+      "It's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+      "It's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+      "It's waiting on you for something I couldn't read, so I held that back in case it's a secret.",
+      "Done",
+    ])
+    expect(result.dispatched).toEqual(["Start with mainnet."])
+  })
+
+  test("an answer that may not have got there isn't taken for one that did while the request still waits behind a newer one, then or after a restart", async () => {
+    // It asked something else alongside, which T3 Code's summary of the thread shows in its place, while r1 still waits.
+    const both = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-08T21:59:30.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: both, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        made.bounded.turnItems.push(
+          { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" },
+          { type: "approval_request", status: "waiting", requestId: "r2", requestKind: "command", prompt: "Bash: npm install right-pad" },
+        )
+        made.answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+        const outcome = yield* made.run({ utterance: "u1", step: 0 }, { _tag: "Decide", to: tezos, requestId: "r1", decision: "accept" })
+        const state = Option.map(yield* made.ledger.get("yapd:u1:0"), ({ state }) => state)
+        const { undelivered, unconfirmed } = yield* made.restarted(now + 60_000).reconcile
+        return {
+          outcome: outcome._tag,
+          state,
+          restarted: Option.map(yield* made.ledger.get("yapd:u1:0"), ({ state }) => state),
+          unconfirmed: unconfirmed.map(({ commandId }) => commandId),
+          undelivered: undelivered.length,
+        }
+      }),
+    )
+    expect(result.outcome).toBe("Unknown")
+    expect(result.state).toEqual(Option.some("unknown"))
+    // Never taken for given after a restart either: it's said it couldn't be confirmed, and never sent again.
+    expect(result.restarted).toEqual(Option.some("abandoned"))
+    expect(result.unconfirmed).toEqual(["yapd:u1:0"])
+    expect(result.undelivered).toBe(0)
+  })
+
+  test("an answer to a question that asks him to type in a secret, or to a secret it asks for, is never sent", async () => {
+    const asking = (id: string) => thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id, kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: asking("q1"), runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        made.bounded.turnItems.push(
+          { type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question: "Please provide OPENAI_API_KEY so I can run the evals." }] },
+          { type: "secret_request", id: "turn-item:secret-request:t-tezos:stripe", status: "waiting", label: "Stripe API key" },
+        )
+        const typed = yield* made.run({ utterance: "u1", step: 0 }, { _tag: "Reply", to: tezos, requestId: "q1", answers: { key: "sk proj one two three" }, said: Option.none() })
+        // A secret behind the question it shows, answered by its id.
+        const secret = yield* made.run(
+          { utterance: "u2", step: 0 },
+          { _tag: "Reply", to: tezos, requestId: "turn-item:secret-request:t-tezos:stripe", answers: { key: "sk test four two" }, said: Option.none() },
+        )
+        const why = (outcome: Hands.Outcome) => ("reason" in outcome ? outcome.reason : outcome._tag)
+        return { outcomes: [why(typed), why(secret)], dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.outcomes).toEqual([
+      "It's waiting on a secret, which I never give by voice: it needs T3 Code.",
+      "It's waiting on a secret, which I never give by voice: it needs T3 Code.",
+    ])
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("an answer to a question T3 Code takes as a message sends one string per part, and isn't sent with a required part missing", async () => {
+    const asking = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: asking, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        // As Codex asks one in its reply, which T3 Code passes on as a message.
+        made.bounded.turnItems.push({
+          type: "user_input_request",
+          status: "waiting",
+          requestId: "q1",
+          responseMode: "message",
+          questions: [
+            { id: "0", header: "Extras", question: "Which test extras should run?", options: [{ label: "Alpha" }, { label: "Beta" }, { label: "Gamma" }], multiSelect: true },
+            { id: "1", header: "Notes", question: "Anything else?" },
+          ],
+        })
+        const missing = yield* made.run({ utterance: "u1", step: 0 }, { _tag: "Reply", to: tezos, requestId: "q1", answers: { "0": ["Alpha", "Gamma"] }, said: Option.some("Alpha and Gamma") })
+        const sent = yield* made.run(
+          { utterance: "u2", step: 0 },
+          { _tag: "Reply", to: tezos, requestId: "q1", answers: { "0": ["Alpha", "Gamma"], "1": "Nothing else." }, said: Option.none() },
+        )
+        return { outcomes: ["reason" in missing ? missing.reason : missing._tag, sent._tag], answers: made.dispatched.map(({ answers }) => answers) }
+      }),
+    )
+    expect(result.outcomes).toEqual(["It needs an answer to every part, so it needs T3 Code.", "Done"])
+    expect(result.answers).toEqual([{ "0": "Alpha, Gamma", "1": "Nothing else." }])
+  })
+
+  test("his own words in one part are refused when they look like a secret, even when another part is an option he picked", async () => {
+    const asking = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: asking, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        made.bounded.turnItems.push({
+          type: "user_input_request",
+          status: "waiting",
+          requestId: "q1",
+          questions: [
+            { id: "build", question: "Which build should I test?", options: [{ label: "Build 202510081" }, { label: "The latest" }] },
+            { id: "shown", question: "What does the dialog show?" },
+          ],
+        })
+        const reply = (utterance: string, answers: Readonly<Record<string, string>>) =>
+          made.run({ utterance, step: 0 }, { _tag: "Reply", to: tezos, requestId: "q1", answers, said: Option.some("Build 202510081") })
+        const withheld = yield* reply("u1", { build: "Build 202510081", shown: "four two seven one nine three" })
+        // An option he picked is never his own words, whatever it looks like.
+        const picked = yield* reply("u2", { build: "Build 202510081", shown: "A warning about the fees." })
+        return { outcomes: ["reason" in withheld ? withheld.reason : withheld._tag, picked._tag], answers: made.dispatched.map(({ answers }) => answers) }
+      }),
+    )
+    expect(result.outcomes).toEqual(["That sounds like a secret, and I never give one by voice, so it needs T3 Code.", "Done"])
+    expect(result.answers).toEqual([{ build: "Build 202510081", shown: "A warning about the fees." }])
+  })
+
+  test("an answer under a key the question doesn't have is refused", async () => {
+    const asking = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "q1", kind: "user_input", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: asking, runs: [{ id: "run-1", status: "running", ordinal: 1 }] })
+        made.bounded.turnItems.push({
+          type: "user_input_request",
+          status: "waiting",
+          requestId: "q1",
+          questions: [{ id: "Which network first?", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }],
+        })
+        const outcome = yield* made.run({ utterance: "u1", step: 0 }, { _tag: "Reply", to: tezos, requestId: "q1", answers: { "Which network?": "Ghostnet" }, said: Option.some("Ghostnet") })
+        return { outcome: "reason" in outcome ? outcome.reason : outcome._tag, dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result).toEqual({ outcome: "It isn't waiting on that kind of answer, so it needs T3 Code.", dispatched: 0 })
+  })
+
+  test("a different answer to a request goes as he said it last once the earlier never left, is left to T3 Code once it may have got there, and the same one goes once more under its ids", async () => {
+    const waiting = thread(tezos.id, {
+      activeRunId: "run-1",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" },
+    })
+    /** Allows, or turns down, r1, as the step of `utterance`. */
+    const decide = (made: { readonly run: Hands.Hands["Type"]["run"] }, utterance: string, decision: Hands.Decision) =>
+      made.run({ utterance, step: 0 }, { _tag: "Decide", to: tezos, requestId: "r1", decision })
+    const result = await run(
+      Effect.gen(function* () {
+        const never = () => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." }))
+        const lost = () => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+        const ask = (sent: Answer) =>
+          Effect.gen(function* () {
+            const made = yield* hands({ thread: waiting })
+            made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+            made.answering(sent)
+            return made
+          })
+        // A no that never left, then a yes: only the yes can go, under its own ids, and it's what's said.
+        const turned = yield* ask(never)
+        yield* decide(turned, "u1", "decline")
+        turned.answering(takes())
+        const allowed = yield* decide(turned, "u2", "accept")
+        // A yes that never left, then a no: the yes is never sent.
+        const changed = yield* ask(never)
+        yield* decide(changed, "u1", "accept")
+        changed.answering(takes())
+        const declined = yield* decide(changed, "u2", "decline")
+        // A yes that may have got there, then a no: nothing goes, and why is said.
+        const unsure = yield* ask(lost)
+        yield* decide(unsure, "u1", "accept")
+        unsure.answering(takes())
+        const left = yield* decide(unsure, "u2", "decline")
+        const said = left._tag === "Refused" ? Hands.failed({ _tag: "Decide", to: tezos, requestId: "r1", decision: "decline" }, left, lines, Option.none()) : left._tag
+        // The same yes again, after one that never left: once more, under its own ids.
+        const same = yield* ask(never)
+        yield* decide(same, "u1", "accept")
+        same.answering(takes())
+        const again = yield* decide(same, "u2", "accept")
+        const sent = (made: { readonly dispatched: ReadonlyArray<Record<string, unknown>> }) => made.dispatched.map(({ commandId, decision }) => `${commandId} ${decision}`)
+        return {
+          allowed: allowed._tag,
+          declined: declined._tag,
+          said,
+          again: again._tag,
+          dispatched: { turned: sent(turned), changed: sent(changed), unsure: sent(unsure), same: sent(same) },
+        }
+      }),
+    )
+    expect(result.allowed).toBe("Done")
+    expect(result.declined).toBe("Done")
+    expect(result.said).toBe("I couldn't get your no to it, sir: your earlier answer may already have got there, so this one needs T3 Code.")
+    expect(result.again).toBe("Done")
+    expect(result.dispatched).toEqual({
+      turned: ["yapd:u1:0 decline", "yapd:u2:0 accept"],
+      changed: ["yapd:u1:0 accept", "yapd:u2:0 decline"],
+      unsure: ["yapd:u1:0 accept"],
+      same: ["yapd:u1:0 accept", "yapd:u1:0 accept"],
+    })
+  })
+
+  test("an answer sent once more on his yes isn't, once yapd was turned off since he said it, and stays as it was, to go on a yes once it's on", async () => {
+    const waiting = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: waiting })
+        made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+        const act: Hands.Act = { _tag: "Decide", to: tezos, requestId: "r1", decision: "accept" }
+        // His yes never left yapd.
+        made.answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code isn't answering." })))
+        yield* made.run({ utterance: "u1", step: 0 }, act)
+        made.answering(takes())
+        // He says yes again, and turns yapd off while the thread is read first.
+        const off = yield* made.run({ utterance: "u2", step: 0 }, act, { wanted: Effect.succeed(false) })
+        const kept = Option.map(yield* made.ledger.get("yapd:u1:0"), ({ state }) => state)
+        const on = yield* made.run({ utterance: "u3", step: 0 }, act)
+        return { off: "reason" in off ? off.reason : off._tag, kept, on: on._tag, dispatched: made.dispatched.map(({ commandId }) => commandId) }
+      }),
+    )
+    expect(result).toEqual({ off: Hands.switchedOff, kept: Option.some("failed"), on: "Done", dispatched: ["yapd:u1:0", "yapd:u1:0"] })
+  })
+
+  test("an answer that may have got there, sent once more and still unconfirmed, or left unconfirmed by a restart, is never sent again under any ids, nor a different one, and he's told why", async () => {
+    const waiting = thread(tezos.id, { activeRunId: "run-1", activityRunStatus: "running", pendingRuntimeRequest: { id: "r1", kind: "command", createdAt: "2026-10-08T21:59:00.000Z" } })
+    const decide = (decision: Hands.Decision): Hands.Act => ({ _tag: "Decide", to: tezos, requestId: "r1", decision })
+    const lost = () => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true }))
+    const said = (outcome: Hands.Outcome, decision: Hands.Decision) => ("reason" in outcome ? Hands.failed(decide(decision), outcome, lines, Option.none()) : outcome._tag)
+    const sent = (made: { readonly dispatched: ReadonlyArray<Record<string, unknown>> }) => made.dispatched.map(({ commandId, decision }) => `${commandId} ${decision}`)
+    const twice = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: waiting })
+        made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+        made.answering(lost)
+        yield* made.run({ utterance: "u1", step: 0 }, decide("accept"))
+        // His yes again sends it once more under its ids, which may not have got there either.
+        yield* made.run({ utterance: "u2", step: 0 }, decide("accept"))
+        made.answering(takes())
+        const third = yield* made.run({ utterance: "u3", step: 0 }, decide("accept"))
+        const declined = yield* made.run({ utterance: "u4", step: 0 }, decide("decline"))
+        return { said: [said(third, "accept"), said(declined, "decline")], dispatched: sent(made) }
+      }),
+    )
+    expect(twice.dispatched).toEqual(["yapd:u1:0 accept", "yapd:u1:0 accept"])
+    expect(twice.said).toEqual([
+      "I couldn't confirm it got your go-ahead before, sir, so I won't risk sending it again: it needs T3 Code.",
+      "I couldn't get your no to it, sir: your earlier answer may already have got there, so this one needs T3 Code.",
+    ])
+    const restarted = await run(
+      Effect.gen(function* () {
+        const made = yield* hands({ thread: waiting })
+        made.bounded.turnItems.push({ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "Bash: npm install left-pad" })
+        made.answering(lost)
+        yield* made.run({ utterance: "u1", step: 0 }, decide("accept"))
+        const after = made.restarted(now + 60_000)
+        yield* after.reconcile
+        made.answering(takes())
+        const again = yield* after.run({ utterance: "u2", step: 0 }, decide("accept"))
+        return { said: said(again, "accept"), dispatched: sent(made) }
+      }),
+    )
+    expect(restarted).toEqual({ said: "I couldn't confirm it got your go-ahead before, sir, so I won't risk sending it again: it needs T3 Code.", dispatched: ["yapd:u1:0 accept"] })
   })
 })
 

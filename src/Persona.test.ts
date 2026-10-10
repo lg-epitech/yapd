@@ -18,6 +18,8 @@ const jarvis: Persona.Lines = {
   stopped: "Stopped, sir.",
   again: "Shall I send it again?",
   carrying: "Carrying on, sir.",
+  approved: "Approved, sir.",
+  declined: "Declined, sir.",
   onScreen: "It's on your screen, sir.",
   address: "sir",
 }

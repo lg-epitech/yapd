@@ -225,12 +225,17 @@ export const make = (options: {
       )
 
     let fetched: { readonly at: number; readonly fiber: Fiber.RuntimeFiber<Array<Listing>> } | undefined
-    /** Asks every machine at once what it can start, telling what transcribes the dictation which names there are. */
-    const fetch = (titles: ReadonlyArray<string>) =>
+    /**
+     * Asks every machine at once what it can start, telling what transcribes
+     * the dictation which names there are, `terms` first, like the options
+     * of a question it may answer, as they're likeliest and the list is cut
+     * from the end.
+     */
+    const fetch = (titles: ReadonlyArray<string>, terms: ReadonlyArray<string> = []) =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const fiber = yield* Effect.forEach(options.machines, listing, { concurrency: "unbounded" }).pipe(
-          Effect.tap((listings) => options.expect?.(vocabulary(listings, titles)) ?? Effect.void),
+          Effect.tap((listings) => options.expect?.([...new Set([...terms, ...vocabulary(listings, titles)])]) ?? Effect.void),
           Effect.forkIn(scope),
         )
         fetched = { at, fiber }
@@ -406,8 +411,8 @@ export const make = (options: {
       })
 
     return {
-      /** The user started dictating: what's ready by the time they've finished doesn't hold the prompt up. */
-      prepare: (titles: ReadonlyArray<string>) => Effect.zipRight(fetch(titles), writer.prepare).pipe(Effect.asVoid),
+      /** The user started dictating: what's ready by the time they've finished doesn't hold the prompt up. `terms` are what it's likeliest to hold. */
+      prepare: (titles: ReadonlyArray<string>, terms?: ReadonlyArray<string>) => Effect.zipRight(fetch(titles, terms), writer.prepare).pipe(Effect.asVoid),
       /**
        * Writes the prompt for what was said, which may turn out not to be new
        * work: it starts before that's known, so new work doesn't wait. With

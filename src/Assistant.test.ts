@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
+import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
+import { Condenser } from "./Condenser.ts"
 import type * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
@@ -10,6 +11,7 @@ import * as Journal from "./Journal.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
 import { Model, ModelError } from "./Model.ts"
+import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
 import * as Show from "./Show.ts"
@@ -117,6 +119,8 @@ const lines: Persona.Lines = {
   cantTell: "I couldn't tell which one you meant, sir.",
   stopped: "Stopped, sir.",
   carrying: "Carrying on, sir.",
+  approved: "Approved, sir.",
+  declined: "Declined, sir.",
   address: "sir",
 }
 
@@ -248,8 +252,24 @@ const assistant = (
     readonly persona?: Context.Tag.Service<Persona.Persona>
     /** The persona's line for going ahead, in place of the written one. */
     readonly onIt?: string
-    /** Rig, followed too: how its tunnel stands, and its threads, when they can be seen. */
-    readonly rig?: { readonly status: Effect.Effect<Tunnel.Status>; readonly threads?: ReadonlyArray<T3Live.Thread> }
+    /** Whether this Mac's threads can be seen, as they can unless the test says, like while T3 Code restarts here. */
+    readonly seen?: () => boolean
+    /**
+     * Rig, followed too: how its tunnel stands, and its threads, when they can
+     * be seen, which `seen` says when it's down a while; with `dispatched`, a
+     * T3 Code of its own that answers, keeping what it's sent there, what its
+     * threads wait on as `items`, and what it tells of as `changes`.
+     */
+    readonly rig?: {
+      readonly status: Effect.Effect<Tunnel.Status>
+      readonly threads?: ReadonlyArray<T3Live.Thread>
+      readonly seen?: () => boolean
+      readonly dispatched?: Array<Record<string, unknown>>
+      readonly items?: ReadonlyArray<Record<string, unknown>>
+      readonly changes?: Stream.Stream<T3Live.Change>
+      /** Its view a moment behind its T3 Code, so a thread there still shows what it waited on just after that's answered. */
+      readonly behind?: boolean
+    }
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -270,26 +290,63 @@ const assistant = (
     )
     /** Threads T3 Code made since, without saying so. */
     const appeared: Array<T3Live.Thread> = []
+    /** Threads as T3 Code has them since, like once what one waited on was answered. */
+    const changed = new Map<string, T3Live.Thread>()
+    /** Rig's threads as its T3 Code has them since, like once what one waited on was answered there. */
+    const rigChanged = new Map<string, T3Live.Thread>()
+    /** As a machine's T3 Code answers a request, which the thread there then no longer waits on, as `known` had it before. */
+    const answeringOn =
+      (since: Map<string, T3Live.Thread>, known: ReadonlyArray<T3Live.Thread>, behind = false) =>
+      (): Answer =>
+      (payload, bounded) =>
+        Effect.zipRight(
+          Effect.sync(() => {
+            if (behind || payload.type !== "runtime-request.respond") return
+            const before = since.get(String(payload.threadId)) ?? known.find(({ id }) => id === payload.threadId)
+            if (before !== undefined && before.pendingRuntimeRequest?.id === payload.requestId) since.set(before.id, { ...before, pendingRuntimeRequest: null })
+          }),
+          (given.answer ?? (() => takes))()(payload, bounded),
+        )
+    /** As T3 Code here answers a request. */
+    const answering = answeringOn(changed, [...(given.others ?? []), ...view.threads.values()])
     const threads = yield* Threads.make({
       machine: "Rosie",
       live: {
         view: Effect.sync(() =>
-          Option.some({ ...view, threads: new Map([...view.threads, ...[...(given.others ?? []), ...appeared].map((other) => [other.id, other] as const)]) }),
+          Option.filter(
+            Option.some({
+              ...view,
+              threads: new Map([...view.threads, ...[...(given.others ?? []), ...appeared, ...changed.values()].map((other) => [other.id, other] as const)]),
+            }),
+            () => given.seen?.() !== false,
+          ),
         ),
         changes: Stream.never,
       },
-      actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, given.answer, given.reading, given.items))),
-      // Rig, whose threads can be seen when the test gives them, and which never answers then, nor can be reached otherwise.
+      actions: Option.some(T3Actions.make(transport(given.search ?? (() => []), dispatched, answering, given.reading, given.items))),
+      // Rig, whose threads can be seen when the test gives them, and which answers then only when the test gives it a T3 Code of its own,
+      // never otherwise, nor can be reached while its threads can't be seen.
       others: Option.match(Option.fromNullable(given.rig), {
         onNone: () => [],
         onSome: (rig) => [
           {
             machine: "rig",
             live: {
-              view: Effect.succeed(Option.map(Option.fromNullable(rig.threads), (threads) => ({ ...view, threads: new Map(threads.map((thread) => [thread.id, thread] as const)) }))),
-              changes: Stream.never,
+              view: Effect.sync(() =>
+                Option.map(Option.filter(Option.fromNullable(rig.threads), () => rig.seen?.() !== false), (threads) => ({
+                  ...view,
+                  threads: new Map([...threads, ...rigChanged.values()].map((thread) => [thread.id, thread] as const)),
+                })),
+              ),
+              changes: rig.changes ?? Stream.never,
             },
-            actions: T3Actions.make(rig.threads === undefined ? Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." })) : Effect.never),
+            actions: T3Actions.make(
+              rig.threads === undefined
+                ? Effect.fail(new T3CodeServer.Trouble({ reason: "I can't reach rig right now." }))
+                : rig.dispatched === undefined
+                  ? Effect.never
+                  : transport(() => [], rig.dispatched, answeringOn(rigChanged, rig.threads, rig.behind), Effect.void, rig.items),
+            ),
             status: rig.status,
           },
         ],
@@ -299,6 +356,8 @@ const assistant = (
     })
     const hands = Hands.make({ threads, ledger })
     const started: Array<Request> = []
+    /** What each dictation was to be heard listening for. */
+    const expected: Array<ReadonlyArray<string>> = []
     const said: Array<Notice> = []
     /** What the persona was told is being said. */
     const noted: Array<string> = []
@@ -341,6 +400,7 @@ const assistant = (
         },
       ],
       rules: Effect.succeed(Option.none()),
+      expect: (terms) => Effect.sync(() => void expected.push(terms)),
       ledger,
       find: (machine, id) => threads.find({ machine, id }),
       recent: Effect.succeed([]),
@@ -361,6 +421,20 @@ const assistant = (
     )
     let power = { on: true, turns: 1 }
     let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>()
+    /** What threads wait on him for, worded as notices word them, by a model that says what the agent wrote it wants, and whether it's risky. */
+    const compose = yield* Notices.composer(threads).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(Condenser, {
+            condense: () => Effect.die("not expected"),
+            ask: (request) => Effect.succeed({ spoken: `wants to ${request.what.replace(/^[\w.-]+: /, "run ")}`, risk: "low" as const }),
+            // Only for a part of a question whose words can't be said as they are.
+            question: () => Effect.succeed({ spoken: "Which network should we start with?" }),
+          }),
+          persona,
+        ),
+      ),
+    )
     /** What the browser was asked to open. */
     const opened: Array<string> = []
     /** What's said aloud as it's played: what a notice says in place of its own words, when it says to by then, which it's told of. */
@@ -391,6 +465,7 @@ const assistant = (
             : voice(notice).pipe(
                 Effect.zipRight(notice.saying ?? Effect.void),
                 Effect.zipRight(notice.confirmed ?? Effect.void),
+                Effect.zipRight(notice.question?.through ?? Effect.void),
                 Effect.zipRight(notice.heard ?? Effect.void),
               ),
         ),
@@ -401,6 +476,7 @@ const assistant = (
       queued: (spoken) => Effect.succeed(given.queued?.has(spoken) === true),
       skip: () => Effect.void,
       upcoming: Effect.succeed([]),
+      compose,
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -426,11 +502,13 @@ const assistant = (
     const questions = () => said.filter(({ kind }) => kind === "question")
     return {
       ...made,
+      threads,
       dispatched,
       ledger,
       told: said,
       noted,
       started,
+      expected,
       seen,
       journal,
       show,
@@ -461,9 +539,22 @@ const assistant = (
         voice(notice).pipe(
           Effect.zipRight(notice?.saying ?? Effect.void),
           Effect.zipRight(notice?.confirmed ?? Effect.void),
+          Effect.zipRight(notice?.question?.through ?? Effect.void),
           Effect.zipRight(notice?.heard ?? Effect.void),
           Effect.zipRight(flush),
         ),
+      /** What a thread waits on him for, read and worded as notices word it, if it still waits on it, on this machine unless `machine` says. */
+      compose: (of: T3Live.Thread, machine = "Rosie") => compose({ machine, id: of.id }, of.pendingRuntimeRequest?.id ?? ""),
+      /** T3 Code has the thread as it is now, like once what it waited on was answered there. */
+      becomes: (next: T3Live.Thread) =>
+        Effect.sync(() => {
+          changed.set(next.id, next)
+        }).pipe(Effect.zipRight(flush)),
+      /** Rig's T3 Code has its thread as it is now. */
+      becomesOnRig: (next: T3Live.Thread) =>
+        Effect.sync(() => {
+          rigChanged.set(next.id, next)
+        }).pipe(Effect.zipRight(flush)),
       /** Its turn came, and a dictation cut it off before the end. */
       cut: (notice = said.at(-1)) => voice(notice).pipe(Effect.zipRight(notice?.saying ?? Effect.void), Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
@@ -510,6 +601,241 @@ const run = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) => Effect.runPromise(
 /** What the model logged for the Mina status: the right thread, sure of it. */
 const minaStatus = (situation: Brain.Situation) =>
   Brain.decision({ act: "answer", target: handle(situation, mina), spoken: "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst." })
+
+/** The cloud deployment discovery, at work and waiting on him for what `pending` says. */
+const waitingOn = (pending: { readonly id: string; readonly kind: string }) =>
+  thread(distractors[4]!.id, "Cloud deployment discovery", "cloudmate", {
+    activeRunId: "run-3",
+    activityRunStatus: "running",
+    pendingRuntimeRequest: { ...pending, createdAt: "2026-10-01T02:17:00.000Z" },
+    updatedAt: "2026-10-01T02:17:00.000Z",
+  })
+
+/** What T3 Code keeps of an approval it waits on, with the command it's for. */
+const approval = (requestId: string, command: string) => [
+  { type: "approval_request", status: "waiting", requestId, requestKind: "command", prompt: `Bash: ${command}`, nativeItemRef: { nativeId: `tool-${requestId}` } },
+  { type: "command_execution", status: "running", input: command, nativeItemRef: { nativeId: `tool-${requestId}` } },
+]
+
+/** What T3 Code keeps of an approval it waits on with no words of its own for it, only the command it's for, as it would run. */
+const commanded = (requestId: string, command: string) => [
+  { type: "approval_request", status: "waiting", requestId, requestKind: "command", nativeItemRef: { nativeId: `tool-${requestId}` } },
+  { type: "command_execution", status: "running", input: command, nativeItemRef: { nativeId: `tool-${requestId}` } },
+]
+
+/** What a thread waits on him for, worded and asked as notices have it asked. */
+const asked = (
+  made: { readonly compose: (of: T3Live.Thread, machine?: string) => Effect.Effect<Option.Option<Assistant.Worded>>; readonly ask: (asking: Assistant.Asking) => Effect.Effect<void> },
+  of: T3Live.Thread,
+  machine?: string,
+) =>
+  Effect.gen(function* () {
+    const worded = Option.getOrThrow(yield* made.compose(of, machine))
+    if (worded._tag !== "Ask") return yield* Effect.die(`Only told: ${worded.spoken}`)
+    yield* made.ask(worded.asking)
+    yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
+    return worded.asking
+  })
+
+/** No model: what's said to what a thread waits on is settled without it, or not at all. */
+const unasked = () => undefined
+
+/** What T3 Code keeps of a question a thread waits on, in its parts. */
+const card = (requestId: string, questions: ReadonlyArray<Record<string, unknown>>) => [{ type: "user_input_request", status: "waiting", requestId, questions }]
+
+/** A part as Claude asks it, by its question, with what each option means and the one it recommends. */
+const colour = {
+  id: "Which colour should the test use?",
+  header: "Colour",
+  question: "Which colour should the test use?",
+  options: [
+    { label: "Red", description: "A red test." },
+    { label: "Blue (Recommended)", description: "A blue test." },
+  ],
+}
+
+/** A part he can pick several of. */
+const extras = {
+  id: "Which test extras should run?",
+  header: "Extras",
+  question: "Which test extras should run?",
+  options: [{ label: "Alpha" }, { label: "Beta" }, { label: "Gamma" }],
+  multiSelect: true,
+}
+
+/** What's sent in answer to the questions threads asked. */
+const answered = (dispatched: ReadonlyArray<Record<string, unknown>>) => dispatched.filter(({ type }) => type === "runtime-request.respond").map(({ answers }) => answers)
+
+/**
+ * Notices over the assistant's threads, as `yapd serve` has them: what a
+ * thread on any machine yapd follows waits on him for is asked through the
+ * assistant, worded by a model that only words what can't be said as it is.
+ */
+const noticing = (made: {
+  readonly threads: Threads.Threads["Type"]
+  readonly journal: Journal.Journal["Type"]
+  readonly mention: Assistant.Assistant["Type"]["mention"]
+  readonly ask: Assistant.Assistant["Type"]["ask"]
+  readonly settled: Assistant.Assistant["Type"]["settled"]
+  readonly returned: Assistant.Assistant["Type"]["returned"]
+}) =>
+  Notices.make({
+    threads: made.threads,
+    journal: made.journal,
+    tell: () => Effect.void,
+    power: Effect.succeed({ on: true, turns: 1 }),
+    stopped: () => Effect.succeed([]),
+    finished: () => Effect.void,
+    overtaken: () => Effect.void,
+    mention: made.mention,
+    ask: made.ask,
+    settled: made.settled,
+    returned: made.returned,
+    shortest: 60_000,
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(Condenser, {
+          condense: () => Effect.die("not expected"),
+          ask: () => Effect.die("not expected"),
+          question: () => Effect.die("not expected"),
+        }),
+        Layer.succeed(Persona.Persona, { lines: Effect.succeed(lines), onIt: () => Effect.succeed(lines.onIt), said: () => Effect.void }),
+      ),
+    ),
+  )
+
+/** A thread on rig asking him which colour the test should use. */
+const onRig = thread("rig-fees", "Fee table checks", "connectors", {
+  activeRunId: "run-9",
+  activityRunStatus: "running",
+  pendingRuntimeRequest: { id: "q9", kind: "user_input", createdAt: "2026-10-01T02:17:00.000Z" },
+  updatedAt: "2026-10-01T02:17:00.000Z",
+})
+
+/**
+ * Every answer review found sent another option than the one he meant
+ * without the model, by the question, its options and what he said: the
+ * same words in other roles, what an option leaves out or puts in another's
+ * place, "just" or "only", a plain yes or no to options that start with no,
+ * a verb of his own or none, and a no to one with "not" in another's name.
+ * Several when he could pick several.
+ */
+const misread: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<string>, heard: ReadonlyArray<string>, several?: boolean]> = [
+  ["What should I fix?", ["Fix the test, not the code (Recommended)", "Fix the code"], ["The code, not the test."]],
+  ["What should I do with the data?", ["Copy the prod database to staging", "Leave staging as is"], ["Copy staging to prod."]],
+  ["What should I keep?", ["Keep the tests, drop the docs (Recommended)", "Keep both"], ["Keep the docs, drop the tests."]],
+  ["How should I land it?", ["Squash, don't rebase", "Rebase"], ["Rebase, don't squash."]],
+  ["Which database?", ["Use Postgres instead of SQLite (Recommended)", "Keep SQLite"], ["SQLite instead of Postgres."]],
+  ["How should I update the branch?", ["Merge main into the feature branch (Recommended)", "Rebase instead"], ["Merge the feature branch into main."]],
+  ["When should I merge?", ["Merge now (Recommended)", "Not now, maybe later"], ["Now, not later."]],
+  ["What should I rename?", ["Rename foo to bar", "Keep the name"], ["Rename bar to foo."]],
+  ["What next?", ["Merge, then deploy", "Wait"], ["Deploy, then merge."]],
+  ["Which checks should run?", ["Lint the code, not the docs", "Tests", "Docs"], ["Docs, not the code."], true],
+  ["Which backups should I delete?", ["Delete all but the latest backup (Recommended)", "Delete all backups"], ["Delete the latest backup."]],
+  ["What should I delete?", ["Delete everything but the logs", "Delete nothing"], ["Delete the logs."]],
+  ["What should I deploy?", ["Deploy all services other than billing", "Hold off"], ["Deploy billing."]],
+  ["What should I update?", ["Update every package apart from React", "Leave them"], ["Update React."]],
+  ["What should I restart?", ["Restart all workers besides the scheduler", "Leave them running"], ["Restart the scheduler."]],
+  ["What should I migrate?", ["Migrate all tables but users (Recommended)", "Wait"], ["Migrate users."]],
+  ["Which cache?", ["Use Redis in place of Memcached (Recommended)", "Leave the cache alone"], ["Use Memcached.", "Memcached."]],
+  ["Which date library?", ["Replace Moment with Day.js (Recommended)", "Leave it as is"], ["Use Moment."]],
+  ["Which package manager?", ["Switch from npm to Bun", "Leave it"], ["npm."]],
+  ["What matters more?", ["Speed over accuracy (Recommended)", "Balance both"], ["Accuracy over speed."]],
+  ["What should I run before pushing?", ["Tests and lint (Recommended)", "Nothing"], ["Just lint.", "Only lint.", "Lint only.", "Only the tests."]],
+  ["Where should I deploy?", ["Deploy to staging and production (Recommended)", "Hold off"], ["Just staging.", "Staging only."]],
+  ["Which tests?", ["Run unit and integration tests", "Skip tests"], ["Only the unit tests."]],
+  ["What should I update?", ["Update the lockfile and package.json", "Leave them"], ["Just the lockfile."]],
+  ["Which checks should run?", ["Lint and tests", "Docs"], ["Only tests."], true],
+  ["Should I drop the cache layer?", ["Keep it (Recommended)", "No cache"], ["No.", "Yes."]],
+  ["Should I skip the tests to save time?", ["Run the full suite (Recommended)", "No tests"], ["No."]],
+  ["Do you want me to keep the old endpoints?", ["Remove them", "No change"], ["No."]],
+  ["Should I skip CI?", ["No CI", "Run CI"], ["No."]],
+  ["Should I delete the old branch?", ["Keep it (Recommended)", "Delete it", "No preference"], ["No.", "Yes."]],
+  ["What about the cache?", ["Bypass the cache (Recommended)", "Rebuild it"], ["Use the cache.", "Go with the cache."]],
+  ["What about the feature branch?", ["Abandon the feature branch", "Rebase it"], ["Take the feature branch."]],
+  ["What about the deploy?", ["Roll back the deploy (Recommended)", "Keep it running"], ["Deploy."]],
+  ["What about the migration?", ["Dry run the migration (Recommended)", "Skip it"], ["Run the migration."]],
+  ["How should I push?", ["Force push", "Open a new branch"], ["Push."]],
+  ["What about the migration?", ["Abandon the migration", "Keep going"], ["The migration."]],
+  ["What about the PR?", ["Close the PR (Recommended)", "Merge it"], ["The PR."]],
+  ["What about the old SDK?", ["Uninstall the old SDK", "Leave it"], ["The old SDK."]],
+  ["What about the old flag?", ["Disallow the old flag", "Keep it"], ["The old flag."]],
+  ["How many retries?", ["Up to 3 retries", "No retries"], ["Three retries."]],
+  ["What should I do with the branch?", ["Merge now (Recommended)", "Do not merge yet", "Close the PR"], ["Not that one.", "Not this one.", "Not."]],
+]
+
+/**
+ * Every answer the reviews of the rules before found still sent another
+ * option than his without the model: a bare number or letter taken for a
+ * place, or a place counted in the order the options were read rather than
+ * named; a plain yes to a question that asks whether, however it's put; a
+ * no with a stop or a mark after it; a name with what goes without saying
+ * left out; "all" before he'd heard them all, and "I don't mind"; a name
+ * by how it sounds, hiding a no or joining numbers; a letter for a name
+ * with a symbol; more than a yes or a no to options named Yes and No; and
+ * a name said over and over, taken as said once. Several when he could
+ * pick several.
+ */
+const reviewed: ReadonlyArray<readonly [asked: string, labels: ReadonlyArray<string>, heard: ReadonlyArray<string>, several?: boolean]> = [
+  ["How many retries?", ["Once", "Twice", "Never"], ["Three."]],
+  ["How many retries?", ["None", "A few", "A lot"], ["One."]],
+  ["Which language should the bindings use?", ["Python", "Rust", "Go"], ["C."]],
+  ["How many days of logs should I keep?", ["A week", "A month", "Forever"], ["Three.", "A."]],
+  ["Should I drop the table, yes or no?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Drop the table? Yes or no?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I force push or not?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["Should I run the migration now, which locks the table for an hour or so?", ["Run it now", "Wait until tonight (Recommended)"], ["Yes."]],
+  ["Confirm: drop the users table.", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I drop the cache layer", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Should I run the tests?", ["Tests", "No tests (Recommended)"], ["No, tests.", "Nope, tests.", "No? Tests."]],
+  ["Should I merge?", ["Merge", "No merge (Recommended)"], ["No, merge."]],
+  ["Should I merge?", ["Merge", "Don't merge"], ["Don't. Merge.", "Don’t, merge."]],
+  ["Should I retry?", ["Retry", "Never retry"], ["Never, retry."]],
+  ["What should I do?", ["Restart", "Restart yapd"], ["Restart yapd, please.", "Um, restart yapd.", "Restart yapd, sir."]],
+  ["What should I do?", ["Voice", "Jarvis voice"], ["Jarvis voice, please."]],
+  ["What should I do?", ["Restart", "Restart Jarvis"], ["Restart Jarvis please."]],
+  ["What should I do?", ["Hold", "Please hold"], ["Please hold, sir."]],
+  ["What should I run?", ["Run tests", "Lint", "Drop the staging database"], ["All.", "All but lint."], true],
+  ["What should I do with the branch?", ["Rebase", "Merge", "Squash", "Delete the branch"], ["The last one.", "The latter."]],
+  ["Do you mind if I force push?", ["Force push", "Open a new branch (Recommended)"], ["I don't mind."]],
+  ["Which changes should go in?", ["Notable changes only", "Everything"], ["Not able changes only."]],
+  ["Who should review it?", ["Nobody", "Everyone"], ["No body."]],
+  ["What do you think — should I merge now?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["What do you think; should I merge now?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["How does merging now sound?", ["Merge now", "Wait for CI (Recommended)"], ["Yes."]],
+  ["What do you say we drop the table?", ["Drop it", "Keep it (Recommended)"], ["Sure."]],
+  ["Which is safer — should I drop the users table now?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Who should do it — can I go ahead and force push?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["When I'm done — delete the branch?", ["Delete it", "Keep it (Recommended)"], ["Yes."]],
+  ["How would you feel about dropping the table?", ["Drop it", "Keep it (Recommended)"], ["Yes."]],
+  ["Which do you prefer, me force pushing?", ["Force push", "Open a new branch (Recommended)"], ["Yes."]],
+  ["Should I run the tests?", ["Tests", "No tests"], ["No - tests.", "No -- tests.", "No / tests.", "No . . . tests.", `No "tests".`, "No (tests).", "No | tests.", "No um tests."]],
+  ["Should I merge?", ["Merge", "Don't merge"], ["Don't - merge."]],
+  ["Should I merge?", ["Merge", "Do not merge"], ["Do not - merge."]],
+  ["Should I retry?", ["Retry", "Never retry"], ["Never - retry."]],
+  ["Should I keep backups?", ["Backups", "No backups"], ["No- backups."]],
+  ["Which language should the bindings use?", ["C++", "Rust", "Go"], ["C."]],
+  ["Which languages should the bindings use?", ["C++", "Rust", "Go"], ["C, Rust."], true],
+  ["Which grade?", ["A+", "B"], ["A."]],
+  ["Which language?", ["C#", "Java"], ["C."]],
+  ["Which language?", ["F#", "OCaml"], ["F."]],
+  ["How long should I keep the preview up?", ["1 hour", "2 hours", "12 hours"], ["One, two hours."]],
+  ["How many replicas?", ["1 replica", "3 replicas", "13 replicas"], ["One, three replicas."]],
+  ["Which version should I pin?", ["Version 1.0", "Version 2.0"], ["Version ten."]],
+  ["Which version should I pin?", ["1.0", "2.0"], ["Ten."]],
+  ["How many workers?", ["2 workers", "4 workers", "24 workers"], ["Two, four workers."]],
+  ["Where should I deploy?", ["Deploy nowhere", "Deploy here"], ["Deploy now, here."]],
+  ["Do you mind if I force push?", ["Yes", "No"], ["Don't.", "Sure."]],
+  ["Mind if I force push?", ["Yes, go ahead", "No, don't"], ["Nope."]],
+  ["Deploy or roll back?", ["Roll back the release", "Deploy anyway"], ["The first one."]],
+  ["Should I deploy or roll back?", ["Roll back the release (Recommended)", "Deploy anyway"], ["The first one."]],
+  ["What should I do?", ["Cancel deploy", "Deploy"], ["Cancel, deploy."]],
+  ["Do you mind if I force push?", ["Yes", "No"], ["No, no.", "Yes, yes."]],
+  ["Should I deploy now?", ["Go ahead", "Wait"], ["Go ahead, go ahead."]],
+  ["Should I update the docs or the tests?", ["Neither", "Both"], ["Both, both."]],
+  ["Ready to deploy?", ["OK", "Cancel"], ["Cancel, cancel."]],
+]
 
 describe("Assistant", () => {
   test("status on MiNAS SV2 is answered about the Mina tickets first time, with no question", async () => {
@@ -575,6 +901,2845 @@ describe("Assistant", () => {
     )
     expect(result.shown).toBe(true)
     expect(result.spoken).toEqual(["The Tezos migration finished three days ago, sir."])
+  })
+
+  test("'approve' to an approval heard in full allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install --global netlify-cli") })
+        yield* asked(made, cloud)
+        yield* made.answer("Approve.")
+        const steps = yield* made.ledger.steps(0)
+        return { spoken: made.spoken(), dispatched: made.dispatched, steps: steps.map(({ kind, state }) => `${kind} ${state}`) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Say 'approve' if you want it, sir.", "Approved, sir."])
+    expect(result.dispatched).toEqual([
+      { commandId: expect.stringMatching(/^yapd:u/), threadId: cloud.id, type: "runtime-request.respond", requestId: "r1", decision: "accept" },
+    ])
+    expect(result.steps).toEqual(["decide sent"])
+  })
+
+  test("'approve' with more after it, which the approve may be to as much as to the approval, never allows it: it's asked again on its own, and the rest is said to be left", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const allow = "Cloud deployment discovery wants to run rm -rf build, which can't be undone, so say 'approve' if you want it, sir."
+    // The model takes the approve for the one open, and what came after it for the rest.
+    const model = (situation: Brain.Situation) =>
+      Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers", rest: "tell the Mina one to wait" })
+    const answered = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(model, undefined, { others: [cloud], items: approval("r1", "rm -rf build") })
+        yield* asked(made, cloud)
+        yield* made.answer("Approve it, and tell the Mina one to wait.")
+        const before = made.dispatched.length
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(answered).toEqual({
+      before: 0,
+      spoken: [
+        allow,
+        "I left the rest, sir: tell the Mina one to wait. Shall I still allow Cloud deployment discovery to run rm -rf build? Only 'approve' will do.",
+        "Approved, sir.",
+      ],
+      dispatched: ["r1 accept"],
+    })
+    // Dictated with nothing open, it's read back to him, with the rest said to be left.
+    const dictated = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(model, undefined, { others: [cloud], items: approval("r1", "rm -rf build") })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("Approve the cloud one, and tell the Mina one to wait.")
+        const before = made.dispatched.length
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(dictated).toEqual({
+      before: 0,
+      spoken: [`I left the rest, sir: tell the Mina one to wait. ${allow.replace(", sir.", ".")}`, "Approved, sir."],
+      dispatched: ["r1 accept"],
+    })
+  })
+
+  test("an approval in the rest of a request, which is the model's words, never his, is never allowed: it's read back to him, and 'approve' then allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        // The model makes "and sure, the cloud one can go ahead too" an approve of the cloud one, as the rest after the message.
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Tell the Mina")
+              ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "now", rest: "approve the cloud one too" })
+              : Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }),
+          undefined,
+          { others: [cloud], items: approval("r1", "rm -rf build") },
+        )
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("Tell the Mina one to add tests, and sure, the cloud one can go ahead too.")
+        const sent = () => made.dispatched.map(({ requestId, decision }) => (requestId === undefined ? "message" : `${requestId} ${decision}`))
+        const before = sent()
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken().slice(2), dispatched: sent() }
+      }),
+    )
+    expect(result.before).toEqual(["message"])
+    expect(result.spoken).toEqual([
+      "On it, sir: Open Mina SSV2 Bug Tickets. Cloud deployment discovery wants to run rm -rf build, which can't be undone, so say 'approve' if you want it.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["message", "r1 accept"])
+  })
+
+  test("a plain yes to an approval, harmless-looking or not, only gets that it needs an 'approve', with nothing sent, and 'approve' then allows it once", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    for (const command of ["git status", "git checkout -f main"]) {
+      const result = await run(
+        Effect.gen(function* () {
+          // The model, for what's said with nothing open, takes "approve" to allow what the thread waits on.
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+            others: [cloud],
+            items: approval("r1", command),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          const yes = { spoken: made.spoken().slice(1), dispatched: made.dispatched.length, open: Option.isSome(yield* made.open) }
+          yield* made.dictate("Approve.")
+          return { yes, spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+      expect([command, result]).toEqual([
+        command,
+        {
+          yes: { spoken: ["It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: 0, open: false },
+          spoken: ["Approved, sir: Cloud deployment discovery."],
+          dispatched: ["r1 accept"],
+        },
+      ])
+    }
+    // Nor does any other yes, however the model takes it, even with an approve in another clause, or asked.
+    for (const heard of [
+      "Sure.",
+      "OK.",
+      "Go ahead.",
+      "Do it.",
+      "Yes, do it.",
+      "Yeah, go for it.",
+      "Go ahead, I'll approve the other one later.",
+      "Sure, but allow more time for the tests.",
+      "Yes. Allow me a second to look.",
+      "Should I approve it?",
+    ]) {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: approval("r1", "git status"),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), dispatched: made.dispatched.length }
+        }),
+      )
+      expect([heard, result]).toEqual([heard, { spoken: ["It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: 0 }])
+    }
+  })
+
+  test("'approve' over an approval he hasn't heard to the end asks it again in full, and allows it only once he has", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2"].flatMap((requestId) => approval(requestId, "npm install left-pad"))
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items, waiting: true })
+        yield* asked(made, cloud)
+        // Said over it, before the end.
+        yield* made.cut()
+        yield* made.answer("Approve.")
+        const before = made.dispatched.length
+        // Asked again, and heard to the end this time.
+        yield* made.play()
+        yield* made.answer("Approve.")
+        // Another, cut off both times it's asked: it's left waiting, never allowed.
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.cut()
+        yield* made.answer("Approve it.")
+        yield* made.cut()
+        yield* made.answer("Approved.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir? Only 'approve' will do.",
+      "Approved, sir.",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir? Only 'approve' will do.",
+      "You stopped me before the end, so I've left it waiting for you in T3 Code, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("approving another thread by name while one approval is open never answers the open one", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const fees = thread(mina.id, mina.title, "connectors", {
+      activeRunId: "run-4",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:17:30.000Z" },
+      updatedAt: "2026-10-01T02:17:30.000Z",
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, fees), how: "accept", pending: "answers" }), undefined, {
+          others: [cloud, fees],
+          items: [...approval("r1", "npm install left-pad"), ...approval("r2", "git push origin fee-tables")],
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Approve the Mina one instead.")
+        const before = made.dispatched.length
+        // What the Mina one waits on, read back since he hasn't heard it asked, and allowed.
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Open Mina SSV2 Bug Tickets wants to run git push origin fee-tables. Say 'approve' if you want it, sir.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r2 accept"])
+  })
+
+  test("an approval cut off before its end by something new is asked once more after it, in the same words, and cut off again isn't asked a third time", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        // He asks something else over it before it's done, and again over it asked once more.
+        yield* made.cut()
+        yield* made.dictate("What's the status on Mina?")
+        const again = made.spoken()
+        yield* made.cut()
+        yield* made.dictate("What's the status on Mina?")
+        yield* made.wait(120)
+        return { again, spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir."
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(result.again).toEqual([allow, status, allow])
+    expect(result.spoken).toEqual([allow, status, allow, status])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("an approval that comes while another question is open is asked once that one's answered", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            Option.isNone(situation.open)
+              ? Brain.decision({ act: "answer", target: handle(situation, tezos), sure: "low", others: handle(situation, mina), spoken: "It's comparing formats." })
+              : Brain.decision({ act: "answer", target: handle(situation, tezos), pending: "answers", spoken: "The Tezos migration is comparing request formats, sir." }),
+          undefined,
+          { others: [cloud], items: approval("r1", "npm install left-pad") },
+        )
+        yield* made.dictate("What's the status on my Tesla's migration request comparison?")
+        const worded = Option.getOrThrow(yield* made.compose(cloud))
+        if (worded._tag === "Ask") yield* made.ask(worded.asking)
+        yield* made.flush
+        const held = made.spoken()
+        yield* made.answer("Migrate Tezos.", made.questions()[0])
+        return { held, spoken: made.spoken(), open: Option.map(yield* made.open, ({ kind }) => kind) }
+      }),
+    )
+    expect(result.held).toEqual(["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?"])
+    expect(result.spoken).toEqual([
+      "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?",
+      "The Tezos migration is comparing request formats, sir.",
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+    ])
+    expect(result.open).toEqual(Option.some("approval"))
+  })
+
+  test("an approval he heard and didn't answer is asked once more in other words a minute later, then left waiting in T3 Code with a word", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install left-pad") })
+        yield* asked(made, cloud)
+        yield* made.unanswered()
+        yield* made.wait(59)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        yield* made.unanswered()
+        yield* made.wait(120)
+        return { soon, spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.soon).toBe(1)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Shall I still allow Cloud deployment discovery to run npm install left-pad, sir? Only 'approve' will do.",
+      "I didn't hear back about whether to allow Cloud deployment discovery to run npm install left-pad, so it's still waiting for you in T3 Code, sir.",
+    ])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("what a thread waits on is kept under its key as it comes up to be asked, and noted heard once he's heard it, so a restart never asks it again", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        const kept = () => Effect.map(made.journal.since(0, { kinds: ["notice"] }), (all) => all.map(({ key, heardAt }) => [key, heardAt !== undefined]))
+        const before = yield* kept()
+        // Its turn comes, and it's still waiting: it's kept as it's said.
+        const stale = yield* made.questions().at(-1)!.stale
+        const said = yield* kept()
+        yield* made.play()
+        return { before, stale, said, heard: yield* kept() }
+      }),
+    )
+    expect(result.before).toEqual([])
+    expect(result.stale).toBe(false)
+    expect(result.said).toEqual([["ask:Rosie:r1", false]])
+    expect(result.heard).toEqual([["ask:Rosie:r1", true]])
+  })
+
+  test("an approval cut off by turning yapd off is asked again once it's on, under the entry it was kept under, and noted heard once he's heard it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        const first = made.questions().at(-1)!
+        // Its turn comes, and he turns yapd off as it starts, say for a call.
+        yield* first.stale
+        yield* made.cut(first)
+        yield* made.toggle(false)
+        const off = { open: Option.isSome(yield* made.open), spoken: made.spoken().length }
+        yield* made.toggle(true)
+        yield* made.back
+        yield* made.flush
+        const again = made.questions().at(-1)!
+        const stale = yield* again.stale
+        yield* made.play(again)
+        yield* made.answer("Approve.", again)
+        const kept = yield* made.journal.since(0, { kinds: ["notice"] })
+        return {
+          off,
+          stale,
+          spoken: made.spoken(),
+          kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]),
+          dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`),
+        }
+      }),
+    )
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir."
+    expect(result.off).toEqual({ open: false, spoken: 1 })
+    expect(result.stale).toBe(false)
+    expect(result.spoken).toEqual([allow, allow, "Approved, sir."])
+    expect(result.kept).toEqual([["ask:Rosie:r1", true]])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("an approval asked again after something cut it off, or read back on his dictating it, is noted heard once he's heard it, so it's nothing he missed", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const unheard = (made: { readonly journal: Journal.Journal["Type"] }) =>
+      Effect.map(made.journal.unheard(0, 20), (entries) => entries.flatMap(({ key }) => (key === undefined ? [] : [key])))
+    const cut = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        yield* made.questions().at(-1)!.stale
+        yield* made.cut()
+        yield* made.dictate("What's the status on Mina?")
+        const again = made.questions().at(-1)!
+        yield* again.stale
+        yield* made.play(again)
+        yield* made.answer("Approve.", again)
+        return { spoken: made.spoken().at(-1), unheard: yield* unheard(made) }
+      }),
+    )
+    expect(cut).toEqual({ spoken: "Approved, sir.", unheard: [] })
+    const dictated = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "npm install left-pad"),
+          waiting: true,
+        })
+        yield* made.dictate("Approve the cloud deployment one.")
+        const read = made.questions().at(-1)!
+        yield* read.stale
+        yield* made.play(read)
+        yield* made.answer("Approve.", read)
+        return { spoken: made.spoken().at(-1), unheard: yield* unheard(made) }
+      }),
+    )
+    expect(dictated).toEqual({ spoken: "Approved, sir.", unheard: [] })
+    // One only told, as a question with too many options to take in is, once he's heard it told.
+    const question = waitingOn({ id: "q1", kind: "user_input" })
+    const told = await run(
+      Effect.gen(function* () {
+        const options = ["Mainnet", "Ghostnet", "Shadownet", "Weeklynet", "Localnet"].map((label) => ({ label }))
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, question), text: "Ghostnet" }), undefined, {
+          others: [question],
+          items: [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "net", question: "Which network first?", options }] }],
+        })
+        yield* made.dictate("Tell the cloud one Ghostnet.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.length, unheard: yield* unheard(made) }
+      }),
+    )
+    expect(told).toEqual({
+      spoken: ["A question on Cloud deployment discovery, sir: Which network first? It has five options, so it's waiting for you in T3 Code."],
+      dispatched: 0,
+      unheard: [],
+    })
+  })
+
+  test("a dangerous approval needs 'approve', and the notice says so", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "git push --force origin main") })
+        yield* asked(made, cloud)
+        // A yes in other words than "approve": it needs the word, and it's left waiting.
+        yield* made.answer("Yeah, go ahead.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.length, open: yield* made.open }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+    ])
+    expect(result.dispatched).toBe(0)
+    expect(result.open).toEqual(Option.none())
+  })
+
+  test("a forced checkout, or a switch that discards changes, is said to be what can't be undone though the model says it's harmless, and a plain yes heard in full never allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    for (const command of ["git checkout -f main", "git switch --discard-changes main"]) {
+      const result = await run(
+        Effect.gen(function* () {
+          // The model words it, and says it's low risk.
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", command) })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.length }
+        }),
+      )
+      expect(result).toEqual({
+        spoken: [
+          `Cloud deployment discovery wants to run ${command}, which can't be undone, so say 'approve' if you want it, sir.`,
+          "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+        ],
+        dispatched: 0,
+      })
+    }
+  })
+
+  test("an approval is said to be what can't be undone by all of what it would run, however long, and one whose command can't be read says so, and needs 'approve' too", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    // Something harmless long enough to be cut short before what's risky, under T3 Code's own harmless words for it.
+    const long = `echo '${"a".repeat(650)}'; rm -rf /tmp/example-data`
+    const items = [
+      ...approval("r1", long).map((item) => (item.type === "approval_request" ? { ...item, prompt: "run a maintenance check" } : item)),
+      // One with nothing to say what it would run.
+      { type: "approval_request", status: "waiting", requestId: "r2", requestKind: "command", prompt: "run a maintenance check" },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Yes.")
+        const unread = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(unread)
+        yield* asked(made, unread)
+        yield* made.answer("Approve.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
+      "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+      "Cloud deployment discovery wants to run a maintenance check, but I couldn't read all of what it would run, so say 'approve' if you want it, sir.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r2 accept"])
+  })
+
+  test("a tool's approval is said to be risky by what it's given as the tool gets it, line breaks and all, or not read in full when T3 Code sends only how that starts, and a yes never allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    /** Asks for a tool given `input` to be allowed, under T3 Code's own harmless words for it, and says yes. */
+    const allowing = (input: unknown) =>
+      run(
+        Effect.gen(function* () {
+          const items = [
+            { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "run a maintenance check", nativeItemRef: { nativeId: "tool-r1" } },
+            { type: "dynamic_tool", status: "running", toolName: "Monitor", input, nativeItemRef: { nativeId: "tool-r1" } },
+          ]
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    // What's risky on a line of its own, which is how the tool runs it.
+    expect(await allowing({ command: "cd build\nrm -rf ~/work" })).toEqual({
+      spoken: [
+        "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
+        "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+      ],
+      dispatched: [],
+    })
+    // Given too much to send whole, T3 Code sends how it starts in its place, which leaves out whatever comes after.
+    expect(await allowing({ summary: '{"command":"echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…', truncated: true })).toEqual({
+      spoken: [
+        "Cloud deployment discovery wants to run a maintenance check, but I couldn't read all of what it would run, so say 'approve' if you want it, sir.",
+        "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+      ],
+      dispatched: [],
+    })
+    // A command given as a list of words, as it runs, and one sent as JSON in a string, as that holds it.
+    for (const input of [{ args: ["git", "push", "origin", "main", "--force"] }, '{"command":"cd build\\nrm -rf ~/work"}']) {
+      expect(await allowing(input)).toEqual({
+        spoken: [
+          "Cloud deployment discovery wants to run a maintenance check, which can't be undone, so say 'approve' if you want it, sir.",
+          "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+        ],
+        dispatched: [],
+      })
+    }
+    // Sent whole, with nothing risky in it, it's asked plainly, and a yes still needs an "approve".
+    expect(await allowing({ command: "cd build\nls" })).toEqual({
+      spoken: ["Cloud deployment discovery wants to run a maintenance check. Say 'approve' if you want it, sir.", "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."],
+      dispatched: [],
+    })
+  })
+
+  test("an approval is said to be risky by a command that goes on over a backslash onto the next line, and by a tool told to force, to overwrite or to delete all of a tree, and a yes never allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    /** Asks for what `items` say it would run to be allowed, under T3 Code's own harmless words for it, and says yes. */
+    const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
+      run(
+        Effect.gen(function* () {
+          const harmless = items.map((item) => (item.type === "approval_request" ? { ...item, prompt: "push the branch" } : item))
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: harmless })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    /** A tool given `input`, waiting on his go-ahead. */
+    const tool = (toolName: string, input: unknown) => [
+      { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", nativeItemRef: { nativeId: "tool-r1" } },
+      { type: "dynamic_tool", status: "running", toolName, input, nativeItemRef: { nativeId: "tool-r1" } },
+    ]
+    const risky = {
+      spoken: [
+        "Cloud deployment discovery wants to push the branch, which can't be undone, so say 'approve' if you want it, sir.",
+        "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+      ],
+      dispatched: [],
+    }
+    // The flag that makes it risky put on a line of its own, which the shell runs as one with the line before it.
+    for (const command of ["git push origin main \\\n  --force", "rm \\\n  -rf ~/work", "git branch \\\n  -D fee-tables"]) {
+      expect(await allowing(approval("r1", command))).toEqual(risky)
+    }
+    // A tool told to force, and one that deletes told to take all that's under what it's given, in so many words.
+    expect(await allowing(tool("mcp__git__git_push", { remote: "origin", branch: "main", force: true }))).toEqual(risky)
+    expect(await allowing(tool("mcp__fs__rm", { path: "~/work", recursive: true }))).toEqual(risky)
+    // Told to force with a lease, which still overwrites, and a command given apart from its words, which runs as one line.
+    expect(await allowing(tool("mcp__git__git_push", { remote: "origin", branch: "main", force_with_lease: true }))).toEqual(risky)
+    expect(await allowing(tool("mcp__shell__run", { command: "rm", args: ["-rf", "~/work"] }))).toEqual(risky)
+    // Named as a program instead, and a tool told to write over what's there.
+    expect(await allowing(tool("mcp__shell__run", { program: "rm", args: ["-rf", "~/work"] }))).toEqual(risky)
+    expect(await allowing(tool("mcp__fs__copy_file", { source: "a.txt", destination: "b.txt", overwrite: true }))).toEqual(risky)
+    // A tool named for git's push or reset, told to force or to reset hard as a list of flags or a mode.
+    expect(await allowing(tool("mcp__git__push", { remote: "origin", flags: ["-u", "--force"] }))).toEqual(risky)
+    expect(await allowing(tool("mcp__git__reset", { mode: "hard", target: "HEAD~3" }))).toEqual(risky)
+    // Going on over lines with nothing risky in it, or told to take all of a tree it only lists or searches, whatever it looks for, it's asked
+    // plainly, and a yes still needs an "approve".
+    for (const items of [
+      approval("r1", "git push origin main \\\n  --follow-tags"),
+      tool("mcp__fs__list_directory", { path: "src", recursive: true }),
+      tool("mcp__search__search", { query: "how to remove a recursive function", recursive: true }),
+      tool("mcp__search__grep", { pattern: "delete_user", path: "src", recursive: true }),
+      tool("mcp__git__reset", { mode: "soft", target: "HEAD~1" }),
+    ]) {
+      expect(await allowing(items)).toEqual({ spoken: ["Cloud deployment discovery wants to push the branch. Say 'approve' if you want it, sir.", "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] })
+    }
+  })
+
+  test("an approval is said to be risky by the command in T3 Code's own words for it, never by the tool's name before it, and a yes never allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    /** Asks for what `items` say it would run to be allowed, in T3 Code's own words for it, and says yes. */
+    const allowing = (items: ReadonlyArray<Record<string, unknown>>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer("Yes.")
+          return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    // A search for what would be risky to run, and git only reading or writing it down, are asked plainly, as "Bash: grep 'rm' -r src", and a
+    // yes still needs an "approve".
+    for (const command of [
+      "grep 'rm' -r src",
+      "git log --grep 'clean' -f",
+      'git commit -m "push --force"',
+      "bash -c 'grep rm -r src'",
+      "rg -n 'rm -rf' src",
+      // And a commit's message as Claude Code writes one, which is only words.
+      "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF\n)\"",
+      "git commit -m \"$(cat <<'EOF'\nDrop the rm -rf from the docs\nEOF)\"",
+    ]) {
+      expect(await allowing(approval("r1", command))).toEqual({ spoken: [`Cloud deployment discovery wants to run ${command}. Say 'approve' if you want it, sir.`, "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] })
+    }
+    // A tool given a command apart from its words, as "mcp__shell__run: git", runs them with it, never on their own.
+    const logging = [
+      { type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", prompt: "mcp__shell__run: git", nativeItemRef: { nativeId: "tool-r1" } },
+      { type: "dynamic_tool", status: "running", toolName: "mcp__shell__run", input: { command: "git", args: ["log", "--grep", "clean", "-f"] }, nativeItemRef: { nativeId: "tool-r1" } },
+    ]
+    expect(await allowing(logging)).toEqual({ spoken: ["Cloud deployment discovery wants to run git. Say 'approve' if you want it, sir.", "It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] })
+    // A push forced by a flag among others, a hard reset with its flag after the rest, and what's run after a commit's message,
+    // however its heredoc is closed, are said to be what can't be undone.
+    for (const command of [
+      "git push -uf origin main",
+      "git reset -q HEAD~1 --hard",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF\n)\" && git push --force",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF)\" && git push --force",
+      "git commit -m \"$(cat <<'EOF'\nwip\nEOF)\"; rm -rf x",
+    ]) {
+      expect(await allowing(approval("r1", command))).toEqual({
+        spoken: [
+          `Cloud deployment discovery wants to run ${command}, which can't be undone, so say 'approve' if you want it, sir.`,
+          "It needs an 'approve', so I've left it waiting for you in T3 Code, sir.",
+        ],
+        dispatched: [],
+      })
+    }
+  })
+
+  test("'approve' allows a dangerous approval first time", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: approval("r1", "git push --force origin main"), waiting: true })
+        yield* asked(made, cloud)
+        yield* made.play()
+        yield* made.answer("Approve it.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ decision }) => decision) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["accept"])
+  })
+
+  test("'approve' said over an approval before what it would run was said asks it again in full, and allows it only once he's heard it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2"].flatMap((requestId) => approval(requestId, "git push --force origin main"))
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items, waiting: true })
+        yield* asked(made, cloud)
+        // He knows the word, and says it over "Cloud deployment discovery wants to—".
+        yield* made.cut()
+        yield* made.answer("Approve.")
+        const before = made.dispatched.length
+        yield* made.play()
+        yield* made.answer("Approve.")
+        // Another, cut off both times it's asked: it's left waiting, never allowed.
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.cut()
+        yield* made.answer("Approve.")
+        yield* made.cut()
+        yield* made.answer("Approve it.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    const asking = "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir."
+    const again = "Shall I still allow Cloud deployment discovery to run git push --force origin main, sir? Only 'approve' will do."
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([asking, again, "Approved, sir.", asking, again, "You stopped me before the end, so I've left it waiting for you in T3 Code, sir."])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("an approval he heard and let go is allowed by dictation only with 'approve', and read back to him on a yes in other words", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "git push --force origin main"),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("Yes, let the cloud one go ahead.")
+        const before = made.dispatched.length
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "I'll leave that one, sir.",
+      "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+      "Approved, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("'approve' with anything more to it, like a condition the model left out, never allows it: it's left waiting, needing an 'approve'", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const allow = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes it all for a yes, with nothing left over.
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: approval("r1", "npm install left-pad"),
+          })
+          yield* asked(made, cloud)
+          yield* made.play()
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    for (const heard of ["Approve it unless the tests fail.", "Approve it provided the tests pass.", "Approve nothing."]) {
+      expect([heard, await allow(heard)]).toEqual([heard, { spoken: ["It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: [] }])
+    }
+    expect(await allow("Approve it.")).toEqual({ spoken: ["Approved, sir."], dispatched: ["r1 accept"] })
+  })
+
+  test("an approval is allowed for the rest of its work only when he says so, whatever the model took his 'approve' for", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2"].flatMap((requestId) => approval(requestId, "npm install left-pad"))
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "session", pending: "answers" }), undefined, {
+          others: [cloud],
+          items,
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Yes, approve it.")
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.answer("Yes, approve it for the session.")
+        return made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`)
+      }),
+    )
+    expect(result).toEqual(["r1 accept", "r2 acceptForSession"])
+  })
+
+  test("an approval dictated before he's heard it asked is read back first, and only an 'approve' to that allows it", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "npm install --global netlify-cli"),
+        })
+        yield* made.dictate("Approve the cloud deployment one.")
+        const before = made.dispatched.length
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.spoken).toEqual(["Cloud deployment discovery wants to run npm install --global netlify-cli. Say 'approve' if you want it, sir.", "Approved, sir."])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("what he said before an approval was asked, or before its turn came to be said, never allows it, however late it's handed on", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const allow = "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir."
+    // A model that takes anything for a yes to it, as one might, seeing what waits on him.
+    const yes = (situation: Brain.Situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" })
+    const sent = (made: { readonly dispatched: ReadonlyArray<Record<string, unknown>> }) => made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`)
+    // Dictated a second before it was even asked, and handed on once he'd heard it to the end: it stays open, for him to answer.
+    const early = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(yes, undefined, { others: [cloud], items: approval("r1", "npm install left-pad") })
+        yield* asked(made, cloud)
+        yield* made.heard({ heard: "Approve the cloud deployment one.", via: "shortcut", at: now - 1000, voiced: 3, turns: 1 })
+        yield* made.flush
+        const before = { dispatched: sent(made), open: Option.isSome(yield* made.open) }
+        yield* made.answer("Approve.")
+        return { before, spoken: made.spoken(), dispatched: sent(made) }
+      }),
+    )
+    expect(early).toEqual({ before: { dispatched: [], open: true }, spoken: [allow, "Approved, sir."], dispatched: ["r1 accept"] })
+    // Said once it was asked, but before its turn came to be said, and handed on once he'd heard it.
+    const waiting = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(yes, undefined, { others: [cloud], items: approval("r1", "npm install left-pad"), waiting: true })
+        yield* asked(made, cloud)
+        yield* made.wait(1)
+        const at = yield* TestClock.currentTimeMillis
+        yield* made.wait(1)
+        yield* made.play()
+        yield* made.heard({ heard: "Approve.", via: "shortcut", at, voiced: 1, turns: 1 })
+        yield* made.flush
+        return { spoken: made.spoken(), open: Option.isSome(yield* made.open), dispatched: sent(made) }
+      }),
+    )
+    expect(waiting).toEqual({ spoken: [allow], open: true, dispatched: [] })
+  })
+
+  test("an approval answered in T3 Code meanwhile is not said, and a late 'approve' sends nothing and is told it's been dealt with", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = ["r1", "r2", "r3"].flatMap((requestId) => approval(requestId, "npm install --global netlify-cli"))
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items, waiting: true })
+        yield* asked(made, cloud)
+        const waiting = made.questions().at(-1)!
+        // Answered in T3 Code's app while something else was being said: by its turn, it isn't.
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("r1")
+        const unsaid = yield* waiting.stale
+        // Another, heard this time, then answered there as he approves it: the approve sends nothing, and he's told why.
+        const again = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.play()
+        const heard = made.questions().at(-1)!
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("r2")
+        yield* made.answer("Approve.", heard)
+        // And one he approves just as it's answered there, before yapd hears of it: nothing goes, and he's told why.
+        const third = { ...cloud, pendingRuntimeRequest: { id: "r3", kind: "command", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(third)
+        yield* asked(made, third)
+        yield* made.play()
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.answer("Approve.")
+        const noted = yield* made.journal.since(0, { kinds: ["action"] })
+        return {
+          unsaid,
+          spoken: made.spoken(),
+          dispatched: made.dispatched.length,
+          moot: noted.filter(({ detail }) => (detail as { outcome?: string }).outcome === "Moot").length,
+        }
+      }),
+    )
+    const allow = "Cloud deployment discovery wants to run npm install --global netlify-cli. Say 'approve' if you want it, sir."
+    expect(result.unsaid).toBe(true)
+    expect(result.spoken).toEqual([allow, allow, "That's already been dealt with, sir.", allow, "That's already been dealt with, sir."])
+    expect(result.dispatched).toBe(0)
+    expect(result.moot).toBe(1)
+  })
+
+  test("'approve' to an approval still waiting behind a newer one asked alongside it allows it, and the newer one is asked after", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        const items = [...approval("r1", "npm install left-pad"), ...approval("r2", "npm install right-pad")]
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        // It asks something else alongside, which T3 Code's summary of the thread shows in its place, while the first still waits.
+        const both = { ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:17:30.000Z" } }
+        yield* made.becomes(both)
+        yield* asked(made, both)
+        yield* made.answer("Approve.", made.questions()[0])
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "Approved, sir.",
+      "Cloud deployment discovery wants to run npm install right-pad. Say 'approve' if you want it, sir.",
+    ])
+    expect(result.dispatched).toEqual(["r1 accept"])
+  })
+
+  test("an approval he heard, now behind a question it asked since, is allowed by dictating 'approve', and read back to him on a yes in other words, risky or not", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const question = { type: "user_input_request", status: "waiting", requestId: "q2", questions: [{ id: "net", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }] }
+    // It asks something else alongside, which T3 Code's summary shows in its place, while the approval still waits.
+    const both = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:17:30.000Z" } }
+    const allow = (command: string, dictated: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+            others: [cloud],
+            items: [...approval("r1", command), question],
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Never mind.")
+          yield* made.becomes(both)
+          for (const words of dictated) {
+            if (Option.isSome(yield* made.open)) yield* made.answer(words)
+            else yield* made.dictate(words)
+          }
+          return { spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+        }),
+      )
+    expect(await allow("npm install left-pad", ["Approve it."])).toEqual({ spoken: ["Approved, sir: Cloud deployment discovery."], dispatched: ["r1 accept"] })
+    // A yes in other words has it read back to him, however harmless it looks, as has an approve with more to it, like the thread it's for.
+    expect(await allow("npm install left-pad", ["Approve the cloud deployment one.", "Approve."])).toEqual({
+      spoken: ["Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.", "Approved, sir."],
+      dispatched: ["r1 accept"],
+    })
+    expect(await allow("npm install left-pad", ["Yes, let the cloud one go ahead.", "Approve."])).toEqual({
+      spoken: ["Cloud deployment discovery wants to run npm install left-pad. Say 'approve' if you want it, sir.", "Approved, sir."],
+      dispatched: ["r1 accept"],
+    })
+    expect(await allow("git push --force origin main", ["Yes, let the cloud one go ahead.", "Approve."])).toEqual({
+      spoken: [
+        "Cloud deployment discovery wants to run git push --force origin main, which can't be undone, so say 'approve' if you want it, sir.",
+        "Approved, sir.",
+      ],
+      dispatched: ["r1 accept"],
+    })
+  })
+
+  test("an approval he heard that was answered in T3 Code since is never what a dictated approve goes to: the newer one he hasn't heard is read back", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const items = [...approval("r1", "npm install left-pad"), ...approval("r2", "npm install right-pad")]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        // Answered in T3 Code's app; it then asks something else, which he hasn't heard.
+        Object.assign(items[0]!, { status: "resolved" })
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: { id: "r2", kind: "command", createdAt: "2026-10-01T02:17:30.000Z" } })
+        yield* made.dictate("Approve the cloud deployment one.")
+        return { spoken: made.spoken().slice(2), dispatched: made.dispatched.map(({ requestId, decision }) => `${requestId} ${decision}`), open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const newer = "Cloud deployment discovery wants to run npm install right-pad. Say 'approve' if you want it, sir."
+    expect(result.spoken).toEqual([newer])
+    expect(result.open).toEqual(Option.some(newer))
+    expect(result.dispatched).toEqual([])
+  })
+
+  test("an option said aloud answers the thread's question", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [
+      {
+        type: "user_input_request",
+        status: "waiting",
+        requestId: "q1",
+        questions: [{ id: "Which network first?", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet", description: "" }] }],
+      },
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Ghostnet.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.map(({ type, requestId, answers }) => ({ type, requestId, answers })) }
+      }),
+    )
+    expect(result.spoken).toEqual(["A question on Cloud deployment discovery, sir: Which network first? Mainnet or Ghostnet?", "Ghostnet it is, sir."])
+    expect(result.dispatched).toEqual([{ type: "runtime-request.respond", requestId: "q1", answers: { "Which network first?": "Ghostnet" } }])
+  })
+
+  test("a question with a label in code, or with four parts, is still asked, never only told", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const part = (question: string, options: ReadonlyArray<{ readonly label: string; readonly description?: string }> = []) => ({ id: question, question, options })
+    const asking = async (questions: ReadonlyArray<ReturnType<typeof part>>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: [{ type: "user_input_request", status: "waiting", requestId: "q1", questions }] })
+          yield* asked(made, cloud)
+          return made.spoken()
+        }),
+      )
+    expect(await asking([part("Which date library should the fee table use?", [{ label: "`date-fns`" }, { label: "src/utils/date.ts", description: "Keep the helper we wrote." }])])).toEqual([
+      "A question on Cloud deployment discovery, sir: Which date library should the fee table use? date-fns or option two, keep the helper we wrote?",
+    ])
+    expect(await asking([part("Which network first?", [{ label: "Mainnet" }, { label: "Ghostnet" }]), part("Which fee table?"), part("Should I file the bugs?"), part("Anything else?")])).toEqual([
+      "Four questions on Cloud deployment discovery, sir. First: Which network first? Mainnet or Ghostnet?",
+    ])
+  })
+
+  test("a question in two parts is asked a part at a time, each answer acknowledged, and both go in one reply", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour, extras]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Red.")
+        const between = made.dispatched.length
+        yield* made.answer("Alpha and Gamma.")
+        return { between, spoken: made.spoken(), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(result.between).toBe(0)
+    expect(result.spoken).toEqual([
+      "Two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?",
+      "Alpha and Gamma it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red", [extras.id]: ["Alpha", "Gamma"] }])
+  })
+
+  test("a question with every part skipped sends nothing, and one T3 Code takes as a message asks once more for a part it needs, then lets it go, and sends lists as words", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (mode: "live" | "message", ...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const questions = [{ ...colour, id: "0" }, { ...extras, id: "1" }]
+          const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions, ...(mode === "message" ? { responseMode: "message" } : {}) }]
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const needed = "That one needs an answer, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    const last = "And last: Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(await answering("live", "Skip.", "Skip.")).toEqual({ spoken: [`Skipped, sir. ${last}`, "I'll leave that one, sir."], answers: [], open: false })
+    // The last part skipped, what's said back is never the pick he made of the one before, as if it answered this one.
+    expect(await answering("live", "Red.", "Skip.")).toEqual({ spoken: [`Red, sir. ${last}`, "On it, sir."], answers: [{ "0": "Red" }], open: false })
+    expect(await answering("message", "Skip.", "Red.", "Alpha and Gamma.")).toEqual({
+      spoken: [needed, `Red, sir. ${last}`, "Alpha and Gamma it is, sir."],
+      answers: [{ "0": "Red", "1": "Alpha, Gamma" }],
+      open: false,
+    })
+    expect(await answering("message", "Skip.", "Skip.")).toEqual({
+      spoken: [needed, "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."],
+      answers: [],
+      open: false,
+    })
+  })
+
+  test("a multi-select question sends the options he names as a list, and says 'Alpha and Gamma it is'", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          // The model, only for what isn't plain, names each option he picked on a line of its own.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Alpha\nGamma", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [extras]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), asked: made.seen.length }
+        }),
+      )
+    for (const heard of ["All but Beta.", "Alpha and Gamma, I think, the others can wait."]) {
+      const result = await answering(heard)
+      expect(result.spoken).toEqual(["Alpha and Gamma it is, sir."])
+      expect(result.answers).toEqual([{ [extras.id]: ["Alpha", "Gamma"] }])
+    }
+    // A list of exact names needs no model; all but some is the model's, since it takes what he may not have heard.
+    expect((await answering("Alpha and Gamma.")).asked).toBe(0)
+    expect((await answering("All but Beta.")).asked).toBe(1)
+  })
+
+  test("a number alone to options named with numbers is the model's to tell, which sends the option with that number, never the one in that place, and only its exact name needs no model", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const workers = {
+      id: "How many parallel workers should the test run use?",
+      header: "Workers",
+      question: "How many parallel workers should the test run use?",
+      options: [{ label: "1 worker" }, { label: "2 workers" }, { label: "4 workers (Recommended)" }, { label: "8 workers" }],
+    }
+    const answering = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          // The model, only for what isn't plain, names the option as it's written.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "4 workers (Recommended)", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [workers]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), asked: made.seen.length }
+        }),
+      )
+    for (const heard of ["Four.", "4.", "Four workers."]) {
+      expect(await answering(heard)).toEqual({ spoken: ["4 workers it is, sir."], answers: [{ [workers.id]: "4 workers (Recommended)" }], asked: 1 })
+    }
+    for (const heard of ["4 workers.", "4 workers"]) {
+      expect(await answering(heard)).toEqual({ spoken: ["4 workers it is, sir."], answers: [{ [workers.id]: "4 workers (Recommended)" }], asked: 0 })
+    }
+  })
+
+  test("a letter or place word an option's name has, with the options out of order, is the model's to tell, which sends the option of that name, never the one in that place", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string, text: string, multiSelect = false) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "way", question: "Which way should it go?", options: labels.map((label) => ({ label })), multiSelect }
+          // The model, only for what isn't plain, names the options he meant as they're written, one a line.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await answering(["Option B (Recommended)", "Option A"], "A.", "Option A")).toEqual({ asked: 1, spoken: ["Option A it is, sir."], answers: [{ way: "Option A" }] })
+    expect(await answering(["Option 2 (Recommended)", "Option 1"], "Option one.", "Option 1")).toEqual({ asked: 1, spoken: ["Option 1 it is, sir."], answers: [{ way: "Option 1" }] })
+    expect(await answering(["Option 2 (Recommended)", "Option 1"], "Option 1.", "")).toEqual({ asked: 0, spoken: ["Option 1 it is, sir."], answers: [{ way: "Option 1" }] })
+    const merging = ["Last write wins (Recommended)", "First write wins", "Manual merge"]
+    expect(await answering(merging, "First.", "First write wins")).toEqual({ asked: 1, spoken: ["First write wins it is, sir."], answers: [{ way: "First write wins" }] })
+    expect(await answering(merging, "Last.", "Last write wins (Recommended)")).toEqual({ asked: 1, spoken: ["Last write wins it is, sir."], answers: [{ way: "Last write wins (Recommended)" }] })
+    expect(await answering(merging, "First write wins.", "")).toEqual({ asked: 0, spoken: ["First write wins it is, sir."], answers: [{ way: "First write wins" }] })
+    expect(await answering(["Option C", "Option A", "Option B"], "A and B.", "Option A\nOption B", true)).toEqual({
+      asked: 1,
+      spoken: ["Option A and Option B it is, sir."],
+      answers: [{ way: ["Option A", "Option B"] }],
+    })
+  })
+
+  test("an option named like another but for its marks, like C# beside C++, is sent as the one he picked, by its name as written or by the model", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const language = (...labels: ReadonlyArray<string>) => ({
+      id: "Which language should the bindings use?",
+      header: "Language",
+      question: "Which language should the bindings use?",
+      options: labels.map((label) => ({ label })),
+    })
+    const answering = (question: ReturnType<typeof language>, heard: string, text = "") =>
+      run(
+        Effect.gen(function* () {
+          // The model, only for what isn't plain, names the option as it's written.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const sharp = language("C++", "C#", "Rust")
+    const id = sharp.id
+    expect(await answering(sharp, "C++.")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    // A letter in their names keeps places off: the model tells which.
+    expect(await answering(sharp, "The first one.", "C++")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    expect(await answering(sharp, "The second one.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
+    expect(await answering(sharp, "The sharp one.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
+    // "C", which both are without their marks, is no letter's place either: which he meant is the model's.
+    expect(await answering(sharp, "C.", "C#")).toEqual({ spoken: ["Option two it is, sir."], answers: [{ [id]: "C#" }] })
+    const plain = language("C", "C++", "Rust")
+    expect(await answering(plain, "C.")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
+    expect(await answering(plain, "The first one.", "C")).toEqual({ spoken: ["C it is, sir."], answers: [{ [id]: "C" }] })
+    expect(await answering(plain, "The second one.", "C++")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+    expect(await answering(plain, "The plus plus one.", "C++")).toEqual({ spoken: ["C++ it is, sir."], answers: [{ [id]: "C++" }] })
+  })
+
+  test("words that aren't an option go as the answer in his words, and a message to a thread waiting on a question he heard is sent as its answer", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        let decided = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Ghostnet, but only for the tests.", pending: "answers" })
+        const made = yield* assistant((situation) => decided(situation), undefined, { others: [cloud], items: [...card("q1", [network]), ...card("q2", [network]), ...card("q3", [network])] })
+        yield* asked(made, cloud)
+        yield* made.answer("Ghostnet, but only for the tests.")
+        // Another he heard and let be, then told it as a message: it goes as the answer, and he's told so.
+        const next = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(next)
+        yield* asked(made, next)
+        yield* made.answer("Never mind.")
+        decided = (situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" })
+        yield* made.dictate("Tell the cloud one to start with mainnet.")
+        // Once it's done, not now, it's still a message, queued behind the turn.
+        const last = { ...cloud, pendingRuntimeRequest: { id: "q3", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(last)
+        yield* asked(made, last)
+        yield* made.answer("Never mind.")
+        decided = (situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet once it's done.", how: "after" })
+        yield* made.dictate("Tell the cloud one to start with mainnet once it's done.")
+        return {
+          spoken: made.spoken().filter((line) => !line.startsWith("A question on")),
+          sent: made.dispatched.map(({ type, requestId, answers, text }) => (type === "runtime-request.respond" ? { requestId, answers } : { text })),
+        }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "On it, sir.",
+      "I'll leave that one, sir.",
+      "On it, sir. It was waiting on a question, so that's its answer.",
+      "I'll leave that one, sir.",
+      expect.stringMatching(/^(On it|I'll get to it|Cloud deployment discovery is waiting on you)/),
+    ])
+    expect(result.sent).toEqual([
+      { requestId: "q1", answers: { network: "Ghostnet, but only for the tests." } },
+      { requestId: "q2", answers: { network: "Start with mainnet." } },
+      { text: "Start with mainnet once it's done." },
+    ])
+  })
+
+  test("an answer in his own words, or a message that went as one, takes turns with his own going-ahead lines, while a picked option is said back", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        let decided = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Ghostnet, but only for the tests.", pending: "answers" })
+        const made = yield* assistant((situation) => decided(situation), undefined, {
+          others: [cloud],
+          items: [...card("q1", [network]), ...card("q2", [network]), ...card("q3", [network])],
+          onIt: "Very good, sir.",
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Ghostnet, but only for the tests.")
+        const next = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(next)
+        yield* asked(made, next)
+        yield* made.answer("Never mind.")
+        decided = (situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" })
+        yield* made.dictate("Tell the cloud one to start with mainnet.")
+        const last = { ...cloud, pendingRuntimeRequest: { id: "q3", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(last)
+        yield* asked(made, last)
+        yield* made.answer("Mainnet.")
+        return { spoken: made.spoken().filter((line) => !line.startsWith("A question on")), noted: made.noted }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Very good, sir.",
+      "I'll leave that one, sir.",
+      "Very good, sir. It was waiting on a question, so that's its answer.",
+      "Mainnet it is, sir.",
+    ])
+    // Each noted as the one he heard last, once it plays.
+    expect(result.noted).toEqual(["Very good, sir.", "Very good, sir."])
+  })
+
+  test("a message for now to a thread waiting on a question he heard goes as the option it names, as the form takes it, and as a message when the form takes only its options", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = {
+      id: "network",
+      question: "Which network first?",
+      options: [
+        { label: "Mainnet", value: "main" },
+        { label: "Ghostnet", value: "ghost" },
+      ],
+      allowCustomAnswer: false,
+    }
+    const telling = (text: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text, how: "now" }), undefined, { others: [cloud], items: card("q1", [network]) })
+          yield* asked(made, cloud)
+          yield* made.answer("Never mind.")
+          yield* made.dictate(`Tell the cloud one: ${text}`)
+          return {
+            spoken: made.spoken().slice(2),
+            sent: made.dispatched.map(({ type, answers, text }) => (type === "runtime-request.respond" ? { answers } : { text })),
+          }
+        }),
+      )
+    expect(await telling("Mainnet.")).toEqual({ spoken: ["On it, sir. It was waiting on a question, so that's its answer."], sent: [{ answers: { network: "main" } }] })
+    expect(await telling("Use the devnet instead.")).toEqual({ spoken: [expect.stringMatching(/^(On it|Right away|Very good)/)], sent: [{ text: "Use the devnet instead." }] })
+  })
+
+  test("a message for now to a thread waiting on a question in parts answers the part he'd got to, and the rest are asked before anything goes, never sent as skipped", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const telling = (leaving: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Use red.", how: "now" }), undefined, {
+            others: [cloud],
+            items: card("q1", [colour, extras]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(leaving)
+          yield* made.dictate("Tell the cloud one to use red.")
+          const between = answered(made.dispatched)
+          yield* made.answer("Alpha.")
+          const answers = answered(made.dispatched)
+          // Nothing's left of it to come back.
+          yield* made.wait(11 * 60)
+          return { between, spoken: made.spoken().slice(2), answers, open: Option.isSome(yield* made.open) }
+        }),
+      )
+    // "Use red." is more than Red's name, so it goes in his words.
+    for (const leaving of ["Never mind.", "Later."]) {
+      expect([leaving, await telling(leaving)]).toEqual([
+        leaving,
+        {
+          between: [],
+          spoken: ["Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Alpha it is, sir."],
+          answers: [{ [colour.id]: "Use red.", [extras.id]: ["Alpha"] }],
+          open: false,
+        },
+      ])
+    }
+  })
+
+  test("a message taken as the answer to a part of a question still goes, with the rest left out, once he lets the rest go or leaves it unanswered", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const message = "Hold off on the deploy until I've checked the fees."
+    const telling = (lettingGo: (made: Effect.Effect.Success<ReturnType<typeof assistant>>) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: message, how: "now" }), undefined, {
+            others: [cloud],
+            items: card("q1", [colour, extras]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the cloud one: hold off on the deploy until I've checked the fees.")
+          const noted = made.spoken().at(-1)
+          yield* lettingGo(made)
+          const answers = answered(made.dispatched)
+          // Nothing's left of it to come back.
+          yield* made.wait(11 * 60)
+          return { noted, said: made.spoken().at(-1), answers, open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const went = {
+      noted: "Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?",
+      said: "Your message went as its answer, sir, with the rest of the question left out.",
+      answers: [{ [colour.id]: message }],
+      open: false,
+    }
+    for (const word of ["Never mind.", "Stop."]) expect([word, await telling((made) => made.answer(word))]).toEqual([word, went])
+    // Left unanswered, as it would be let go, it goes all the same, naming the thread, since it isn't said to anything he said.
+    const unanswered = await telling((made) =>
+      Effect.gen(function* () {
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+      }),
+    )
+    expect(unanswered).toEqual({ ...went, said: "Your message went to Cloud deployment discovery as its answer, sir, with the rest of the question left out." })
+    // Put off once too often, it goes too, rather than be let go with it.
+    const putOff = await telling((made) =>
+      Effect.gen(function* () {
+        yield* made.answer("Later.")
+        yield* made.wait(10 * 60)
+        yield* made.answer("Later.")
+      }),
+    )
+    expect(putOff).toEqual(went)
+    // Taken back as he hears what's asked after it, however the model takes that, it never goes, then or once the rest is let go: taken
+    // back on its own, it's withdrawn, and the question's asked again from the part it answered.
+    const back = "Here are the two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue."
+    for (const [taken, after] of [
+      ["undo", ["Withdrawn, sir.", back, "I'll leave that one, sir."]],
+      ["dismiss", ["I'll leave that one, sir."]],
+    ] as const) {
+      const scratched = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard === "Scratch that."
+                ? Brain.decision({ act: taken, target: handle(situation, cloud), pending: "answers" })
+                : Brain.decision({ act: "send", target: handle(situation, cloud), text: message, how: "now" }),
+            undefined,
+            { others: [cloud], items: card("q1", [colour, extras]) },
+          )
+          yield* asked(made, cloud)
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the cloud one: hold off on the deploy until I've checked the fees.")
+          yield* made.answer("Scratch that.")
+          if (Option.isSome(yield* made.open)) yield* made.answer("Never mind.")
+          yield* made.wait(11 * 60)
+          if (Option.isSome(yield* made.open)) yield* made.answer("Never mind.")
+          return { answers: answered(made.dispatched), after: made.spoken().slice(3) }
+        }),
+      )
+      expect([taken, scratched]).toEqual([taken, { answers: [], after: [...after] }])
+    }
+  })
+
+  test("a message said over a question that can't go as its answer, to a form that takes only its options or as T3 Code takes a message, goes, and the question is asked again after", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const telling = (items: ReadonlyArray<Record<string, unknown>>, text: string) =>
+      run(
+        Effect.gen(function* () {
+          // The model takes his words as answering the question, which a message to its thread may well be.
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text, how: "now", pending: "answers" }), undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer(`Tell it: ${text}`)
+          return {
+            spoken: made.spoken().slice(1),
+            sent: made.dispatched.map(({ type, answers, text }) => (type === "runtime-request.respond" ? { answers } : { text })),
+            open: Option.isSome(yield* made.open),
+          }
+        }),
+      )
+    const form = card("q1", [{ ...colour, allowCustomAnswer: false }])
+    const message = [{ type: "user_input_request", status: "waiting", requestId: "q1", responseMode: "message", questions: [{ ...colour, id: "0" }] }]
+    const back = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    for (const items of [form, message]) {
+      expect(await telling(items, "Use the devnet instead.")).toEqual({
+        spoken: [expect.stringMatching(/^(On it|Right away|Very good)/), back],
+        sent: [{ text: "Use the devnet instead." }],
+        open: true,
+      })
+    }
+    // One that can go as its answer does, and the question is done with.
+    expect(await telling(form, "Red.")).toEqual({ spoken: ["On it, sir. It was waiting on a question, so that's its answer."], sent: [{ answers: { [colour.id]: "Red" } }], open: false })
+  })
+
+  test("a part of a thread's question is answered only by what he said once he'd heard it: what he dictated before it was asked, or once it was cut off, never goes as its answer", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const last = "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?"
+    // He answers the first part in his own words, and dictates more before the second is asked.
+    const early = await run(
+      Effect.gen(function* () {
+        let decided = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Red, but only for the unit tests.", pending: "answers" })
+        const made = yield* assistant((situation) => decided(situation), undefined, { others: [cloud], items: card("q1", [colour, extras]) })
+        yield* asked(made, cloud)
+        const before = yield* TestClock.currentTimeMillis
+        yield* made.wait(2)
+        yield* made.answer("Red, but only for the unit tests.")
+        decided = (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Keep the old fixtures." })
+        yield* made.heard({ heard: "And tell it to keep the old fixtures.", via: "shortcut", at: before + 1000, voiced: 3, turns: 1 })
+        yield* made.flush
+        const between = answered(made.dispatched)
+        yield* made.answer("Alpha.")
+        return { between, answers: answered(made.dispatched) }
+      }),
+    )
+    expect(early.between).toEqual([])
+    expect(early.answers).toEqual([{ [colour.id]: "Red, but only for the unit tests.", [extras.id]: ["Alpha"] }])
+    // He answers the first part, and the second is cut off before he's heard it: a message goes as a message, and a reply reads it to him.
+    const cut = (decided: (situation: Brain.Situation) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(decided, undefined, { others: [cloud], items: card("q1", [colour, extras]), waiting: true })
+          yield* asked(made, cloud)
+          yield* made.play()
+          yield* made.answer("Red.")
+          yield* made.cut()
+          yield* made.dictate("Tell the cloud one to start with mainnet.")
+          return { spoken: made.spoken().slice(2), sent: made.dispatched.map(({ type, answers, text }) => (type === "runtime-request.respond" ? { answers } : { text })) }
+        }),
+      )
+    expect(await cut((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" }))).toEqual({
+      spoken: [expect.stringMatching(/^(On it|Right away|Very good)/), last],
+      sent: [{ text: "Start with mainnet." }],
+    })
+    expect(await cut((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Start with mainnet." }))).toEqual({ spoken: [last], sent: [] })
+    // He answers the first part by dictation, and dictates again before the second is said: it's read to him, never answered.
+    const twice = await run(
+      Effect.gen(function* () {
+        let text = "Red"
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour, extras]),
+          waiting: true,
+        })
+        yield* asked(made, cloud)
+        yield* made.play()
+        yield* made.answer("Later.")
+        yield* made.dictate("Tell the cloud one red.")
+        text = "Alpha"
+        yield* made.dictate("And alpha for the extras.")
+        return { spoken: made.spoken().slice(-1), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(twice).toEqual({ spoken: [last], answers: [] })
+  })
+
+  test("a dictated answer to a thread's question answers the part he's at, a list one option a line, never the parts after, which are asked; one a form can't take asks that part again", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const dictating = (questions: ReadonlyArray<Record<string, unknown>>, text: string, then: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text }), undefined, {
+            others: [cloud],
+            items: card("q1", questions),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the cloud one what I want.")
+          const between = answered(made.dispatched)
+          yield* made.answer(then)
+          return { between, spoken: made.spoken().slice(2), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await dictating([extras, colour], "Alpha\nGamma", "Red.")).toEqual({
+      between: [],
+      spoken: ["Alpha and Gamma, sir. And last: Which colour should the test use? Red or Blue? I'd go with Blue.", "Red it is, sir."],
+      answers: [{ [extras.id]: ["Alpha", "Gamma"], [colour.id]: "Red" }],
+    })
+    // Two lines to a part that takes one are his words for it, and the next part is still asked.
+    expect(await dictating([colour, extras], "Red\nGamma", "Beta.")).toEqual({
+      between: [],
+      spoken: ["Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?", "Beta it is, sir."],
+      answers: [{ [colour.id]: "Red\nGamma", [extras.id]: ["Beta"] }],
+    })
+    // A form that takes only its options asks which one, rather than say it couldn't tell.
+    expect(await dictating([{ ...colour, allowCustomAnswer: false }], "Purple, please.", "Red.")).toEqual({
+      between: [],
+      spoken: ["Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.", "Red it is, sir."],
+      answers: [{ [colour.id]: "Red" }],
+    })
+  })
+
+  test("what he answered of a question before yapd was turned off and on is never sent: it's brought back from its first part, being asked or put off", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const cycled = (putOff: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour, extras]) })
+          yield* asked(made, cloud)
+          yield* made.answer("Red.")
+          if (putOff) yield* made.answer("Later.")
+          yield* made.toggle(false)
+          yield* made.toggle(true)
+          yield* made.back
+          yield* made.wait(putOff ? 600 : 0)
+          const back = made.spoken().at(-1)
+          yield* made.answer("Blue.")
+          yield* made.answer("Alpha and Gamma.")
+          return { back, answers: answered(made.dispatched) }
+        }),
+      )
+    for (const putOff of [false, true]) {
+      expect(await cycled(putOff)).toEqual({
+        back: "Here are the two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue.",
+        answers: [{ [colour.id]: "Blue (Recommended)", [extras.id]: ["Alpha", "Gamma"] }],
+      })
+    }
+    // Let go after he answered the first part, then dictated to once yapd's on again: it's read to him from the start, and nothing goes.
+    const dictated = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Alpha" }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour, extras]),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Red.")
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+        yield* made.toggle(false)
+        yield* made.toggle(true)
+        yield* made.heard({ heard: "Tell the cloud one alpha.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 3 })
+        yield* made.flush
+        return { back: made.spoken().at(-1), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(dictated).toEqual({
+      back: "Two questions on Cloud deployment discovery, sir. First: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      answers: [],
+    })
+  })
+
+  test("a plain yes goes to the model, told yapd's pick and whether he heard it, and is taken as that pick only once he heard that far; cut off, it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        // A model that takes a plain yes for yapd's pick, however much of it he heard.
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue (Recommended)", pending: "answers" }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour]),
+          waiting: true,
+        })
+        yield* asked(made, cloud)
+        yield* made.cut()
+        yield* made.answer("Yes.")
+        const cut = made.dispatched.length
+        yield* made.play()
+        yield* made.answer("Yes.")
+        const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+        return { cut, asked: made.seen.length, told, spoken: made.spoken(), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(result.cut).toBe(0)
+    expect(result.asked).toBe(2)
+    expect(result.told.map((prompt) => [prompt.includes("nor that you'd go with «Blue (Recommended)»"), prompt.includes("You said you'd go with «Blue (Recommended)».")])).toEqual([
+      [true, false],
+      [false, true],
+    ])
+    expect(result.spoken).toEqual([
+      "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Again, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Blue it is, sir.",
+    ])
+    // Sent as the agent wrote it.
+    expect(result.answers).toEqual([{ [colour.id]: "Blue (Recommended)" }])
+  })
+
+  test("what only agrees, said before he heard yapd's pick, is never sent as that pick, however the model takes it: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes what he said for agreeing with yapd's pick.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue (Recommended)", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [colour]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          // It starts playing, and he talks over it before "I'd go with Blue", or hears it through.
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const again = "Again, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    for (const heard of ["Yeah, that works.", "Sounds great, let's do that."]) {
+      expect([heard, await answering(heard, true)]).toEqual([heard, { asked: 1, spoken: [again], answers: [] }])
+      expect([heard, await answering(heard, false)]).toEqual([heard, { asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] }])
+    }
+    // Naming it exactly, he picked it himself; a place, which may be of the ones he'd heard so far, is asked again in full.
+    expect(await answering("Blue works, yeah.", true)).toEqual({ asked: 1, spoken: ["Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }] })
+    expect(await answering("The second, I guess.", true)).toEqual({ asked: 1, spoken: [again], answers: [] })
+  })
+
+  test("an option picked by where it came, like the last one, said before he heard them all, is never sent, recommended or not: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const shade = { id: "shade", question: "Which shade should the badge use?", options: [{ label: "Red" }, { label: "Green" }, { label: "Blue" }] }
+    const answering = (heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes "the last one" for the last option there is, which he may not have heard.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [shade]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), told: told.map((prompt) => prompt.includes("He stopped you before the end, so he may not have heard every option:")) }
+        }),
+      )
+    const again = "Again, sir: Which shade should the badge use? Red, Green or Blue?"
+    expect(await answering("The last one.", true)).toEqual({ spoken: [again], answers: [], told: [true] })
+    // Heard to the end, it's the model's to tell; named, it's his, however much he heard.
+    const blue = { spoken: ["Blue it is, sir."], answers: [{ shade: "Blue" }] }
+    expect(await answering("The last one.", false)).toEqual({ ...blue, told: [false] })
+    expect(await answering("Blue, I think.", true)).toEqual({ ...blue, told: [true] })
+  })
+
+  test("yapd's pick among several the model takes him to want, said before he heard it and never named, sends nothing: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const networks = { id: "networks", question: "Which networks should the tests run on?", options: [{ label: "Mainnet" }, { label: "Testnet (Recommended)" }, { label: "Devnet" }], multiSelect: true }
+    const answering = (heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes what he said for yapd's pick and another.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Testnet (Recommended)\nDevnet", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [networks]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const again = "Again, sir: Which networks should the tests run on? Any of Mainnet, Testnet and Devnet? I'd go with Testnet."
+    expect(await answering("Yeah, that works, and devnet too.", true)).toEqual({ spoken: [again], answers: [] })
+    // Heard in full, or named, it's his.
+    const both = { spoken: ["Testnet and Devnet it is, sir."], answers: [{ networks: ["Testnet (Recommended)", "Devnet"] }] }
+    expect(await answering("Yeah, that works, and devnet too.", false)).toEqual(both)
+    expect(await answering("Testnet, and devnet too I guess.", true)).toEqual(both)
+  })
+
+  test("a plain no after yapd's pick is the model's, which may ask which one then, without it, and what he says then is the model's too unless it's an option's exact name", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (options: ReadonlyArray<string>, then: string, text = "") =>
+      run(
+        Effect.gen(function* () {
+          // A model that asks which one then on a no, and otherwise names the option he meant as it's written.
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard === "No."
+                ? Brain.decision({ act: "again", how: "instead", target: handle(situation, cloud), pending: "answers" })
+                : Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }),
+            undefined,
+            { others: [cloud], items: card("q1", [{ id: "colour", question: "Which colour?", options: options.map((label) => ({ label })) }]) },
+          )
+          yield* asked(made, cloud)
+          yield* made.answer("No.")
+          yield* made.answer(then)
+          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched), told: told.map((prompt) => prompt.includes("You said you'd go with «Red».")) }
+        }),
+      )
+    expect(await answering(["Red", "Blue (Recommended)", "Green"], "Green.")).toEqual({
+      asked: 1,
+      spoken: ["Which one then, sir: Red or Green?", "Green it is, sir."],
+      answers: [{ colour: "Green" }],
+      told: [false],
+    })
+    // With one left, the model's told it's yapd's pick now, which a yes is to.
+    expect(await answering(["Red", "Blue (Recommended)"], "Yes.", "Red")).toEqual({
+      asked: 2,
+      spoken: ["Red then, sir?", "Red it is, sir."],
+      answers: [{ colour: "Red" }],
+      told: [false, true],
+    })
+    // A place is the model's to tell, which sends the option it takes it for.
+    expect(await answering(["Blue (Recommended)", "Red", "Green"], "The first one.", "Red")).toEqual({
+      asked: 2,
+      spoken: ["Which one then, sir: Red or Green?", "Red it is, sir."],
+      answers: [{ colour: "Red" }],
+      told: [false, false],
+    })
+  })
+
+  test("a place said to a question that names its options, so they aren't read, is the model's to tell, never counted in the agent's order", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const deploy = { id: "deploy", question: "Should I deploy now or wait?", options: [{ label: "Wait (Recommended)" }, { label: "Deploy now" }] }
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [deploy]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken(), answers: answered(made.dispatched) }
+        }),
+      )
+    // He heard "deploy now" first, which Claude lists second, after the one it recommends.
+    expect(await answering("The first one.", "Deploy now")).toEqual({
+      asked: 1,
+      spoken: ["A question on Cloud deployment discovery, sir: Should I deploy now or wait? I'd go with Wait.", "Deploy now it is, sir."],
+      answers: [{ deploy: "Deploy now" }],
+    })
+    expect(await answering("The latter.", "Wait (Recommended)")).toEqual({ asked: 1, spoken: [expect.stringMatching(/^A question/), "Wait it is, sir."], answers: [{ deploy: "Wait (Recommended)" }] })
+  })
+
+  test("words a form that takes only its options can't take ask which of them all, with yapd's pick, which a yes then takes, uses up an ask, and is never asked twice in the same words", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (heard: ReadonlyArray<string>, unanswered = false) =>
+      run(
+        Effect.gen(function* () {
+          // The model, for what isn't plain, has his words as they are, and a plain yes as yapd's pick.
+          const made = yield* assistant(
+            (situation) =>
+              Brain.decision({ act: "reply", target: handle(situation, cloud), text: situation.utterance.heard === "Yes." ? "Blue (Recommended)" : situation.utterance.heard, pending: "answers" }),
+            undefined,
+            { others: [cloud], items: card("q1", [{ ...colour, allowCustomAnswer: false }]) },
+          )
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          if (unanswered) yield* made.unanswered()
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const which = "Which one, sir: Red or Blue? I'd go with Blue."
+    // A yes then is the model's, which takes it for yapd's pick.
+    expect(await answering(["Purple, please.", "Yes."])).toEqual({ spoken: [which, "Blue it is, sir."], answers: [{ [colour.id]: "Blue (Recommended)" }], open: false })
+    expect(await answering(["None of those.", "Red."])).toEqual({ spoken: [which, "Red it is, sir."], answers: [{ [colour.id]: "Red" }], open: false })
+    // Off them again, it isn't asked in the same words twice: it's let go with its line, and waits in T3 Code.
+    const leave = "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."
+    expect(await answering(["Purple, please.", "Purple, I said."])).toEqual({ spoken: [which, leave], answers: [], open: false })
+    // Asked which of them, it's been asked twice: left unanswered then, it's let go with its line rather than asked a third time.
+    expect(await answering(["Purple, please."], true)).toEqual({
+      spoken: [which, "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."],
+      answers: [],
+      open: false,
+    })
+  })
+
+  test("after which one then, a yes is to what he heard last: yapd's pick once it's said again, and a second no is the model's to judge, never yapd's pick", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          // A model that asks which one then on a first no, lets it go on a second, and takes a yes for the pick it's told yapd made.
+          const made = yield* assistant(
+            (situation) => {
+              const target = handle(situation, cloud)
+              const asked = Option.getOrUndefined(situation.open)
+              if (situation.utterance.heard === "Yes.") {
+                const pick = Option.getOrUndefined(Option.flatMap(Option.fromNullable(asked?.wording?.part), ({ recommended, options }) => Option.flatMap(recommended, (index) => Option.fromNullable(options[index]))))
+                return Brain.decision({ act: "reply", target, text: pick?.label ?? "", pending: "answers" })
+              }
+              return asked !== undefined && asked.asked === asked.wording?.instead
+                ? Brain.decision({ act: "dismiss", target, pending: "answers" })
+                : Brain.decision({ act: "again", how: "instead", target, pending: "answers" })
+            },
+            undefined,
+            { others: [cloud], items: card("q1", [{ id: "colour", question: "Which colour?", options: [{ label: "Red" }, { label: "Blue (Recommended)" }] }]) },
+          )
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await answering("No.", "Say that again.", "Yes.")).toEqual({
+      asked: 2,
+      spoken: ["Red then, sir?", "Again, sir: Which colour? Red or Blue? I'd go with Blue.", "Blue it is, sir."],
+      answers: [{ colour: "Blue (Recommended)" }],
+    })
+    expect(await answering("No.", "What are the options?", "Yes.")).toEqual({
+      asked: 2,
+      spoken: ["Red then, sir?", "Red. Blue. I'd go with Blue. Which one, sir?", "Blue it is, sir."],
+      answers: [{ colour: "Blue (Recommended)" }],
+    })
+    expect(await answering("No.", "No.")).toEqual({ asked: 2, spoken: ["Red then, sir?", "I'll leave that one, sir."], answers: [] })
+  })
+
+  test("a question he heard, closed by talk over an update, 'who needs me' or a failed model call, is asked again after, and let go with a word the third time", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        // Kept under its key as its turn came.
+        yield* made.questions().at(-1)!.stale
+        // He says something over an update read after it, asks who needs him, then something the model can't be asked about.
+        yield* made.replied
+        yield* made.flush
+        yield* made.dictate("Who needs me?")
+        yield* made.dictate("What's the status on the Mina tickets?")
+        return { spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+      "Cloud deployment discovery asked you something, sir.",
+      // Brought back a second time within ten minutes, it still names its thread.
+      `Back to Cloud deployment discovery, sir: ${line}`,
+      "I couldn't work that out just now, sir. What you said is in my log.",
+      "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+    ])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("'say that again' over a question says the question itself again, framed anew, and doesn't use up its asks", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Say that again.")
+        yield* made.answer("Pardon?")
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+        return made.spoken()
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      `Again, sir: ${line}`,
+      `Once more, sir: ${line}`,
+      `Back to Cloud deployment discovery, sir: ${line}`,
+      "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+    ])
+  })
+
+  test("'what are the options?' reads each with what it means, and his pick still answers it", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        yield* made.answer("What are the options?")
+        yield* made.answer("Red.")
+        return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), asked: made.seen.length }
+      }),
+    )
+    expect(result.spoken).toEqual(["Red: a red test. Blue: a blue test. I'd go with Blue. Which one, sir?", "Red it is, sir."])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+    expect(result.asked).toBe(0)
+  })
+
+  test("'what's the question?' about a thread reads its question again in full, even after it was let go, from the part he'd reached", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour, extras]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Red.")
+        // The second part goes unanswered twice, and is let go.
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.unanswered()
+        yield* made.dictate("What's the question?")
+        yield* made.answer("Alpha, Beta and Gamma.")
+        return { spoken: made.spoken().slice(2), answers: answered(made.dispatched), asked: made.seen.length }
+      }),
+    )
+    const line = "Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(result.spoken).toEqual([
+      `Back to Cloud deployment discovery, sir: ${line}`,
+      "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+      `Here's the last question on Cloud deployment discovery, sir: ${line}`,
+      "Alpha, Beta and Gamma it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red", [extras.id]: ["Alpha", "Beta", "Gamma"] }])
+    expect(result.asked).toBe(0)
+  })
+
+  test("'later' puts a question off ten minutes, keeps what he'd answered of it, and asks the rest then", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour, extras]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Red.")
+        yield* made.answer("Later.")
+        const off = { spoken: made.spoken().length, open: Option.isSome(yield* made.open) }
+        yield* made.wait(599)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        yield* made.answer("Beta.")
+        return { off, soon, spoken: made.spoken().slice(2), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(result.off).toEqual({ spoken: 3, open: false })
+    expect(result.soon).toBe(3)
+    expect(result.spoken).toEqual([
+      "I'll bring it back in ten minutes, sir.",
+      "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?",
+      "Beta it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red", [extras.id]: ["Beta"] }])
+  })
+
+  test("'later' a third time lets the question go with a word, and it isn't brought back", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        for (const _ of [1, 2]) {
+          yield* made.answer("Later.")
+          yield* made.wait(600)
+        }
+        yield* made.answer("Later.")
+        const left = made.spoken().length
+        yield* made.wait(600)
+        return { spoken: made.spoken().slice(1), after: made.spoken().length - left, open: Option.isSome(yield* made.open), dispatched: made.dispatched.length }
+      }),
+    )
+    const back = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result).toEqual({
+      spoken: [
+        "I'll bring it back in ten minutes, sir.",
+        back,
+        "I'll bring it back in ten minutes, sir.",
+        back,
+        "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+      ],
+      after: 0,
+      open: false,
+      dispatched: 0,
+    })
+  })
+
+  test("a question put off, then read back on his asking, is the one asked from then on: let go, it isn't brought back, and a 'later' after counts with the first", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const leave = "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."
+    const back = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    // He hears it again, and lets it go unanswered twice.
+    const unheeded = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Later.")
+        yield* made.wait(60)
+        yield* made.dictate("What's the question?")
+        yield* made.unanswered()
+        yield* made.wait(61)
+        yield* made.unanswered()
+        const left = made.spoken().length
+        yield* made.wait(600)
+        return { spoken: made.spoken().slice(1, left), after: made.spoken().length - left }
+      }),
+    )
+    expect(unheeded).toEqual({
+      spoken: ["I'll bring it back in ten minutes, sir.", back, "Back to Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.", leave],
+      after: 0,
+    })
+    // He puts it off each time he hears it again: the third time, it's let go, and nothing comes back.
+    const putOff = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        yield* made.answer("Later.")
+        for (const _ of [1, 2]) {
+          yield* made.wait(60)
+          yield* made.dictate("What's the question?")
+          yield* made.answer("Later.")
+        }
+        const left = made.spoken().length
+        yield* made.wait(1200)
+        return { spoken: made.spoken().slice(1, left), after: made.spoken().length - left }
+      }),
+    )
+    expect(putOff.spoken.at(-1)).toBe(leave)
+    expect(putOff.after).toBe(0)
+  })
+
+  test("a message for now to a thread whose question was answered in T3 Code while it was worked out goes as a message, never as that question's answer", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    let answering: Effect.Effect<void> = Effect.void
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Use the staging database.", how: "now" }), undefined, {
+          others: [cloud],
+          items: card("q1", [colour]),
+          deciding: Effect.suspend(() => answering),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        // He answers it in T3 Code once what he dictates is read, while the model works it out.
+        answering = made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.dictate("Tell the cloud one to use the staging database.")
+        return { spoken: made.spoken().slice(2), sent: made.dispatched.map(({ type, text }) => ({ type, text })) }
+      }),
+    )
+    expect(result.sent).toEqual([{ type: "message.dispatch", text: "Use the staging database." }])
+    expect(result.spoken).toEqual([expect.stringMatching(/^(On it|Right away|Very good)/)])
+  })
+
+  test("a message for now to a thread whose question T3 Code takes as a message itself still goes as a message", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", responseMode: "message", questions: [{ ...colour, id: "0" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "Start with mainnet.", how: "now" }), undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("Tell the cloud one to start with mainnet.")
+        return made.dispatched.map(({ type, text }) => ({ type, text }))
+      }),
+    )
+    expect(result).toEqual([{ type: "message.dispatch", text: "Start with mainnet." }])
+  })
+
+  test("'what's the question?' once the next part was cut off before he heard it reads that part, keeping what he'd answered", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour, extras]), waiting: true })
+        yield* asked(made, cloud)
+        yield* made.play()
+        yield* made.answer("Red.")
+        // The second part's turn never comes: he asks for the question before it's said.
+        yield* made.dictate("What's the question?")
+        yield* made.play()
+        yield* made.answer("Alpha, Beta and Gamma.")
+        return { spoken: made.spoken().slice(2), answers: answered(made.dispatched) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?",
+      "Alpha, Beta and Gamma it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red", [extras.id]: ["Alpha", "Beta", "Gamma"] }])
+  })
+
+  test("an answer to a question dealt with in T3 Code meanwhile is told so, and nothing is sent", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: [...card("q1", [colour]), ...card("q2", [colour])] })
+        yield* asked(made, cloud)
+        const question = made.questions().at(-1)!
+        // Answered in T3 Code as he answers it: yapd heard of it first, then not yet.
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("q1")
+        yield* made.answer("Red.", question)
+        const again = { ...cloud, pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:18:00.000Z" } }
+        yield* made.becomes(again)
+        yield* asked(made, again)
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.length }
+      }),
+    )
+    const asking = "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([asking, "That's already been dealt with, sir.", asking, "That's already been dealt with, sir."])
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("with two threads asking, an unanswered question gives way to the next at once, and comes back no sooner than a minute later", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const fees = thread(mina.id, mina.title, "connectors", {
+      activeRunId: "run-4",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:17:30.000Z" },
+      updatedAt: "2026-10-01T02:17:30.000Z",
+    })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud, fees], items: [...card("q1", [colour]), ...card("q2", [network])] })
+        yield* asked(made, cloud)
+        yield* asked(made, fees)
+        const first = made.questions().at(-1)!
+        const waiting = made.spoken().length
+        yield* made.unanswered(first)
+        const gave = made.spoken().length
+        yield* made.answer("Ghostnet.")
+        yield* made.wait(59)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        yield* made.unanswered()
+        return { waiting, gave, soon, spoken: made.spoken(), answers: answered(made.dispatched) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.waiting).toBe(1)
+    expect(result.gave).toBe(2)
+    expect(result.soon).toBe(3)
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      "A question on Open Mina SSV2 Bug Tickets, sir: Which network first? Mainnet or Ghostnet?",
+      "Ghostnet it is, sir.",
+      `Back to Cloud deployment discovery, sir: ${line}`,
+      "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+    ])
+    expect(result.answers).toEqual([{ network: "Ghostnet" }])
+  })
+
+  test("a question that comes while one unanswered waits out its minute is asked at once, and the first comes back once its minute is up", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const fees = thread(mina.id, mina.title, "connectors", {
+      activeRunId: "run-4",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:17:30.000Z" },
+      updatedAt: "2026-10-01T02:17:30.000Z",
+    })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud, fees], items: [...card("q1", [colour]), ...card("q2", [network])] })
+        yield* asked(made, cloud)
+        // Nothing else waits yet, so it's to be asked once more a minute on.
+        yield* made.unanswered()
+        yield* made.wait(5)
+        yield* asked(made, fees)
+        const next = made.spoken().length
+        yield* made.unanswered()
+        yield* made.wait(54)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        return { next, soon, spoken: made.spoken() }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.next).toBe(2)
+    expect(result.soon).toBe(2)
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      "A question on Open Mina SSV2 Bug Tickets, sir: Which network first? Mainnet or Ghostnet?",
+      `Back to Cloud deployment discovery, sir: ${line}`,
+    ])
+  })
+
+  test("a question that gave way waits, once due, for the one asked in its place to be done with, never cutting in while that one is being heard", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const fees = thread(mina.id, mina.title, "connectors", {
+      activeRunId: "run-4",
+      activityRunStatus: "running",
+      pendingRuntimeRequest: { id: "q2", kind: "user_input", createdAt: "2026-10-01T02:17:30.000Z" },
+      updatedAt: "2026-10-01T02:17:30.000Z",
+    })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud, fees], items: [...card("q1", [colour]), ...card("q2", [network])] })
+        yield* asked(made, cloud)
+        yield* made.unanswered()
+        yield* made.wait(5)
+        yield* asked(made, fees)
+        // Its minute is up while he still has the other to answer.
+        yield* made.wait(60)
+        const due = made.spoken().length
+        yield* made.answer("Ghostnet.")
+        return { due, spoken: made.spoken().slice(1) }
+      }),
+    )
+    expect(result.due).toBe(2)
+    expect(result.spoken).toEqual([
+      "A question on Open Mina SSV2 Bug Tickets, sir: Which network first? Mainnet or Ghostnet?",
+      "Ghostnet it is, sir.",
+      "Back to Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+    ])
+  })
+
+  test("a question cut off before he heard it all is asked again, and let go with a word the third time", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        for (const _ of [1, 2, 3]) {
+          // Its turn comes, and he talks over it before the end.
+          const question = made.questions().at(-1)!
+          yield* question.stale
+          yield* made.cut(question)
+          yield* made.dictate("What's the status on Mina?")
+        }
+        return { spoken: made.spoken(), open: yield* made.open, dispatched: made.dispatched.length }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      status,
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+      status,
+      `Back to Cloud deployment discovery, sir: ${line}`,
+      status,
+      "I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready.",
+    ])
+    expect(result.open).toEqual(Option.none())
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("a question he heard and left unanswered, its place then taken, comes back when it was due to anyway, never sooner", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* asked(made, cloud)
+        // Asked once more a minute after it went unanswered, unless he says something meanwhile.
+        yield* made.unanswered()
+        yield* made.wait(20)
+        yield* made.dictate("What's the status on Mina?")
+        yield* made.wait(39)
+        const soon = made.spoken().length
+        yield* made.wait(1)
+        return { soon, spoken: made.spoken() }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.soon).toBe(2)
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst.",
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+    ])
+  })
+
+  test("a question that has its place taken before it's begun playing loses no turn to it: taken three times, it's still asked", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaStatus, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        // Its turn never comes before he dictates something else.
+        for (const _ of [1, 2, 3]) yield* made.dictate("What's the status on Mina?")
+        return { spoken: made.spoken(), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken.at(-1)).toBe(`A question on Cloud deployment discovery, sir: ${line}`)
+    expect(result.open).toBe(true)
+  })
+
+  test("a thread's question goes with its options, for what he says over it, or dictates, to be heard listening for them", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const library = { id: "library", question: "Which date library should we use?", options: [{ label: "`date-fns` (Recommended)" }, { label: "Day.js" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [library]) })
+        yield* asked(made, cloud)
+        // He presses the shortcut to answer it by dictation.
+        yield* made.prepare(1, 1)
+        yield* made.flush
+        return { terms: made.questions().at(-1)!.question!.terms, dictated: made.expected.at(-1)?.slice(0, 3) }
+      }),
+    )
+    expect(result.terms).toEqual(["date-fns", "Day.js"])
+    expect(result.dictated).toEqual(["date-fns", "Day.js", "Rosie"])
+  })
+
+  test("'stop', 'skip', 'never mind' or 'enough' over a question lets it go, never picking an option it's a word of, which only its name in full picks", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    for (const [said, label] of [
+      ["Stop.", "Stop here"],
+      ["Skip.", "Skip the flaky test"],
+      ["Never mind.", "Never mind the flaky test"],
+      ["Enough.", "That's enough for now"],
+    ] as const) {
+      const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "next", question: "What next?", options: [{ label }, { label: "Keep going" }] }] }]
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items })
+          yield* asked(made, cloud)
+          yield* made.answer(said)
+          const quiet = { dispatched: made.dispatched.length, open: Option.isSome(yield* made.open) }
+          // Its name, said in full, picks it.
+          yield* asked(made, cloud)
+          yield* made.answer(`${label}.`)
+          return { said, quiet, left: made.spoken()[1], picked: made.dispatched.map(({ answers }) => answers) }
+        }),
+      )
+      expect(result.quiet).toEqual({ dispatched: 0, open: false })
+      expect(result.left).toBe("I'll leave that one, sir.")
+      expect(result.picked).toEqual([{ next: label }])
+    }
+  })
+
+  test("an option named 'Stop' or 'Later', said before he heard the options, only stops yapd talking or puts it off, never sending that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string, cut: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "next", question: "Should I carry on with the migration?", options: labels.map((label) => ({ label })) }
+          // The model, asked, would take his words for the option named like them.
+          const named = (situation: Brain.Situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: labels.at(-1) ?? "", pending: "answers" })
+          const made = yield* assistant(named, undefined, { others: [cloud], items: card("q1", [question]), waiting: true })
+          yield* asked(made, cloud)
+          yield* (cut ? made.cut() : made.play())
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    expect(await answering(["Continue (Recommended)", "Stop"], "Stop.", true)).toEqual({ spoken: ["I'll leave that one, sir."], answers: [] })
+    expect(await answering(["Now (Recommended)", "Later"], "Later.", true)).toEqual({ spoken: ["I'll bring it back in ten minutes, sir."], answers: [] })
+    // So are words to let it go, to an option named or starting like them.
+    for (const [labels, heard] of [
+      [["Proceed (Recommended)", "Cancel"], "Cancel."],
+      [["Go on (Recommended)", "Drop it"], "Drop it."],
+      [["Go on (Recommended)", "Leave it"], "Leave it."],
+      [["Retry (Recommended)", "Cancel the migration"], "Cancel."],
+    ] as const) {
+      expect([heard, await answering(labels, heard, true)]).toEqual([heard, { spoken: ["I'll leave that one, sir."], answers: [] }])
+    }
+    // Heard them all, it's the option he named.
+    expect(await answering(["Continue (Recommended)", "Stop"], "Stop.", false)).toEqual({ spoken: ["Stop it is, sir."], answers: [{ next: "Stop" }] })
+    expect(await answering(["Now (Recommended)", "Later"], "Later.", false)).toEqual({ spoken: ["Later it is, sir."], answers: [{ next: "Later" }] })
+    expect(await answering(["Proceed (Recommended)", "Cancel"], "Cancel.", false)).toEqual({ spoken: ["Cancel it is, sir."], answers: [{ next: "Cancel" }] })
+  })
+
+  test("'leave it' or 'cancel' to a question with an option that starts with it is the model's to tell, which may take it for that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: Record<string, unknown>, heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [question]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const changelog = { id: "log", question: "Should I also update the changelog?", options: [{ label: "Update the changelog" }, { label: "Leave the changelog" }] }
+    const deploy = { id: "deploy", question: "The deploy is half done and failing. What now?", options: [{ label: "Cancel the deploy" }, { label: "Retry the deploy (Recommended)" }] }
+    expect(await answering(changelog, "Leave it.", "Leave the changelog")).toEqual({ asked: 1, spoken: ["Leave the changelog it is, sir."], answers: [{ log: "Leave the changelog" }] })
+    expect(await answering(deploy, "Cancel.", "Cancel the deploy")).toEqual({ asked: 1, spoken: ["Cancel the deploy it is, sir."], answers: [{ deploy: "Cancel the deploy" }] })
+  })
+
+  test("'cancel that' over a question with an option that starts with cancel is the model's to tell, never sending that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const deploy = { id: "deploy", question: "The deploy failed. What now?", options: [{ label: "Retry (Recommended)" }, { label: "Cancel the deploy" }] }
+    const answering = (heard: string, decided: (situation: Brain.Situation) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(decided, undefined, { others: [cloud], items: card("q1", [deploy]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    // He may only have meant to drop the question.
+    expect(await answering("Cancel that.", () => Brain.decision({ act: "dismiss", pending: "answers" }))).toEqual({ asked: 1, spoken: ["I'll leave that one, sir."], answers: [] })
+    expect(await answering("Scratch that.", (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Cancel the deploy", pending: "answers" }))).toEqual({
+      asked: 1,
+      spoken: ["Cancel the deploy it is, sir."],
+      answers: [{ deploy: "Cancel the deploy" }],
+    })
+  })
+
+  test("an option named like stopping the run answers its question, never interrupting the turn that asked it", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    for (const label of ["Cancel the run", "Stop the run"]) {
+      const question = { id: "next", question: "The deploy run keeps failing. What now?", options: [{ label }, { label: "Retry the deploy (Recommended)" }] }
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [question]) })
+          yield* asked(made, cloud)
+          yield* made.answer(`${label}.`)
+          return { spoken: made.spoken().slice(1), sent: made.dispatched.map(({ type }) => type), answers: answered(made.dispatched) }
+        }),
+      )
+      expect(result).toEqual({ spoken: [`${label} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: label }] })
+    }
+    // Close to an option's name but not it, words to stop the run are the model's to tell, as is all but the revert of "Stop the run and revert".
+    for (const [labels, heard] of [
+      [["Cancel", "Retry the deploy (Recommended)"], "Cancel the run."],
+      [["Stop the run and revert", "Keep going (Recommended)"], "Stop the run."],
+      [["Interrupt and retry", "Wait it out (Recommended)"], "Interrupt the run."],
+    ] as const) {
+      const [named] = labels
+      const question = { id: "next", question: "The benchmark run is taking two hours. Should I cancel the run?", options: labels.map((label) => ({ label })) }
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: named, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), sent: made.dispatched.map(({ type }) => type), answers: answered(made.dispatched) }
+        }),
+      )
+      expect([heard, result]).toEqual([heard, { asked: 1, spoken: [`${named} it is, sir.`], sent: ["runtime-request.respond"], answers: [{ next: named }] }])
+    }
+  })
+
+  test("a yes or an okay that starts another option's name is the model's to tell, which may take it for that option, never sending yapd's pick in its place", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "next", question: "What now?", options: labels.map((label) => ({ label })) }
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [question]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    for (const [labels, heard] of [
+      [["Ship it now", "Hold it for QA (Recommended)"], "Ship it."],
+      [["Proceed with the migration", "Wait for review (Recommended)"], "Proceed."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Go ahead."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Do it."],
+      [["Agreed, ship it", "Revise first (Recommended)"], "Agreed."],
+      // So is a yes with the other option's words after it.
+      [["Ship it now", "Hold it for QA (Recommended)"], "Yes, ship it."],
+      [["Go for it", "Hold off (Recommended)"], "Yes, go for it."],
+      [["Merge it now", "Not yet (Recommended)"], "Yes, merge it."],
+      [["Proceed with the migration", "Wait for review (Recommended)"], "Yes, proceed."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sure, go ahead."],
+      [["Go ahead with the rename", "Keep the old name (Recommended)"], "Sounds good, go ahead."],
+      [["Do it again", "Mark it skipped (Recommended)"], "Yes, do it."],
+      [["Do it again", "Mark it skipped (Recommended)"], "OK, do it."],
+      // Or with a word of the other option's anywhere in its name.
+      [["Merge now", "Wait for CI (Recommended)"], "Yes, merge it."],
+      [["Squash and merge", "Wait for CI (Recommended)"], "Merge it."],
+      [["Squash and merge", "Wait for CI (Recommended)"], "Yes, merge it."],
+      [["Tag and ship", "Hold for QA (Recommended)"], "Ship it."],
+      // Or words to go ahead, to a pick that holds back.
+      [["Continue the migration", "Pause (Recommended)"], "Proceed."],
+      [["Continue the migration", "Pause (Recommended)"], "Go on."],
+      [["Merge now", "Wait for CI (Recommended)"], "Yes, ship it."],
+    ] as const) {
+      const [named] = labels
+      expect([heard, await answering(labels, heard, named)]).toEqual([heard, { asked: 1, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
+    }
+    // "OK" to an option called OK is that option, by its name, with no model; "Okay", as Whisper may write it, is the model's.
+    expect(await answering(["OK", "Wait (Recommended)"], "OK.", "Wait (Recommended)")).toEqual({ asked: 0, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
+    expect(await answering(["OK", "Wait (Recommended)"], "Okay.", "OK")).toEqual({ asked: 1, spoken: ["OK it is, sir."], answers: [{ next: "OK" }] })
+  })
+
+  test("words that are only part of an option's name, and leave out or add what turns it around, like 'not' or 'skip', are the model's to tell, never sending that option", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (labels: ReadonlyArray<string>, heard: string) =>
+      run(
+        Effect.gen(function* () {
+          const question = { id: "next", question: "What should I do with the branch?", options: labels.map((label) => ({ label })) }
+          // The model, only for what isn't plain, takes his words as he said them, which are no option.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: heard, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [question]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    // He heard both, and wants the opposite of the one his words are part of, or turns around the one they're all of.
+    for (const [labels, heard] of [
+      [["Open a draft pull request (Recommended)", "Do not merge now"], "Merge now."],
+      [["Do not merge", "Wait for CI"], "Merge."],
+      [["Merge now", "Wait for CI"], "Don't merge."],
+      [["Merge now", "Do not merge"], "Merge it."],
+    ] as const) {
+      expect([heard, await answering(labels, heard)]).toEqual([heard, { asked: 1, spoken: ["On it, sir."], answers: [{ next: heard }] }])
+    }
+    // An option named in full is plain, with no model, whatever turns it.
+    for (const [labels, heard, named] of [
+      [["Red", "Blue"], "Blue.", "Blue"],
+      [["Keep it", "Don't keep it"], "Keep it.", "Keep it"],
+      [["Run tests", "Skip tests"], "Skip tests.", "Skip tests"],
+      [["Add tests", "No tests"], "No tests.", "No tests"],
+    ] as const) {
+      expect([heard, await answering(labels, heard)]).toEqual([heard, { asked: 0, spoken: [`${named} it is, sir.`], answers: [{ next: named }] }])
+    }
+  })
+
+  test("every answer review found sent another option than his without the model goes to the model, and the plain ones still need none", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: string, labels: ReadonlyArray<string>, heard: string, multiSelect: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const part = { id: "next", question, options: labels.map((label) => ({ label })), multiSelect }
+          // The model, only for what isn't plain, takes his words as he said them, which are no option.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: heard, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [part]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    for (const [question, labels, said, several = false] of misread) {
+      for (const heard of said) {
+        expect([labels, heard, await answering(question, labels, heard, several)]).toEqual([labels, heard, { asked: 1, spoken: ["On it, sir."], answers: [{ next: heard }] }])
+      }
+    }
+    // An option's exact name needs no model: "C++." and "C." to C and C++ each, and "No tests." but never "No, tests.".
+    for (const [question, labels, heard, named, sent] of [
+      ["Which colour?", ["Red", "Blue"], "Blue.", "Blue", "Blue"],
+      ["Which database?", ["Use Postgres", "Keep SQLite"], "Use Postgres.", "Use Postgres", "Use Postgres"],
+      ["Which language should the bindings use?", ["C", "C++", "Rust"], "C++.", "C++", "C++"],
+      ["Which language should the bindings use?", ["C", "C++", "Rust"], "C.", "C", "C"],
+      ["Should I run the tests?", ["Tests", "No tests (Recommended)"], "No tests.", "No tests", "No tests (Recommended)"],
+      ["Should I also migrate the invoices table?", ["Yes", "No"], "No.", "No", "No"],
+    ] as const) {
+      expect([heard, await answering(question, labels, heard, false)]).toEqual([heard, { asked: 0, spoken: [`${named} it is, sir.`], answers: [{ next: sent }] }])
+    }
+    expect(await answering("Which test extras should run?", ["Alpha", "Beta", "Gamma"], "Alpha and Gamma.", true)).toEqual({
+      asked: 0,
+      spoken: ["Alpha and Gamma it is, sir."],
+      answers: [{ next: ["Alpha", "Gamma"] }],
+    })
+  })
+
+  test("every answer the reviews of the rules before found still sent another option than his without the model goes to the model, which has his words", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: string, labels: ReadonlyArray<string>, heard: string, multiSelect: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const part = { id: "next", question, options: labels.map((label) => ({ label })), multiSelect }
+          // The model takes his words as he said them, which are no option.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: heard, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [part]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    for (const [question, labels, said, several = false] of reviewed) {
+      for (const heard of said) {
+        expect([labels, heard, await answering(question, labels, heard, several)]).toEqual([labels, heard, { asked: 1, spoken: ["On it, sir."], answers: [{ next: heard }] }])
+      }
+    }
+  }, 30_000)
+
+  test("a plain yes or no, whatever the question and yapd's pick, is the model's to tell, so yes and no never send the same", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (question: string, labels: ReadonlyArray<string>, heard: string, text: string) =>
+      run(
+        Effect.gen(function* () {
+          const part = { id: "part", question, options: labels.map((label) => ({ label })) }
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, { others: [cloud], items: card("q1", [part]) })
+          yield* asked(made, cloud)
+          yield* made.answer(heard)
+          return { asked: made.seen.length, spoken: made.spoken(), answers: answered(made.dispatched) }
+        }),
+      )
+    const tests = ["No, skip tests (Recommended)", "Add unit tests"]
+    expect(await answering("Should I add tests?", tests, "Yes.", "Add unit tests")).toEqual({
+      asked: 1,
+      spoken: ["A question on Cloud deployment discovery, sir: Should I add tests? No, skip tests or Add unit tests? I'd go with No, skip tests.", "Add unit tests it is, sir."],
+      answers: [{ part: "Add unit tests" }],
+    })
+    expect(await answering("Should I add tests?", tests, "No.", "No, skip tests (Recommended)")).toEqual({
+      asked: 1,
+      spoken: [expect.stringMatching(/^A question/), "No, skip tests it is, sir."],
+      answers: [{ part: "No, skip tests (Recommended)" }],
+    })
+    const cache = ["Drop it (Recommended)", "Keep it"]
+    expect(await answering("Should I keep the cache?", cache, "Yes.", "Keep it")).toEqual({
+      asked: 1,
+      spoken: ["A question on Cloud deployment discovery, sir: Should I keep the cache? Drop it or Keep it? I'd go with Drop it.", "Keep it it is, sir."],
+      answers: [{ part: "Keep it" }],
+    })
+    expect(await answering("Should I keep the cache?", cache, "No.", "Drop it (Recommended)")).toEqual({
+      asked: 1,
+      spoken: [expect.stringMatching(/^A question/), "Drop it it is, sir."],
+      answers: [{ part: "Drop it (Recommended)" }],
+    })
+    // An okay is as much a yes to the question as to yapd's pick, so two plain yeses never send opposite options.
+    for (const [question, labels, heard, text] of [
+      ["OK to merge now?", ["Not yet (Recommended)", "Merge now"], "OK.", "Merge now"],
+      ["Is it fine to drop the old table?", ["Keep it for now (Recommended)", "Drop it"], "Fine.", "Drop it"],
+      ["Should I deploy?", ["No, wait (Recommended)", "Yes, now"], "OK.", "Yes, now"],
+      // However the question is followed, it's still one a yes or no answers.
+      ["Should I run the migration now? It locks the table for an hour.", ["Skip it for now (Recommended)", "Do it now"], "Yes.", "Do it now"],
+      ["Should I run the migration now? It locks the table for an hour.", ["Skip it for now (Recommended)", "Do it now"], "No.", "Skip it for now (Recommended)"],
+    ] as const) {
+      const said = text.replace(" (Recommended)", "")
+      expect([heard, await answering(question, labels, heard, text)]).toEqual([heard, { asked: 1, spoken: [expect.stringMatching(/^A question/), `${said} it is, sir.`], answers: [{ part: text }] }])
+    }
+  })
+
+  test("'skip it' to a part with more after it and an option that starts with skip asks which of them, never leaving the part out as if he'd heard it taken", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const tests = { id: "tests", question: "The slow tests take ten minutes. What should I do?", options: [{ label: "Skip the slow tests" }, { label: "Run everything" }] }
+    const answering = (...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [tests, extras]) })
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const last = "And last: Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(await answering("Skip it.", "Skip the slow tests.", "Alpha.")).toEqual({
+      asked: 0,
+      spoken: ["Which one, sir: Skip the slow tests or Run everything?", `Skip the slow tests, sir. ${last}`, "Alpha it is, sir."],
+      answers: [{ tests: "Skip the slow tests", [extras.id]: ["Alpha"] }],
+    })
+    // Another word to go on skips it, as he means.
+    expect(await answering("Next.", "Alpha.")).toEqual({ asked: 0, spoken: [`Skipped, sir. ${last}`, "Alpha it is, sir."], answers: [{ [extras.id]: ["Alpha"] }] })
+  })
+
+  test("'next' to a part with an option that starts with next asks which of them with more parts after it, and lets a lone part go, never skipping it as if taken", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const release = { id: "release", question: "Which release should this go in?", options: [{ label: "Next release (Recommended)" }, { label: "This release" }] }
+    const answering = (parts: ReadonlyArray<Record<string, unknown>>, ...heard: ReadonlyArray<string>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", parts) })
+          yield* asked(made, cloud)
+          for (const words of heard) yield* made.answer(words)
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+    const last = "And last: Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(await answering([release, extras], "Next.", "Next release.", "Alpha.")).toEqual({
+      spoken: ["Which one, sir: Next release or This release? I'd go with Next release.", `Next release, sir. ${last}`, "Alpha it is, sir."],
+      answers: [{ release: "Next release (Recommended)", [extras.id]: ["Alpha"] }],
+    })
+    expect(await answering([release], "Next.")).toEqual({ spoken: ["I'll leave that one, sir."], answers: [] })
+  })
+
+  test("a plain no to a thread's question that takes any answer is the model's, sent as it takes it, while 'stop' still lets it go without it", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "bump", question: "Should I also bump the version?" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "No", pending: "answers" }), undefined, { others: [cloud], items })
+        yield* asked(made, cloud)
+        yield* made.answer("Stop.")
+        const stopped = { dispatched: made.dispatched.length, open: Option.isSome(yield* made.open), asked: made.seen.length }
+        yield* asked(made, cloud)
+        yield* made.answer("No.")
+        return { stopped, asked: made.seen.length, spoken: made.spoken(), answers: made.dispatched.map(({ answers }) => answers) }
+      }),
+    )
+    const asking = "A question on Cloud deployment discovery, sir: Should I also bump the version?"
+    expect(result.stopped).toEqual({ dispatched: 0, open: false, asked: 0 })
+    expect(result.asked).toBe(1)
+    expect(result.spoken).toEqual([asking, "I'll leave that one, sir.", asking, "On it, sir."])
+    expect(result.answers).toEqual([{ bump: "No" }])
+  })
+
+  test("a plain no to a thread's question with options and no pick of yapd's is the model's to judge, never letting it go unanswered", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const changelog = { id: "log", question: "Should I also update the changelog?", options: [{ label: "Update the changelog" }, { label: "Leave the changelog" }] }
+    for (const no of ["No.", "Nope.", "No thanks."]) {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Leave the changelog", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [changelog]),
+          })
+          yield* asked(made, cloud)
+          yield* made.answer(no)
+          return { asked: made.seen.length, spoken: made.spoken().slice(1), answers: answered(made.dispatched) }
+        }),
+      )
+      expect([no, result]).toEqual([no, { asked: 1, spoken: ["Leave the changelog it is, sir."], answers: [{ log: "Leave the changelog" }] }])
+    }
+  })
+
+  test("a secret request is never answered by voice", async () => {
+    const secret = "turn-item:secret-request:cloud:stripe"
+    const cloud = waitingOn({ id: secret, kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "The key is sk test four two." }),
+          undefined,
+          { others: [cloud], items: [{ type: "secret_request", id: secret, status: "waiting", label: "Stripe API key" }] },
+        )
+        // Only ever told, never asked.
+        const worded = Option.getOrThrow(yield* made.compose(cloud))
+        yield* made.dictate("Tell the cloud one the key is sk test four two.")
+        return { worded: worded._tag === "Tell" ? worded.spoken : worded._tag, spoken: made.spoken(), dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.worded).toBe("Cloud deployment discovery needs the Stripe API key from you, sir, which I never take by voice: it's waiting for you in T3 Code.")
+    expect(result.spoken).toEqual(["That one needs T3 Code; I never take a secret by voice, sir."])
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("nothing dictated is sent to a thread waiting on a secret, even as a message", async () => {
+    const secret = "turn-item:secret-request:cloud:stripe"
+    const cloud = waitingOn({ id: secret, kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, cloud), text: "The Stripe key is sk test four two.", how: "now" }), undefined, {
+          others: [cloud],
+          items: [{ type: "secret_request", id: secret, status: "waiting", label: "Stripe API key" }],
+        })
+        yield* made.dictate("Tell the cloud one the Stripe key is sk test four two.")
+        return { spoken: made.spoken(), dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.spoken).toEqual(["That one needs T3 Code; I never take a secret by voice, sir."])
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("a question that asks him to type in a secret, as Codex marks one, is only told, and nothing he dictates for it is sent", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question: "Paste your OpenAI API key." }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "sk proj one two three" }), undefined, {
+          others: [cloud],
+          items,
+        })
+        const worded = Option.getOrThrow(yield* made.compose(cloud))
+        yield* made.dictate("Tell the cloud one the key is sk proj one two three.")
+        return { worded: worded._tag, spoken: made.spoken(), dispatched: made.dispatched.length }
+      }),
+    )
+    expect(result.worded).toBe("Tell")
+    expect(result.spoken).toEqual(["Cloud deployment discovery needs the API key from you, sir, which I never take by voice: it's waiting for you in T3 Code."])
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("a question that names a key as code does, or asks him for a token, a key, a code he's sent or a wallet's phrase, is only told, and nothing he dictates to its thread is sent", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    for (const question of [
+      "Please provide OPENAI_API_KEY so I can run the evals.",
+      "What's your OpenAI key?",
+      "Enter the token for the registry.",
+      "Enter the code sent to your phone.",
+      "What's the wallet's recovery phrase?",
+      "Paste the Slack webhook URL.",
+      "Stripe live key?",
+    ]) {
+      const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "key", header: "Question", question }] }]
+      const result = await run(
+        Effect.gen(function* () {
+          let act: "reply" | "send" = "reply"
+          const made = yield* assistant(
+            (situation) =>
+              act === "reply"
+                ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "sk proj one two three" })
+                : Brain.decision({ act: "send", target: handle(situation, cloud), text: "The key is sk proj one two three.", how: "now" }),
+            undefined,
+            { others: [cloud], items },
+          )
+          const worded = Option.getOrThrow(yield* made.compose(cloud))
+          // Answered as such, and told as a message.
+          yield* made.dictate("Tell the cloud one it's sk proj one two three.")
+          act = "send"
+          yield* made.dictate("Tell the cloud one the key is sk proj one two three.")
+          return { question, worded: worded._tag, spoken: made.spoken(), dispatched: made.dispatched.length }
+        }),
+      )
+      expect(result.worded).toBe("Tell")
+      expect(result.spoken).toEqual([
+        expect.stringMatching(/^Cloud deployment discovery needs (a secret|the key|the token|the code|the recovery phrase|the webhook URL) from you, sir, which I never take by voice/),
+        "That didn't go through, sir: it's waiting on a secret, so nothing goes to it by voice until that's given in T3 Code.",
+      ])
+      expect(result.dispatched).toBe(0)
+    }
+  })
+
+  test("an answer in his own words that looks like a secret, like a code he reads out, is never sent, however the question was worded, nor kept in the journal", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    // Nothing in how it's worded says it's for a secret.
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "shown", header: "Question", question: "What does the dialog show?" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        let act: "reply" | "send" = "reply"
+        const made = yield* assistant(
+          (situation) =>
+            act === "reply"
+              ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "four two seven one nine three", pending: "answers" })
+              : Brain.decision({ act: "send", target: handle(situation, cloud), text: "It shows 4 2 7 1 9 3.", how: "now" }),
+          undefined,
+          { others: [cloud], items },
+        )
+        yield* asked(made, cloud)
+        yield* made.answer("Four two seven one nine three.")
+        // Nor told to it as a message while it waits on that, which goes as its answer.
+        act = "send"
+        yield* made.dictate("Tell the cloud one it shows 4 2 7 1 9 3.")
+        const kept = yield* made.journal.since(0)
+        return {
+          spoken: made.spoken(),
+          dispatched: made.dispatched.length,
+          steps: (yield* made.ledger.steps(0)).length,
+          kept: kept.filter((entry) => /4 2 7|four two seven/i.test(JSON.stringify(entry))).length,
+        }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "A question on Cloud deployment discovery, sir: What does the dialog show?",
+      "I couldn't get your answer to it, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
+      "I couldn't get your answer to it, sir: that sounds like a secret, and I never give one by voice, so it needs T3 Code.",
+    ])
+    expect(result.dispatched).toBe(0)
+    expect(result.steps).toBe(0)
+    expect(result.kept).toBe(0)
+  })
+
+  test("an answer that looks like a secret, to a question answered in T3 Code meanwhile, isn't kept in the journal either", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "shown", header: "Question", question: "What does the dialog show?" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "four two seven one nine three", pending: "answers" }),
+          undefined,
+          { others: [cloud], items },
+        )
+        yield* asked(made, cloud)
+        const question = made.questions().at(-1)!
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("q1")
+        yield* made.answer("Four two seven one nine three.", question)
+        const kept = yield* made.journal.since(0)
+        return {
+          dispatched: made.dispatched.length,
+          replies: kept.filter(({ kind }) => kind === "reply").length,
+          kept: kept.filter((entry) => /4 2 7|four two seven/i.test(JSON.stringify(entry))).length,
+        }
+      }),
+    )
+    // Noted as an answer that came too late, but not in his words.
+    expect(result).toEqual({ dispatched: 0, replies: 1, kept: 0 })
   })
 
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {
@@ -3730,6 +6895,32 @@ describe("Assistant", () => {
     }
   })
 
+  test("turned off while the thread is read before an 'approve' to an approval goes once more, after the first never left yapd, nothing goes, and it stays as it was", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const result = await run(
+      Effect.gen(function* () {
+        let read: Effect.Effect<void> = Effect.void
+        let lost = true
+        const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept" }), undefined, {
+          others: [cloud],
+          items: approval("r1", "npm install left-pad"),
+          reading: Effect.suspend(() => read),
+          answer: () => (payload, bounded) => (lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." })) : takes(payload, bounded)),
+        })
+        yield* asked(made, cloud)
+        yield* made.answer("Approve.")
+        // It never left yapd, so it still waits on him; he says it again, and turns yapd off as the thread is read first.
+        yield* made.becomes(cloud)
+        lost = false
+        read = made.toggle(false)
+        yield* made.dictate("Approve the cloud deployment one.")
+        const steps = yield* made.ledger.steps(0)
+        return { dispatched: made.dispatched.length, steps: steps.map(({ commandId, state }) => `${commandId.replace(/^yapd:u\w+:/, "")} ${state}`) }
+      }),
+    )
+    expect(result).toEqual({ dispatched: 1, steps: ["0 failed"] })
+  })
+
   test("'it's on your screen' is said only while an app is watching", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -4054,7 +7245,7 @@ describe("Assistant", () => {
           (situation) =>
             Option.isSome(situation.second) ? Brain.decision({ act: "answer", spoken: answer }) : Brain.decision({ act: "look", target: handle(situation, cleanup) }),
           undefined,
-          { others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { others: [cleanup], items: commanded("r1", command) },
         )
         yield* dictate("What's the build cleanup doing?")
         const unwatched = { said: spoken().at(-1), up: Option.map(Option.flatten(yield* Stream.runHead(show.showing)), ({ kind }) => kind) }
@@ -4086,7 +7277,7 @@ describe("Assistant", () => {
           (situation) =>
             Option.isSome(situation.second) ? Brain.decision({ act: "answer", spoken: answer }) : Brain.decision({ act: "look", target: handle(situation, cleanup) }),
           undefined,
-          { waiting: true, others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { waiting: true, others: [cleanup], items: commanded("r1", command) },
         )
         // The app goes away before its turn comes.
         yield* Effect.scoped(Effect.zipRight(show.watch, dictate("Show me what's running.")))
@@ -4169,7 +7360,7 @@ describe("Assistant", () => {
                 ? Brain.decision({ act: "answer", spoken: answer })
                 : Brain.decision({ act: "look", target: handle(situation, cleanup), rest: "tell the Mina one to use its fee table" }),
           undefined,
-          { others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { others: [cleanup], items: commanded("r1", command) },
         )
         yield* show.watch
         yield* dictate("What's the build cleanup doing? And tell the Mina one to use its fee table.")
@@ -4202,7 +7393,7 @@ describe("Assistant", () => {
                 ? Brain.decision({ act: "answer", spoken: answer })
                 : Brain.decision({ act: "look", target: handle(situation, cleanup), rest: "show me what's running" }),
           undefined,
-          { others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { others: [cleanup], items: commanded("r1", command) },
         )
         const up = Effect.map(show.seen, Option.map(({ kind, markdown }) => ({ kind, command: markdown.includes(Show.verbatim(command)) })))
         yield* show.watch
@@ -4241,7 +7432,7 @@ describe("Assistant", () => {
                 ? Brain.decision({ act: "answer", spoken: answer })
                 : Brain.decision({ act: "look", target: handle(situation, cleanup), rest: "tell the Mina one to use its fee table" }),
           undefined,
-          { others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { others: [cleanup], items: commanded("r1", command) },
         )
         yield* show.watch
         yield* dictate("What's the build cleanup doing? And tell the Mina one to use its fee table.")
@@ -4278,7 +7469,7 @@ describe("Assistant", () => {
                 ? Brain.decision({ act: "answer", spoken: answer })
                 : Brain.decision({ act: "look", target: handle(situation, cleanup), rest: "frobnicate the widget" }),
           undefined,
-          { others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { others: [cleanup], items: commanded("r1", command) },
         )
         yield* show.watch
         yield* dictate("What's the build cleanup doing? And frobnicate the widget.")
@@ -4336,7 +7527,7 @@ describe("Assistant", () => {
                 ? Brain.decision({ act: "answer", spoken: answer })
                 : Brain.decision({ act: "look", target: handle(situation, cleanup) }),
           undefined,
-          { others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { others: [cleanup], items: commanded("r1", command) },
         )
         const up = Effect.map(show.seen, Option.map(({ id, kind, markdown }) => ({ id, kind, markdown })))
         yield* show.watch
@@ -4662,7 +7853,7 @@ describe("Assistant", () => {
                 : Brain.decision({ act: "show", how: "threads", rest: usage ? "Hide that, then show me my usage." : "Hide that." })
           },
           undefined,
-          { others: [cleanup], items: [{ type: "approval_request", status: "waiting", requestId: "r1", requestKind: "command", input: command }] },
+          { others: [cleanup], items: commanded("r1", command) },
         )
         const up = Effect.map(Stream.runHead(show.showing), (up) => Option.map(Option.flatten(up), ({ kind }) => kind))
         yield* show.watch
@@ -4914,6 +8105,1031 @@ describe("Assistant", () => {
     expect(result.away[0]).toEqual([{ machine: "rig", reason: "I can't reach rig right now." }])
   })
 
+  test("a question on a rig thread, heard from rig's T3 Code, is asked aloud, and his answer goes once to rig's T3 Code for that thread, never this Mac's", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const rig: Array<Record<string, unknown>> = []
+        const changes = yield* Queue.unbounded<T3Live.Change>()
+        /** What the ledger held as each command went out: written first, under the one command id it went with. */
+        const written: Array<{ readonly sent: unknown; readonly rows: ReadonlyArray<string> }> = []
+        let ledger: Ledger.Ledger["Type"] | undefined
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], dispatched: rig, items: card("q9", [colour]), changes: Stream.fromQueue(changes) },
+          answer: () => (payload, bounded) =>
+            Effect.flatMap(ledger === undefined ? Effect.succeed([]) : ledger.steps(0), (rows) =>
+              Effect.zipRight(
+                Effect.sync(() => void written.push({ sent: payload.commandId, rows: rows.map(({ commandId, machine, thread, state }) => `${commandId} ${machine} ${thread} ${state}`) })),
+                takes(payload, bounded),
+              ),
+            ),
+        })
+        ledger = made.ledger
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(notices.follow)
+        yield* made.flush
+        // Rig's T3 Code tells of it, as this Mac's would.
+        yield* Queue.offer(changes, { _tag: "Asked", thread: onRig, request: onRig.pendingRuntimeRequest! })
+        yield* made.until(() => made.questions().length > 0)
+        yield* made.answer("Red.")
+        const steps = yield* made.ledger.steps(0)
+        return {
+          spoken: made.spoken(),
+          rig: rig.map(({ type, threadId, requestId, answers, commandId }) => ({ type, threadId, requestId, answers, commandId })),
+          here: made.dispatched,
+          written,
+          steps: steps.map(({ commandId, machine, thread, state }) => ({ commandId, machine, thread, state })),
+        }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red it is, sir.",
+    ])
+    const [step] = result.steps
+    expect(result.steps).toEqual([{ commandId: step!.commandId, machine: "rig", thread: onRig.id, state: "sent" }])
+    expect(result.rig).toEqual([{ type: "runtime-request.respond", threadId: onRig.id, requestId: "q9", answers: { [colour.id]: "Red" }, commandId: step!.commandId }])
+    // Written down before it went, as the only step, under the id it went with.
+    expect(result.written).toEqual([{ sent: step!.commandId, rows: [`${step!.commandId} rig ${onRig.id} prepared`] }])
+    expect(result.here).toEqual([])
+  })
+
+  test("an answer to a rig thread's question that never left yapd goes again only on his saying it again, to rig, under the same ids", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const rig: Array<Record<string, unknown>> = []
+        let lost = true
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, onRig), text: "Red" }), undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], dispatched: rig, items: card("q9", [colour]) },
+          answer: () => (payload, bounded) => (lost ? Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." })) : takes(payload, bounded)),
+        })
+        yield* asked(made, onRig, "rig")
+        yield* made.answer("Red.")
+        const first = rig.length
+        const waited = (yield* made.ledger.steps(0)).map(({ machine, state }) => `${machine} ${state}`)
+        // It never left yapd, so rig's thread still waits on it; nothing goes again of its own accord, however long it waits.
+        yield* made.becomesOnRig(onRig)
+        yield* made.wait(120)
+        const meanwhile = rig.length
+        lost = false
+        yield* made.dictate("Red, for the fee table checks on rig.")
+        const steps = yield* made.ledger.steps(0)
+        return {
+          spoken: made.spoken(),
+          first,
+          waited,
+          meanwhile,
+          ids: rig.map(({ commandId }) => commandId),
+          steps: steps.map(({ machine, thread, state }) => `${machine} ${thread} ${state}`),
+          here: made.dispatched,
+        }
+      }),
+    )
+    expect(result.spoken.slice(1)).toEqual(["I couldn't get your answer to it, sir: no connection.", "Red it is, sir."])
+    expect(result.first).toBe(1)
+    expect(result.waited).toEqual(["rig failed"])
+    expect(result.meanwhile).toBe(1)
+    expect(result.ids).toHaveLength(2)
+    expect(result.ids[1]).toBe(result.ids[0])
+    expect(result.steps).toEqual([`rig ${onRig.id} sent`])
+    expect(result.here).toEqual([])
+  })
+
+  test("a rig question whose threads go out of sight before it's said is let go without a word, never as dealt with, and asked again once rig is back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig"))
+        yield* made.flush
+        const asked = made.questions().length
+        // Rig drops out as it comes up to be said.
+        seen = false
+        const stale = yield* made.questions().at(-1)!.stale
+        const closed = (yield* made.journal.since(0, { kinds: ["action"] })).flatMap(({ detail }) => {
+          const open = (detail as { readonly open?: unknown }).open
+          return typeof open === "string" ? [open] : []
+        })
+        // A minute on, rig's back, and what still waits on him there is asked once more.
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(1)
+        yield* made.wait(1)
+        return { asked, stale, closed, open: yield* made.open, again: made.questions().length }
+      }),
+    )
+    expect(result.asked).toBe(1)
+    expect(result.stale).toBe(true)
+    expect(result.closed).toEqual(["dropped: out of sight"])
+    expect(Option.map(result.open, ({ asked }) => asked)).toEqual(
+      Option.some("A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."),
+    )
+    expect(result.again).toBe(2)
+  })
+
+  test("a rig question he heard, due again as rig drops out, is put by without a word, never let go, and asked from where he'd got to once rig is back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Kept under its key as it comes up to be said, heard to the end, and left unanswered.
+        yield* made.questions().at(-1)!.stale
+        yield* made.play()
+        yield* made.unanswered()
+        // Rig drops out before its minute is up, so asked once more, it's out of sight as it comes up to be said.
+        seen = false
+        yield* made.wait(61)
+        const stale = yield* made.questions().at(-1)!.stale
+        const meanwhile = Option.isSome(yield* made.open)
+        // Rig's back a few minutes later.
+        yield* made.wait(180)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        return { spoken: made.spoken(), stale, meanwhile, open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const here = "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Back to Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      here,
+    ])
+    expect(result.stale).toBe(true)
+    expect(result.meanwhile).toBe(false)
+    expect(result.open).toEqual(Option.some(here))
+  })
+
+  test("a rig question he put off, due while rig is out of sight, waits for rig without holding up one from this Mac, and is asked once rig is back", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, {
+          others: [cloud],
+          items: card("q1", [colour]),
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        yield* made.questions().at(-1)!.stale
+        yield* made.play()
+        yield* made.answer("Later.")
+        // Rig drops out, and its ten minutes are up meanwhile.
+        seen = false
+        yield* made.wait(10 * 60 + 1)
+        const due = made.spoken().length
+        // This Mac's question is asked all the same, and answered.
+        yield* asked(made, cloud)
+        yield* made.play()
+        yield* made.answer("Red.")
+        yield* made.wait(20 * 60)
+        const before = made.spoken().length
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        return { spoken: made.spoken(), due, before, answers: answered(made.dispatched), open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const here = "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I'll bring it back in ten minutes, sir.",
+      "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red it is, sir.",
+      here,
+    ])
+    expect(result.due).toBe(2)
+    expect(result.before).toBe(4)
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+    expect(result.open).toEqual(Option.some(here))
+  })
+
+  test("an answer to a rig question given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        let status: Tunnel.Status = { _tag: "Up" }
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.sync(() => status), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Rig's tunnel drops just before he answers.
+        seen = false
+        status = { _tag: "Down", reason: "I can't reach rig right now.", outage: 1 }
+        yield* made.answer("Red.")
+        const closed = (yield* made.journal.since(0, { kinds: ["action"] })).flatMap(({ detail }) => {
+          const open = (detail as { readonly open?: unknown }).open
+          return typeof open === "string" ? [open] : []
+        })
+        const meanwhile = { sent: rig.length, steps: (yield* made.ledger.steps(0)).length }
+        // Rig's back two minutes later, and he answers it again.
+        yield* made.wait(120)
+        seen = true
+        status = { _tag: "Up" }
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), closed, meanwhile, answers: answered(rig), here: made.dispatched }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I couldn't get your answer to it, sir: I can't reach rig right now. I'll ask you again once I can.",
+      "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red it is, sir.",
+    ])
+    expect(result.closed).toEqual(["dropped: out of sight"])
+    expect(result.meanwhile).toEqual({ sent: 0, steps: 0 })
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+    expect(result.here).toEqual([])
+  })
+
+  test("a message taken as the answer to a part of a rig question, let go unanswered while rig is out of sight, is put by, never said to be dealt with, and goes once rig is back", async () => {
+    const message = "Hold off on the deploy until I've checked the fees."
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, onRig), text: message, how: "now" }), undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour, extras]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        yield* made.questions().at(-1)!.stale
+        yield* made.play()
+        yield* made.answer("Later.")
+        yield* made.dictate("Tell the rig one: hold off on the deploy until I've checked the fees.")
+        yield* made.play()
+        // The part after his message goes unanswered, asked once more, then rig drops out before it's let go.
+        yield* made.unanswered()
+        yield* made.wait(60)
+        yield* made.play()
+        seen = false
+        yield* made.unanswered()
+        const meanwhile = rig.length
+        // Rig's back a few minutes later, and he lets the rest go.
+        yield* made.wait(180)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* made.play()
+        yield* made.answer("Never mind.")
+        return { spoken: made.spoken().slice(2), meanwhile, answers: answered(rig) }
+      }),
+    )
+    const last = "Which test extras should run? Any of Alpha, Beta and Gamma?"
+    expect(result.spoken).toEqual([
+      `Noted, sir. And last: ${last}`,
+      `Back to Fee table checks on rig, sir: ${last}`,
+      "I couldn't get your message to it, sir: I can't follow rig's threads right now. I'll ask you again once I can.",
+      `Here's the last question on Fee table checks on rig, sir: ${last}`,
+      "Your message went as its answer, sir, with the rest of the question left out.",
+    ])
+    expect(result.meanwhile).toBe(0)
+    expect(result.answers).toEqual([{ [colour.id]: message }])
+  })
+
+  test("a message taken as the answer to a part of a rig question, let go by his word or put off once too often as rig drops out, is said to be his message that didn't go, never his answer", async () => {
+    const message = "Hold off on the deploy until I've checked the fees."
+    /** His message is taken as the answer to the first part, then he lets the rest go as `lettingGo` has it, rig dropping out as `drop` does. */
+    const telling = (lettingGo: (made: Effect.Effect.Success<ReturnType<typeof assistant>>, drop: Effect.Effect<void>) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const rig: Array<Record<string, unknown>> = []
+          const made = yield* assistant((situation) => Brain.decision({ act: "send", target: handle(situation, onRig), text: message, how: "now" }), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour, extras]) },
+          })
+          yield* asked(made, onRig, "rig")
+          yield* made.answer("Later.")
+          yield* made.dictate("Tell the rig one: hold off on the deploy until I've checked the fees.")
+          const noted = made.spoken().at(-1)
+          yield* lettingGo(
+            made,
+            Effect.sync(() => {
+              seen = false
+            }),
+          )
+          return { noted, said: made.spoken().at(-1), sent: rig.length }
+        }),
+      )
+    const away = {
+      noted: "Noted, sir. And last: Which test extras should run? Any of Alpha, Beta and Gamma?",
+      said: "I couldn't get your message to it, sir: I can't follow rig's threads right now. I'll ask you again once I can.",
+      sent: 0,
+    }
+    expect(await telling((made, drop) => Effect.zipRight(drop, Effect.asVoid(made.answer("Never mind."))))).toEqual(away)
+    expect(
+      await telling((made, drop) =>
+        Effect.gen(function* () {
+          yield* made.answer("Later.")
+          yield* made.wait(10 * 60)
+          yield* drop
+          yield* made.answer("Later.")
+        }),
+      ),
+    ).toEqual(away)
+  })
+
+  test("a rig question brought back a second time within ten minutes, after rig drops out twice, still names its thread", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        let status: Tunnel.Status = { _tag: "Up" }
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.sync(() => status), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Heard each time it comes up; rig drops just before he answers, twice, and is back a minute or two later each time.
+        for (const [outage, away] of [[1, 120], [2, 60]] as const) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          seen = false
+          status = { _tag: "Down", reason: "I can't reach rig right now.", outage }
+          yield* made.answer("Red.")
+          yield* made.wait(away)
+          seen = true
+          status = { _tag: "Up" }
+          yield* made.wait(10)
+          yield* made.wait(1)
+        }
+        yield* made.questions().at(-1)!.stale
+        yield* made.play(made.questions().at(-1))
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), answers: answered(rig) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const away = "I couldn't get your answer to it, sir: I can't reach rig right now. I'll ask you again once I can."
+    expect(result.spoken).toEqual([
+      `A question on Fee table checks on rig, sir: ${line}`,
+      away,
+      `Here's the question on Fee table checks on rig, sir: ${line}`,
+      away,
+      `Back to Fee table checks on rig, sir: ${line}`,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("a rig question brought back each time rig drops out as he answers is asked the fourth time all the same, never let go for want of words, and his answer then goes", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        let status: Tunnel.Status = { _tag: "Up" }
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.sync(() => status), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Heard each time it comes up; rig drops just before he answers, four times, and is back a minute later each time.
+        for (const outage of [1, 2, 3, 4]) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          seen = false
+          status = { _tag: "Down", reason: "I can't reach rig right now.", outage }
+          yield* made.answer("Red.")
+          yield* made.wait(60)
+          seen = true
+          status = { _tag: "Up" }
+          yield* made.wait(10)
+          yield* made.wait(1)
+        }
+        yield* made.questions().at(-1)!.stale
+        yield* made.play(made.questions().at(-1))
+        yield* made.answer("Red.")
+        return { spoken: made.spoken(), answers: answered(rig) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const away = "I couldn't get your answer to it, sir: I can't reach rig right now. I'll ask you again once I can."
+    const here = `Here's the question on Fee table checks on rig, sir: ${line}`
+    expect(result.spoken).toEqual([
+      `A question on Fee table checks on rig, sir: ${line}`,
+      away,
+      here,
+      away,
+      `Back to Fee table checks on rig, sir: ${line}`,
+      away,
+      `Fee table checks on rig still needs an answer, sir: ${line}`,
+      away,
+      here,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("an answer to a rig question or approval given while rig is out of sight, back as the model works it out, goes to rig, never said to be dealt with", async () => {
+    const approving = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    /** Asked and heard, then rig drops out, and he answers in words only the model makes out, which rig is back by the end of. */
+    const answering = (of: T3Live.Thread, items: ReadonlyArray<Record<string, unknown>>, heard: string, decided: (handle: string) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const rig: Array<Record<string, unknown>> = []
+          const made = yield* assistant((situation) => decided(handle(situation, of)), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [of], seen: () => seen, dispatched: rig, items },
+            deciding: Effect.sync(() => {
+              seen = true
+            }),
+          })
+          yield* asked(made, of, "rig")
+          seen = false
+          yield* made.answer(heard)
+          return { spoken: made.spoken().slice(1), sent: rig.map(({ requestId, answers, decision }) => ({ requestId, answers, decision })), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    expect(
+      await answering(onRig, card("q9", [colour]), "Let's do the red one I think.", (target) => Brain.decision({ act: "reply", target, text: "Red", pending: "answers" })),
+    ).toEqual({ spoken: ["Red it is, sir."], sent: [{ requestId: "q9", answers: { [colour.id]: "Red" }, decision: undefined }], open: false })
+    expect(
+      await answering(approving, approval("r9", "npm install left-pad"), "Okay, approve this one.", (target) =>
+        Brain.decision({ act: "decide", how: "accept", target, pending: "answers" }),
+      ),
+    ).toEqual({ spoken: ["Approved, sir."], sent: [{ requestId: "r9", answers: undefined, decision: "accept" }], open: false })
+  })
+
+  test("a rig question he heard, put by while rig is out of sight, is asked once rig is back, even by a yapd restarted meanwhile, under the entry it was kept under", async () => {
+    /** Heard to the end, then put by as `putting` has it while rig is out of sight; rig comes back, and a restarted yapd looks at what waits there too. */
+    const restarted = (putting: (made: Effect.Effect.Success<ReturnType<typeof assistant>>, question: Notice) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const made = yield* assistant(unasked, undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: [], items: card("q9", [colour]) },
+            waiting: true,
+          })
+          const notices = yield* noticing(made)
+          yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+          yield* made.flush
+          const question = made.questions().at(-1)!
+          yield* question.stale
+          yield* made.play(question)
+          seen = false
+          yield* putting(made, question)
+          const [kept] = yield* made.journal.since(0, { kinds: ["notice"] })
+          // A yapd started afresh over the same journal, which asks what it finds waits on him.
+          const asks: Array<Assistant.Asking> = []
+          const fresh = yield* noticing({ ...made, ask: (asking) => Effect.sync(() => void asks.push(asking)), returned: () => Effect.void })
+          yield* made.wait(120)
+          seen = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+          yield* fresh.reconcileOn("rig")
+          yield* made.flush
+          return {
+            heard: kept?.heardAt !== undefined,
+            asked: made.questions().length,
+            open: Option.map(yield* made.open, ({ asked }) => asked),
+            restarted: asks.map(({ asks, kept: under }) => ({ requestId: asks.requestId, kept: under === kept?.id })),
+          }
+        }),
+      )
+    const here = "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    const after = { heard: false, asked: 2, open: Option.some(here), restarted: [{ requestId: "q9", kept: true }] }
+    // Answered, as the Daemon notes it heard once he's answered it.
+    expect(await restarted((made, question) => Effect.zipRight(made.answer("Red.", question), question.heard ?? Effect.void))).toEqual(after)
+    // Left unanswered, then out of sight as it comes up to be asked once more at its minute.
+    expect(
+      await restarted((made, question) =>
+        Effect.gen(function* () {
+          yield* made.unanswered(question)
+          yield* made.wait(61)
+          yield* made.questions().at(-1)!.stale
+        }),
+      ),
+    ).toEqual({ ...after, asked: 3 })
+  })
+
+  test("a rig question or approval put by while rig was out of sight, then answered by dictation, is never asked again after, even as rig's view catches up", async () => {
+    const approving = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    /** Asked and heard, answered over as rig drops out, so it's put by; rig's back, and he dictates his answer before it's asked again. */
+    const dictated = (of: T3Live.Thread, items: ReadonlyArray<Record<string, unknown>>, over: string, heard: string, decided: (handle: string) => Brain.Decision) =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          const rig: Array<Record<string, unknown>> = []
+          const made = yield* assistant((situation) => decided(handle(situation, of)), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [of], seen: () => seen, dispatched: rig, items, behind: true },
+          })
+          yield* asked(made, of, "rig")
+          seen = false
+          yield* made.answer(over)
+          seen = true
+          yield* made.dictate(heard)
+          yield* made.wait(60)
+          return { spoken: made.spoken().slice(2), sent: rig.length, open: Option.isSome(yield* made.open) }
+        }),
+      )
+    expect(
+      await dictated(onRig, card("q9", [colour]), "Red.", "Red, for the fee table checks on rig.", (target) => Brain.decision({ act: "reply", target, text: "Red" })),
+    ).toEqual({ spoken: ["Red it is, sir."], sent: 1, open: false })
+    expect(
+      await dictated(approving, approval("r9", "npm install left-pad"), "Approve.", "Approve it.", (target) =>
+        Brain.decision({ act: "decide", how: "accept", target }),
+      ),
+    ).toEqual({ spoken: ["Approved, sir."], sent: 1, open: false })
+  })
+
+  test("an answer to the rig question open, dictated as something new, that doesn't go as rig drops out is never sent: he's told why, and it's asked again once rig is back", async () => {
+    /** Rig drops out as `dropping` says: while the model works out what he dictated, or as his answer goes, which never leaves yapd. */
+    const dictated = (dropping: "deciding" | "sending") =>
+      run(
+        Effect.gen(function* () {
+          let seen = true
+          let dictating = false
+          const rig: Array<Record<string, unknown>> = []
+          // The model takes it for a reply to the thread rather than an answer to the question.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, onRig), text: "Red" }), undefined, {
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+            deciding: Effect.sync(() => {
+              if (dictating && dropping === "deciding") seen = false
+            }),
+            answer: () => (payload, bounded) =>
+              dictating && dropping === "sending" && payload.type === "runtime-request.respond"
+                ? Effect.suspend(() => {
+                    seen = false
+                    return Effect.fail(new T3CodeServer.Trouble({ reason: "No connection." }))
+                  })
+                : takes(payload, bounded),
+            waiting: true,
+          })
+          const notices = yield* noticing(made)
+          yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+          yield* made.flush
+          // Kept under its key as it comes up to be said, and heard to the end.
+          yield* made.questions().at(-1)!.stale
+          yield* made.play()
+          dictating = true
+          yield* made.dictate("Make it red for the fee table checks on rig.")
+          dictating = false
+          // It never left yapd, so rig's thread still waits on it.
+          if (dropping === "sending") yield* made.becomesOnRig(onRig)
+          const meanwhile = (yield* made.ledger.steps(0)).map(({ state }) => state)
+          // Rig's back a minute later, and he answers it.
+          yield* made.wait(60)
+          seen = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          yield* made.answer("Red.")
+          const steps = (yield* made.ledger.steps(0)).map(({ state }) => state)
+          return { spoken: made.spoken(), meanwhile, steps, answers: answered(rig), ids: new Set(rig.map(({ commandId }) => commandId)).size, here: made.dispatched }
+        }),
+      )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const spoken = (why: string) => [
+      `A question on Fee table checks on rig, sir: ${line}`,
+      `I couldn't get your answer to it, sir: ${why} I'll ask you again once I can.`,
+      `Here's the question on Fee table checks on rig, sir: ${line}`,
+      "Red it is, sir.",
+    ]
+    expect(await dictated("deciding")).toEqual({
+      spoken: spoken("I can't follow rig's threads right now."),
+      meanwhile: [],
+      steps: ["sent"],
+      answers: [{ [colour.id]: "Red" }],
+      ids: 1,
+      here: [],
+    })
+    // Never left yapd, it goes once more under the same ids.
+    expect(await dictated("sending")).toEqual({
+      spoken: spoken("no connection."),
+      meanwhile: ["failed"],
+      steps: ["sent"],
+      answers: [{ [colour.id]: "Red" }, { [colour.id]: "Red" }],
+      ids: 1,
+      here: [],
+    })
+  })
+
+  test("an answer to a question given while T3 Code restarts on this Mac is never sent nor said to be dealt with: he's told why, and it's asked again once T3 Code is back", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), seen: () => seen })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("Rosie"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "Rosie", "10 seconds"))
+        yield* made.flush
+        yield* asked(made, cloud)
+        seen = false
+        yield* made.answer("Red.")
+        const sent = made.dispatched.length
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        return { spoken: made.spoken(), sent, open: Option.map(yield* made.open, ({ asked }) => asked) }
+      }),
+    )
+    const here = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.spoken).toEqual([
+      "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I couldn't get your answer to it, sir: T3 Code isn't running, so I can't see your threads. I'll ask you again once I can.",
+      here,
+    ])
+    expect(result.sent).toBe(0)
+    expect(result.open).toEqual(Option.some(here))
+  })
+
+  test("an 'approve' to a rig approval given as rig drops out is never sent nor said to be dealt with: he's told why, and it's asked again once rig is back", async () => {
+    const asking = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [asking], seen: () => seen, dispatched: rig, items: approval("r9", "npm install left-pad") },
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Read back to him, as on his asking, and allowed as rig drops out.
+        yield* asked(made, asking, "rig")
+        seen = false
+        yield* made.answer("Approve.")
+        const sent = rig.length
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* made.answer("Approve.")
+        return { spoken: made.spoken(), sent, decided: rig.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Fee table checks on rig wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      "I couldn't get your go-ahead to it, sir: I can't follow rig's threads right now. I'll ask you again once I can.",
+      "Shall I still allow Fee table checks on rig to run npm install left-pad, sir? Only 'approve' will do.",
+      "Approved, sir.",
+    ])
+    expect(result.sent).toBe(0)
+    expect(result.decided).toEqual(["r9 accept"])
+  })
+
+  test("a question asked in every way lately, brought back once T3 Code is back from a restart as he answered, is asked as it was first brought back, never let go for want of words", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), seen: () => seen, waiting: true })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("Rosie"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "Rosie", "10 seconds"))
+        yield* made.flush
+        const heard = Effect.gen(function* () {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+        })
+        // Heard, then its place taken twice by what the model can't make out, then left unanswered, so each of its words has been used.
+        yield* asked(made, cloud)
+        yield* heard
+        for (const _ of [1, 2]) {
+          yield* made.dictate("What was that about the fee tables?")
+          yield* heard
+        }
+        yield* made.unanswered()
+        yield* made.wait(61)
+        yield* heard
+        // He answers as T3 Code restarts here, and it's back a minute later.
+        seen = false
+        yield* made.answer("Red.")
+        yield* made.wait(60)
+        seen = true
+        yield* made.wait(10)
+        yield* made.wait(1)
+        yield* heard
+        yield* made.answer("Red.")
+        return { spoken: made.spoken().filter((line) => !line.startsWith("I couldn't work that out")), answers: answered(made.dispatched) }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const here = `Here's the question on Cloud deployment discovery, sir: ${line}`
+    expect(result.spoken).toEqual([
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      here,
+      `Back to Cloud deployment discovery, sir: ${line}`,
+      `Cloud deployment discovery still needs an answer, sir: ${line}`,
+      "I couldn't get your answer to it, sir: T3 Code isn't running, so I can't see your threads. I'll ask you again once I can.",
+      here,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("a rig approval brought back each time rig drops out as he allows it is asked the third time all the same, never let go for want of words", async () => {
+    const asking = { ...onRig, pendingRuntimeRequest: { id: "r9", kind: "command", createdAt: "2026-10-01T02:17:00.000Z" } }
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [asking], seen: () => seen, dispatched: rig, items: approval("r9", "npm install left-pad") },
+          waiting: true,
+        })
+        const notices = yield* noticing(made)
+        yield* Effect.forkScoped(Notices.lookBack(notices, Effect.map(made.threads.unseen("rig"), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() })), "rig", "10 seconds"))
+        yield* made.flush
+        // Read back to him, as on his asking, and heard each time it comes up; rig drops just as he allows it, three times, and is back a
+        // minute later each time.
+        yield* asked(made, asking, "rig")
+        for (const _ of [1, 2, 3]) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.play(made.questions().at(-1))
+          seen = false
+          yield* made.answer("Approve.")
+          yield* made.wait(60)
+          seen = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+        }
+        yield* made.questions().at(-1)!.stale
+        yield* made.play(made.questions().at(-1))
+        yield* made.answer("Approve.")
+        return { spoken: made.spoken(), decided: rig.map(({ requestId, decision }) => `${requestId} ${decision}`) }
+      }),
+    )
+    const away = "I couldn't get your go-ahead to it, sir: I can't follow rig's threads right now. I'll ask you again once I can."
+    const still = "Shall I still allow Fee table checks on rig to run npm install left-pad, sir? Only 'approve' will do."
+    expect(result.spoken).toEqual([
+      "Fee table checks on rig wants to run npm install left-pad. Say 'approve' if you want it, sir.",
+      away,
+      still,
+      away,
+      "Do you still want me to allow Fee table checks on rig to run npm install left-pad, sir? Say 'approve' if you do.",
+      away,
+      still,
+      "Approved, sir.",
+    ])
+    expect(result.decided).toEqual(["r9 accept"])
+  })
+
+  test("an answer to a rig question whose sending fails as rig drops out is never noted as sent, nor said to have gone", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let seen = true
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(unasked, undefined, {
+          rig: { status: Effect.succeed({ _tag: "Up" }), threads: [onRig], seen: () => seen, dispatched: rig, items: card("q9", [colour]) },
+          // The tunnel drops as the answer goes, so whether it got there can't be told, and rig's threads go out of sight with it.
+          answer: () => (payload, bounded) =>
+            payload.type === "runtime-request.respond"
+              ? Effect.suspend(() => {
+                  seen = false
+                  return Effect.fail(new T3CodeServer.Trouble({ reason: "The connection closed.", sent: true }))
+                })
+              : takes(payload, bounded),
+        })
+        yield* asked(made, onRig, "rig")
+        yield* made.answer("Red.")
+        const steps = yield* made.ledger.steps(0)
+        return { spoken: made.spoken(), sent: rig.length, steps: steps.map(({ machine, state }) => `${machine} ${state}`) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "A question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "I couldn't confirm it got your answer, sir.",
+    ])
+    expect(result.sent).toBe(1)
+    expect(result.steps).toEqual(["rig unknown"])
+  })
+
+  test("a thread's question he let go, however little of it he heard, is never asked again of yapd's own accord as its machine's T3 Code catches up again", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    /** Kept under its key as it comes up to be said, cut off by the shortcut, and let go as `letting` does; then its machine drops out and comes back. */
+    const reconnected = (machine: "rig" | "Rosie", letting: (made: Effect.Effect.Success<ReturnType<typeof assistant>>) => Effect.Effect<void>) =>
+      run(
+        Effect.gen(function* () {
+          const seen = { rig: true, Rosie: true }
+          const made = yield* assistant(unasked, undefined, {
+            ...(machine === "Rosie" ? { others: [cloud], items: card("q1", [colour]) } : {}),
+            seen: () => seen.Rosie,
+            rig: { status: Effect.succeed({ _tag: "Up" }), threads: machine === "rig" ? [onRig] : [], seen: () => seen.rig, dispatched: [], items: card("q9", [colour]) },
+            waiting: true,
+          })
+          const notices = yield* noticing(made)
+          const view = Effect.map(made.threads.unseen(machine), Option.match({ onNone: () => Option.some(true), onSome: () => Option.none() }))
+          yield* Effect.forkScoped(Notices.lookBack(notices, view, machine, "10 seconds"))
+          yield* made.flush
+          yield* letting(made)
+          const before = made.spoken().length
+          seen[machine] = false
+          yield* made.wait(10)
+          seen[machine] = true
+          yield* made.wait(10)
+          yield* made.wait(1)
+          return { said: made.spoken().slice(1, before), after: made.spoken().slice(before), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const cutThen = (words: string) => (made: Effect.Effect.Success<ReturnType<typeof assistant>>) =>
+      Effect.gen(function* () {
+        yield* made.questions().at(-1)!.stale
+        yield* made.cut()
+        yield* made.answer(words)
+      })
+    for (const words of ["Leave it.", "Skip."]) {
+      expect(await reconnected("rig", cutThen(words))).toEqual({ said: ["I'll leave that one, sir."], after: [], open: false })
+    }
+    expect(await reconnected("Rosie", cutThen("Leave it."))).toEqual({ said: ["I'll leave that one, sir."], after: [], open: false })
+    // Put off a third time, cut off each time it's asked.
+    const thrice = (made: Effect.Effect.Success<ReturnType<typeof assistant>>) =>
+      Effect.gen(function* () {
+        for (const time of [1, 2, 3]) {
+          yield* cutThen("Later.")(made)
+          if (time < 3) yield* made.wait(10 * 60)
+        }
+      })
+    expect(await reconnected("rig", thrice)).toEqual({
+      said: [
+        "I'll bring it back in ten minutes, sir.",
+        "Here's the question on Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+        "I'll bring it back in ten minutes, sir.",
+        "Back to Fee table checks on rig, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+        "I'll leave the question on Fee table checks on rig for now, sir; ask me for it when you're ready.",
+      ],
+      after: [],
+      open: false,
+    })
+  })
+
+  test("a press that comes to nothing over a thread's question he hadn't heard all of brings it back at once, never as a second asking a minute on", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const first = "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    const here = "Here's the question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    /** The question comes up, the shortcut is pressed as `pressing` has it, and what he dictates comes to nothing, like with the microphone off, nothing caught, or cancelled. */
+    const pressed = (pressing: "playing" | "queued" | "late") =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+          yield* asked(made, cloud)
+          const question = made.questions().at(-1)!
+          if (pressing === "queued") {
+            // Pressed while it waits its turn to be said, which the press then keeps from being said at all.
+            yield* made.prepare(1, 1)
+            const stale = yield* question.stale
+            yield* made.nothing(1)
+            if (!stale) return yield* Effect.die("It was said after all.")
+          } else {
+            // Pressed as it's said, which cuts it off, and got ready for at once, or only once the dictation is over.
+            yield* question.stale
+            yield* made.cut()
+            if (pressing === "playing") yield* made.prepare(1, 1)
+            yield* made.nothing(1)
+            if (pressing === "late") yield* made.prepare(1, 1)
+          }
+          yield* made.flush
+          const atOnce = made.spoken().slice(1)
+          // Heard in full this time and left unanswered, it's still asked once more a minute on, rather than let go.
+          yield* made.play()
+          yield* made.unanswered()
+          yield* made.wait(61)
+          return { atOnce, then: made.spoken().slice(1 + atOnce.length), open: Option.isSome(yield* made.open) }
+        }),
+      )
+    const still = "Back to Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(await pressed("playing")).toEqual({ atOnce: [here], then: [still], open: true })
+    expect(await pressed("late")).toEqual({ atOnce: [here], then: [still], open: true })
+    // Never said at all, it's asked as it was first going to be.
+    expect(await pressed("queued")).toEqual({ atOnce: [first], then: [still], open: true })
+  })
+
+  test("a faint word Whisper hears in silence over a thread's question he hadn't heard all of brings it back at once, and presses that come to nothing never use up its interruptions", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const faint = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        // Pressed as it's said, which cuts it off, and all Whisper makes of it is a faint "you".
+        yield* made.questions().at(-1)!.stale
+        yield* made.cut()
+        yield* made.prepare(1, 1)
+        yield* made.heard({ heard: "you", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 0.2, turns: 1 }, 1)
+        yield* made.flush
+        const atOnce = made.spoken().slice(1)
+        // Heard in full this time and left unanswered, it's still asked once more a minute on, rather than let go.
+        yield* made.play()
+        yield* made.unanswered()
+        yield* made.wait(61)
+        return { atOnce, then: made.spoken().slice(1 + atOnce.length), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    expect(faint).toEqual({
+      atOnce: [`Here's the question on Cloud deployment discovery, sir: ${line}`],
+      then: [`Back to Cloud deployment discovery, sir: ${line}`],
+      open: true,
+    })
+    const empty = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+        yield* asked(made, cloud)
+        // Cut off by the shortcut three times, each dictation coming to nothing.
+        for (const press of [1, 2, 3]) {
+          yield* made.questions().at(-1)!.stale
+          yield* made.cut()
+          yield* made.prepare(press, 1)
+          yield* made.nothing(press)
+          yield* made.flush
+        }
+        return { spoken: made.spoken().slice(1), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    expect(empty).toEqual({
+      spoken: [
+        `Here's the question on Cloud deployment discovery, sir: ${line}`,
+        `Back to Cloud deployment discovery, sir: ${line}`,
+        `Cloud deployment discovery still needs an answer, sir: ${line}`,
+      ],
+      open: true,
+    })
+  })
+
+  test("presses that come to nothing over a thread's question never use up the words it's asked in: a fourth brings it back all the same, and heard, it's still asked once more a minute on before it's let go", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    /** Cut off by the shortcut `presses` times, each dictation coming to nothing, then heard in full and left unanswered, and again once it's asked once more. */
+    const pressed = (presses: number) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), waiting: true })
+          yield* asked(made, cloud)
+          for (let press = 1; press <= presses; press++) {
+            yield* made.questions().at(-1)!.stale
+            yield* made.cut()
+            yield* made.prepare(press, 1)
+            yield* made.nothing(press)
+            yield* made.flush
+          }
+          const brought = made.spoken().slice(1)
+          yield* made.play()
+          yield* made.unanswered()
+          yield* made.wait(61)
+          const again = made.spoken().slice(1 + brought.length)
+          const open = Option.isSome(yield* made.open)
+          yield* made.play()
+          yield* made.unanswered()
+          yield* made.wait(61)
+          return { brought, again, open, then: made.spoken().slice(1 + brought.length + again.length), after: Option.isSome(yield* made.open) }
+        }),
+      )
+    const here = `Here's the question on Cloud deployment discovery, sir: ${line}`
+    const back = `Back to Cloud deployment discovery, sir: ${line}`
+    const still = `Cloud deployment discovery still needs an answer, sir: ${line}`
+    // Let go only once it's been asked twice, as one he heard and left unanswered is.
+    const then = ["I'll leave the question on Cloud deployment discovery for now, sir; ask me for it when you're ready."]
+    expect(await pressed(3)).toEqual({ brought: [here, back, still], again: [back], open: true, then, after: false })
+    expect(await pressed(4)).toEqual({ brought: [here, back, still, here], again: [back], open: true, then, after: false })
+  })
+
+  test("a thread's question closed quietly, as when it's answered in T3 Code, is told as the question it was when he asks to hear or see it again, never as one about a project", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const told = "I asked you the question on Cloud deployment discovery, sir: which colour should the test use."
+    const result = await run(
+      Effect.gen(function* () {
+        // The model's only asked what he meant by "Remind me what you wanted from me there.", which it takes for asking to hear it again.
+        const made = yield* assistant(() => Brain.decision({ act: "again", how: "same" }), undefined, { others: [cloud], items: card("q1", [colour]) })
+        yield* made.show.watch
+        yield* asked(made, cloud)
+        yield* made.settled("q1")
+        const before = made.spoken().length
+        yield* made.dictate("Remind me what you wanted from me there.")
+        const shown = made.seen.at(-1)?.subject
+        yield* made.dictate("Say that again.")
+        yield* made.dictate("Show me what you said.")
+        return { said: made.spoken().slice(before), open: yield* made.open, shown: shown?._tag === "Answer" ? shown.said : undefined }
+      }).pipe(Effect.scoped),
+    )
+    expect(result.said).toEqual([told, told, `It's on your screen. ${told}`])
+    expect(result.open).toEqual(Option.none())
+    // What the model is shown it said is the same.
+    expect(result.shown).toBe(told)
+  })
+
   test("an answer can be followed up as anything dictated is, with \"it\" the thread it was about, so a message goes there", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -5027,5 +9243,235 @@ describe("Assistant", () => {
     expect(result.reading).toBe(0)
     expect(result.letGo).toHaveLength(1)
     expect(result.letGo[0]!.at(-1)).toBe("It's waiting on the Mina fee table, sir.")
+  })
+
+  test("a follow-up to an answer about one of rig's threads goes to rig's T3 Code for that thread, never this Mac's", async () => {
+    const fees = thread("rig-std", "Add the std fee test", "std", { activeRunId: "run-4", activityRunStatus: "running", updatedAt: "2026-10-01T02:15:00.000Z" })
+    const result = await run(
+      Effect.gen(function* () {
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(
+          (situation) =>
+            Option.isSome(situation.second)
+              ? Brain.decision({ act: "answer", target: handle(situation, fees), spoken: "It's writing the zero-fee case, sir." })
+              : situation.utterance.via === "shortcut"
+                ? Brain.decision({ act: "look", target: handle(situation, fees) })
+                : // What "it" is, as the model is shown it.
+                  Brain.decision({ act: "send", target: Option.match(Brain.focused(situation), { onNone: () => "", onSome: ({ handle }) => handle }), text: "Cover negative fees too.", how: "now" }),
+          undefined,
+          { rig: { status: Effect.succeed({ _tag: "Up" }), threads: [fees], dispatched: rig } },
+        )
+        yield* made.dictate("What's the std fee test on rig doing?")
+        const followed = yield* made.followUp("Tell it to cover negative fees too.")
+        yield* made.until(() => rig.some(({ type }) => type === "message.dispatch"))
+        const steps = yield* made.ledger.steps(0)
+        return {
+          followed,
+          spoken: made.spoken(),
+          it: Option.map(Brain.focused(made.seen.at(-1)!), ({ ref }) => `${ref.machine} ${ref.id}`),
+          rig: rig.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => [threadId, text]),
+          here: made.dispatched.length,
+          steps: steps.map(({ machine, thread, state }) => `${machine} ${thread} ${state}`),
+        }
+      }),
+    )
+    expect(result.followed).toBe(true)
+    expect(result.spoken).toEqual(["One moment.", "It's writing the zero-fee case, sir.", "On it, sir."])
+    expect(result.it).toEqual(Option.some("rig rig-std"))
+    expect(result.rig).toEqual([["rig-std", "Cover negative fees too."]])
+    expect(result.here).toBe(0)
+    expect(result.steps).toEqual(["rig rig-std sent"])
+  })
+
+  test("an agent's question that comes while he can still follow up an answer is held while what he says back is acted on, never taken as its answer, and asked after", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    let slow = false
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.via === "shortcut"
+              ? minaStatus(situation)
+              : // Shown the question as his to answer, the model would take "the red one" for its option.
+                Option.isSome(situation.open)
+                ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Red", pending: "answers" })
+                : Brain.decision({ act: "send", target: handle(situation, mina), text: "Do the red one first.", how: "now" }),
+          undefined,
+          {
+            others: [cloud],
+            items: card("q1", [colour]),
+            waiting: true,
+            // What he says back takes a while to be taken in once the test says, so the question can come up meanwhile.
+            awaiting: Effect.suspend(() => (slow ? Effect.as(Effect.sleep("2 seconds"), Effect.void) : Effect.succeed(Effect.void))),
+          },
+        )
+        yield* made.dictate("What's the status on the Mina tickets?")
+        const status = made.notices().at(-1)!
+        // Said to the end, so he can follow it up, when the agent asks.
+        yield* made.play(status)
+        yield* asked(made, cloud)
+        const asking = made.questions().at(-1)!
+        slow = true
+        const following = yield* Effect.fork(made.followUp("Do the red one first.", 2, status))
+        yield* made.flush
+        // Its turn comes while what he said back is still being taken in: it isn't said.
+        const held = yield* asking.stale
+        yield* made.wait(2)
+        const followed = yield* Fiber.join(following)
+        slow = false
+        const replied = made.seen.at(-1)!
+        const after = made.spoken().slice(2)
+        yield* made.play()
+        yield* made.answer("Red.")
+        return {
+          followed,
+          held,
+          replied: replied.utterance.heard,
+          shown: Option.isSome(replied.open),
+          after,
+          spoken: made.spoken().slice(-1),
+          sent: made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ threadId, text }) => [threadId, text]),
+          answers: answered(made.dispatched),
+        }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    expect(result.followed).toBe(true)
+    expect(result.held).toBe(true)
+    // He hadn't heard it, so it was never his to answer.
+    expect(result.replied).toBe("Do the red one first.")
+    expect(result.shown).toBe(false)
+    expect(result.after).toEqual(["On it, sir.", `A question on Cloud deployment discovery, sir: ${line}`])
+    expect(result.spoken).toEqual(["Red it is, sir."])
+    expect(result.sent).toEqual([[mina.id, "Do the red one first."]])
+    // Only what he said to the question, once he'd heard it, answers it.
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("a yes said back to an answer that came after a question he'd heard is never taken as the question's answer, which is asked again when it was due", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    /** What the model was asked about, in order. */
+    const decided: Array<string> = []
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            decided.push(situation.utterance.heard)
+            if (situation.utterance.heard === "How are the Mina tickets?") return minaStatus(situation)
+            if (situation.utterance.via === "shortcut") return Brain.decision({ act: "answer", spoken: "It's a quarter past two, sir.", rest: "How are the Mina tickets?" })
+            // Shown the question as his to answer, the model would take the yes for yapd's pick.
+            return Option.isSome(situation.open) ? Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue", pending: "answers" }) : Brain.decision({ act: "dismiss" })
+          },
+          undefined,
+          {
+            others: [cloud],
+            items: card("q1", [colour]),
+            // The rest of what he asked takes a while to work out, so what it comes to is said after he's heard the question.
+            deciding: Effect.suspend(() => (decided.at(-1) === "How are the Mina tickets?" ? Effect.sleep("5 seconds") : Effect.void)),
+          },
+        )
+        const dictated = yield* Effect.fork(made.dictate("What time is it, and how are the Mina tickets?"))
+        yield* made.wait(1)
+        yield* Fiber.join(dictated)
+        // Asked and heard to the end, but not answered, so it waits its minute.
+        yield* asked(made, cloud)
+        yield* made.unanswered()
+        yield* made.wait(4)
+        const answer = made.notices().at(-1)!
+        const followed = yield* made.followUp("Yes.", 2, answer)
+        const replied = made.seen.at(-1)!
+        const meanwhile = answered(made.dispatched).length
+        yield* made.wait(60)
+        yield* made.answer("Red.")
+        return {
+          answer: answer.spoken,
+          followed,
+          replied: replied.utterance.heard,
+          shown: Option.isSome(replied.open),
+          meanwhile,
+          spoken: made.spoken(),
+          answers: answered(made.dispatched),
+        }
+      }),
+    )
+    const line = "Which colour should the test use? Red or Blue? I'd go with Blue."
+    const status = "The Mina SSV2 tickets are filed, sir: four bugs, and fee rounding is the worst."
+    expect(result.answer).toBe(status)
+    expect(result.followed).toBe(true)
+    // Said back to the answer, it's worked out as that, with no question shown as his to answer.
+    expect(result.replied).toBe("Yes.")
+    expect(result.shown).toBe(false)
+    expect(result.meanwhile).toBe(0)
+    expect(result.spoken).toEqual([
+      "It's a quarter past two, sir.",
+      `A question on Cloud deployment discovery, sir: ${line}`,
+      status,
+      `Here's the question on Cloud deployment discovery, sir: ${line}`,
+      "Red it is, sir.",
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
+  })
+
+  test("what he missed, told in the same breath as a thread's question, counts as heard once he's heard it", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("What did I miss")
+              ? Brain.decision({ act: "answer", how: "missed", spoken: "The loader fix is ready, sir.", rest: "What's the Cloud one asking?" })
+              : Brain.decision({ act: "reply", target: handle(situation, cloud) }),
+          undefined,
+          { others: [cloud], items: card("q1", [colour]), waiting: true },
+        )
+        const unheard = Effect.map(made.journal.unheard(0, 12), (missed) => missed.flatMap(({ kind, said }) => (kind === "update" ? [said] : [])))
+        yield* made.journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* made.dictate("What did I miss, and what's the Cloud one asking?")
+        const waiting = yield* unheard
+        yield* made.play()
+        return { spoken: made.spoken(), kind: made.notices().at(-1)!.kind, waiting, after: yield* unheard }
+      }),
+    )
+    expect(result.spoken).toEqual(["The loader fix is ready, sir. Here's the question on Cloud deployment discovery: Which colour should the test use? Red or Blue? I'd go with Blue."])
+    expect(result.kind).toBe("question")
+    expect(result.waiting).toEqual(["yapd. The loader fix is ready."])
+    expect(result.after).toEqual([])
+  })
+
+  test("a thread's question read out for a follow-up to a catch-up isn't catching up, so what he answers it with hides what he missed as anything else does", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.via === "shortcut"
+              ? Brain.decision({ act: "answer", how: "missed", spoken: "The loader fix is ready, sir." })
+              : Brain.decision({ act: "reply", target: handle(situation, cloud) }),
+          undefined,
+          { others: [cloud], items: card("q1", [colour]) },
+        )
+        yield* made.journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* made.dictate("What did I miss?")
+        yield* made.followUp("What's the Cloud one asking?")
+        const question = made.notices().at(-1)!
+        yield* made.answer("Red.")
+        const replies = yield* made.journal.since(0, { kinds: ["reply"] })
+        return {
+          kind: question.kind,
+          followed: question.followUp !== undefined,
+          replies: replies.map(({ text, detail }) => [text, (detail as { readonly over?: string }).over ?? ""]),
+          answers: answered(made.dispatched),
+        }
+      }),
+    )
+    // Listened to as a question, never for a follow-up.
+    expect(result.kind).toBe("question")
+    expect(result.followed).toBe(false)
+    // Said back to the catch-up, the follow-up is catching up; said back to the question, the answer isn't.
+    expect(result.replies).toEqual([
+      ["What's the Cloud one asking?", "catch-up"],
+      ["Red.", ""],
+    ])
+    expect(result.answers).toEqual([{ [colour.id]: "Red" }])
   })
 })

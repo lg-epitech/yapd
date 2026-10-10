@@ -65,12 +65,15 @@ export class Journal extends Context.Tag("yapd/Journal")<
     /** Keeps an entry and gives back its id. Never fails: what can't be kept is only logged, and has none. */
     readonly write: (entry: Entry) => Effect.Effect<Option.Option<number>>
     /**
-     * Keeps an entry under its key unless one was ever kept under it, and says
-     * whether this one was: what's said once is said once across restarts.
+     * Keeps an entry under its key unless one was ever kept under it, so what's
+     * said once is said once across restarts: none when one was, otherwise the
+     * new entry's id, when the journal could keep it, to note when it's heard.
      */
-    readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<boolean>
+    readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<Option.Option<Option.Option<number>>>
     /** Notes that the user heard these through, answered them or was briefed on them, unless they had already. */
     readonly markHeard: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<void>
+    /** Notes that the user is still to hear these, like a question put by to be asked again, whatever they heard of them before. */
+    readonly markUnheard: (ids: ReadonlyArray<number>) => Effect.Effect<void>
     /** Notes that what was said for an entry was these words in the end, like a line played without "it's on your screen". */
     readonly reword: (id: number, said: string) => Effect.Effect<void>
     /** Entries since `at`, oldest first, the latest `most` of them when there are more. */
@@ -189,10 +192,15 @@ export const fromStore = (store: Store.Store["Type"], called: Naming = (host) =>
       ),
   claim: (entry) =>
     store
-      .transaction((database: Database) => database.query(`insert or ignore into journal ${columns}`).run(...values(entry, called)).changes > 0)
+      .transaction((database: Database) => {
+        const kept = database.query(`insert or ignore into journal ${columns}`).run(...values(entry, called))
+        return kept.changes > 0 ? Option.some(Option.some(Number(kept.lastInsertRowid))) : Option.none()
+      })
       .pipe(
         // Said twice is better than never said, when the journal can't tell.
-        Effect.catchAll((error) => Effect.logWarning("Could not check my journal for what I've said", error).pipe(Effect.as(true))),
+        Effect.catchAll((error) =>
+          Effect.logWarning("Could not check my journal for what I've said", error).pipe(Effect.as(Option.some(Option.none<number>()))),
+        ),
       ),
   markHeard: (ids, at) =>
     ids.length === 0
@@ -204,6 +212,14 @@ export const fromStore = (store: Store.Store["Type"], called: Naming = (host) =>
               .run(at, ...ids)
           })
           .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what you heard in my journal", error))),
+  markUnheard: (ids) =>
+    ids.length === 0
+      ? Effect.void
+      : store
+          .transaction((database: Database) => {
+            database.query<never, Array<number>>(`update journal set heard_at = null where id in (${ids.map(() => "?").join(", ")})`).run(...ids)
+          })
+          .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what you've still to hear in my journal", error))),
   reword: (id, said) =>
     store
       .transaction((database: Database) => {

@@ -15,6 +15,7 @@ import * as Floor from "./Floor.ts"
 import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Notices from "./Notices.ts"
 import { machines } from "./Machines.ts"
 import { ProviderModel } from "./Model.ts"
 import * as Persona from "./Persona.ts"
@@ -87,7 +88,6 @@ const done = 90 * 24 * 60 * 60_000
 
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
-  const daemon = yield* Daemon.make
   const preferences = yield* Preferences.path
   const tunnels = yield* Tunnels
   const everywhere = yield* machines(Tunnel.masters(tunnels))
@@ -116,6 +116,9 @@ export const serve = Effect.gen(function* () {
     journal,
     store: yield* Store.Store,
   })
+  const hands = Hands.make({ threads, ledger, started })
+  // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
+  const daemon = yield* Daemon.make({ link: (session, cwd) => threads.link(machine, session, cwd), hands })
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),
@@ -125,7 +128,6 @@ export const serve = Effect.gen(function* () {
     find: (machine, id) => threads.find({ machine, id }),
   })
   yield* Effect.logInfo(`Your rules for new work go in ${preferences}`)
-  const hands = Hands.make({ threads, ledger, started })
   const show = yield* Show.make(threads.detail)
   const assistant = yield* Assistant.make({
     threads,
@@ -142,7 +144,25 @@ export const serve = Effect.gen(function* () {
     queued: daemon.queued,
     skip: daemon.skip,
     upcoming: daemon.upcoming,
+    // What a thread waits on him for, worded as notices word it, to read back what he answers before he's heard it asked.
+    compose: yield* Notices.composer(threads),
   })
+  // What threads need him for, what failed and what finished with no hook, each said once, ever.
+  const notices = yield* Notices.make({
+    threads,
+    journal,
+    tell: daemon.tell,
+    power: daemon.power,
+    stopped: daemon.stopped,
+    finished: daemon.finished,
+    overtaken: daemon.overtaken,
+    mention: assistant.mention,
+    ask: assistant.ask,
+    settled: assistant.settled,
+    returned: assistant.returned,
+    shortest: (yield* Config.minSeconds) * 1000,
+  })
+  yield* Effect.forkScoped(notices.follow)
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
   // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it. Each machine's once its own
   // T3 Code has, so one that's down holds up none of the rest, and this one's takes in what went to a machine yapd no longer follows.
@@ -164,6 +184,9 @@ export const serve = Effect.gen(function* () {
       ),
     { discard: true },
   )
+  // And what still waits on him that was never said is said, each machine's whenever its own T3 Code has caught up, so one that's down
+  // holds up none of the rest, and what waits on him there is said once it's back.
+  yield* Effect.forEach(followed, ({ machine: name, live }) => Effect.forkScoped(Notices.lookBack(notices, live.view, name)), { discard: true })
   const shortcut = yield* Shortcut
   // Built once the daemon is, so each press keeps how many times yapd had been turned on or off by then, however late what was said is handed on.
   const dictation = Context.get(
@@ -176,11 +199,12 @@ export const serve = Effect.gen(function* () {
    * Off, whatever hasn't started yet is dropped, from a dictation to what was
    * waiting to be said. The keys go before the dictations, so none starts in
    * between, and all of it before the daemon waits on anything. On, what a
-   * restart found while it was off is said.
+   * restart found while it was off is said, and what waits on him that he
+   * wasn't told of.
    */
   const turn = (on: boolean) =>
     on
-      ? Effect.all([daemon.turn(true), shortcut.toggle(true), assistant.back], { discard: true })
+      ? Effect.all([daemon.turn(true), shortcut.toggle(true), assistant.back, notices.reconcile], { discard: true })
       : Effect.all([shortcut.toggle(false), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.

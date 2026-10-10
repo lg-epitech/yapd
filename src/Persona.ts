@@ -29,6 +29,10 @@ export const Lines = Schema.Struct({
   again: Schema.String,
   /** The work they stopped is going again. */
   carrying: Schema.String,
+  /** What a thread waited on them to allow is allowed. */
+  approved: Schema.String,
+  /** What a thread waited on them to allow is turned down. */
+  declined: Schema.String,
   /** What they asked to see is on their screen, said only while an app is there to show it. */
   onScreen: Schema.String,
   /** How the user is addressed, like "sir", or nothing. Lines made up on the spot use it too. */
@@ -46,6 +50,8 @@ export const plain: Lines = {
   stopped: "Stopped.",
   again: "Send it again?",
   carrying: "Carrying on.",
+  approved: "Approved.",
+  declined: "Declined.",
   onScreen: "It's on your screen.",
   address: "",
 }
@@ -60,6 +66,8 @@ export const sayable = (lines: Lines) => [
   lines.cantTell,
   lines.stopped,
   lines.carrying,
+  lines.approved,
+  lines.declined,
 ]
 
 /** ", sir" before a line's last mark, when the user is addressed at all. */
@@ -109,7 +117,7 @@ export const withOnIt = (onIt: string, rest: string) => {
  * yapd isn't waiting on. Not "misheard", which may well ask him to say it
  * again, nor "again", which asks whether to send something once more.
  */
-const telling = ["onIt", "queued", "checking", "leaving", "cantTell", "stopped", "carrying", "onScreen"] as const
+const telling = ["onIt", "queued", "checking", "leaving", "cantTell", "stopped", "carrying", "approved", "declined", "onScreen"] as const
 
 /** Whether none of the lines that tell asks something, nor how he's addressed, which goes into lines of every kind, and the one that asks does. */
 const tells = (lines: Lines) => !lines.address.includes("?") && telling.every((key) => !lines[key].includes("?")) && lines.again.includes("?")
@@ -253,6 +261,8 @@ export const prompt = (style: string) =>
     `- "stopped": that the work they asked you to stop has stopped, like "${plain.stopped}"`,
     `- "again": asking whether to send something once more, like "${plain.again}" A question. It comes right after a sentence that addressed them already and said it may not have got there, so it has no address of its own.`,
     `- "carrying": that the work they had stopped is going again, like "${plain.carrying}"`,
+    `- "approved": that what the work waited on them to allow is allowed, like "${plain.approved}"`,
+    `- "declined": that what the work waited on them to allow is turned down, like "${plain.declined}"`,
     `- "onScreen": that what they asked to see is on their screen now, like "${plain.onScreen}" It's said as it goes up, so don't ask.`,
     `- "address": how you address them, in a word or two, like "sir", as their style says. Empty if it doesn't say.`,
   ].join("\n\n")

@@ -81,6 +81,140 @@ describe("T3Actions", () => {
     expect(Option.map(bare, (found) => (found._tag === "Approval" ? found.decisions.map(({ decision }) => decision) : []))).toEqual(
       Option.some(["accept", "acceptForSession", "decline"]),
     )
+    // What it would run comes from the command it shares the agent's id with.
+    const command = { type: "command_execution", status: "pending", nativeItemRef: { nativeId: "toolu_1" }, input: "git push --force origin main" }
+    const pushing = T3Actions.request([command, { ...approval, prompt: "Push the branch", nativeItemRef: { nativeId: "toolu_1" } }], "r1")
+    expect(Option.map(pushing, (found) => (found._tag === "Approval" ? [found.what, found.command] : []))).toEqual(
+      Option.some(["Push the branch", "git push --force origin main"]),
+    )
+    // Cut short to be said, a long one is still kept whole, to tell by all of it whether it's risky; one the thread doesn't show has neither.
+    const long = `echo '${"a".repeat(650)}'; rm -rf /tmp/example-data`
+    const cleaning = T3Actions.request([{ ...command, input: long }, { ...approval, nativeItemRef: { nativeId: "toolu_1" } }], "r1")
+    expect(Option.map(cleaning, (found) => (found._tag === "Approval" ? [found.command?.length, found.whole] : []))).toEqual(Option.some([600, long]))
+    expect(Option.map(T3Actions.request([approval], "r1"), (found) => (found._tag === "Approval" ? [found.command, found.whole] : []))).toEqual(
+      Option.some([undefined, undefined]),
+    )
+    // One too long to look through, like a tool given a whole file, is said as it starts, and taken for unread.
+    const huge = T3Actions.request([{ ...command, input: `echo '${"a".repeat(30_000)}'` }, { ...approval, nativeItemRef: { nativeId: "toolu_1" } }], "r1")
+    expect(Option.map(huge, (found) => (found._tag === "Approval" ? [found.command?.length, found.whole] : []))).toEqual(Option.some([600, undefined]))
+    // A tool's input is looked through as the tool gets it, each line on its own, and is unread when T3 Code sent only how it starts.
+    const tool = (input: unknown) =>
+      Option.map(
+        T3Actions.request([{ type: "dynamic_tool", status: "running", toolName: "Monitor", input, nativeItemRef: { nativeId: "toolu_1" } }, { ...approval, nativeItemRef: { nativeId: "toolu_1" } }], "r1"),
+        (found) => (found._tag === "Approval" ? [found.command, found.whole] : []),
+      )
+    expect(tool({ command: "cd build\nrm -rf ~/work", timeout: 30 })).toEqual(
+      Option.some(['Monitor {"command":"cd build\\nrm -rf ~/work","timeout":30}', "Monitor\ncommand\ncd build\nrm -rf ~/work\ntimeout\n30"]),
+    )
+    expect(tool({ summary: '{"command":"echo aaaa…', truncated: true })).toEqual(Option.some(['Monitor {"summary":"{\\"command\\":\\"echo aaaa…","truncated":true}', undefined]))
+    // A command given as a list of words is one line, as it runs, and an input sent as JSON in a string is read as what that holds.
+    expect(Option.map(tool({ args: ["git", "push", "origin", "main", "--force"] }), ([, whole]) => whole)).toEqual(Option.some("Monitor\nargs\ngit push origin main --force"))
+    expect(Option.map(tool('{"command":"cd build\\nrm -rf ~/work"}'), ([, whole]) => whole)).toEqual(Option.some("Monitor\ncommand\ncd build\nrm -rf ~/work"))
+    // A command given apart from its words is the one line it runs as too, after the rest, and its words are never a line of their own.
+    expect(Option.map(tool({ command: "rm", args: ["-rf", "~/work"] }), ([, whole]) => whole)).toEqual(Option.some("Monitor\ncommand\nrm\nargs\nrm -rf ~/work"))
+    expect(Option.map(tool({ cmd: "git", argv: "push --force" }), ([, whole]) => whole)).toEqual(Option.some("Monitor\ncmd\ngit\nargv\ngit push --force"))
+    expect(Option.map(tool({ command: "git", args: ["log", "--grep", "clean", "-f"] }), ([, whole]) => whole)).toEqual(
+      Option.some("Monitor\ncommand\ngit\nargs\ngit log --grep clean -f"),
+    )
+    // However what it runs is named, as a program or an executable too.
+    expect(Option.map(tool({ program: "rm", args: ["-rf", "~/work"] }), ([, whole]) => whole)).toEqual(Option.some("Monitor\nprogram\nrm\nargs\nrm -rf ~/work"))
+    expect(Option.map(tool({ executable: "/bin/rm", arguments: ["-rf", "~/work"] }), ([, whole]) => whole)).toEqual(
+      Option.some("Monitor\nexecutable\n/bin/rm\narguments\n/bin/rm -rf ~/work"),
+    )
+    // A secret goes by its own item's id, which is what the thread says it waits on.
+    const secret = { type: "secret_request", id: "turn-item:secret-request:t1:deploy", status: "waiting", label: "Deploy key", reason: "To deploy", secretStatus: "pending" }
+    expect(T3Actions.request([secret], "turn-item:secret-request:t1:deploy")).toEqual(
+      Option.some({ _tag: "Secret", id: "turn-item:secret-request:t1:deploy", label: "Deploy key" }),
+    )
+    // A question that asks him to type in a secret, as Codex marks one and T3 Code passes on as any other, is a secret too; one with options isn't.
+    const typed = (header: string, asked: string, options: ReadonlyArray<{ readonly label: string; readonly description: string }> = []) =>
+      Option.map(T3Actions.request([{ ...question, questions: [{ id: "k", header, question: asked, options }] }], "r2"), (found) => (found._tag === "Secret" ? found.label : found._tag))
+    expect(typed("Question", "Paste your OpenAI API key.")).toEqual(Option.some("API key"))
+    expect(typed("Login", "What's the database password?")).toEqual(Option.some("password"))
+    expect(typed("GitHub token", "So I can open the PR.")).toEqual(Option.some("GitHub token"))
+    // However it's written: as code names it, in a word that's only one when he's asked to give it, or as a code he's sent.
+    for (const [asked, label] of [
+      ["Please provide OPENAI_API_KEY so I can run the evals.", "OPENAI_API_KEY"],
+      ["What is the value of STRIPE_SECRET_KEY?", "STRIPE_SECRET_KEY"],
+      ["Provide your AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"],
+      ["Enter the HF_TOKEN", "HF_TOKEN"],
+      ["Please provide the DATABASE_URL", "DATABASE_URL"],
+      ["What's your OpenAI key?", "key"],
+      ["Enter your Stripe key", "key"],
+      ["Please provide your Hugging Face token", "token"],
+      ["Enter the token for the registry", "token"],
+      ["What is your GitHub PAT?", "PAT"],
+      ["What's your PIN?", "PIN"],
+      ["What is your sudo pwd?", "pwd"],
+      ["Paste the session cookie", "cookie"],
+      ["What's your npm OTP?", "OTP"],
+      ["Provide the JWT", "JWT"],
+      ["Enter the verification code sent to your phone", "verification code"],
+      ["Provide the connection string for Postgres", "connection string"],
+      ["What's the database URL, with its user and pass?", "database URL"],
+      ["What's the webhook signing secret?", "secret"],
+      ["Enter the code sent to your phone.", "code"],
+      ["What's the SMS code?", "SMS code"],
+      ["What's the wallet's recovery phrase?", "recovery phrase"],
+      ["Give me the 12 words for the test wallet", "12 words"],
+      ["Paste the Slack webhook URL.", "webhook URL"],
+      ["Paste the Slack webhook.", "webhook"],
+      ["Stripe live key?", "key"],
+      ["What's the bearer for the API?", "bearer"],
+      ["What's the DB connection URI?", "connection URI"],
+      ["What's the admin login for the staging dashboard?", "login"],
+      ["Paste the contents of service-account.json", "service-account"],
+      ["What should I put in the Authorization header?", "Authorization header"],
+      ["I need the value for SENTRY_AUTH so I can upload source maps", "SENTRY_AUTH"],
+      ["What's GOOGLE_APPLICATION_CREDENTIALS?", "GOOGLE_APPLICATION_CREDENTIALS"],
+      ["What's REDIS_URL?", "REDIS_URL"],
+    ] as const) {
+      expect(typed("Question", asked)).toEqual(Option.some(label))
+    }
+    // A token or a key he's asked to pick, like a coin, is a question.
+    expect(typed("Question", "Which token should the indexer track first?")).toEqual(Option.some("Question"))
+    expect(typed("Question", "Should I sort by the date key or the name key?")).toEqual(Option.some("Question"))
+    expect(typed("Question", "What should the new branch be called?")).toEqual(Option.some("Question"))
+    expect(typed("Keys", "Keep the API keys in the vault?", [{ label: "Yes", description: "Yes" }, { label: "No", description: "No" }])).toEqual(Option.some("Question"))
+  })
+
+  test("a question's response mode and required parts are read from its card", () => {
+    const read = (card: object) =>
+      Option.match(T3Actions.request([{ ...question, ...card }], "r2"), {
+        onNone: () => undefined,
+        onSome: (found) => (found._tag === "Question" ? { mode: found.mode, required: found.questions.map(({ required }) => required) } : undefined),
+      })
+    // Claude's go straight to it, and every part needs an answer unless the card says otherwise.
+    expect(read({})).toEqual({ mode: "live", required: [true] })
+    // Codex's asked in its reply are answered as a message to the thread.
+    const parts = [
+      { id: "0", question: "Which network first?", required: true },
+      { id: "1", question: "Anything to skip?", required: false },
+    ]
+    expect(read({ responseMode: "message", questions: parts })).toEqual({ mode: "message", required: [true, false] })
+  })
+
+  test("takes what he'd send for a secret when it looks like one, however the question it answers was worded", () => {
+    for (const said of [
+      "Four two seven one nine three.",
+      "4 2 7 1 9 3",
+      "4-2-7-1-9-3",
+      "427193",
+      "The PIN is 4271.",
+      "sk proj one two three",
+      "sk-proj-abc123",
+      "ghp_abcdef123",
+      "xoxb-1234-abcd",
+      "AKIAIOSFODNN7EXAMPLE",
+      "The key is hunter2.",
+      "a8f3k2l9x0q7w5e1r4",
+    ]) {
+      expect([said, T3Actions.revealing(said)]).toEqual([said, true])
+    }
+    // A port, a year, a PR number, a version or a name isn't.
+    for (const said of ["No.", "Use port 8080.", "Target the 2026 release.", "PR 4271 please", "Yes, bump it to 1.2.3.", "Call it fee-tables-v2", "Two or three of them."]) {
+      expect([said, T3Actions.revealing(said)]).toEqual([said, false])
+    }
   })
 
   test("gives back a thread's last messages, its plan and what it waits on", async () => {
@@ -89,6 +223,10 @@ describe("T3Actions", () => {
     expect(detail.messages.map(({ text }) => text)).toEqual(["Fix it.", "Pushing now."])
     expect(Option.map(detail.request, ({ id }) => id)).toEqual(Option.some("r1"))
     expect(detail.plan).toEqual(Option.some("- [running] Push"))
+    expect(detail.pending).toEqual(["r1"])
+    // What it still waits on, by T3 Code's own record of each when it keeps one, even one hidden behind a newer one.
+    const both = transport(projection({ runtimeRequests: [{ id: "r0", status: "pending" }, { id: "r1", status: "resolved" }, { id: "r2", status: "pending" }] }))
+    expect((await Effect.runPromise(both.actions.detail("t1"))).pending).toEqual(["r0", "r2"])
     const settled = transport(projection({ turnItems: [{ ...approval, status: "completed" }] }))
     expect((await Effect.runPromise(settled.actions.detail("t1"))).request).toEqual(Option.none())
   })

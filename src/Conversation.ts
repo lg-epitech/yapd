@@ -8,6 +8,7 @@ import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
 import { enough, gist, hallucinated, type Line, type Reply, Responder } from "./Responder.ts"
+import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
 import { extension, Voice } from "./Voice.ts"
@@ -24,6 +25,8 @@ export interface Update {
   readonly thread: Thread
   /** When its turn stopped. */
   readonly at: number
+  /** The T3 Code thread it came from, when its hook could be tied to one, or T3 Code told of it. */
+  readonly about?: Threads.Ref
 }
 
 type Signal =
@@ -700,6 +703,10 @@ export interface Question {
   readonly spoken: string
   /** Run once it starts playing the first time, which is when the user hears of it: never when it can't be played. */
   readonly saying?: Effect.Effect<void>
+  /** Run each time it plays to the end, before the wait for an answer: the user has heard all of it, whatever they say next. */
+  readonly through?: Effect.Effect<void>
+  /** What its options are called, which what's said back is heard listening for, since Whisper mishears names it doesn't expect. */
+  readonly terms?: ReadonlyArray<string>
   /** Like `saying`, but once it's known to be playing, which with afplay is only once it has played to the end. */
   readonly confirmed?: Effect.Effect<void>
   /**
@@ -732,14 +739,20 @@ export const make = (options: {
   readonly dir: string
   /** Whether unrelated activity has made the update stale. */
   readonly moved: (update: Update) => Effect.Effect<boolean>
-  /** Delivers the follow-up, or queues it until the session can receive it, using its latest thread. */
-  readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued", RelayError>
-  /** Says how a follow-up went when the update it answers was cut off before yapd could, noting it with the persona once it plays. */
+  /**
+   * Delivers the follow-up, or queues it until the session can receive it,
+   * using its latest thread; or says what came of it when that's more than
+   * sent or queued, like held behind a turn waiting on the user.
+   */
+  readonly send: (update: Update, message: string) => Effect.Effect<"sent" | "queued" | { readonly said: string }, RelayError>
+  /** Says how a follow-up went when the update it answers was cut off before yapd could. */
   readonly late: (update: Update, spoken: string, failed: boolean) => Effect.Effect<void>
   /** Something was said over an update and taken in, which takes the place of whatever yapd asked before. */
   readonly replied: Effect.Effect<void>
   /** yapd starts saying something back over an update, like an answer or word of a follow-up, which is then what the user heard last. */
   readonly saying: (update: Update, line: string) => Effect.Effect<void>
+  /** Whether what the user said to send over an update would be held back as it could give a secret away, so their words are kept and logged nowhere. */
+  readonly withholds: (update: Update, message: string) => Effect.Effect<boolean>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -1360,7 +1373,13 @@ export const make = (options: {
         const lines = yield* persona.lines
         const fiber = yield* follow(update, reply.message).pipe(
           Effect.flatMap((result) =>
-            result === "queued" ? Effect.succeed(lines.queued) : reply.spoken === "" ? persona.onIt() : Effect.succeed(reply.spoken),
+            typeof result === "object"
+              ? Effect.succeed(result.said)
+              : result === "queued"
+                ? Effect.succeed(lines.queued)
+                : reply.spoken === ""
+                  ? persona.onIt()
+                  : Effect.succeed(reply.spoken),
           ),
           Effect.catchAll((error) =>
             Effect.logWarning("Could not send the follow-up", { reason: error.reason, error }).pipe(
@@ -1394,26 +1413,35 @@ export const make = (options: {
         if (yield* options.moved(update)) return yield* new RelayError({ reason: movedOn })
         const text = plain(message)
         const result = yield* options.send(update, text)
-        yield* Effect.logInfo(`${result === "queued" ? "Queued" : "Sent"}: ${text}`)
+        yield* Effect.logInfo(`${result === "queued" ? "Queued" : typeof result === "object" ? "Held" : "Sent"}: ${text}`)
         return result
       })
 
-    const transcribe = (audio: Float32Array) =>
-      transcriber.transcribe(audio).pipe(
-        Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))),
-        Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))),
-      )
+    /** What the user said, logged once it's known it's fit to be, as what's said over an update may not be; listening for `terms`, when there are any. */
+    const unlogged = (audio: Float32Array, terms?: ReadonlyArray<string>) =>
+      transcriber.transcribe(audio, terms).pipe(Effect.catchAll((error) => Effect.logWarning("Could not transcribe", error).pipe(Effect.as(""))))
 
-    /** What the user said over a line, each piece made out unless it was already, as Whisper heard it, or what's taken of that. */
-    const hear = (said: ReadonlyArray<Piece>) =>
+    const transcribe = (audio: Float32Array, terms?: ReadonlyArray<string>) =>
+      unlogged(audio, terms).pipe(Effect.tap((heard) => (heard === "" ? Effect.void : Effect.logInfo(`Heard: ${heard}`))))
+
+    /** What the user said over a line, each piece made out with `transcribe` unless it was already, as Whisper heard it, or what's taken of that. */
+    const hear = (said: ReadonlyArray<Piece>, transcribe: (audio: Float32Array) => Effect.Effect<string>) =>
       Effect.forEach(said, (piece) => (piece.heard !== undefined ? Effect.succeed(piece.heard) : transcribe(piece.audio))).pipe(
         Effect.map((pieces) => pieces.filter((heard) => heard !== "").reduce((before, after) => (before === "" ? after : together(before, after)), "")),
       )
 
-    /** Takes in what the user said over a line and works out a reply to it, as `settle` does: none when nothing came of what he said. */
-    const heardOver = <R>(outcome: Interrupted, respond: (heard: string, voiced: number) => Effect.Effect<R>) =>
+    /**
+     * Takes in what the user said over a line, made out with `transcribe`, and
+     * works out a reply to it, as `settle` does: none when nothing came of
+     * what he said.
+     */
+    const heardOver = <R>(
+      outcome: Interrupted,
+      transcribe: (audio: Float32Array) => Effect.Effect<string>,
+      respond: (heard: string, voiced: number) => Effect.Effect<R>,
+    ) =>
       Effect.gen(function* () {
-        const first = yield* hear(outcome.said)
+        const first = yield* hear(outcome.said, transcribe)
         const stop = outcome.said.find((piece) => piece.stop !== undefined)?.stop
         return first === "" ? undefined : yield* settle(outcome.ear, first, outcome.audio, transcribe, respond, outcome.last, outcome.open, stop)
       })
@@ -1451,7 +1479,7 @@ export const make = (options: {
             }
 
             const said = cut(text, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
-            const settled = yield* heardOver(outcome, (heard) =>
+            const settled = yield* heardOver(outcome, unlogged, (heard) =>
               responder
                 .respond({
                   project: update.project,
@@ -1475,6 +1503,9 @@ export const make = (options: {
               continue
             }
             const { heard, reply } = settled
+            // Held back as it could give a secret away, it's kept and logged nowhere: whether it is, is known before either.
+            const withheld = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
+            yield* Effect.logInfo(withheld ? "Heard something to send that could give a secret away, so it's held back" : `Heard: ${heard}`)
             yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
             if (reply.intent !== "resume") {
               yield* journal.write({
@@ -1482,11 +1513,12 @@ export const make = (options: {
                 kind: "reply",
                 host: update.thread.origin.host,
                 project: update.project,
-                thread: update.session,
+                // With the thread T3 Code knows it by, when it's tied to one, like the update itself.
+                ...(update.about === undefined ? { thread: update.session } : { machine: update.about.machine, thread: update.about.id }),
                 directory: update.thread.cwd,
                 said: reply.spoken,
-                text: heard,
-                detail: { intent: reply.intent, ...(reply.message === "" ? {} : { message: reply.message }) },
+                ...(withheld ? {} : { text: heard }),
+                detail: { intent: reply.intent, ...(reply.message === "" || withheld ? {} : { message: reply.message }), ...(withheld ? { withheld } : {}) },
               })
               yield* options.replied
             }
@@ -1523,13 +1555,16 @@ export const make = (options: {
      * or `wait` after, like with an update: `respond` works out what they
      * meant, and what it gives back is run once they've stopped. Talk it
      * makes nothing of picks up where it cut in, unless it came once all of
-     * it was said. `through` runs each time it's said to the end. Returns
-     * whether something came of what they said, and fails when it can't be
-     * played or breaks off.
+     * it was said. Its `through` runs each time it's said to the end, and
+     * what they say is heard listening for its `terms`. Returns whether
+     * something came of what they said, and fails when it can't be played or
+     * breaks off.
      */
-    const exchange = (said: Omit<Question, "answer">, respond: Question["answer"], wait: Duration.DurationInput, through: Effect.Effect<void> = Effect.void) =>
+    const exchange = (said: Omit<Question, "answer">, respond: Question["answer"], wait: Duration.DurationInput) =>
       Effect.gen(function* () {
         const ear = hearing(yield* Effect.scope)
+        // Listening for its options, if it has any, all of what he says back, however long he goes on.
+        const makeOut = (audio: Float32Array) => transcribe(audio, said.terms)
         let from = 0
         let missed = 0
         let begun = said.saying ?? Effect.void
@@ -1540,12 +1575,12 @@ export const make = (options: {
             wait,
             begun,
             confirmed,
-            through,
+            through: said.through ?? Effect.void,
           })
           begun = Effect.void
           confirmed = Effect.void
           if (outcome._tag === "Finished") return false
-          const settled = yield* heardOver(outcome, respond)
+          const settled = yield* heardOver(outcome, makeOut, respond)
           const reply = settled === undefined ? Option.none() : settled.reply
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.
@@ -1572,7 +1607,7 @@ export const make = (options: {
      * asked to hear rather than something they're asked. Returns whether they
      * followed it up, and fails when it can't be played or breaks off.
      */
-    const answer = (said: Answer) => exchange(said, said.followUp, linger, said.through)
+    const answer = (said: Answer) => exchange(said, said.followUp, linger)
 
     return {
       converse,

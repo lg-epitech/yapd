@@ -467,16 +467,19 @@ export const tally = (desk: Threads.Desk, address: string, now: number) => {
 }
 
 /**
- * What a thread waits on, as text only, in code blocks: a command, or a
- * question with its choices, where nothing written out, like an address, can
+ * What a thread waits on, as text only, in code blocks: a command, a question
+ * with its choices, or what a secret it asks for is called, which is only
+ * ever given in T3 Code, where nothing written out, like an address, can
  * become a link.
  */
 const waiting = (request: T3Actions.Request) =>
   request._tag === "Approval"
     ? `### Waiting for your approval\n\n${verbatim(request.what)}`
-    : `### Asking you\n\n${request.questions
-        .map(({ question, options }) => verbatim([question, ...options.map(({ label }) => `- ${label}`)].join("\n")))
-        .join("\n\n")}`
+    : request._tag === "Secret"
+      ? `### Waiting for a secret, in T3 Code\n\n${verbatim(request.label)}`
+      : `### Asking you\n\n${request.questions
+          .map(({ question, options }) => verbatim([question, ...options.map(({ label }) => `- ${label}`)].join("\n")))
+          .join("\n\n")}`
 
 /** A thread: where and how it's doing, what it waits on, its latest message and its plan. */
 export const thread = (listed: Threads.Listed, detail: Option.Option<T3Actions.Detail>, now: number): Draft => {
@@ -924,9 +927,9 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
       aside: (target, detail, answer, lines) =>
         Effect.gen(function* () {
           const request = Option.getOrUndefined(detail.request)
-          // A question's choices too, which he can't pick between by ear when they're commands or addresses.
+          // A question's choices too, which he can't pick between by ear when they're commands or addresses; never a secret, given only in T3 Code.
           const words =
-            request === undefined
+            request === undefined || request._tag === "Secret"
               ? []
               : request._tag === "Approval"
                 ? [request.what]

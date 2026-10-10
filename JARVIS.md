@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite` and `yapd.before-followups.sqlite`.
 
-Live on `dev` now: everything below. Rig's threads are followed, waiting on their first voice checks with you. Being built: an agent's questions read out and answered by voice.
+Live on `dev` now: everything below except "Needs you". Rig's threads are followed, waiting on their first voice checks with you. Built, waiting on review and a first run with you: "Needs you", on this Mac and rig alike.
 
 ## Talk to it (the shortcut)
 
@@ -21,20 +21,25 @@ Live on `dev` now: everything below. Rig's threads are followed, waiting on thei
 - "Stop", "skip" or "enough" over an update skips it. "What did I miss?" leaves out what's about to be read anyway, and says how many are coming up.
 - `POST /utterances` takes a typed request the same way, for scripts and other apps.
 
+## Needs you (built, waiting on review and its live check)
+
+- An agent's question, on this Mac or rig, is read out as it comes, in its own words, a part at a time, with the option it recommends said as yapd's pick ("I'd go with Blue."). Answer with an option, a few, "yes" to the pick, or your own words, which it gets as you said them, sent back only to the machine that asked; "what are the options?", "later" and "what's the question?" work too. Only an option's exact name skips the model: as the agent wrote it, in any case, with a full stop after it at most ("C++.", "No tests."), or, where you can pick several, exact names joined by "and" or commas. Anything else goes to the model, which is told yapd's pick and whether you heard the question to the end: cut short, what doesn't name an option ("the last one", "yeah, that works") asks it again in full. The model handles a plain "yes", "your pick", "the second one", "four" for "4 workers", "C" for "C++", "No, tests", part of a name or "all of them". What it makes of them goes as your own words unless it's an option's exact name. A message you dictate to a thread waiting on a question goes as its answer; with parts after it, those are asked first, and if you let them go, leave them unanswered or put them off too often, your message still goes, with them left out. Approvals are no longer announced, since your agents run with full access: "who needs me?" still lists them, and you can approve one by voice, only with "approve", "approve it", "allow" or "allow it" as your whole answer ("yes, approve it" and "approve it, thanks" too). A plain "yes", "sure", "OK", "go ahead" or "do it" never approves one, however harmless it looks, nor does an approve with anything more to it ("approve it unless the tests fail", "approve the Mina one", "go ahead, I'll approve the other one later"), which gets "It needs an 'approve', so I've left it waiting for you in T3 Code." An approve with more after it ("approve it, and tell the Mina one to wait") is asked again on its own, with the rest said to be left. Nothing you said before you heard a question answers it, and a quick "yes" or an option's name said back to an answer is never taken as one: an agent's question that comes up while you can still follow up an answer is asked once yapd has dealt with what you said. Failures, usage limits and finished work from agents without hooks are said once, and a finished turn from its hook or from T3 Code, never both. After a restart, what still waits on you is asked once each machine's T3 Code has caught up, so rig being down holds up nothing here. A question whose machine drops out is put by and asked again once that machine is back, even across a restart; an answer you give meanwhile isn't sent, and yapd says so: "I couldn't get your answer to it, sir: I can't reach rig right now. I'll ask you again once I can." Secrets are never taken by voice, nor kept when you say one.
+- Updates are tied to their T3 Code thread, so "tell it to…" after one goes into that thread.
+
 ## Show me
 
-- "Show me what's running", "show me that PR", "show me my usage" or "what I missed" puts a card in a panel under the menu bar icon as yapd says it; "hide that" takes it down, and "open that PR" opens it in your browser, https only. A thread waiting on a command that can't be read aloud gets its card with the answer, and "say that again" puts it back up.
+- "Show me what's running", "show me that PR", "show me my usage" or "what I missed" puts a card in a panel under the menu bar icon as yapd says it; "hide that" takes it down, and "open that PR" opens it in your browser, https only. A thread waiting on a command that can't be read aloud gets its card with the answer, and "say that again" puts it back up. "Show me the question" puts an agent's question up as it's asked again.
 - The API gains `/cards`, `/threads` and `/journal` to read from.
 
 ## Rig
 
-- Rig's threads count as much as this Mac's: the desk, "who needs me?", "what's running?", cards and messages or stops by voice cover both, each sent only to its own machine, through an SSH tunnel to rig's T3 Code whose token is fetched at startup and kept in memory only. While rig can't be reached, yapd says why the first time something needs rig, then only that it still can't see rig's threads, and this Mac's carry on regardless. Needs rig on a yapd with `yapd t3`.
+- Rig's threads count as much as this Mac's: the desk, "who needs me?", "what's running?", cards, agents' questions and messages or stops by voice cover both, each sent only to its own machine, through an SSH tunnel to rig's T3 Code whose token is fetched at startup and kept in memory only. While rig can't be reached, yapd says why the first time something needs rig, then only that it still can't see rig's threads, and this Mac's carry on regardless. Needs rig on a yapd with `yapd t3`.
 
 ## Faster
 
 - "Yes" or "go ahead" to an update that asked something, and "thanks" or "skip it", are handled without the model: about two seconds saved on the most common replies.
 - Short lines like "Right away, sir." are rendered once and kept; your usual lines are written in your `YAPD_STYLE` once and rendered at startup.
-- Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message goes by voice or new work starts, never the same twice in a row.
+- Your own lines for "on it", in `YAPD_ON_IT` separated by `|`, take turns in place of the written one when a reply is passed on, a message or an answer in your own words goes by voice or new work starts, never the same twice in a row.
 - No more ~2 s wait for a fresh Codex thread after a quiet spell (one update in five); three are kept ready.
 - The speaker gets ready while an update renders: about a second saved on nearly every update.
 - You can interrupt from the first word of an update or an answer. Over yapd's first three seconds, "stop", "wait" or "skip" work at once, and other words work when they're clearly yours; otherwise say it again once it's a few seconds in.
@@ -57,6 +62,12 @@ Live on `dev` now: everything below. Rig's threads are followed, waiting on thei
 - With an older yapd on rig, a connection dropped while starting work there is said as "I can't reach rig" rather than "it may have started".
 - "Show Last Card" just after closing a card can come to nothing if the close reaches yapd after it: choose it again.
 - A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.
+- Rig's hooks aren't tied to their thread yet, so "tell it to…" after one of rig's updates goes the way hooks always have.
+- A question you put off with "later", or that made way for another, isn't brought back if yapd restarts before it comes round again. It still waits in T3 Code, and "who needs me?" lists it.
+- "Thanks" or "skip" said back to an answer, while yapd's own "which one?" for the next step of what you asked waits behind it, lets that step go; yapd says so.
+- Showing or hiding a card while an agent's question waits on you asks it again straight away, and the third time in a row lets it go: ask for it when you're ready.
+- For Yes and No options you hear "No it is, sir.", which can sound as if yapd is turning you down.
+- If T3 Code is slow to hand over a question as it arrives, you're only told one is waiting; "what's the question?" reads it to you.
 - Catching up, if yapd has to ask "which one?" about your follow-up, the next "what did I miss?" may say "Nothing else." though an update is still unheard.
 - After twenty follow-ups in a row, "what did I miss?" can reach back to an update from earlier that day you'd moved on from.
 - Over yapd's first three seconds, its own voice heard as wholly other words, like "Oh, Rennie app." for "Over in yapd", can still stop it and be taken for yours. A transcription still running as those seconds end can let the start of its voice duck or stop it too.
