@@ -38,12 +38,8 @@ type Signal =
    * `quiet` frames without a voice, as the voice detector counts them.
    */
   | { readonly _tag: "Onset"; readonly echo: boolean; readonly playing: boolean; readonly quiet: number }
-  /**
-   * They've finished: with how much of it, from the start, came in while yapd
-   * was still playing something, `played`, when they went on a moment
-   * after that with no pause.
-   */
-  | { readonly _tag: "Utterance"; readonly audio: Float32Array; readonly played?: number }
+  /** They've finished. */
+  | { readonly _tag: "Utterance"; readonly audio: Float32Array }
   /**
    * All the user has said so far of what may be yapd's own voice, passed on
    * as it goes, so a stop of his needn't wait till he's finished: `paused`
@@ -147,8 +143,7 @@ interface Chain {
   /**
    * The part he's saying now, while he is: where it comes in what he said,
    * how far into the line he began it, whether he began it once `cue` had
-   * been said to the end, or while yapd was playing it, as the microphone
-   * heard it, the look at it so far under way, for a stop of
+   * been said to the end, the look at it so far under way, for a stop of
    * his, the stop a look found, which yapd stopped for, the one a look heard
    * only as the last word, which all of it is to bear out, and the last look
    * as he paused, how much it had, and what it came to, once it's told.
@@ -158,7 +153,6 @@ interface Chain {
         readonly order: number
         readonly at: number
         readonly after: boolean
-        readonly over: boolean
         looking: number | undefined
         looked: string | undefined
         ending: string | undefined
@@ -283,13 +277,6 @@ const hush = 6
  * on its own, as over the rest of what it says: a quarter of a second.
  */
 const lull = 8
-/**
- * Frames of voice in what he says, after the last of it that came in while
- * yapd was playing something, for that to be him going on with no pause
- * rather than the last of yapd's own voice still getting in: a fifth of a
- * second, as long as a quick "Yes." lasts.
- */
-const onward = 6
 
 /** Seconds either side of the user talking that yapd's words are looked for in what he said, since where each falls in a line is only guessed. */
 const reach = 4
@@ -855,22 +842,11 @@ export const make = (options: {
         let since: number | undefined
         /** Whether yapd's own voice has stopped getting in since that began: past its first seconds, or once it stopped talking. */
         let past = false
-        /** Frames of what's being said up to the last that came in while yapd played something, and how many voiced ones since. */
-        let played: number | undefined
-        let onwards = 0
         const reset = () => {
           unsure = false
           since = undefined
           past = false
-          played = undefined
-          onwards = 0
         }
-        /** All that's been said, with how much of it came in while yapd played something, when he went on long enough after that. */
-        const finished = (audio: Float32Array): Signal => ({
-          _tag: "Utterance",
-          audio,
-          ...(played !== undefined && onwards >= onward ? { played: played * frame } : {}),
-        })
         /**
          * Frames he's been quiet for, counted as the voice detector counts
          * them, whether that's long enough with none of yapd's voice still
@@ -900,9 +876,8 @@ export const make = (options: {
             if (endpointer.pausing) {
               if (past && endpointer.silent >= lull) {
                 const audio = endpointer.end()
-                const utterance = audio === undefined ? undefined : finished(audio)
                 reset()
-                return utterance
+                return audio === undefined ? undefined : { _tag: "Utterance", audio }
               }
               if (endpointer.silent !== hush) return undefined
               since = 0
@@ -921,11 +896,7 @@ export const make = (options: {
             case "Speech":
               since = unsure ? 0 : undefined
               return event
-            case "Utterance": {
-              const utterance = finished(event.audio)
-              reset()
-              return utterance
-            }
+            case "Utterance":
             case "Abandoned":
               reset()
               return event
@@ -938,14 +909,6 @@ export const make = (options: {
               if (unsure && echo !== "talking") past = true
               const probability = yield* detect.value(frame)
               const event = endpointer.push(frame, probability)
-              if (event?._tag === "Onset") {
-                played = undefined
-                onwards = 0
-              }
-              if ((echo === "talking" || echo === "playing") && endpointer.size > 0) {
-                played = endpointer.size
-                onwards = 0
-              } else if (played !== undefined && probability >= Endpointer.defaults.on) onwards++
               return [signalled(echo, event), quieted(echo, probability)].filter((signal) => signal !== undefined)
             }),
           ),
@@ -1344,7 +1307,6 @@ export const make = (options: {
                 order: ++chain.parts,
                 at: yield* position,
                 after: line.cue && completed && !playing && !signal.playing,
-                over: signal.playing,
                 looking: undefined,
                 looked: undefined,
                 ending: undefined,
@@ -1384,22 +1346,13 @@ export const make = (options: {
               yield* startLulling
               // Once a stop of his is known, nothing else he said counts.
               if (part !== undefined && chain.stop === undefined) {
-                // Begun over "Sir?" and gone on past where it was said to the end with no pause, it's cut there: what came after
-                // is his reply to it, as if he'd begun it then.
-                const ran = line.cue && completed && part.over ? signal.played : undefined
-                const audio = ran === undefined ? signal.audio : signal.audio.subarray(0, ran)
                 // Said nothing more since he paused, the look then has all of it, and is told as that, once it's back.
-                const paused = ran === undefined && part.paused !== undefined && audio.length <= part.paused.samples ? part.paused : undefined
-                const finished = { order: part.order, at: part.at, audio }
+                const paused = part.paused !== undefined && signal.audio.length <= part.paused.samples ? part.paused : undefined
+                const finished = { order: part.order, at: part.at, audio: signal.audio }
                 // Begun once "Sir?" was over, with nothing over it known to be him, it's held for his reply until that's known.
                 if (part.after && chain.holding) chain.held.push(finished)
                 else if (paused?.whole !== undefined) yield* told(paused.whole, finished)
-                else chain.checking.set(paused?.id ?? (yield* look(audio, chain.at, "whole", part.looked, part.ending)), finished)
-                if (ran !== undefined) {
-                  const reply = { order: ++chain.parts, at: part.at, audio: signal.audio.subarray(ran) }
-                  if (chain.holding) chain.held.push(reply)
-                  else chain.checking.set(yield* look(reply.audio, chain.at, "whole"), reply)
-                }
+                else chain.checking.set(paused?.id ?? (yield* look(signal.audio, chain.at, "whole", part.looked, part.ending)), finished)
               }
               const closed = yield* close
               if (closed !== undefined) return closed

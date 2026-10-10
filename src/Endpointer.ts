@@ -104,11 +104,6 @@ export class Endpointer {
     return this.phase === "speech" && this.quiet > 0
   }
 
-  /** How many frames of what the user is saying there are so far, from just before the onset: none when they aren't. */
-  get size(): number {
-    return this.phase === "quiet" ? 0 : this.frames.length
-  }
-
   /** How many frames the user has been quiet for partway through: none while they talk. */
   get silent(): number {
     return this.phase === "speech" ? this.quiet : 0
