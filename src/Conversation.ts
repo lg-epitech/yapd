@@ -27,6 +27,12 @@ export interface Update {
   readonly at: number
   /** The T3 Code thread it came from, when its hook could be tied to one, or T3 Code told of it. */
   readonly about?: Threads.Ref
+  /**
+   * The T3 Code thread a hook from another machine is known to be from, for
+   * what's shown and muted only: what's said over it still goes the way hooks
+   * always have.
+   */
+  readonly owner?: Threads.Ref
 }
 
 type Signal =

@@ -107,6 +107,11 @@ export const migrations: ReadonlyArray<string> = [
   create index actions_thread on actions (machine, thread, at);
   create index actions_open on actions (at) where state in ('prepared', 'unknown');
   create index actions_message on actions (message_id) where message_id is not null;`,
+  // The threads the user muted, whose progress and finished work yapd keeps
+  // to itself until he unmutes them, or until `ends_at`. The key names the
+  // machine and the thread, or the session when there's no thread to tie it
+  // to, so only what it's called aloud and its project are kept beside it.
+  "create table mutes (key text primary key, called text, project text, at integer not null, ends_at integer) strict;",
 ]
 
 export class Store extends Context.Tag("yapd/Store")<

@@ -1,0 +1,288 @@
+import type { Database } from "bun:sqlite"
+import { Clock, Effect, Option, PubSub, Stream } from "effect"
+import { hostname } from "node:os"
+import type * as Conversation from "./Conversation.ts"
+import type { Journal, Naming } from "./Journal.ts"
+import type * as Store from "./Store.ts"
+import type * as Threads from "./Threads.ts"
+
+// The threads the user muted because they're noisy. A muted thread's progress
+// and finished work are summed up and kept, but never said; whatever needs
+// him still is: a question, an approval, a failure, a limit, and the answer
+// to a message he sent it himself. A mute is his to make and take off, from
+// the menu or by voice, and nothing about it ever reaches an agent.
+
+/**
+ * What a mute is kept under: `t3:<machine>:<thread>` for a thread T3 Code
+ * runs, and `session:<machine>:<agent>:<session>` for a session yapd can't tie
+ * to one, like one run in a terminal. Clients take it as a name, nothing more.
+ */
+export const key = {
+  thread: (ref: Threads.Ref) => `t3:${ref.machine}:${ref.id}`,
+  /** `session` is the agent and its own id for the session, as `Payload.key` puts them. */
+  session: (machine: string, session: string) => `session:${machine}:${session}`,
+}
+
+/** What a key is about. */
+export type About =
+  | { readonly _tag: "Thread"; readonly ref: Threads.Ref }
+  | { readonly _tag: "Session"; readonly machine: string; readonly agent: string; readonly session: string }
+
+/** What a key is about, or none for one yapd never made, like a mangled one. */
+export const parse = (text: string): Option.Option<About> => {
+  const thread = /^t3:([^:\s]+):(\S+)$/.exec(text)
+  if (thread !== null) return Option.some({ _tag: "Thread", ref: { machine: thread[1]!, id: thread[2]! } })
+  const session = /^session:([^:\s]+):(claude|codex):(\S+)$/.exec(text)
+  if (session !== null) return Option.some({ _tag: "Session", machine: session[1]!, agent: session[2]!, session: session[3]! })
+  return Option.none()
+}
+
+/**
+ * The keys an update is muted by: its thread's, when it's tied to one, here
+ * or on another machine, and its session's, unless it's a turn T3 Code told
+ * of, which has no session of its own.
+ */
+export const keysOf = (update: Pick<Conversation.Update, "session" | "about" | "owner" | "thread">, called: Naming): ReadonlyArray<string> => {
+  const ref = update.about ?? update.owner
+  return [
+    ...(ref === undefined ? [] : [key.thread(ref)]),
+    ...(update.session.startsWith("finished:") ? [] : [key.session(called(update.thread.origin.host ?? hostname()), update.session)]),
+  ]
+}
+
+/** A thread he muted. */
+export interface Mute {
+  readonly key: string
+  /** What it's called aloud, like "the Tezos migration", for when there's nothing else to call it by. */
+  readonly called?: string | undefined
+  readonly project?: string | undefined
+  /** When he muted it. */
+  readonly at: number
+  /** When it ends on its own, if it does. */
+  readonly ends?: number | undefined
+}
+
+/** A change he made to what's muted, which "scratch that" takes back: the mutes it made and the ones it took off. */
+export interface Change {
+  readonly how: "mute" | "unmute" | "clear" | "undo"
+  readonly at: number
+  readonly added: ReadonlyArray<Mute>
+  readonly removed: ReadonlyArray<Mute>
+}
+
+/** How long a change can be taken back for, as for anything else yapd did. */
+const takeBack = 2 * 60_000
+
+export interface Mutes {
+  /** The mute any of these keys is under, if one is, from memory, so nothing waits on the database for it. */
+  readonly muted: (keys: ReadonlyArray<string>) => Effect.Effect<Option.Option<Mute>>
+  /** Mutes a thread, or changes when its mute ends, and says whether that changed anything. */
+  readonly mute: (mute: Omit<Mute, "at">) => Effect.Effect<boolean>
+  /** Takes a thread's mute off, and gives it back, or none when it wasn't muted. */
+  readonly unmute: (key: string) => Effect.Effect<Option.Option<Mute>>
+  /** Takes every mute off, and gives them back. */
+  readonly clear: Effect.Effect<ReadonlyArray<Mute>>
+  /** Undoes the last change, if it was made in the last two minutes, and gives back what undoing it changed. */
+  readonly undo: Effect.Effect<Option.Option<Change>>
+  /** Moves a session's mute to its thread once the session is found to be the thread's, keeping a mute the thread has already. */
+  readonly rekey: (from: string, to: string) => Effect.Effect<void>
+  /** Every mute, oldest first. */
+  readonly list: Effect.Effect<ReadonlyArray<Mute>>
+  /** The last change he made, if it was in the last two minutes. */
+  readonly last: Effect.Effect<Option.Option<Change>>
+  /** Each time what's muted changes, even when a mute ends on its own. */
+  readonly changes: Stream.Stream<void>
+}
+
+interface Row {
+  readonly key: string
+  readonly called: string | null
+  readonly project: string | null
+  readonly at: number
+  readonly ends_at: number | null
+}
+
+const fromRow = (row: Row): Mute => ({
+  key: row.key,
+  ...(row.called === null ? {} : { called: row.called }),
+  ...(row.project === null ? {} : { project: row.project }),
+  at: row.at,
+  ...(row.ends_at === null ? {} : { ends: row.ends_at }),
+})
+
+/**
+ * The mutes kept in `store`, read once, then kept in memory as they change.
+ * Should the database fail, what he asked for still holds until yapd restarts.
+ */
+export const make = (store: Store.Store["Type"]) =>
+  Effect.gen(function* () {
+    const kept = yield* store
+      .transaction((database: Database) => database.query<Row, []>("select key, called, project, at, ends_at from mutes order by at, key").all())
+      .pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read what's muted", error), [] as ReadonlyArray<Row>)))
+    const mutes = new Map(kept.map((row) => [row.key, fromRow(row)]))
+    let last: Change | undefined
+    const changed = yield* PubSub.unbounded<void>()
+
+    /** Writes what's added and taken off as one, in memory whatever the database makes of it. */
+    const save = (added: ReadonlyArray<Mute>, removed: ReadonlyArray<Mute>) =>
+      Effect.gen(function* () {
+        const adding = new Set(added.map(({ key }) => key))
+        for (const { key } of removed) if (!adding.has(key)) mutes.delete(key)
+        for (const mute of added) mutes.set(mute.key, mute)
+        yield* store
+          .transaction((database: Database) => {
+            for (const { key } of removed) if (!adding.has(key)) database.query("delete from mutes where key = ?").run(key)
+            for (const mute of added) {
+              database
+                .query("insert or replace into mutes (key, called, project, at, ends_at) values (?, ?, ?, ?, ?)")
+                .run(mute.key, mute.called ?? null, mute.project ?? null, mute.at, mute.ends ?? null)
+            }
+          })
+          .pipe(Effect.catchAll((error) => Effect.logWarning("Could not keep what's muted", error)))
+        yield* PubSub.publish(changed, undefined)
+      })
+
+    /** Records a change he made, for taking it back. */
+    const change = (how: Change["how"], added: ReadonlyArray<Mute>, removed: ReadonlyArray<Mute>) =>
+      Effect.gen(function* () {
+        yield* save(added, removed)
+        last = { how, at: yield* Clock.currentTimeMillis, added, removed }
+        return last
+      })
+
+    /** Mutes that ended on their own are let go of as they're next looked at. */
+    const lapsed = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const ended = [...mutes.values()].filter(({ ends }) => ends !== undefined && ends <= now)
+      if (ended.length > 0) yield* save([], ended)
+    })
+
+    const lately = Effect.map(Clock.currentTimeMillis, (now) => Option.filter(Option.fromNullable(last), ({ at }) => now - at <= takeBack))
+
+    return {
+      muted: (keys) =>
+        Effect.zipRight(
+          lapsed,
+          Effect.sync(() => Option.fromNullable(keys.map((key) => mutes.get(key)).find((mute) => mute !== undefined))),
+        ),
+      mute: ({ key, called, project, ends }) =>
+        Effect.gen(function* () {
+          yield* lapsed
+          const before = mutes.get(key)
+          if (before !== undefined && before.ends === ends) return false
+          const at = yield* Clock.currentTimeMillis
+          const mute: Mute = {
+            key,
+            ...(called === undefined ? (before?.called === undefined ? {} : { called: before.called }) : { called }),
+            ...(project === undefined ? (before?.project === undefined ? {} : { project: before.project }) : { project }),
+            at,
+            ...(ends === undefined ? {} : { ends }),
+          }
+          yield* change("mute", [mute], before === undefined ? [] : [before])
+          return true
+        }),
+      unmute: (key) =>
+        Effect.gen(function* () {
+          yield* lapsed
+          const before = mutes.get(key)
+          if (before === undefined) return Option.none()
+          yield* change("unmute", [], [before])
+          return Option.some(before)
+        }),
+      clear: Effect.gen(function* () {
+        yield* lapsed
+        const all = [...mutes.values()]
+        if (all.length > 0) yield* change("clear", [], all)
+        return all
+      }),
+      undo: Effect.gen(function* () {
+        const undone = yield* lately
+        if (Option.isNone(undone)) return Option.none()
+        // Taken back, it's a change of its own, so taking that back too puts things as they were before.
+        return Option.some(yield* change("undo", undone.value.removed, undone.value.added))
+      }),
+      rekey: (from, to) =>
+        Effect.gen(function* () {
+          const before = mutes.get(from)
+          if (before === undefined) return
+          const kept = mutes.get(to)
+          const moved = kept ?? { ...before, key: to }
+          yield* save(kept === undefined ? [moved] : [], [before])
+          // What's taken back is the thread's mute from now on.
+          if (last !== undefined) {
+            const follow = (all: ReadonlyArray<Mute>) => all.map((mute) => (mute.key === from ? { ...mute, key: to } : mute))
+            last = { ...last, added: follow(last.added), removed: follow(last.removed) }
+          }
+        }),
+      list: Effect.zipRight(
+        lapsed,
+        Effect.sync(() => [...mutes.values()].toSorted((one, other) => one.at - other.at || (one.key < other.key ? -1 : one.key > other.key ? 1 : 0))),
+      ),
+      last: lately,
+      changes: Stream.fromPubSub(changed),
+    } satisfies Mutes
+  })
+
+/** What's done to mutes, from the menu or by voice: never anything sent to an agent. */
+export interface Controls {
+  /** Mutes a thread, drops what of it is waiting to be said, and notes it. Whether it wasn't muted already, as it is now. */
+  readonly mute: (target: Omit<Mute, "at" | "ends">, ends?: number) => Effect.Effect<boolean>
+  /** Unmutes a thread, and notes it. Whether it was muted. */
+  readonly unmute: (key: string) => Effect.Effect<boolean>
+  /** Unmutes every thread, and notes it. The mutes taken off. */
+  readonly clear: Effect.Effect<ReadonlyArray<Mute>>
+  /** Takes back the last change to what's muted, made in the last two minutes, and notes it. What taking it back changed. */
+  readonly undo: Effect.Effect<Option.Option<Change>>
+}
+
+/**
+ * Mutes and unmutes threads in `mutes`, dropping what of a thread is waiting
+ * to be said with `silence`, and noting each change in the journal.
+ */
+export const controls = (options: {
+  readonly mutes: Mutes
+  readonly silence: (keys: ReadonlyArray<string>) => Effect.Effect<void>
+  readonly journal: Journal["Type"]
+}): Controls => {
+  const { mutes, silence, journal } = options
+  /** Under the thread it's about, when it's a thread. */
+  const where = (key: string) =>
+    Option.match(parse(key), {
+      onNone: () => ({}),
+      onSome: (about) => (about._tag === "Thread" ? { machine: about.ref.machine, thread: about.ref.id } : { machine: about.machine, thread: `${about.agent}:${about.session}` }),
+    })
+  const noted = (detail: Record<string, unknown>, key?: string) =>
+    Effect.flatMap(Clock.currentTimeMillis, (at) => journal.write({ at, kind: "action", ...(key === undefined ? {} : where(key)), detail }))
+  /** What's muted again is silenced again too. */
+  const silenced = (added: ReadonlyArray<Mute>) => (added.length === 0 ? Effect.void : silence(added.map(({ key }) => key)))
+  return {
+    mute: (target, ends) =>
+      Effect.gen(function* () {
+        const muted = yield* mutes.mute({ ...target, ...(ends === undefined ? {} : { ends }) })
+        // Muted already, what of it was waiting was dropped then, and nothing of it has been queued since.
+        if (!muted) return false
+        yield* silence([target.key])
+        yield* noted({ mute: target.key, ...(ends === undefined ? {} : { until: new Date(ends).toISOString() }) }, target.key)
+        return true
+      }),
+    unmute: (key) =>
+      Effect.gen(function* () {
+        const was = yield* mutes.unmute(key)
+        if (Option.isSome(was)) yield* noted({ unmute: key }, key)
+        return Option.isSome(was)
+      }),
+    clear: Effect.gen(function* () {
+      const all = yield* mutes.clear
+      if (all.length > 0) yield* noted({ unmute: all.map(({ key }) => key) })
+      return all
+    }),
+    undo: Effect.gen(function* () {
+      const undone = yield* mutes.undo
+      if (Option.isNone(undone)) return undone
+      const { added, removed } = undone.value
+      yield* silenced(added)
+      yield* noted({ undo: { mute: added.map(({ key }) => key), unmute: removed.map(({ key }) => key) } })
+      return undone
+    }),
+  }
+}
