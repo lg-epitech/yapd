@@ -356,34 +356,6 @@ const stems = (text: string) =>
       .filter((word) => word.length >= 3 && !ignored.has(word)),
   )
 
-/**
- * Words that ask for something or point at a thread, never name one: "tell",
- * "stop", "interrupt", "the Tezos one", "it", "yes", stemmed as titles' words are.
- */
-const asking: ReadonlySet<string> = new Set(
-  [
-    "one", "ones", "its", "it's", "this", "that", "these", "those", "thread", "threads", "send", "sent", "tell", "ask", "say", "message",
-    "reply", "respond", "answer", "write", "stop", "halt", "interrupt", "cancel", "run", "working", "approve", "allow", "deny", "decline",
-    "reject", "undo", "scratch", "take", "back", "carry", "yes", "yeah", "yep", "sure", "okay", "please", "now", "instead", "also", "well",
-    "too", "again", "but", "not", "don't", "dont", "what", "here", "there", "him", "her", "and", "the", "them",
-  ].map(stem),
-)
-
-/**
- * Whether what he said names a thread: a word of it, however speech spelled
- * it, is in what the thread is called aloud or in its title, leaving out
- * words too short or too common to tell threads apart and those that only
- * ask or point, like "tell", "stop" or "one". "The Tezos one" names "Migrate
- * Tezos Integration"; "interrupt it" names nothing. A name it misses only
- * ever means nothing is done.
- */
-export const names = (heard: string, listed: Pick<Listed, "called" | "thread">) => {
-  const said = [...stems(heard)].filter((word) => !asking.has(word))
-  if (said.length === 0) return false
-  const own = new Set([...stems(listed.called), ...stems(listed.thread.title)].filter((word) => !asking.has(word)))
-  return said.some((word) => own.has(word))
-}
-
 /** Threads put among the likeliest by their titles at most. */
 const entitledAt = 5
 

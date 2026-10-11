@@ -292,8 +292,6 @@ describe("Latest", () => {
         const told: Array<string> = []
         const replayed: Array<string> = []
         const mentioned: Array<string> = []
-        /** The sessions "it" was made, by their rows' keys. */
-        const sessions: Array<string> = []
         const controls = Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal })
         const menu = Latest.menu({
           latest: listed.latest,
@@ -303,18 +301,15 @@ describe("Latest", () => {
           daemon: {
             // The newest he heard under the key, kept at `at` or since.
             latestHeard: (key, at) => Effect.succeed(Option.fromNullable(heard.filter((one) => one.key === key && one.at >= at).at(-1)?.id)),
-            replay: (id, menu) => Effect.sync(() => void replayed.push(`${id} for ${menu}`)).pipe(Effect.as("queued" as const)),
+            replay: (id) => Effect.sync(() => void replayed.push(id)).pipe(Effect.as("queued" as const)),
             power: Effect.succeed({ on, turns: 1 }),
             // Said at once, which makes "it" the thread it's about.
             tell: (notice) => Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.as(true)),
           } as Parameters<typeof Latest.menu>[0]["daemon"],
-          assistant: {
-            mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.machine}/${ref.id}: ${said}`)),
-            mentionSession: (update, said, key) => Effect.sync(() => void sessions.push(`${key} (${update.project}): ${said}`)),
-          },
+          mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.id}: ${said}`)),
         })
         const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
-        return { ...listed, menu, told, replayed, mentioned, sessions, settle }
+        return { ...listed, menu, told, replayed, mentioned, settle }
       })
 
     test("hears a thread again from the update it shows, not one he heard before what was kept quiet of it or a question it asked since", async () => {
@@ -333,14 +328,14 @@ describe("Latest", () => {
       )
       expect([result.quiet, result.notice, result.unknown]).toEqual(["queued", "queued", "unknown"])
       expect(result.told).toEqual(["integration. Halfway.", "The Tezos migration asks which network first."])
-      expect(result.mentioned).toEqual(["Rosie/t-tezos: integration. Halfway.", "Rosie/t-tezos: The Tezos migration asks which network first."])
+      expect(result.mentioned).toEqual(["t-tezos: integration. Halfway.", "t-tezos: The Tezos migration asks which network first."])
       expect(result.replayed).toEqual([])
     })
 
     test("hears again as it was said the update he heard that the row shows, under its thread or the session it's shown from", async () => {
       const result = await run(
         Effect.gen(function* () {
-          const { journal, menu, told, replayed, mentioned, sessions, settle } = yield* menuOf([
+          const { journal, menu, told, replayed, settle } = yield* menuOf([
             { id: "heard-a", key: "t3:Rosie:t-tezos", at: 1 },
             { id: "heard-b", key: "session:Rosie:claude:s", at: 2 },
           ])
@@ -351,78 +346,12 @@ describe("Latest", () => {
           yield* journal.write({ at: 2, kind: "update", host: "Rosie", thread: "claude:s", said: "integration. Done." })
           yield* settle
           const session = yield* menu.replayThread("t3:Rosie:t-tezos")
-          return { linked, session, told: [...told], replayed: [...replayed], mentioned: [...mentioned], sessions: [...sessions] }
+          return { linked, session, told: [...told], replayed: [...replayed] }
         }),
       )
       expect([result.linked, result.session]).toEqual(["queued", "queued"])
-      // Said again as it was, for the row, which "it" means once it plays, rather than the session it may have been heard as.
-      expect(result.replayed).toEqual(["heard-a for t3:Rosie:t-tezos", "heard-b for t3:Rosie:t-tezos"])
+      expect(result.replayed).toEqual(["heard-a", "heard-b"])
       expect(result.told).toEqual([])
-      expect([...result.mentioned, ...result.sessions]).toEqual([])
-    })
-
-    test("says a session's row again as that session, never a thread, here or on rig, and a thread's row as that thread, here or on rig", async () => {
-      const result = await run(
-        Effect.gen(function* () {
-          const { journal, menu, told, mentioned, sessions, settle } = yield* menuOf([])
-          // A session in a terminal here, one on rig, and a thread on each, none of them heard.
-          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. Done." })
-          yield* journal.write({ at: 2, kind: "update", host: "rig.local", thread: "codex:s-rig", directory: "/code/integration", project: "integration", said: "integration. Done on rig." })
-          yield* journal.write({ at: 3, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s" } })
-          yield* journal.write({ at: 4, kind: "update", machine: "rig", thread: "t-rig", said: "integration. Halfway on rig.", detail: { session: "claude:s-r" } })
-          yield* settle
-          const outcomes = [
-            yield* menu.replayThread("session:Rosie:claude:s-term"),
-            yield* menu.replayThread("session:rig:codex:s-rig"),
-            yield* menu.replayThread("t3:Rosie:t-tezos"),
-            yield* menu.replayThread("t3:rig:t-rig"),
-          ]
-          return { outcomes, told: [...told], mentioned: [...mentioned], sessions: [...sessions] }
-        }),
-      )
-      expect(result.outcomes).toEqual(["queued", "queued", "queued", "queued"])
-      expect(result.told).toEqual(["integration. Done.", "integration. Done on rig.", "integration. Halfway.", "integration. Halfway on rig."])
-      expect(result.sessions).toEqual([
-        "session:Rosie:claude:s-term (integration): integration. Done.",
-        "session:rig:codex:s-rig (integration): integration. Done on rig.",
-      ])
-      expect(result.mentioned).toEqual(["Rosie/t-tezos: integration. Halfway.", "rig/t-rig: integration. Halfway on rig."])
-    })
-
-    test("says nothing of a session's row gone from the list while it was being said again, as once its session is found to be a thread's", async () => {
-      const result = await run(
-        Effect.gen(function* () {
-          const listed = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] })
-          const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
-          const told: Array<string> = []
-          yield* listed.journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. Done." })
-          yield* settle
-          const before = brief(yield* listed.latest.current)
-          const menu = Latest.menu({
-            latest: listed.latest,
-            threads: { find: () => Effect.succeedNone },
-            mutes: listed.mutes,
-            controls: Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal }),
-            daemon: {
-              latestHeard: () => Effect.succeedNone,
-              replay: () => Effect.die("not expected"),
-              // Meanwhile its session is found to be the Tezos migration's, which its row is then shown under.
-              power: Effect.as(
-                Effect.zipRight(listed.journal.write({ at: 2, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s-term" } }), settle),
-                { on: true, turns: 1 },
-              ),
-              tell: (notice) => Effect.as(Effect.sync(() => void told.push(notice.spoken)), true),
-            } as Parameters<typeof Latest.menu>[0]["daemon"],
-            assistant: { mention: () => Effect.die("not expected"), mentionSession: () => Effect.die("not expected") },
-          })
-          const outcome = yield* menu.replayThread("session:Rosie:claude:s-term")
-          return { before, outcome, told: [...told], after: brief(yield* listed.latest.current) }
-        }),
-      )
-      expect(result.before).toEqual(["session:Rosie:claude:s-term · Claude session · integration. Done."])
-      expect(result.outcome).toBe("unknown")
-      expect(result.told).toEqual([])
-      expect(result.after).toEqual(["t3:Rosie:t-tezos · Migrate the Tezos integration · integration. Halfway."])
     })
 
     test("says nothing again while yapd is off", async () => {

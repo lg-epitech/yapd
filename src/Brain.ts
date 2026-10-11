@@ -372,13 +372,6 @@ export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.
 /** What's said of an approval or an answer for a thread no longer waiting on it, as when it was dealt with in T3 Code. */
 export const dealtWith = (lines: Lines) => `That's already been dealt with${addressed(lines)}.`
 
-/**
- * What's said when he asks for something to be done to a thread without
- * naming it, while "it" is a menu's row yapd can't reach: nothing's done,
- * and nothing's asked.
- */
-export const nameIt = (lines: Lines) => `I can't reach that one from here${addressed(lines)}. Name the thread you mean.`
-
 /** What's said instead of answering a thread that waits on a secret, which is only ever given in T3 Code. */
 export const secretly = (lines: Lines) => `That one needs T3 Code; I never take a secret by voice${addressed(lines)}.`
 
@@ -1291,131 +1284,18 @@ export const takesBack = (heard: string) => scratching.has(gist(heard))
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
 
-/**
- * What the menu said again that "it" means: an update, or what was kept of
- * it, said for the menu's row, or one a question was asked over since.
- */
-export const rowOf = (subject: Assistant.Subject): Extract<Assistant.Subject, { readonly _tag: "Session" | "Answer" }> | undefined => {
-  switch (subject._tag) {
-    case "Session":
-      return subject.menu === undefined ? undefined : subject
-    case "Answer":
-      return subject.row !== undefined ? rowOf(subject.row) : subject.menu !== undefined && subject.question === undefined ? subject : undefined
-    default:
-      return undefined
-  }
-}
-
-/** The menu's row said again that "it" means, when it was: a thread, or a session T3 Code doesn't run. */
-export const saidAgain = (subject: Assistant.Subject): Option.Option<Mutes.About> => {
-  const key = rowOf(subject)?.menu
-  return key === undefined ? Option.none() : Mutes.parse(key)
-}
-
-/**
- * The thread what he heard last is about, if it's one: an update's when its
- * hook was tied to the thread, or said again from the menu, that row's
- * thread, and none for a session's row, however the update was tied. A
- * question asked over a menu's row yapd can't reach is about that row still.
- */
+/** The thread what he heard last is about, if it's one: an update's when its hook was tied to the thread. */
 export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> => {
   switch (subject._tag) {
     case "Thread":
       return Option.some(subject.ref)
     case "Answer":
-      return subject.row !== undefined ? about(subject.row) : subject.about
+      return subject.about
     case "Session":
-      return Option.match(saidAgain(subject), {
-        onNone: () => Option.fromNullable(subject.update.about),
-        onSome: (row) => (row._tag === "Thread" ? Option.some(row.ref) : Option.none()),
-      })
+      return Option.fromNullable(subject.update.about)
     case "Nothing":
       return Option.none()
   }
-}
-
-/**
- * The menu's row said again that "it" means, when yapd can't reach it from
- * here, and what it is: a session T3 Code doesn't run, or a thread that
- * isn't on the desk, as when it was archived or deleted, or its machine
- * can't be seen right now. None for anything else, like a thread's row on
- * the desk, which is that thread as ever.
- */
-export const outOfReach = (situation: Pick<Situation, "subject" | "desk">): Option.Option<{ readonly what: string; readonly kind: "session" | "thread" }> =>
-  Option.flatMap(saidAgain(situation.subject), (row) => {
-    if (row._tag === "Session") {
-      const subject = rowOf(situation.subject)
-      const where = subject?._tag === "Session" && subject.update.thread.cwd !== "" ? ` in ${fenced(subject.update.thread.cwd, 120)}` : ""
-      return Option.some({ what: `a session${where} on ${row.machine} that T3 Code doesn't run, like one in a terminal`, kind: "session" as const })
-    }
-    const { desk } = situation
-    if (desk.threads.some((listed) => Threads.same(listed.ref, row.ref))) return Option.none()
-    const away = desk.away.find(({ machine }) => machine.toLowerCase() === row.ref.machine.toLowerCase())
-    return Option.some({
-      what: away === undefined ? "a thread no longer in THREADS, maybe archived or deleted" : `a thread on ${away.machine}, which can't be seen right now`,
-      kind: "thread" as const,
-    })
-  })
-
-/** What he said that's surely his: all of it, or when he began over yapd's own voice, only what he said after a pause. */
-const his = (said: Overheard & { readonly heard: string }) => (said.echo === undefined ? said.heard : (said.afterPause ?? ""))
-
-/** Whether the question open was asked over a menu's row yapd can't reach, which "it" meant then. */
-const overRow = (situation: Pick<Situation, "subject" | "open">) => {
-  const { subject } = situation
-  return subject._tag === "Answer" && subject.row !== undefined && Option.exists(situation.open, (open) => subject.question?.id === open.id)
-}
-
-/** Whether a decision answers the question open: said as its answer, and what it asked about. */
-const answersOpen = (choice: Decision, situation: Pick<Situation, "open" | "desk">) =>
-  choice.pending === "answers" && Option.exists(situation.open, (open) => agrees(open, choice, situation.desk))
-
-/**
- * Whether his words name a thread, as `Threads.names` has it: what he said,
- * surely his, and for a later step of his request, what he said in all too.
- * Answering a question asked over a menu's row yapd can't reach, like "the
- * first one", the words he asked for it in count too.
- */
-const naming = (choice: Decision, situation: Situation, listed: Threads.Listed) => {
-  const { utterance } = situation
-  if (Threads.names(his(utterance), listed) && (utterance.whole === undefined || Threads.names(utterance.whole, listed))) return true
-  const open = Option.getOrUndefined(situation.open)
-  return open !== undefined && overRow(situation) && answersOpen(choice, situation) && Threads.names(his(open), listed)
-}
-
-/**
- * Whether what's to be done to a thread, like a message, an answer, an
- * allowing, stopping it or taking something back, waits for him to name it:
- * while "it" is a menu's row yapd can't reach, the model may take "it" for a
- * thread he heard of before, so nothing's done to a thread his words don't
- * name, and nothing's asked about it either. Reading what a thread asks
- * isn't doing anything to it, and a plain yes to a question asked before the
- * row was said again is that question's, as ever.
- */
-export const unnamed = (choice: Decision, listed: Threads.Listed | undefined, situation: Situation) => {
-  if (Option.isNone(outOfReach(situation))) return false
-  if (choice.act === "reply" && choice.text.trim() === "" && choice.how === "") return false
-  if (answersOpen(choice, situation) && !overRow(situation) && agreed.has(meaning(gist(situation.utterance.heard)).said)) return false
-  return listed === undefined || !naming(choice, situation, listed)
-}
-
-/**
- * What "it" means once yapd has said something back, when it meant a menu's
- * row yapd can't reach: still that row, whatever was said about it, like
- * that it can't be reached or another thread the model took it for, so
- * "mute it" and a second "interrupt it" are about the row too. A question
- * asked over it is what "it" means while it's open, about the row still.
- * Only a thread his words named, as `thought` had them, makes "it" that
- * thread, as ever.
- */
-export const held = (thought: Pick<Assistant.Thought, "subject" | "decision" | "situation">, after: Assistant.Subject): Assistant.Subject => {
-  const { desk } = thought.situation
-  const row = rowOf(thought.subject)
-  if (row === undefined || after._tag !== "Answer" || Option.isNone(outOfReach({ subject: row, desk }))) return after
-  const told = Option.flatMap(after.about, (ref) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, ref))))
-  if (Option.exists(told, (listed) => naming(thought.decision, thought.situation, listed))) return after
-  if (after.question !== undefined) return { ...after, row }
-  return { ...row, said: after.said }
 }
 
 /** The thread he's on about: what he heard about last, when it's on the desk. */
@@ -1597,8 +1477,7 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     const when = minutes === undefined ? "" : new Date(situation.now + minutes * 60_000).toISOString()
     if (how === "clear") return decision({ act: "mute", how, pending: replacing })
     if (Option.isSome(on)) return decision({ act: "mute", how, target: on.value.handle, when, pending: replacing })
-    // A question asked over a menu's row yapd can't reach is about that row, which is what's muted.
-    if (Option.isSome(about(subject)) || (rowOf(subject) ?? subject)._tag === "Session") return decision({ act: "mute", how, when, pending: replacing })
+    if (Option.isSome(about(subject)) || subject._tag === "Session") return decision({ act: "mute", how, when, pending: replacing })
     return undefined
   }
   if (hiding.has(said) && situation.showing !== undefined) return decision({ act: "show", how: "hide", pending: replacing })
@@ -1801,8 +1680,6 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
  * that's only fairly sure is confirmed first, since it can't be taken back
  * mid-thought. Otherwise he's asked which, naming them, or told it couldn't
  * be told with nothing to choose between, as the confidence policy says.
- * While "it" is a menu's row yapd can't reach, a thread his words don't name
- * gets nothing, and he's told to name it, as `unnamed` has it.
  */
 const writing = (
   choice: Decision,
@@ -1815,7 +1692,6 @@ const writing = (
   const { utterance, desk } = situation
   // Said over something, too little speech is talk or noise nearby, never something to do.
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
-  if (unnamed(choice, Option.getOrUndefined(target), situation)) return { _tag: "Say", spoken: nameIt(lines) }
   // Taking back what was just done needs no thread named: it's what was just done.
   if (choice.act === "undo" && Option.isNone(target)) return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target } }
   if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
@@ -2142,12 +2018,8 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   return `- ${lasted(now - kept.at)} ago, ${what}`
 }
 
-/** What the model is told of a menu's row said again that yapd can't reach, which "it" means. */
-const beyond = ({ what, kind }: { readonly what: string; readonly kind: "session" | "thread" }) =>
-  `It's from ${what}. You can't reach it from here. "It" and "that" mean that ${kind}, never ${kind === "session" ? "a" : "another"} thread in THREADS. If he asks you to do something to it, like stopping it or telling it something, answer that you can't reach it from here.`
-
 /** What "it" means, as the model sees it. */
-const focus = (situation: Situation): string => {
+const focus = (situation: Situation) => {
   const { subject, desk, now } = situation
   switch (subject._tag) {
     case "Nothing":
@@ -2158,15 +2030,11 @@ const focus = (situation: Situation): string => {
     }
     case "Session": {
       const { update } = subject
-      const ref = about(subject)
-      const handle = Option.getOrUndefined(Option.flatMap(ref, (ref) => Option.fromNullable(handleOf(desk, ref.machine, ref.id))))
-      const unreached = outOfReach(situation)
+      const handle = update.about === undefined ? undefined : handleOf(desk, update.about.machine, update.about.id)
       return [
-        Option.isSome(unreached)
-          ? `Your update about ${update.project}, from ${lasted(now - update.at)} ago, which he just heard again from the menu: ${fenced(update.spoken, 400)}\n${beyond(unreached.value)}`
-          : handle === undefined
-            ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
-            : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
+        handle === undefined
+          ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
+          : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
         // Like an answer to what he asked over it, which is what he heard last.
         ...(subject.said === update.spoken ? [] : [`What you said last, over it: ${fenced(subject.said, 400)}`]),
         ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${fenced(prompt, 300)}`] }),
@@ -2174,10 +2042,6 @@ const focus = (situation: Situation): string => {
       ].join("\n")
     }
     case "Answer": {
-      // Asked over a menu's row yapd can't reach, the question is about that row still.
-      if (subject.row !== undefined) return `What you just asked him: ${fenced(subject.said, 700)}, over this:\n${focus({ ...situation, subject: subject.row })}`
-      const unreached = outOfReach(situation)
-      if (Option.isSome(unreached)) return `What you just told him again from the menu, as he asked: ${fenced(subject.said, 700)}\n${beyond(unreached.value)}`
       const handle = Option.flatMap(subject.about, (ref) => Option.fromNullable(handleOf(desk, ref.machine, ref.id)))
       return `What you just told him${Option.match(handle, { onNone: () => "", onSome: (handle) => ` about ${handle}` })}: ${fenced(subject.said, 700)}`
     }
