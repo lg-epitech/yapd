@@ -2469,6 +2469,12 @@ export const make = (options: {
         const it = Option.exists(Brain.focused(situation), ({ handle }) => handle === listed.handle)
         return Option.some({ key: Mutes.key.thread(listed.ref), called: `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`, project: listed.project, it })
       }
+      // One of what's muted by its own handle there, like a session in a terminal, which no thread on the desk is.
+      const by = Brain.mutedBy(plan.decision.target, situation)
+      if (Option.isSome(by)) {
+        const mute = by.value
+        return Option.some({ key: mute.key, called: Brain.mutedName(mute, situation.desk), project: mute.project, it: false })
+      }
       // Only "mute it", worked out without the model, means what he's on about with nothing named.
       if (thought.source !== "fast") return Option.none()
       const { subject } = situation

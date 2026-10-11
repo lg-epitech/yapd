@@ -10104,6 +10104,26 @@ describe("Assistant muting", () => {
     expect(result.model).toBe(0)
   })
 
+  test("a muted session no thread on the desk is, named to the model, is unmuted by its handle in MUTED", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, mutes, dispatched } = yield* assistant(
+          (situation) => Brain.decision({ act: "mute", how: "unmute", target: situation.utterance.heard.includes("session") ? "m1" : "m9", sure: "high" }),
+          undefined,
+          { muting: true },
+        )
+        yield* mutes!.mute({ key: "session:Rosie:claude:s-term", called: "the Claude session in yapd", project: "yapd" })
+        yield* dictate("Unmute the Claude session in yapd.")
+        const after = yield* keys(mutes)
+        yield* dictate("Unmute the other one.")
+        return { spoken: spoken(), after, dispatched: dispatched.length }
+      }),
+    )
+    expect(result.spoken).toEqual(["Unmuted the Claude session in yapd, sir.", "I couldn't tell which one you meant, sir."])
+    expect(result.after).toEqual([])
+    expect(result.dispatched).toBe(0)
+  })
+
   test("'scratch that' takes back a mute he just made, rather than a message sent before it", async () => {
     const result = await run(
       Effect.gen(function* () {

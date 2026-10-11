@@ -966,9 +966,22 @@ export const until = (ends: number, now: number) => (clock(new Date(ends).toISOS
  * when that isn't this one, or else as it was called when he muted it.
  */
 export const mutedName = (mute: Mutes.Mute, desk: Threads.Desk) => {
-  const listed = desk.threads.find(({ ref }) => Mutes.key.thread(ref) === mute.key)
+  const listed = mutedListed(mute, desk)
   if (listed !== undefined) return `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`
   return mute.called ?? (mute.key.startsWith("session:") ? "a session" : "a thread")
+}
+
+/** The thread on the desk a mute is of, when it's one. */
+const mutedListed = (mute: Mutes.Mute, desk: Threads.Desk) => desk.threads.find(({ ref }) => Mutes.key.thread(ref) === mute.key)
+
+/** What a mute of nothing on the desk, like a session in a terminal, goes by in MUTED, for the model to name it: m1, m2, by where it's listed. */
+export const mutedHandle = (index: number) => `m${index + 1}`
+
+/** The mute a handle in MUTED stands for: only one of nothing on the desk, which the model can't name otherwise. */
+export const mutedBy = (handle: string, situation: Pick<Situation, "mutes" | "desk">): Option.Option<Mutes.Mute> => {
+  const found = /^m(\d+)$/.exec(handle.trim())
+  const mute = found === null ? undefined : situation.mutes[Number(found[1]) - 1]
+  return mute === undefined || mutedListed(mute, situation.desk) !== undefined ? Option.none() : Option.some(mute)
 }
 
 /** What's said once a thread is muted or unmuted, or found as it was, by name or as "it", and once every thread is unmuted. */
@@ -1633,6 +1646,8 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
       if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
       if (choice.how === "clear" || choice.how === "undo") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
       if (choice.how !== "mute" && choice.how !== "unmute") return { _tag: "Say", spoken: lines.cantTell }
+      // One of MUTED by its own handle, like a session in a terminal, which isn't a thread on the desk.
+      if (Option.isNone(target) && Option.isSome(mutedBy(choice.target, situation))) return doing({ decision: choice, target })
       if (Option.isSome(target)) return choice.sure === "low" && candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
       // With nothing named, it's what he's on about, which only "mute it" said in so many words can mean.
       return candidates.length >= 2 ? ask(candidates) : doing({ decision: choice, target })
@@ -1792,7 +1807,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 - "reply": he answers a thread's question, in WAITING ON YOU or OPEN. "target" is the thread; "text" is his answer: the option he picked, as it's written, or his own words. A question in several parts is answered a part at a time: "text" answers only the part he's at, and yapd asks him the rest. "text" empty when he wants to hear a thread's question before answering: yapd reads it to him.
 - "dismiss": he wants you to stop talking, or it needs nothing: thanks, okay, an acknowledgement, or no to OPEN, unless OPEN asks a thread's question, which a no answers.
 - "resume": it wasn't meant for you: talk with someone else, noise, or words that make no sense.
-- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread; "when" the time it ends, if he says, as ISO 8601 with offset worked out from NOW, like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread.
+- "mute": he wants you to stop reading a thread's progress and finished work aloud, or start again. "how" "mute" or "unmute"; "target" the thread, or the handle of one in MUTED that has one, like m1, which isn't in THREADS; "when" the time it ends, if he says, as ISO 8601 with offset worked out from NOW, like an hour from now for "for an hour". What needs him still comes through. Not "mode", which is how you talk, nor "tidy", which snoozes it in T3 Code. "how" "clear" unmutes every thread.
 - "show": he wants to see something on his screen, or to stop seeing it. "how" is "threads" for what's going on across his threads, "thread" for one thread, "pr" for a thread's pull request, which opens it in his browser too, "usage" for his limits, "missed" for what he hasn't heard, "said" for what you said last, or "hide" to take down what's on his screen. "target" is the thread for "thread" and "pr". yapd says what's on it.
 - These you can't do yet, but name them when they're what he wants, with "target" and "text" filled in, and yapd tells him: "mode" to change when you talk; "remember" or "forget" something; "remind" him later, or do something once a thread finishes; "tidy" a thread away, like archiving or renaming it.`
 
@@ -2193,7 +2208,10 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
       ? []
       : [
           `MUTED, threads whose progress and finished work you keep to yourself, though what needs him still comes through: ${situation.mutes
-            .map((mute) => `${fenced(mutedName(mute, desk), 90)}${mute.ends === undefined ? "" : ` until ${until(mute.ends, now)}`}`)
+            .map(
+              (mute, index) =>
+                `${mutedListed(mute, desk) === undefined ? `${mutedHandle(index)} ` : ""}${fenced(mutedName(mute, desk), 90)}${mute.ends === undefined ? "" : ` until ${until(mute.ends, now)}`}`,
+            )
             .join(", ")}`,
         ]),
     `UNHEARD, what he hasn't heard yet:\n${unheard.length === 0 ? "Nothing." : unheard.join("\n")}${

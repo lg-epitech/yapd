@@ -1597,6 +1597,21 @@ describe("Brain", () => {
       expect(checked._tag === "Do" ? checked.plan.decision.how : checked).toBe("undo")
     })
 
+    test("a mute of nothing on the desk, like a terminal's session, has a handle of its own in MUTED, by which the model unmutes it", () => {
+      const mutes = [
+        { key: `t3:Rosie:${tezos.id}`, at: now - 60_000 },
+        { key: "session:Rosie:claude:s-term", called: "the Claude session in yapd", at: now - 30_000 },
+      ]
+      const told = Brain.prompt(situation("Unmute the Claude session in yapd.", { mutes }), Option.none())
+      expect(told).toContain("still comes through: «Migrate Tezos Integration», m2 «the Claude session in yapd»")
+      const checked = Brain.check(Brain.decision({ act: "mute", how: "unmute", target: "m2", sure: "high" }), situation("Unmute the Claude session in yapd.", { mutes }), lines)
+      expect(checked._tag === "Do" ? [checked.plan.decision.target, Option.isNone(checked.plan.target)] : checked).toEqual(["m2", true])
+      expect(Option.map(Brain.mutedBy("m2", { mutes, desk: desk() }), ({ key }) => key)).toEqual(Option.some("session:Rosie:claude:s-term"))
+      // A thread on the desk goes by its own handle, and a handle MUTED doesn't list stands for nothing.
+      expect(Brain.mutedBy("m1", { mutes, desk: desk() })).toEqual(Option.none())
+      expect(Brain.mutedBy("m3", { mutes, desk: desk() })).toEqual(Option.none())
+    })
+
     test("a mute the model isn't sure of asks between the threads it could be, and one it names goes ahead", () => {
       const handles = desk().threads.map(({ handle }) => handle)
       const unsure = Brain.check(Brain.decision({ act: "mute", how: "mute", target: handles[0]!, sure: "low", others: handles[1]! }), situation("Mute the migration one."), lines)
@@ -1625,7 +1640,7 @@ describe("Brain", () => {
       expect(told).toContain(`you kept quiet about it, since he muted it (integration, `)
       expect(told).toContain(`- from muted integration (2 updates, latest 5 min ago): «integration. Tests running.»`)
       expect(told).toContain(`you told him (integration-connectors, `)
-      expect(Brain.prompt(situation("What's going on?"), Option.none())).not.toContain("MUTED")
+      expect(Brain.prompt(situation("What's going on?"), Option.none())).not.toContain("MUTED,")
     })
   })
 })
