@@ -101,8 +101,8 @@ const before = 0.8
 const overhang = 0.45
 /**
  * Logged each time it picks up again after its own voice stopped a line over
- * its first seconds, which is how often that happens on his speakers is
- * counted in the log.
+ * its first seconds, so how often that happens on his speakers can be counted
+ * from the log.
  */
 export const ownVoice = "Stopped for its own voice over its first seconds, so it picks up again"
 /** Logged instead when it picks up again there after his talk that went on past where it stopped, but wasn't meant for it. */
