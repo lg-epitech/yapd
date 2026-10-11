@@ -800,7 +800,8 @@ const first = "Over in yapd, the tests pass now and the pull request is ready"
  * says back in `rendered`. With `answer`, it says an answer of yapd's in the
  * same words instead, which takes anything said for a follow-up, kept in
  * `followed`, unless `follow` says otherwise, and all it's offered, with
- * what yapd was saying around then when it's told that, in `offered`.
+ * what yapd was saying around then when it's told that, in `offered`. Its
+ * fiber ends with whether the update was heard, or the answer followed up.
  */
 const overHelper = (
   words: ReadonlyArray<readonly [number, string]>,
@@ -981,7 +982,7 @@ const overHelper = (
                 return (options.follow?.(heard, echo) ?? true) ? Option.some(Effect.sync(() => void followed.push(heard))) : Option.none()
               }),
           })
-        : Effect.as(made.converse({ ...long, spoken }), false),
+        : made.converse({ ...long, spoken }),
     )
     yield* flush
     yield* flush
@@ -1615,6 +1616,108 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     })
   })
 
+  test("tells the model nothing of its own voice for what he begins past its first seconds, though a sound before was let go as what may have been its own voice", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Which PR was that?"]], { reply: () => ({ intent: "answer", spoken: answered, message: "" }) })
+        yield* helper.wait(2.5)
+        // A sound over its first seconds that never becomes speech.
+        yield* helper.talk(0.8, 2)
+        yield* helper.talk(0, defaults.abandon)
+        yield* helper.wait(1.5)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, responded: helper.responded.map(({ heard, echo }) => ({ heard, echo })) }
+      }),
+    )
+    expect(result).toEqual({
+      commands: ["play", "volume", "volume", "volume", "stop", "play"],
+      responded: [{ heard: "Which PR was that?", echo: undefined }],
+    })
+  })
+
+  test("falls quiet at once when the model carries on after what he said once a line has ended, as it's no reply, without listening on", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Sam, can you pass the salt?"], [0.91, "Merge it."]], {
+          duration: 2,
+          reply: () => ({ intent: "resume", spoken: "", message: "" }),
+        })
+        yield* helper.wait(2)
+        yield* helper.finish
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        const done = Option.isSome(yield* Fiber.poll(helper.fiber))
+        // Within the moment it would have listened on for.
+        yield* helper.talk(0.91, 10)
+        yield* helper.quiet
+        yield* helper.wait(5)
+        return { done, heard: yield* Fiber.join(helper.fiber), commands: helper.commands, responded: helper.responded, sent: helper.sent }
+      }),
+    )
+    expect(result).toEqual({
+      done: true,
+      heard: true,
+      commands: ["play"],
+      // Said to the end, there was nothing it hadn't said yet.
+      responded: [{ project: "yapd", turn: long.turn, needsYou: false, lines: [{ speaker: "yapd", text: long.spoken }], heard: "Sam, can you pass the salt?" }],
+      sent: [],
+    })
+  })
+
+  test("takes its own voice going on a third of a second past where it stopped for its own, when it took a fifth of a second to stop", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."]], { reply: () => ({ intent: "dismiss", spoken: "", message: "" }) })
+        yield* helper.wait(1)
+        yield* helper.talk(0, defaults.lead)
+        yield* helper.talk(0.8, 1)
+        // Stopped a fifth of a second after its first sound, at 1.2 seconds, its voice going on to about 1.5.
+        yield* helper.wait(0.2)
+        yield* helper.talk(0.8, 15)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, plays: helper.plays.map(seconds), responded: helper.responded, done: Option.isSome(yield* Fiber.poll(helper.fiber)) }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "volume", "stop", "play"], plays: [0, 0.4], responded: [], done: false })
+  })
+
+  test("journals a dismissal said over its first seconds that he went on with after a pause, and counts the update heard", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Hmm, hold on."], [0.91, "No, that's fine, leave it."]], {
+          responding: 2,
+          reply: () => ({ intent: "dismiss", spoken: "", message: "" }),
+        })
+        yield* helper.wait(1)
+        yield* helper.talk(0, defaults.lead)
+        // No longer than its own voice can go on after it stops, so it may all have been that.
+        yield* helper.talk(0.9, 12)
+        yield* helper.quiet
+        // He goes on before the reply to it is ready.
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        return {
+          responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
+          replies: yield* helper.replies,
+          heard: yield* Fiber.join(helper.fiber),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      responded: [
+        { heard: "Hmm, hold on.", told: true },
+        { heard: "Hmm, hold on. No, that's fine, leave it.", told: true },
+      ],
+      replies: ["Hmm, hold on. No, that's fine, leave it."],
+      heard: true,
+    })
+  })
 })
 
 describe("Responder", () => {
