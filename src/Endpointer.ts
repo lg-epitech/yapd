@@ -59,6 +59,7 @@ export class Endpointer {
   private voiced = 0
   private quiet = 0
   private needed = 0
+  private wary = false
 
   constructor(private readonly options: Options = defaults) {}
 
@@ -76,6 +77,7 @@ export class Endpointer {
         }
         this.phase = "onset"
         this.voiced = 1
+        this.wary = wary
         this.needed = wary ? this.options.wary : confirm
         return onset
 
@@ -92,9 +94,9 @@ export class Endpointer {
           return speech
         }
         if (this.quiet >= abandon) {
-          const kept = this.frames.slice(-lead)
+          const kept = this.wary ? this.frames.slice(-lead) : []
           this.reset()
-          // Still before whatever comes next, as when nothing came, so speech begun just after isn't clipped.
+          // After what may have been yapd's own voice, still before whatever comes next, so his voice begun just after isn't clipped.
           this.frames = kept
           return abandoned
         }

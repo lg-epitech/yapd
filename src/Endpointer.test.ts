@@ -44,12 +44,21 @@ describe("Endpointer", () => {
     expect(events.map(({ event }) => event._tag)).toEqual(["Onset", "Abandoned"])
   })
 
-  test("keeps the lead-in after a noise it let go, so speech that starts just after it isn't clipped", () => {
-    const events = feed([...quiet(3), ...voiced(2), ...quiet(defaults.abandon), ...voiced(10), ...quiet(defaults.silence)])
-    const last = events.at(-1)?.event
+  test("keeps the lead-in after what may have been yapd's own voice it let go, so speech that starts just after it isn't clipped", () => {
+    const endpointer = new Endpointer()
+    const frames = [...quiet(3), ...voiced(2), ...quiet(defaults.abandon), ...voiced(10), ...quiet(defaults.silence)]
+    const events = frames.map((probability, at) => endpointer.push(new Float32Array([at]), probability, at === 3))
+    const last = events.findLast((event) => event !== undefined)
     const audio = last?._tag === "Utterance" ? [...last.audio] : []
     const began = 5 + defaults.abandon
     expect(audio[0]).toBe(began - defaults.lead)
+  })
+
+  test("starts the lead-in afresh after any other noise it let go, as before", () => {
+    const events = feed([...quiet(3), ...voiced(2), ...quiet(defaults.abandon), ...voiced(10), ...quiet(defaults.silence)])
+    const last = events.at(-1)?.event
+    const audio = last?._tag === "Utterance" ? [...last.audio] : []
+    expect(audio[0]).toBe(5 + defaults.abandon)
   })
 
   test("ends the utterance after enough silence, keeping the lead-in", () => {
