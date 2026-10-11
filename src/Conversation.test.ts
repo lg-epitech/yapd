@@ -8,6 +8,7 @@ import {
   Effect,
   Fiber,
   Layer,
+  Logger,
   Option,
   Queue,
   Random,
@@ -1746,6 +1747,69 @@ describe("Once its own voice has stopped a line over its first seconds, and it p
       }),
     )
     expect(result).toEqual({ offered: [{ heard: "Stop.", told: true }], followed: ["Stop."] })
+  })
+
+  /** What's logged of its own voice and the cap, which is how often that happens on his speakers is counted, and what's logged of his words. */
+  const logged = <A, E>(test: Effect.Effect<A, E, Scope.Scope>) => {
+    const lines: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      lines.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    return overHelperScoped(test.pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger)))).then(() => ({
+      counted: lines.filter((line) => /own voice|Ducked|Picked up again/.test(line)),
+      all: lines,
+    }))
+  }
+
+  test("logs one plain line each time its own voice stops a line, and each sound the cap kept from stopping it, with none of his words", async () => {
+    const result = await logged(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."]], { live: true, reply: () => ({ intent: "resume", spoken: "", message: "" }) })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, defaults.wary)
+        yield* helper.quiet
+        yield* helper.talk(0.8, defaults.capped)
+        yield* helper.quiet
+        yield* helper.talk(0.8, defaults.wary - 1)
+        yield* helper.talk(0, defaults.abandon)
+        yield* helper.talk(0.8, defaults.wary)
+        yield* helper.quiet
+        yield* helper.wait(1)
+      }),
+    )
+    expect(result.counted).toEqual([
+      "Stopped for its own voice over its first seconds, as its words tell, so it picks up again, and takes more speech to stop till they're over",
+      "Stopped for its own voice again over its first seconds, as its words tell, though it took more speech to stop, so it picks up again",
+      "Ducked for a sound over its first seconds too short to stop for, as its own voice stopped this line before, so it turns back up",
+      "Ducked for a sound over its first seconds too short to stop for, as its own voice stopped this line before, so it turns back up while it hears whose it was",
+      "Heard only its own voice in a sound over its first seconds too short to stop for, so it played on",
+    ])
+    expect(result.all.filter((line) => line.includes("yapd") && !line.startsWith("Heard:"))).toEqual([])
+  })
+
+  test("counts talk that went on past where it stopped, which the model took as not meant for it, as nobody's own voice, and leaves the cap off", async () => {
+    const result = await logged(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Can you pass me the salt?"], [0.8, "Over in yapd, the tests pass."]], {
+          live: true,
+          reply: () => ({ intent: "resume", spoken: "", message: "" }),
+        })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.9, 40)
+        yield* helper.quiet
+        const before = helper.timeline.length
+        yield* helper.talk(0.8, defaults.wary)
+        const after = read(helper.timeline.slice(before))
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return after
+      }).pipe(Effect.tap((after) => Effect.sync(() => expect(after).toEqual(["volume 0.25", "stop"])))),
+    )
+    expect(result.counted).toEqual([
+      "Picked up again over its first seconds after talk not meant for it",
+      "Stopped for its own voice over its first seconds, as its words tell, so it picks up again, and takes more speech to stop till they're over",
+    ])
+    expect(result.all.some((line) => line.includes("salt") && !line.startsWith("Heard:"))).toBe(false)
   })
 
   test("stops for him past its first seconds as ever, though its own voice stopped the line before", async () => {

@@ -1043,6 +1043,9 @@ export const make = (options: {
       return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
     }
 
+    /** Logged when talk over its first seconds that went on past where it stopped wasn't meant for yapd, which isn't its own voice. */
+    const notMeant = "Picked up again over its first seconds after talk not meant for it"
+
     /**
      * Picks up again just before where its own voice, or what the model took
      * for it, stopped the line, `told` as by its words or by the model; from
@@ -1177,9 +1180,13 @@ export const make = (options: {
                 if (echo !== undefined && listenOn()) continue
                 return true
               }
-              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
-              if (echo === undefined) carryOn()
-              else from = yield* again(outcome, "model", from)
+              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so. Talk that
+              // went on past where it stopped can't be that, so it's talk that wasn't, as later in a line, and takes no more to stop it after.
+              if (echo !== undefined && unsure) from = yield* again(outcome, "model", from)
+              else {
+                if (echo !== undefined) yield* Effect.logInfo(notMeant)
+                carryOn()
+              }
               continue
             }
 
@@ -1259,10 +1266,11 @@ export const make = (options: {
           // Talk that wasn't meant for yapd, once all of it was said, ends it: a question is left unanswered.
           if (outcome.at >= outcome.duration) return false
           // Nor is what may have been its own voice, as `respond` was told, which is picked up just before.
-          if (itself || echo !== undefined) {
+          if (itself || (echo !== undefined && unsure)) {
             from = yield* again(outcome, itself ? "words" : "model", from)
             continue
           }
+          if (echo !== undefined) yield* Effect.logInfo(notMeant)
           missed++
           from = Math.max(from, outcome.at - rewind)
         }
