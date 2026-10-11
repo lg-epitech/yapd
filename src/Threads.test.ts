@@ -39,25 +39,31 @@ const viewing = (...threads: ReadonlyArray<T3Live.Thread>): T3Live.View => ({
  * `sessions` says, by the agent's own ids, as T3 Code references them, and
  * which counts how often each thread is read.
  */
-const linking = (view: Option.Option<T3Live.View>, sessions: Readonly<Record<string, ReadonlyArray<string>>>) =>
+const linking = (
+  view: Option.Option<T3Live.View>,
+  sessions: Readonly<Record<string, ReadonlyArray<string>>>,
+  /** Rig's own threads and their sessions, when they aren't the same as here. */
+  rig: { readonly view: Option.Option<T3Live.View>; readonly sessions: Readonly<Record<string, ReadonlyArray<string>>> } = { view, sessions },
+) =>
   Effect.gen(function* () {
     const reads: Array<string> = []
-    const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
-      api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
-        const id = decodeURIComponent(path.split("/").at(-2) ?? "")
-        reads.push(id)
-        const providerThreads = (sessions[id] ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
-        return Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie)
-      }) as Server.Transport["api"],
-      call: (() => Effect.die("not expected")) as Server.Transport["call"],
-    })
+    const reaching = (name: string, sessions: Readonly<Record<string, ReadonlyArray<string>>>): Effect.Effect<Server.Transport, Server.Trouble> =>
+      Effect.succeed({
+        api: (<A, I>(path: string, schema: Schema.Schema<A, I>) => {
+          const id = decodeURIComponent(path.split("/").at(-2) ?? "")
+          reads.push(name === "Rosie" ? id : `${name} ${id}`)
+          const providerThreads = (sessions[id] ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
+          return Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie)
+        }) as Server.Transport["api"],
+        call: (() => Effect.die("not expected")) as Server.Transport["call"],
+      })
     const store = yield* Store.make(":memory:")
     const threads = yield* Threads.make({
       machine: "Rosie",
       live: { view: Effect.succeed(view), changes: Stream.never },
-      actions: Option.some(T3Actions.make(reach)),
-      // Rig, followed too, with the same threads as here.
-      others: [{ machine: "rig", live: { view: Effect.succeed(view), changes: Stream.never }, actions: T3Actions.make(reach), status: Effect.succeed({ _tag: "Up" }) }],
+      actions: Option.some(T3Actions.make(reaching("Rosie", sessions))),
+      // Rig, followed too, with the same threads as here unless said.
+      others: [{ machine: "rig", live: { view: Effect.succeed(rig.view), changes: Stream.never }, actions: T3Actions.make(reaching("rig", rig.sessions)), status: Effect.succeed({ _tag: "Up" }) }],
       journal: Journal.fromStore(store),
       store,
     })
@@ -209,18 +215,76 @@ describe("Threads", () => {
     expect(result.reads).toEqual(["fees", "tezos"])
   })
 
-  test("a hook is never linked while this machine's T3 Code isn't followed, nor one from rig, though rig's is", async () => {
+  test("a hook is never linked while its machine's T3 Code isn't followed, nor from a machine yapd doesn't follow", async () => {
     const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
     const result = await Effect.gen(function* () {
-      // T3 Code isn't running, or hasn't caught up.
+      // T3 Code isn't running, or hasn't caught up, here and on rig.
       const away = yield* linking(Option.none(), { tezos: ["s-tezos"] })
-      const unfollowed = yield* away.threads.link("Rosie", "s-tezos", "/code/integration")
-      // Rig's hooks come through the tunnel, and its T3 Code is followed, but its directories can't be looked at from here, even the same as here.
+      const unfollowed = [yield* away.threads.link("Rosie", "s-tezos", "/code/integration"), yield* away.threads.link("rig", "s-tezos", "/code/integration")]
+      // Alaska's hooks come through a tunnel too, but its T3 Code isn't followed.
       const here = yield* linking(Option.some(viewing(tezos)), { tezos: ["s-tezos"] })
-      const rig = yield* here.threads.link("rig", "s-tezos", "/code/integration")
-      return { unfollowed, rig, reads: [...away.reads, ...here.reads] }
+      const alaska = yield* here.threads.link("alaska", "s-tezos", "/code/integration")
+      return { unfollowed, alaska, reads: [...away.reads, ...here.reads] }
     }).pipe(Effect.scoped, Effect.runPromise)
-    expect(result).toEqual({ unfollowed: Option.none(), rig: Option.none(), reads: [] })
+    expect(result).toEqual({ unfollowed: [Option.none(), Option.none()], alaska: Option.none(), reads: [] })
+  })
+
+  test("a hook from rig is found in rig's T3 Code by the agent's own session id, its directory taken as rig gives it, and never for a session of this machine's", async () => {
+    // The same Tezos thread id on both machines, each with its own session; rig's works in a folder this Mac doesn't have.
+    const tezos = thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")
+    const rigView: T3Live.View = {
+      projects: new Map([["p", { id: "p", title: "integration", workspaceRoot: "/home/laurent/code/integration" }]]),
+      threads: new Map([["tezos", tezos]]),
+      sequence: 1,
+      synced: true,
+    }
+    const result = await Effect.gen(function* () {
+      const { threads, reads } = yield* linking(Option.some(viewing(tezos)), { tezos: ["s-here"] }, { view: Option.some(rigView), sessions: { tezos: ["s-rig"] } })
+      const rig = yield* threads.link("rig", "s-rig", "/home/laurent/code/integration/src")
+      // Rig's session is rig's, never this machine's, and this machine's isn't rig's.
+      const crossed = [yield* threads.link("Rosie", "s-rig", "/code/integration"), yield* threads.link("rig", "s-here", "/home/laurent/code/integration")]
+      const here = yield* threads.link("Rosie", "s-here", "/code/integration")
+      // Known once read, it's found without reading rig's T3 Code again.
+      const again = yield* threads.link("rig", "s-rig", "/home/laurent/code/integration")
+      return { rig, crossed, here, again, reads }
+    }).pipe(Effect.scoped, Effect.runPromise)
+    expect(result.rig).toEqual(Option.some({ machine: "rig", id: "tezos" }))
+    expect(result.crossed).toEqual([Option.none(), Option.none()])
+    expect(result.here).toEqual(Option.some({ machine: "Rosie", id: "tezos" }))
+    expect(result.again).toEqual(Option.some({ machine: "rig", id: "tezos" }))
+    expect(result.reads).toEqual(["rig tezos", "tezos"])
+  })
+
+  test("a thread's project is found by the thread, or by the nearest folder holding a directory: a project's, or a worktree of one", async () => {
+    const view: T3Live.View = {
+      projects: new Map([
+        ["p", { id: "p", title: "integration", workspaceRoot: "/code/integration" }],
+        ["q", { id: "q", title: "integration connectors", workspaceRoot: "/code/integration/connectors" }],
+        ["y", { id: "y", title: "yapd", workspaceRoot: "/code/yapd" }],
+      ]),
+      threads: new Map([
+        ["tezos", thread("tezos", "Migrate Tezos Integration", "2026-10-08T20:00:00.000Z")],
+        ["menu", thread("menu", "Thread menu", "2026-10-08T21:00:00.000Z", { projectId: "y", worktreePath: "/worktrees/yapd/t3-menu" })],
+      ]),
+      sequence: 1,
+      synced: true,
+    }
+    const result = await Effect.gen(function* () {
+      const { threads } = yield* linking(Option.some(view), {}, { view: Option.none(), sessions: {} })
+      const name = (found: Option.Option<T3Live.Project>) => Option.getOrUndefined(Option.map(found, ({ title }) => title))
+      return {
+        byThread: name(yield* threads.project("Rosie", { thread: "menu", directory: "/code/integration" })),
+        nearest: name(yield* threads.project("Rosie", { directory: "/code/integration/connectors/src" })),
+        outer: name(yield* threads.project("Rosie", { directory: "/code/integration/packages" })),
+        worktree: name(yield* threads.project("Rosie", { directory: "/worktrees/yapd/t3-menu/app" })),
+        // Next to it, with a name that starts the same, isn't in it.
+        beside: name(yield* threads.project("Rosie", { directory: "/code/integration-loader" })),
+        gone: name(yield* threads.project("Rosie", { thread: "gone" })),
+        // Rig's T3 Code isn't followed right now.
+        rig: name(yield* threads.project("rig", { directory: "/code/integration" })),
+      }
+    }).pipe(Effect.scoped, Effect.runPromise)
+    expect(result).toEqual({ byThread: "yapd", nearest: "integration connectors", outer: "integration", worktree: "yapd", beside: undefined, gone: undefined, rig: undefined })
   })
 })
 

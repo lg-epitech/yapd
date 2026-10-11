@@ -108,12 +108,19 @@ export class Threads extends Context.Tag("yapd/Threads")<
     readonly keep: (ref: Ref, started: { readonly prompt: string; readonly dictated: string; readonly description: string }) => Effect.Effect<void>
     /**
      * The thread a hook on `machine` came from, found by the agent's own id
-     * for its session among the threads working in its directory, and only
-     * for this machine's hooks while its T3 Code is followed (I11). None
+     * for its session among the threads working in its directory, while that
+     * machine's T3 Code is followed (I11): this machine's directories as they
+     * really are, links followed, another's as its hooks give them. None
      * otherwise, which keeps its update on the way hooks have always gone.
      * Never fails.
      */
     readonly link: (machine: string, session: string, cwd: string) => Effect.Effect<Option.Option<Ref>>
+    /**
+     * The project of a thread on `machine`, or else the one whose folder, or
+     * a thread's worktree of it, holds `directory`, the nearest first. None
+     * while that machine's T3 Code isn't followed.
+     */
+    readonly project: (machine: string, where: { readonly thread?: string; readonly directory?: string }) => Effect.Effect<Option.Option<T3Live.Project>>
     /** The agent's own ids for a thread's conversations, which its hooks report as their session. */
     readonly sessions: (ref: Ref) => Effect.Effect<ReadonlyArray<string>, ThreadsError>
     /**
@@ -606,10 +613,12 @@ export const make = (options: {
         actions.sessions(ref.id).pipe(Effect.mapError((error) => new ThreadsError({ reason: T3Actions.reason(error), cause: error }))),
       )
 
-    /** Which thread each agent conversation read so far is behind, by the agent's own id for it, for as long as yapd runs. */
+    /** Which thread each agent conversation read so far is behind, by its machine and the agent's own id for it, for as long as yapd runs. */
     const owners = new Map<string, string>()
-    /** When each thread read for its conversations was last updated then: it only has new ones once it has run again. */
+    /** When each thread read for its conversations was last updated then, by its machine and id: it only has new ones once it has run again. */
     const read = new Map<string, string>()
+    /** What `owners` and `read` know a thread or a session on a machine by. */
+    const on = (name: string, id: string) => `${name}\n${id}`
     /** Directories as they really are, links followed, as each was first looked at. */
     const real = new Map<string, string>()
     const canonical = (path: string) =>
@@ -619,47 +628,79 @@ export const make = (options: {
         return Effect.promise(() => realpath(path).catch(() => path)).pipe(Effect.tap((resolved) => Effect.sync(() => real.set(path, resolved))))
       })
 
+    /** A directory on a machine as it's compared: as it really is here, and as it's given on another machine, whose files can't be looked at from here. */
+    const resolved = (at: Link, path: string) => (at.here ? canonical(path) : Effect.succeed(path))
+
+    /** Whether a directory is `root` or in it, and how near, the nearest the longest. */
+    const within = (root: string, path: string) => (root === path || path.startsWith(root.endsWith("/") ? root : `${root}/`) ? Option.some(root.length) : Option.none())
+
     const link = (from: string, session: string, cwd: string) =>
       Effect.gen(function* () {
         const unlinked = (why: string) => Effect.as(Effect.logInfo(`Not linked: ${why}`), Option.none<Ref>())
-        const linked = (thread: T3Live.Thread) => Effect.as(Effect.logInfo(`Linked to "${thread.title}"`), Option.some<Ref>({ machine, id: thread.id }))
-        // Only this machine's hooks, whose directories can be looked at here.
-        if (from !== machine) return yield* unlinked(`${from}'s hooks aren't linked from here`)
-        const view = yield* options.live.view
-        if (Option.isNone(view)) return yield* unlinked("T3 Code isn't followed right now")
+        const owned = (thread: T3Live.Thread) => Effect.as(Effect.logInfo(`Linked to "${thread.title}"`), Option.some<Ref>({ machine: from, id: thread.id }))
+        const at = linked(from)
+        if (at === undefined) return yield* unlinked(`${from}'s T3 Code isn't followed`)
+        const view = yield* at.live.view
+        if (Option.isNone(view)) return yield* unlinked(at.here ? "T3 Code isn't followed right now" : `${from}'s T3 Code isn't followed right now`)
         const { threads, projects } = view.value
-        const owner = threads.get(owners.get(session) ?? "")
-        if (owner !== undefined && !subagent(owner)) return yield* linked(owner)
+        const owner = threads.get(owners.get(on(from, session)) ?? "")
+        if (owner !== undefined && !subagent(owner)) return yield* owned(owner)
         // A subagent's own conversation is its provider's to talk to, so its hooks keep to their old way.
-        const here = yield* canonical(cwd)
+        const here = yield* resolved(at, cwd)
         // In its directory, or one it holds, since the agent may have gone into a folder of it: the nearest first, then the newest.
         const candidates = (yield* Effect.forEach(
           [...threads.values()].filter((thread) => !subagent(thread)),
           (thread) => {
             const directory = thread.worktreePath ?? projects.get(thread.projectId)?.workspaceRoot
             if (directory === undefined) return Effect.succeed([])
-            return Effect.map(canonical(directory), (real) => (real === here || here.startsWith(real.endsWith("/") ? real : `${real}/`) ? [{ thread, depth: real.length }] : []))
+            return Effect.map(resolved(at, directory), (real) => Option.match(within(real, here), { onNone: () => [], onSome: (depth) => [{ thread, depth }] }))
           },
         ))
           .flat()
           .toSorted((one, other) => other.depth - one.depth || (time(other.thread.updatedAt) ?? 0) - (time(one.thread.updatedAt) ?? 0))
           .map(({ thread }) => thread)
           .slice(0, linkable)
-        for (const thread of candidates.filter(({ id, updatedAt }) => read.get(id) !== updatedAt)) {
-          const found = yield* Effect.either(sessions({ machine, id: thread.id }))
+        for (const thread of candidates.filter(({ id, updatedAt }) => read.get(on(from, id)) !== updatedAt)) {
+          const found = yield* Effect.either(sessions({ machine: from, id: thread.id }))
           if (Either.isLeft(found)) {
             yield* Effect.logWarning(`Could not read which sessions "${thread.title}" has: ${found.left.reason}`)
             continue
           }
-          read.set(thread.id, thread.updatedAt)
-          for (const native of found.right) owners.set(native, thread.id)
-          if (found.right.includes(session)) return yield* linked(thread)
+          read.set(on(from, thread.id), thread.updatedAt)
+          for (const native of found.right) owners.set(on(from, native), thread.id)
+          if (found.right.includes(session)) return yield* owned(thread)
         }
         return yield* unlinked(candidates.length === 0 ? "no thread in T3 Code works in this directory or one holding it" : "no thread in this directory, or one holding it, has this session")
       }).pipe(
         Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not link a hook to its thread", cause), Option.none<Ref>())),
         Effect.annotateLogs({ session }),
       )
+
+    const project = (name: string, where: { readonly thread?: string; readonly directory?: string }) =>
+      Effect.gen(function* () {
+        const at = linked(name)
+        if (at === undefined) return Option.none<T3Live.Project>()
+        const view = yield* at.live.view
+        if (Option.isNone(view)) return Option.none<T3Live.Project>()
+        const { threads, projects } = view.value
+        const thread = where.thread === undefined ? undefined : threads.get(where.thread)
+        if (thread !== undefined) return Option.fromNullable(projects.get(thread.projectId))
+        if (where.directory === undefined) return Option.none<T3Live.Project>()
+        const here = yield* resolved(at, where.directory)
+        // Each project's folder, and the worktrees its threads work in, which may be anywhere.
+        const roots = [
+          ...[...projects.values()].map((project) => ({ project, root: project.workspaceRoot })),
+          ...[...threads.values()].flatMap((thread) => {
+            const project = projects.get(thread.projectId)
+            return thread.worktreePath === null || project === undefined ? [] : [{ project, root: thread.worktreePath }]
+          }),
+        ]
+        const holding = yield* Effect.forEach(roots, ({ project, root }) =>
+          Effect.map(resolved(at, root), (real) => Option.map(within(real, here), (depth) => ({ project, depth }))),
+        )
+        const nearest = holding.flatMap(Option.toArray).toSorted((one, other) => other.depth - one.depth)[0]
+        return Option.fromNullable(nearest?.project)
+      }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not find a project", cause), Option.none<T3Live.Project>())))
 
     const find = (ref: Ref) =>
       Option.match(Option.fromNullable(linked(ref.machine)), {
@@ -779,6 +820,7 @@ export const make = (options: {
           })
         }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not note the work I started", error))),
       link,
+      project,
       sessions,
       waiting: (ref, requestId) =>
         Effect.gen(function* () {
