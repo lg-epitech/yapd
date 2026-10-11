@@ -70,6 +70,8 @@ Live on `dev` now: everything below. Talking over yapd's first seconds stopping 
 - A card closed while the app has lost touch with yapd is taken down when it's back, even if something else showed it again meanwhile.
 - Rig's hooks are tied to their thread only for what's shown and muted, so "tell it to…" after one of rig's updates goes the way hooks always have.
 - A mute on a session that isn't a T3 Code thread, like one in a terminal, stays on that session only, and is listed by "what's muted?" until you unmute it.
+- A thread muted by its session, before yapd found the session was the thread's, shows muted in the menu and is unmuted with it, but the brain doesn't see it as muted: "unmute the Tezos one" still works, while "what's muted?" names the session.
+- The answer to a message you sent a muted thread is said when its turn's prompt came through the hooks; after a restart in the middle of that turn, it's kept quiet like the rest.
 - A question you put off with "later", or that made way for another, isn't brought back if yapd restarts before it comes round again. It still waits in T3 Code, and "who needs me?" lists it.
 - "Thanks" or "skip" said back to an answer, while yapd's own "which one?" for the next step of what you asked waits behind it, lets that step go; yapd says so.
 - Showing or hiding a card while an agent's question waits on you asks it again straight away, and the third time in a row lets it go: ask for it when you're ready.
