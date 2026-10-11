@@ -14,6 +14,18 @@ export interface Options {
    * and for him 64 ms later.
    */
   readonly wary: number
+  /**
+   * The same once its own voice has stopped the line it's saying and it
+   * picked up again, for the rest of that line's first seconds: about a
+   * third of a second of speech, which its own voice ducked seldom lasts
+   * and his words do, even a short "Stop.". In a simulation with Silero,
+   * with its own voice dying away over those seconds as the echo
+   * cancellation learns it, a line stopped twice for it in 1 of 48 rather
+   * than 4, and none of his words was let go; half a second let a third of
+   * his short words go. Held at one level all along, its own voice is
+   * speech like his, and still stops most lines more than once.
+   */
+  readonly capped: number
   /** Unvoiced frames in a row that end an onset that never became speech. */
   readonly abandon: number
   /** Frames of silence that end an utterance. Long enough to outlast a pause between words. */
@@ -31,6 +43,7 @@ export const defaults: Options = {
   off: 0.35,
   confirm: 4,
   wary: 6,
+  capped: 10,
   abandon: 8,
   silence: 22,
   lead: 10,
@@ -48,6 +61,9 @@ export type Event =
   /** They've finished. The audio starts just before the onset. */
   | { readonly _tag: "Utterance"; readonly audio: Float32Array }
 
+/** How sure to be that it's speech: as ever, `wary` of what may be yapd's own voice, or surer still once that stopped it for nothing, `capped`. */
+export type Care = "plain" | "wary" | "capped"
+
 const onset: Event = { _tag: "Onset" }
 const speech: Event = { _tag: "Speech" }
 const abandoned: Event = { _tag: "Abandoned" }
@@ -62,8 +78,8 @@ export class Endpointer {
 
   constructor(private readonly options: Options = defaults) {}
 
-  /** Takes the next frame, `wary` when it may carry yapd's own voice. */
-  push(frame: Float32Array, probability: number, wary = false): Event | undefined {
+  /** Takes the next frame, with the care due to what it may carry, which only its first frame decides. */
+  push(frame: Float32Array, probability: number, care: Care = "plain"): Event | undefined {
     const { on, off, confirm, abandon, silence, lead, tail, longest } = this.options
     const isVoiced = probability >= on
     this.frames.push(frame)
@@ -76,7 +92,7 @@ export class Endpointer {
         }
         this.phase = "onset"
         this.voiced = 1
-        this.needed = wary ? this.options.wary : confirm
+        this.needed = care === "plain" ? confirm : this.options[care]
         return onset
 
       case "onset":

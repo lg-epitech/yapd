@@ -29,13 +29,31 @@ describe("Endpointer", () => {
     const frames = [...quiet(3), ...voiced(defaults.wary), ...quiet(defaults.silence)]
     frames.forEach((probability, at) => {
       // Only its first frame tells.
-      const event = endpointer.push(new Float32Array(512), probability, at === 3)
+      const event = endpointer.push(new Float32Array(512), probability, at === 3 ? "wary" : "plain")
       if (event !== undefined) events.push([at, event._tag])
     })
     expect(defaults.wary).toBeGreaterThan(defaults.confirm)
     expect(events.slice(0, 2)).toEqual([
       [3, "Onset"],
       [3 + defaults.wary - 1, "Speech"],
+    ])
+  })
+
+  test("waits longer still once yapd's own voice has stopped it for nothing, letting go what ends short of that", () => {
+    const endpointer = new Endpointer()
+    const events: Array<readonly [number, string]> = []
+    const frames = [...voiced(defaults.capped - 1), ...quiet(defaults.abandon), ...voiced(defaults.capped)]
+    frames.forEach((probability, at) => {
+      const event = endpointer.push(new Float32Array(512), probability, "capped")
+      if (event !== undefined) events.push([at, event._tag])
+    })
+    expect(defaults.capped).toBeGreaterThan(defaults.wary)
+    const again = defaults.capped - 1 + defaults.abandon
+    expect(events).toEqual([
+      [0, "Onset"],
+      [again - 1, "Abandoned"],
+      [again, "Onset"],
+      [again + defaults.capped - 1, "Speech"],
     ])
   })
 

@@ -1542,6 +1542,156 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
   })
 })
 
+describe("Once its own voice has stopped a line over its first seconds, and it picked up again", () => {
+  /** Commands as they're read, with the volume they asked for. */
+  const read = (timeline: ReadonlyArray<{ readonly type: string; readonly value?: number }>) =>
+    timeline.map(({ type, value }) => (value === undefined ? type : `${type} ${value}`))
+
+  test.each([
+    ["its words tell", "Over in yapd, the tests pass.", []],
+    ["the model judged", "Cup day.", [{ heard: "Cup day.", told: true }]],
+  ] as const)("only ducks for more of its own voice over the rest of that line's first seconds, as %s, and turns back up once it ends short of what stops it", async (_, heard, asked) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, heard]], { live: true, reply: () => ({ intent: "resume", spoken: "", message: "" }) })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, defaults.wary)
+        yield* helper.quiet
+        const once = read(helper.timeline)
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, defaults.capped - 1)
+        yield* helper.talk(0, defaults.abandon)
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, defaults.capped - 1)
+        yield* helper.talk(0, defaults.abandon)
+        yield* helper.wait(1)
+        return {
+          once,
+          after: read(helper.timeline).slice(once.length),
+          plays: helper.plays,
+          transcribed: helper.transcribed,
+          responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      once: ["play", "volume 0.25", "stop", "play"],
+      after: ["volume 0.25", "volume 1", "volume 0.25", "volume 1"],
+      plays: [0, 0],
+      transcribed: [heard],
+      responded: [...asked],
+    })
+  })
+
+  test("still ducks at his first sound, stops once he's surely talking, takes all he says whole, and takes a new line's first stop at once again", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Which PR was that?"]], {
+          live: true,
+          reply: ({ heard }) => (heard === "Which PR was that?" ? { intent: "answer", spoken: answered, message: "" } : { intent: "resume", spoken: "", message: "" }),
+        })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, defaults.wary)
+        yield* helper.quiet
+        yield* helper.wait(0.3)
+        const before = helper.timeline.length
+        const began = (yield* Clock.currentTimeMillis) / 1000
+        yield* helper.talk(0.9, 1)
+        const ducked = helper.timeline.slice(before)
+        yield* helper.talk(0.9, defaults.capped - 1)
+        const stopped = helper.timeline.slice(before)
+        yield* helper.talk(0.9, 20)
+        yield* helper.quiet
+        yield* helper.wait(0.2)
+        // yapd's answer, a new line, still within its first seconds: its own voice, heard as nothing, stops it as the first time did.
+        const answering = helper.timeline.length
+        yield* helper.talk(0.7, defaults.wary)
+        const anew = read(helper.timeline.slice(answering))
+        yield* helper.quiet
+        yield* helper.wait(1)
+        const start = helper.timeline[0]!.at
+        return {
+          ducked: ducked.map(({ type, at, value }) => ({ type, at: seconds(at + start - began), value })),
+          stopped: stopped.map(({ type, at }) => ({ type, at: seconds(at + start - began) })).slice(1),
+          responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
+          rendered: helper.rendered,
+          anew,
+          plays: helper.plays,
+        }
+      }),
+    )
+    expect(result).toEqual({
+      // Turned down with the first frame of his voice, and stopped with the frame that makes it surely his.
+      ducked: [{ type: "volume", at: 0.032, value: 0.25 }],
+      stopped: [{ type: "stop", at: seconds(0.032 * defaults.capped) }],
+      responded: [{ heard: "Which PR was that?", told: true }],
+      rendered: [answered],
+      anew: ["volume 0.25", "stop"],
+      plays: [0, 0, 0, 0],
+    })
+  })
+
+  test("takes what Whisper makes up for his then, but yapd's own words still for its voice", async () => {
+    const over = (heard: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.7, "Over in yapd."], [0.9, heard]], { reply: () => ({ intent: "dismiss", spoken: "", message: "" }) })
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.7, defaults.wary)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.9, defaults.capped)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return { plays: helper.plays, responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })) }
+        }),
+      )
+    expect(await over("Thank you.")).toEqual({ plays: [0, 0], responded: [{ heard: "Thank you.", told: true }] })
+    expect(await over("Over in yapd, the tests pass.")).toEqual({ plays: [0, 0, 0], responded: [] })
+  })
+
+  test("only ducks for more of its own voice over an answer's first seconds too", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."]], { answer: true, live: true })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, defaults.wary)
+        yield* helper.quiet
+        const once = read(helper.timeline)
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, defaults.capped - 1)
+        yield* helper.talk(0, defaults.abandon)
+        yield* helper.wait(1)
+        return { once, after: read(helper.timeline).slice(once.length), offered: helper.offered }
+      }),
+    )
+    expect(result).toEqual({ once: ["play", "volume 0.25", "stop", "play"], after: ["volume 0.25", "volume 1"], offered: [] })
+  })
+
+  test("stops for him past its first seconds as ever, though its own voice stopped the line before", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Hold on."]], {
+          live: true,
+          reply: () => ({ intent: "dismiss", spoken: "", message: "" }),
+        })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.8, defaults.wary)
+        yield* helper.quiet
+        yield* helper.wait(3)
+        const before = helper.timeline.length
+        yield* helper.talk(0.9, defaults.confirm)
+        const stopped = read(helper.timeline.slice(before))
+        yield* helper.talk(0.9, 6)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { stopped, responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })) }
+      }),
+    )
+    expect(result).toEqual({ stopped: ["volume 0.25", "stop"], responded: [{ heard: "Hold on.", told: false }] })
+  })
+})
+
 describe("Responder", () => {
   test("gives the model the update and the conversation so far", () => {
     const prompt = Responder.prompt(
