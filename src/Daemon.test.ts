@@ -573,6 +573,7 @@ const assisted = (
                 asked.push(situation)
                 return model(situation)
               }).pipe(Effect.zipLeft(deciding(situation))),
+            brief: () => Effect.fail(new Brain.BrainError({ cause: "Not asked here." })),
           }),
           Persona.Plain,
         ),

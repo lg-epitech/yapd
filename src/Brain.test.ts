@@ -1643,4 +1643,119 @@ describe("Brain", () => {
       expect(Brain.prompt(situation("What's going on?"), Option.none())).not.toContain("MUTED,")
     })
   })
+
+  describe("modes and headlines", () => {
+    const loader: Assistant.Subject = {
+      _tag: "Session",
+      update: {
+        session: "claude:s-loader",
+        project: "yapd",
+        turn: { prompt: Option.none(), message: "Fixed the loader. Retries back off now." },
+        needsYou: false,
+        spoken: "yapd's loader is fixed.",
+        more: "Retries back off now, and the flaky test is gone.",
+        audio: "/tmp/update.wav",
+        thread: { agent: "claude", session: "s-loader", cwd: "/code/yapd", message: "Fixed the loader.", origin: {} },
+        at: now - 20_000,
+      },
+      said: "yapd's loader is fixed.",
+    }
+    const mode = (heard: string, overrides: Partial<Brain.Situation> = {}) => Brain.fast(situation(heard, overrides), lines)
+
+    test("'goodnight' goes quiet until morning, 'I'm back' ends it, and the rest of the phrases change how yapd talks, with no model", () => {
+      for (const heard of ["Goodnight.", "Good night, Jarvis.", "Turn yourself off."]) expect(mode(heard)).toMatchObject({ act: "mode", how: "quiet", when: "" })
+      for (const heard of ["I'm back.", "Im back", "Back to normal.", "Normal mode."]) expect(mode(heard)).toMatchObject({ act: "mode", how: "normal" })
+      for (const heard of ["Focus.", "Focus mode."]) expect(mode(heard)).toMatchObject({ act: "mode", how: "focus", when: "" })
+      expect(mode("Focus for two hours.")).toMatchObject({ act: "mode", how: "focus", when: new Date(now + 2 * 60 * 60_000).toISOString() })
+      expect(mode("Focus mode for 30 minutes.")?.when).toBe(new Date(now + 30 * 60_000).toISOString())
+      expect(mode("Quiet for an hour.")).toMatchObject({ act: "mode", how: "quiet", when: new Date(now + 60 * 60_000).toISOString() })
+      for (const heard of ["Talk shorter.", "Keep it short."]) expect(mode(heard)).toMatchObject({ act: "mode", how: "brief" })
+      for (const heard of ["Give me everything.", "Tell me everything.", "Full updates."]) expect(mode(heard)).toMatchObject({ act: "mode", how: "full" })
+      // With a question open, it takes its place.
+      expect(mode("Goodnight.", { open: Option.some(which([ref(tezos), ref(mina)])) })?.pending).toBe("replaces")
+      const checked = Brain.check(Brain.decision({ act: "mode", how: "quiet" }), situation("Goodnight."), lines)
+      expect(checked._tag === "Do" ? checked.plan.decision : checked).toMatchObject({ act: "mode", how: "quiet", target: "" })
+      expect(Brain.check(Brain.decision({ act: "mode", how: "louder" }), situation("Be louder."), lines)).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    })
+
+    test("mode words count only as the whole of what he said, never over yapd's own voice, and a bare 'quiet' only stops yapd", () => {
+      for (const heard of ["Let me focus till three.", "I'm off to bed.", "You can talk normally again.", "Stop giving me the short version.", "Focus on the tests.", "Focus for a bit."]) {
+        expect(mode(heard)?.act).not.toBe("mode")
+      }
+      expect(mode("Quiet.")?.act).toBe("dismiss")
+      expect(mode("Be quiet.")?.act).toBe("dismiss")
+      const over = (heard: string, voiced: number, echo?: string) => {
+        const given = situation(heard)
+        return { ...given, utterance: { ...given.utterance, via: "reply" as const, voiced, ...(echo === undefined ? {} : { echo }) } }
+      }
+      expect(Brain.fast(over("Goodnight.", 2, "the Tezos migration is merged, goodnight"), lines)).toBeUndefined()
+      const faint = Brain.check(Brain.decision({ act: "mode", how: "quiet" }), over("Goodnight.", 0.2), lines)
+      expect(faint._tag === "Do" ? faint.plan.decision.act : faint).toBe("resume")
+      expect(Brain.modeCommand("Focus for a while.")).toEqual(Option.none())
+    })
+
+    test("'more' after an update said in its headline says the rest, with no model, only when there's more and nothing's asked", () => {
+      expect(mode("More.", { subject: loader })).toMatchObject({ act: "again", how: "more", spoken: "Retries back off now, and the flaky test is gone." })
+      expect(mode("Tell me more.", { subject: loader })?.spoken).toBe("Retries back off now, and the flaky test is gone.")
+      const { more: _, ...whole } = (loader as Extract<Assistant.Subject, { _tag: "Session" }>).update
+      expect(mode("More.", { subject: { ...loader, update: whole } as Assistant.Subject })).toBeUndefined()
+      expect(mode("More.", { subject: loader, open: Option.some(which([ref(tezos), ref(mina)])) })?.act).not.toBe("again")
+    })
+
+    test("the prompt shows the mode, and what was held as held for later, never as told", () => {
+      const heldRow: Kept = { id: 7, at: now - 5 * 60_000, kind: "update", project: "integration", machine: "Rosie", thread: tezos.id, said: "integration's review pass 7 is running.", detail: { held: "progress" } }
+      const prompt = Brain.prompt(
+        situation("What did I miss?", {
+          mode: { mode: { mode: "focus", until: now + 60 * 60_000, since: now - 60_000 }, detail: "full" },
+          held: [heldRow],
+          lately: [heldRow],
+        }),
+        Option.none(),
+      )
+      expect(prompt).toContain(`MODE: focus until ${Brain.until(now + 60 * 60_000, now)}: you only tell him what needs him, and hold the rest for later`)
+      expect(prompt).toContain("You tell him every update in full, as he asked.")
+      expect(prompt).toContain("- held for later from integration (1 update, latest 5 min ago): «integration's review pass 7 is running.»")
+      expect(prompt).toContain("you held it for later, so he hasn't heard it")
+      expect(prompt).not.toContain("you told him (integration")
+      // "mode" is something yapd does now, not something it can't do yet.
+      expect(prompt).toContain(`- "mode": he wants you to change how and when you talk.`)
+      expect(prompt).not.toContain(`"mode" to change when you talk`)
+      const normal = Brain.prompt(situation("What's going on?", { mode: { mode: { mode: "normal" }, detail: "brief" } }), Option.none())
+      expect(normal).not.toContain("MODE:")
+      expect(normal).not.toContain("You tell him every update in full")
+    })
+
+    test("how yapd talks is said in fixed words: until when, the morning's rundown offered, and nothing held", () => {
+      const at = new Date(now)
+      at.setHours(14, 0, 0, 0)
+      const three = at.getTime() + 60 * 60_000
+      const said = Brain.modeLines(lines, at.getTime())
+      expect(said.focus(three)).toBe("Only what needs you until three, sir.")
+      expect(said.focus(three + 15 * 60_000)).toBe(`Only what needs you until ${Brain.time(three + 15 * 60_000)}, sir.`)
+      expect(said.quiet(three)).toBe("Quiet until three, sir. Anything that needs you still comes through, and the menu turns me off completely.")
+      expect(said.brief).toBe("I'll keep it short, sir.")
+      expect(said.full).toBe("I'll tell you everything, sir.")
+      expect(said.nothing).toBe("Nothing came in while you were away, sir.")
+      expect(said.offer(3, "focus")).toEqual({ news: "Focus is over, sir. Three things came in.", question: "Want the rundown?" })
+      at.setHours(8, 0, 0, 0)
+      expect(Brain.modeLines(lines, at.getTime()).offer(1, "quiet")).toEqual({ news: "Good morning, sir. One thing came in.", question: "Want the rundown?" })
+      at.setHours(23, 0, 0, 0)
+      expect(Brain.modeLines(lines, at.getTime()).offer(2, "quiet").news).toBe("Quiet is over, sir. Two things came in.")
+    })
+
+    test("the brief puts what waits on him first, then what was held, a thread at a time", () => {
+      const held: ReadonlyArray<Kept> = [
+        { id: 1, at: now - 30 * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "Pass 6 found nothing new.", detail: { held: "progress" } },
+        { id: 2, at: now - 10 * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "Pass 7 is running.", detail: { held: "progress" } },
+        { id: 3, at: now - 5 * 60_000, kind: "update", machine: "Rosie", thread: mina.id, project: "integration-connectors", said: "The tickets are filed.", detail: { held: "focus" } },
+      ]
+      const prompt = Brain.briefPrompt(held, desk(), now, Option.some("Call me sir."))
+      expect(prompt).toContain("At most 60 words. First anything in WAITING ON YOU")
+      expect(prompt).toContain("Call me sir.")
+      expect(prompt).toContain(`WAITING ON YOU:\n- «Fix the transcription upload»: waiting for your approval (command)`)
+      expect(prompt).toContain(`- «Migrate Tezos Integration», 2 updates, the latest 10 min ago:\n  - «Pass 6 found nothing new.»\n  - «Pass 7 is running.»`)
+      expect(prompt).toContain(`- «Open Mina SSV2 Bug Tickets», 1 update, the latest 5 min ago:\n  - «The tickets are filed.»`)
+      expect(prompt.indexOf("WAITING ON YOU")).toBeLessThan(prompt.indexOf("HELD FOR LATER"))
+    })
+  })
 })

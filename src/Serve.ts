@@ -1,8 +1,8 @@
-import { Clock, Context, Effect, Layer, Logger, Option, Stream } from "effect"
+import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
-import { ProviderBrain } from "./Brain.ts"
+import { modeCommand, modeLines, ProviderBrain } from "./Brain.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
@@ -17,6 +17,7 @@ import * as Icons from "./Icons.ts"
 import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import { machines } from "./Machines.ts"
@@ -123,6 +124,12 @@ export const serve = Effect.gen(function* () {
   const naming = yield* Journal.naming
   // What he muted, kept quiet whoever tells of it, until he unmutes it.
   const mutes = yield* Mutes.make(yield* Store.Store)
+  const settings = yield* Settings.Settings
+  // How yapd talks, focus and quiet holding for later what a mute would keep quiet, kept across restarts.
+  const modes = yield* Modes.make({ settings, journal })
+  const persona = yield* Persona.Persona
+  /** What tells him what was held once he says he's back over an update, which the assistant does, once it's made. */
+  const welcome = yield* Deferred.make<Effect.Effect<void>>()
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
   // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
   const daemon = yield* Daemon.make({
@@ -133,6 +140,33 @@ export const serve = Effect.gen(function* () {
     naming,
     // What went to a thread for him and may have got there: what answers it is his to hear, however he muted the thread.
     sent: (to, since) => ledger.steps(since, { kinds: ["message", "reply", "start"], states: ["prepared", "sent", "unknown"], machine: to.machine, thread: to.id }),
+    holding: modes.holding,
+    detail: modes.detail,
+    // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent. Back, what was
+    // held is told right after, as an answer.
+    command: (heard) =>
+      Option.map(modeCommand(heard), ({ how, minutes }) =>
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis
+          const told = modeLines(yield* persona.lines, now)
+          switch (how) {
+            case "focus":
+            case "quiet": {
+              const { now: mode } = yield* modes.set(how, minutes === undefined ? undefined : now + minutes * 60_000)
+              const ends = mode.until ?? Modes.ending(how, undefined, now)
+              return how === "focus" ? told.focus(ends) : told.quiet(ends)
+            }
+            case "brief":
+            case "full":
+              yield* modes.setDetail(how)
+              return how === "brief" ? told.brief : told.full
+            case "normal":
+              if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal")
+              yield* Effect.flatten(Deferred.await(welcome))
+              return ""
+          }
+        }),
+      ),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   const latest = yield* Latest.make({
@@ -182,7 +216,9 @@ export const serve = Effect.gen(function* () {
     mutes,
     controls,
     naming,
+    modes,
   })
+  yield* Deferred.succeed(welcome, assistant.welcome)
   // What threads need him for, what failed and what finished with no hook, each said once, ever.
   const notices = yield* Notices.make({
     threads,
@@ -230,7 +266,6 @@ export const serve = Effect.gen(function* () {
     yield* Layer.build(WhisperDictation).pipe(Effect.provideService(Turns, Effect.map(daemon.power, ({ turns }) => turns))),
     Dictation,
   )
-  const settings = yield* Settings.Settings
 
   /**
    * Off, whatever hasn't started yet is dropped, from a dictation to what was
@@ -290,6 +325,16 @@ export const serve = Effect.gen(function* () {
     unmute: (key) => Effect.asVoid(controls.unmute(key)),
     replayThread,
     icon: icons.image,
+  })
+  // Focus and quiet end on their own, the heartbeat is written, and what was held is brought up in a digest once it's quiet.
+  yield* Modes.run(modes, {
+    settings,
+    journal,
+    power: daemon.power,
+    idle: daemon.idle,
+    hold: daemon.hold,
+    digest: assistant.digest,
+    rundown: assistant.rundown,
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))

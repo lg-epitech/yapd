@@ -72,7 +72,7 @@ const counts: ReadonlyMap<string, number> = new Map([
 ])
 
 /** How many minutes "an hour", "half an hour", "ten minutes" or "2 hours" is, or none when it's said any other way. */
-const lasting = (said: string) => {
+export const lasting = (said: string) => {
   if (said === "half an hour") return 30
   const asked = /^(.+?) (minute|minutes|hour|hours)$/.exec(said)
   if (asked === null) return undefined

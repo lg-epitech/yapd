@@ -13,6 +13,7 @@ import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import { Model, ModelError } from "./Model.ts"
 import * as Notices from "./Notices.ts"
@@ -278,6 +279,10 @@ const assistant = (
     }
     /** Whether threads can be muted, which drops what of them waits to be said, as kept in `silenced`. */
     readonly muting?: boolean
+    /** Whether how yapd talks can be changed, kept in the same database. */
+    readonly modes?: boolean
+    /** What the model briefs him with on what was held, from what it's given, or none when it can't be asked. */
+    readonly briefs?: (held: ReadonlyArray<Journal.Kept>) => string | undefined
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -461,7 +466,11 @@ const assistant = (
     const silenced: Array<ReadonlyArray<string>> = []
     const mutes = given.muting === true ? yield* Mutes.make(store) : undefined
     const controls = mutes === undefined ? undefined : Mutes.controls({ mutes, journal, silence: (keys) => Effect.sync(() => void silenced.push(keys)) })
+    const modes = given.modes === true ? yield* Modes.make({ settings: Settings.fromStore(store), journal }) : undefined
+    /** What each brief was asked to sum up. */
+    const briefed: Array<ReadonlyArray<string>> = []
     const made = yield* Assistant.make({
+      ...(modes === undefined ? {} : { modes }),
       // This Mac is Rosie.
       ...(mutes === undefined || controls === undefined
         ? {}
@@ -506,6 +515,12 @@ const assistant = (
                   decided === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(decided),
                 )
               }).pipe(Effect.delay(`${given.thinking ?? 0} seconds`)),
+            brief: (held) =>
+              Effect.suspend(() => {
+                briefed.push(held.map(({ said }) => said ?? ""))
+                const spoken = given.briefs?.(held)
+                return spoken === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(spoken)
+              }),
           }),
           persona,
         ),
@@ -523,6 +538,8 @@ const assistant = (
       ledger,
       mutes,
       silenced,
+      modes,
+      briefed,
       told: said,
       noted,
       started,
@@ -10248,4 +10265,153 @@ describe("Assistant after the menu says a thread again", () => {
     expect(result.interrupted).toEqual([tezos.id])
   })
 })
+})
+
+describe("Assistant modes", () => {
+  /** An update held for later, as the daemon keeps one. */
+  const held = (journal: Journal.Journal["Type"], at: number, said: string, why: Journal.Held = "quiet") =>
+    Effect.map(journal.write({ at, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said, detail: { held: why } }), Option.getOrThrow)
+  const unheard = (journal: Journal.Journal["Type"]) => Effect.map(journal.held(0), (rows) => rows.map(({ said }) => said))
+
+  test("'goodnight' goes quiet until the morning, and 'I'm back' ends it with what was held, heard once he's heard it through, never with the model", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, spoken, journal, modes, briefed, seen, dispatched } = yield* assistant(() => undefined, undefined, {
+          modes: true,
+          waiting: true,
+          briefs: (rows) => `While you were away, sir, the Tezos review got to pass ${rows.length + 5}.`,
+        })
+        yield* dictate("Goodnight.")
+        yield* play()
+        const quiet = (yield* modes!.current).mode
+        yield* held(journal, now + 60_000, "integration's review pass 6 is running.")
+        yield* held(journal, now + 120_000, "integration's review pass 7 is running.")
+        yield* dictate("I'm back.")
+        const before = yield* unheard(journal)
+        yield* play()
+        return { quiet, spoken: spoken(), before, after: yield* unheard(journal), mode: (yield* modes!.current).mode, briefed: [...briefed], model: seen.length, dispatched: dispatched.length }
+      }),
+    )
+    const told = Brain.modeLines(lines, now)
+    expect(result.quiet).toEqual({ mode: "quiet", until: Modes.morning(now), since: now })
+    expect(result.spoken).toEqual([told.quiet(Modes.morning(now)), "While you were away, sir, the Tezos review got to pass 7."])
+    expect(result.briefed).toEqual([["integration's review pass 6 is running.", "integration's review pass 7 is running."]])
+    // Covered once he's heard it to the end, not before.
+    expect(result.before).toHaveLength(2)
+    expect(result.after).toEqual([])
+    expect(result.mode).toEqual({ mode: "normal" })
+    expect(result.model).toBe(0)
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("focus for a while, talk shorter and give me everything are said back in fixed words, and nothing held is said so", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, modes } = yield* assistant(() => undefined, undefined, { modes: true })
+        yield* dictate("Focus for two hours.")
+        const focus = (yield* modes!.current).mode
+        yield* dictate("Give me everything.")
+        const full = (yield* modes!.current).detail
+        yield* dictate("Talk shorter.")
+        yield* dictate("I'm back.")
+        return { spoken: spoken(), focus, full, after: yield* modes!.current }
+      }),
+    )
+    const told = Brain.modeLines(lines, now)
+    expect(result.focus).toEqual({ mode: "focus", until: now + 2 * 60 * 60_000, since: now })
+    expect(result.full).toBe("full")
+    expect(result.spoken).toEqual([told.focus(now + 2 * 60 * 60_000), told.full, told.brief, told.nothing])
+    expect(result.after).toEqual({ mode: { mode: "normal" }, detail: "brief" })
+  })
+
+  test("leaving focus when its time is up offers the rundown once, and a yes gives it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { rundown, answer, spoken, journal, questions, flush } = yield* assistant(() => undefined, undefined, {
+          modes: true,
+          briefs: () => "The Tezos review is on pass 7, sir.",
+        })
+        yield* held(journal, now - 30 * 60_000, "integration's review pass 6 is running.", "focus")
+        yield* held(journal, now - 10 * 60_000, "integration's review pass 7 is running.", "focus")
+        yield* rundown(2, "focus")
+        yield* flush
+        const asked = questions().map(({ spoken }) => spoken)
+        yield* answer("Yes.")
+        return { asked, spoken: spoken(), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.asked).toEqual(["Focus is over, sir. Two things came in. Want the rundown?"])
+    expect(result.spoken).toEqual(["Focus is over, sir. Two things came in. Want the rundown?", "The Tezos review is on pass 7, sir."])
+    expect(result.after).toEqual([])
+  })
+
+  test("'what did I miss?' covers what was held, even from before he last spoke, which counts as heard once he's heard it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, seen, journal } = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", how: "missed", spoken: `${situation.held?.length ?? 0} held, sir.` }),
+          undefined,
+          { modes: true },
+        )
+        yield* held(journal, now - 2 * 60 * 60_000, "integration's review pass 6 is running.", "progress")
+        yield* journal.write({ at: now - 60 * 60_000, kind: "dictation", text: "How's std?" })
+        yield* dictate("What did I miss?")
+        return { held: seen.at(-1)!.held?.map(({ said }) => said), unheard: seen.at(-1)!.unheard.map(({ said }) => said), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.held).toEqual(["integration's review pass 6 is running."])
+    expect(result.unheard).toEqual([])
+    expect(result.after).toEqual([])
+  })
+
+  test("the digest is told as yapd's own line he can follow up, kept as a brief, covering what was held once he's heard it, and stale once all of it was heard elsewhere", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { digest, notices, play, journal } = yield* assistant(() => undefined, undefined, {
+          modes: true,
+          waiting: true,
+          briefs: () => "The Tezos review is on pass 7, sir, and Mina's tickets are filed.",
+        })
+        const first = yield* held(journal, now - 30 * 60_000, "integration's review pass 7 is running.", "progress")
+        const second = yield* held(journal, now - 10 * 60_000, "Mina's tickets are filed.", "progress")
+        yield* digest(yield* journal.held(0))
+        const told = notices().at(-1)!
+        const fresh = yield* told.stale
+        yield* play(told)
+        const covered = yield* unheard(journal)
+        const kept = yield* journal.since(0, { kinds: ["brief"] })
+        // Another, whose rows he heard of from the menu meanwhile.
+        const third = yield* held(journal, now - 5 * 60_000, "std's cache is fixed.", "progress")
+        yield* digest(yield* journal.held(0))
+        const again = notices().at(-1)!
+        yield* journal.markHeard([third], now)
+        return {
+          told: { kind: told.kind, priority: told.priority, spoken: told.spoken, followUp: told.followUp !== undefined },
+          fresh,
+          covered,
+          kept: kept.map(({ said, detail, heardAt }) => [said, detail, heardAt !== undefined]),
+          ids: [first, second],
+          stale: yield* again.stale,
+        }
+      }),
+    )
+    expect(result.told).toEqual({ kind: "notice", priority: "done", spoken: "The Tezos review is on pass 7, sir, and Mina's tickets are filed.", followUp: true })
+    expect(result.fresh).toBe(false)
+    expect(result.covered).toEqual([])
+    expect(result.kept).toEqual([["The Tezos review is on pass 7, sir, and Mina's tickets are filed.", { covered: result.ids }, true]])
+    expect(result.stale).toBe(true)
+  })
+
+  test("a digest the model can't sum up says nothing, and leaves what was held unheard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { digest, spoken, journal } = yield* assistant(() => undefined, undefined, { modes: true })
+        yield* held(journal, now - 30 * 60_000, "integration's review pass 7 is running.", "progress")
+        yield* digest(yield* journal.held(0))
+        return { spoken: spoken(), unheard: yield* unheard(journal) }
+      }),
+    )
+    expect(result.spoken).toEqual([])
+    expect(result.unheard).toEqual(["integration's review pass 7 is running."])
+  })
 })

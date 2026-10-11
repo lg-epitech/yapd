@@ -7,6 +7,7 @@ import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal, Kept } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
@@ -287,6 +288,16 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly settled: (requestId: string) => Effect.Effect<void>
     /** A machine's threads can be seen again, like rig's once it can be reached: what waits on him there, put by meanwhile, is asked. */
     readonly returned: (machine: string) => Effect.Effect<void>
+    /**
+     * Briefs him on what was held for later, `held`, as yapd's own notice,
+     * which he can follow up as he can an answer: heard to the end, what it
+     * covered counts as heard. Nothing is said when it can't be summed up.
+     */
+    readonly digest: (held: ReadonlyArray<Kept>) => Effect.Effect<void>
+    /** Focus or quiet ended other than by his word, with `count` held meanwhile: the rundown is offered once, in its turn. */
+    readonly rundown: (count: number, was: Modes.Hold) => Effect.Effect<void>
+    /** He said he's back over an update: the rundown of what was held is said, in its turn, as an answer, without the model working out what he meant. */
+    readonly welcome: Effect.Effect<void>
   }
 >() {}
 
@@ -598,6 +609,8 @@ export const make = (options: {
   readonly controls?: Mutes.Controls
   /** What the user calls each machine, for the keys an update is muted by. */
   readonly naming?: (host: string) => string
+  /** How yapd talks, which he changes by voice. Without it, that's something yapd can't do yet. */
+  readonly modes?: Modes.Modes
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -685,6 +698,8 @@ export const make = (options: {
     const starting = new Map<string, Kept>()
     /** What a restart found, waiting its turn to be said: messages to offer to send again, and steps it couldn't confirm, to say so. */
     const restarted: Array<{ readonly row: Ledger.Row; readonly offer: boolean }> = []
+    /** The rundown to offer once focus or quiet ended on its own or from the menu, with how much was held: only the latest. */
+    const rundowns: Array<{ readonly count: number; readonly was: Modes.Hold }> = []
     /** What threads wait on him for, waiting their turn to be asked, after what a restart found. */
     const asked: Array<Queued> = []
     /** Questions about what a thread waited on him for that was dealt with in T3 Code, which a late answer does nothing to. */
@@ -870,9 +885,10 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, held] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
-          journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action"] }),
+          // Never what was held for later, which he was never told.
+          journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action", "brief"], held: false }),
           journal.since(now - day, { most: 20, kinds: ["dictation", "reply"] }),
           threads.usage,
           askedLately,
@@ -881,13 +897,16 @@ export const make = (options: {
           ledger.latest(scratchable),
           options.mutes?.list ?? Effect.succeed<ReadonlyArray<Mutes.Mute>>([]),
           options.mutes?.last ?? Effect.succeedNone,
+          options.modes === undefined ? Effect.succeedNone : Effect.map(options.modes.current, Option.some),
+          // What was held for later he hasn't heard, never said, so his speaking since covers none of it.
+          journal.held(now - Modes.digesting.window, unheard),
         ])
         // What he hasn't heard since he last said something, other than catching up, which he may never have heard the
         // answer to, or something only heard as noise, like a cough taken for "Thank you.". Not what's waiting to be
         // read, like an update his asking cut off: he's told of that as it's read, not twice. What was kept quiet is
         // looked for on its own, so a noisy thread he muted can't crowd out the rest.
         const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
-        const missed = (yield* journal.unheard(since, unheard + coming.length, false)).filter(({ id }) => !coming.includes(id)).slice(-unheard)
+        const missed = (yield* journal.unheard(since, unheard + coming.length, false, false)).filter(({ id }) => !coming.includes(id)).slice(-unheard)
         const quieted = (yield* journal.unheard(since, quietest, true)).filter(({ id }) => !coming.includes(id))
         // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing.
         const done = recent.filter((kept) => kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined).slice(-lately.most)
@@ -901,6 +920,8 @@ export const make = (options: {
           lately: [...done, ...starting.values()].toSorted((one, other) => one.at - other.at),
           unheard: missed,
           quieted,
+          held: held.filter(({ id }) => !coming.includes(id)),
+          ...Option.match(mode, { onNone: () => ({}), onSome: (mode) => ({ mode }) }),
           mutes,
           muteChange,
           usage,
@@ -1278,7 +1299,7 @@ export const make = (options: {
         const coming = catching ? comingUp((yield* options.upcoming).length, said) : ""
         const text = `${spoken.trim() === "" ? said.misheard : spoken.trim()}${coming}`
         // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop, what was kept quiet with it.
-        const missed = catching ? [...thought.situation.unheard, ...thought.situation.quieted].map(({ id }) => id) : []
+        const missed = catching ? [...thought.situation.unheard, ...thought.situation.quieted, ...(thought.situation.held ?? [])].map(({ id }) => id) : []
         const ref = Option.map(about, ({ ref }) => ref)
         const told = {
           say: text,
@@ -2528,6 +2549,64 @@ export const make = (options: {
         return answered(done ? told.muted(lasts) : told.already)
       })
 
+    /**
+     * Changes how yapd talks, and says so: focus or quiet until when, short or
+     * full updates, or back to normal, which gives him what was held for
+     * later at once. "It" stays what it was. Never anything sent to a thread.
+     */
+    const moding = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { modes } = options
+        if (modes === undefined) return reply(Brain.notYet(said), thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        const told = Brain.modeLines(said, now)
+        const stays = (line: string): Outcome => ({
+          say: line,
+          subject: thought.subject._tag === "Session" ? { ...thought.subject, said: line } : { _tag: "Answer", said: line, about: Brain.about(thought.subject) },
+          kind: "done",
+        })
+        const { how, when } = plan.decision
+        switch (how) {
+          case "focus":
+          case "quiet": {
+            // A time that's gone or can't be read is the mode's own default, which is said.
+            const { now: mode } = yield* modes.set(how, Mutes.ending(when, now))
+            const ends = mode.until ?? Modes.ending(how, undefined, now)
+            return stays(how === "focus" ? told.focus(ends) : told.quiet(ends))
+          }
+          case "brief":
+          case "full":
+            yield* modes.setDetail(how)
+            return stays(how === "brief" ? told.brief : told.full)
+          default: {
+            if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal")
+            return yield* rundown(thought.situation.desk, said)
+          }
+        }
+      })
+
+    /**
+     * What was held for later, told him now, as he's back: summed up, with
+     * what it covered heard once he's heard it to the end. Nothing held, he's
+     * told so; when it can't be summed up, how to hear it.
+     */
+    const rundown = (on: Threads.Desk, said: Lines) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const told = Brain.modeLines(said, now)
+        const held = yield* journal.held(now - Modes.digesting.window)
+        if (held.length === 0) return { say: told.nothing, subject: { _tag: "Answer", said: told.nothing, about: Option.none() }, kind: "answer" } satisfies Outcome
+        const brief = yield* brain.brief(held, on, now).pipe(Effect.either)
+        if (Either.isLeft(brief)) {
+          yield* Effect.logWarning("Could not sum up what I held", brief.left)
+          return { say: told.unbriefed, subject: { _tag: "Answer", said: told.unbriefed, about: Option.none() }, kind: "answer" } satisfies Outcome
+        }
+        // So the digest doesn't bring it up again.
+        yield* options.modes?.briefed ?? Effect.void
+        const missed = held.map(({ id }) => id)
+        return { say: brief.right, subject: { _tag: "Answer", said: brief.right, about: Option.none(), missed }, kind: "answer", missed } satisfies Outcome
+      })
+
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
     const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping = { step: 0, twice: false }): Effect.Effect<Outcome> => {
       const { decision, target } = plan
@@ -2592,6 +2671,8 @@ export const make = (options: {
           return start(thought, said, at.step)
         case "mute":
           return Effect.flatMap(muting(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
+        case "mode":
+          return Effect.flatMap(moding(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         case "show": {
           // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
           // A later step of the request takes down only a card it put up, like "show me everything, then hide that", never one asked for after it.
@@ -3276,6 +3357,30 @@ export const make = (options: {
         if (next === undefined) {
           const now = yield* Clock.currentTimeMillis
           const due = yield* askable(now)
+          // Once nothing a thread waits on him for is due, the rundown of what was held is offered.
+          const offer = Option.isNone(due) ? rundowns.shift() : undefined
+          if (offer !== undefined) {
+            const { news, question } = Brain.modeLines(yield* persona.lines, now).offer(offer.count, offer.was)
+            const id = mint(now, "u")
+            const offered = yield* opening(
+              {
+                kind: "offer",
+                utterance: id,
+                heard: "",
+                decision: Brain.decision({ act: "mode", how: "normal" }),
+                candidates: [],
+                asked: `${news} ${question}`,
+                about: "give you the rundown",
+                material: Option.none(),
+                resend: Option.none(),
+                news,
+                question,
+              },
+              { turns: power.turns, at: now },
+            )
+            yield* deliver(offered, { id, turns: power.turns })
+            continue
+          }
           if (Option.isNone(due)) return yield* wake(now)
           const index = asked.indexOf(due.value)
           if (index === -1) continue
@@ -3559,5 +3664,55 @@ export const make = (options: {
         Effect.suspend(() =>
           asked.some(({ asking: waiting }) => waiting.ref.machine === machine) ? Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)) : Effect.void,
         ),
+      digest: (held) =>
+        Effect.gen(function* () {
+          const power = yield* options.power
+          if (!power.on || held.length === 0) return
+          const now = yield* Clock.currentTimeMillis
+          const brief = yield* brain.brief(held, yield* threads.desk(Option.none(), [], desk.reply), now).pipe(Effect.either)
+          // Left unheard, for "what did I miss?".
+          if (Either.isLeft(brief)) return yield* Effect.logWarning("Could not sum up what I held", brief.left)
+          const spoken = brief.right
+          const covered = held.map(({ id }) => id)
+          const entry = yield* journal.write({ at: now, kind: "brief", said: spoken, detail: { covered } })
+          const subject: Subject = { _tag: "Answer", said: spoken, about: Option.none(), missed: covered }
+          const oldest = Math.min(...held.map(({ at }) => at))
+          yield* options.tell(
+            {
+              id: mint(now, "d"),
+              // Its own, ranked with finished work, never ahead of what needs him.
+              kind: "notice",
+              priority: "done",
+              spoken,
+              at: now,
+              // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell.
+              stale: Effect.map(journal.held(oldest), (still) => !still.some(({ id }) => covered.includes(id))),
+              saying: Effect.sync(() => {
+                answered = { subject, at: now, turns: power.turns }
+              }),
+              // Cut off, what it covered is still his to catch up on.
+              heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([...covered, ...Option.toArray(entry)], at)),
+              followUp: followUp(subject, Effect.succeed(spoken)),
+            },
+            power.turns,
+          )
+        }),
+      rundown: (count, was) =>
+        Effect.suspend(() => {
+          rundowns.splice(0, rundowns.length, { count, was })
+          return Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope))
+        }),
+      welcome: Effect.gen(function* () {
+        const { on, turns } = yield* options.power
+        if (!on) return
+        const said = yield* persona.lines
+        const outcome = yield* rundown(yield* threads.desk(Option.none(), [], desk.reply), said)
+        yield* deliver(outcome, { id: mint(yield* Clock.currentTimeMillis, "u"), turns })
+      }).pipe(
+        turn.withPermits(1),
+        Effect.catchAllCause((cause) => Effect.logWarning("Could not tell you what I held", cause)),
+        Effect.forkIn(scope),
+        Effect.asVoid,
+      ),
     } satisfies Assistant["Type"]
   })
