@@ -1594,28 +1594,34 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     const after = (at: number) =>
       overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, "Hmm, hold on."], [0.91, "Merge it."]], { responding: 2 })
+          const helper = yield* overHelper([[0.9, "Hmm, hold on."], [0.91, "Merge it."], [0.92, "And deploy."]], { responding: 2 })
           yield* helper.wait(at)
           yield* helper.talk(0, defaults.lead)
           yield* helper.talk(0.9, 20)
           yield* helper.quiet
-          // He goes on before the reply to it is ready.
+          // He goes on before the reply to it is ready, twice.
           yield* helper.wait(0.5)
           yield* helper.talk(0.91, 20)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.92, 20)
           yield* helper.quiet
           yield* helper.wait(3)
           return helper.responded.map(({ heard, echo, afterPause }) => ({ heard, told: echo !== undefined, afterPause }))
         }),
       )
     // Begun over its first seconds.
+    // All he said after the first pause, however many more there were.
     expect(await after(1)).toEqual([
       { heard: "Hmm, hold on.", told: true, afterPause: undefined },
       { heard: "Hmm, hold on. Merge it.", told: true, afterPause: "Merge it." },
+      { heard: "Hmm, hold on. Merge it. And deploy.", told: true, afterPause: "Merge it. And deploy." },
     ])
     // Begun once its own voice was learnt, all of it is his, so nothing is set apart.
     expect(await after(4)).toEqual([
       { heard: "Hmm, hold on.", told: false, afterPause: undefined },
       { heard: "Hmm, hold on. Merge it.", told: false, afterPause: undefined },
+      { heard: "Hmm, hold on. Merge it. And deploy.", told: false, afterPause: undefined },
     ])
   })
 
