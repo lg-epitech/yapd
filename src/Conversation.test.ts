@@ -8,6 +8,7 @@ import {
   Effect,
   Fiber,
   Layer,
+  Logger,
   Option,
   Queue,
   Random,
@@ -1220,6 +1221,51 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       sent: [],
       replies: [],
     })
+  })
+
+  test("logs one plain line each time it picks up again after its own voice, apart from his talk not meant for it, with none of his words", async () => {
+    const lines: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      lines.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper(
+          [
+            [0.8, "Over in yapd, the tests pass."],
+            [0.7, "Cup day of"],
+            [0.9, "Can you pass me the salt?"],
+          ],
+          { reply: () => ({ intent: "resume", spoken: "", message: "" }) },
+        )
+        yield* helper.wait(0.5)
+        // Its own words, as they tell.
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        // What the model takes for its own voice.
+        yield* helper.talk(0.7, 10)
+        yield* helper.quiet
+        // His, going on past where it stopped, which the model takes as not meant for it.
+        yield* helper.talk(0.9, 40)
+        yield* helper.quiet
+        // Past its first seconds, its own words are talk not meant for it, as ever, and not logged as either.
+        yield* helper.wait(4)
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        expect(helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined }))).toEqual([
+          { heard: "Cup day of", told: true },
+          { heard: "Can you pass me the salt?", told: true },
+          { heard: "Over in yapd, the tests pass.", told: false },
+        ])
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(lines.filter((line) => line === Conversation.ownVoice || line === Conversation.notMeant)).toEqual([
+      Conversation.ownVoice,
+      Conversation.ownVoice,
+      Conversation.notMeant,
+    ])
+    expect(lines.filter((line) => /yapd, the tests|Cup day|salt/.test(line) && !line.startsWith("Heard:"))).toEqual([])
   })
 
   test("keeps listening however often its own voice stopped it over its first seconds, unlike for talk that wasn't meant for it", async () => {

@@ -99,6 +99,14 @@ const before = 0.8
  * 0.38 s past with Silero, his "Thank you." 0.5 s or more.
  */
 const overhang = 0.45
+/**
+ * Logged each time it picks up again after its own voice stopped a line over
+ * its first seconds, which is how often that happens on his speakers is
+ * counted in the log.
+ */
+export const ownVoice = "Stopped for its own voice over its first seconds, so it picks up again"
+/** Logged instead when it picks up again there after his talk that went on past where it stopped, but wasn't meant for it. */
+export const notMeant = "Picked up again over its first seconds after talk not meant for it"
 /** How near its end a line can be stopped and still count as said, with nothing of it left to go back to. */
 const ending = 0.3
 /** Talk that wasn't meant for yapd, after which the rest of an update plays without listening, say for a TV. */
@@ -921,17 +929,24 @@ export const make = (options: {
      * line, so the model isn't told. Otherwise all of it may yet have been its
      * own voice, `unsure`.
      */
-    const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) =>
-      Effect.gen(function* () {
-        const { echo, onset = outcome.at } = outcome
-        if (echo === undefined) return { itself: false, unsure: false }
-        const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
-        if (past ? first === "" : own(first, "") || own(first, echo)) {
-          yield* Effect.logInfo("Stopped for its own voice over its first seconds, so it picks up again")
-          return { itself: true, unsure: true }
-        }
-        return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
-      })
+    const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
+      const { echo, onset = outcome.at } = outcome
+      if (echo === undefined) return { itself: false, unsure: false }
+      const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
+      if (past ? first === "" : own(first, "") || own(first, echo)) return { itself: true, unsure: true }
+      return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
+    }
+
+    /**
+     * Picks up again just before where it stopped over its first seconds, for
+     * its own voice, as its words tell or the model took it, `unsure` whether
+     * there was more; or else for his talk that went on past where it stopped
+     * but wasn't meant for it. Each is logged in one plain line, with none of
+     * his words, so how often its own voice stops a line on his speakers can
+     * be counted.
+     */
+    const again = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, unsure: boolean, from: number) =>
+      Effect.logInfo(unsure ? ownVoice : notMeant).pipe(Effect.as(Math.max(from, outcome.at - before)))
 
     /**
      * Reads an update out and talks it over. `through` runs as soon as the
@@ -975,7 +990,7 @@ export const make = (options: {
             }
 
             const first = yield* unlogged(outcome.audio)
-            const { itself, echo, unsure } = yield* whose(outcome, first)
+            const { itself, echo, unsure } = whose(outcome, first)
             // Its own last words as it ended leave him the usual moment to reply, once.
             const listenOn = () => {
               if (lingered) return false
@@ -989,7 +1004,7 @@ export const make = (options: {
                 if (listenOn()) continue
                 return true
               }
-              from = Math.max(from, outcome.at - before)
+              from = yield* again(outcome, true, from)
               continue
             }
             if (first === "") {
@@ -1050,7 +1065,7 @@ export const make = (options: {
               }
               // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
               if (echo === undefined) carryOn()
-              else from = Math.max(from, outcome.at - before)
+              else from = yield* again(outcome, unsure, from)
               continue
             }
 
@@ -1109,7 +1124,7 @@ export const make = (options: {
           if (outcome._tag === "Finished") return false
           const first = yield* hear(outcome.audio)
           // Its own voice, over its first seconds, is no answer, nor talk that wasn't meant for yapd.
-          const { itself, echo, unsure } = yield* whose(outcome, first)
+          const { itself, echo, unsure } = whose(outcome, first)
           const reply =
             itself || first === ""
               ? Option.none()
@@ -1129,7 +1144,7 @@ export const make = (options: {
           if (outcome.at >= outcome.duration) return false
           // Nor is what may have been its own voice, as `respond` was told, which is picked up just before.
           if (itself || echo !== undefined) {
-            from = Math.max(from, outcome.at - before)
+            from = yield* again(outcome, unsure, from)
             continue
           }
           missed++
