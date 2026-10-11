@@ -764,7 +764,13 @@ export const make = (options: {
                 directory: update.thread.cwd,
                 said: reply.spoken,
                 ...(withheld ? {} : { text: heard }),
-                detail: { intent: reply.intent, ...(reply.message === "" || withheld ? {} : { message: reply.message }), ...(withheld ? { withheld } : {}) },
+                detail: {
+                  intent: reply.intent,
+                  ...(reply.message === "" || withheld ? {} : { message: reply.message }),
+                  // What may have been its own voice in his words, kept with them for whatever reads them back.
+                  ...(echo === undefined || withheld ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }),
+                  ...(withheld ? { withheld } : {}),
+                },
               })
               yield* options.replied
             }

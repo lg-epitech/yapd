@@ -960,6 +960,13 @@ const overHelper = (
       replies: Effect.map(Effect.flatMap(Journal.Journal, (journal) => journal.since(0)), (entries) => entries.map(({ text }) => text)).pipe(
         Effect.provide(context),
       ),
+      /** What the journal kept of what may have been its own voice in each reply, as the model asked later reads it back. */
+      overheard: Effect.map(Effect.flatMap(Journal.Journal, (journal) => journal.since(0)), (entries) =>
+        entries.map(({ detail }) => {
+          const { echo, afterPause } = (detail ?? {}) as { readonly echo?: string; readonly afterPause?: string }
+          return { echo, afterPause }
+        }),
+      ).pipe(Effect.provide(context)),
     }
   })
 
@@ -1128,10 +1135,12 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
         yield* helper.talk(0.91, 15)
         yield* helper.quiet
         yield* helper.wait(1)
-        return { asked, responded: helper.responded, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies }
+        return { asked, responded: helper.responded, rendered: helper.rendered, sent: helper.sent, replies: yield* helper.replies, overheard: yield* helper.overheard }
       }),
     )
     expect(result.asked).toEqual({ commands: ["play", "volume", "stop", "play"], rendered: [again], sent: [] })
+    // Kept with what may have been its own voice, so the brain reading it back later is told so too; what he said once it had stopped, as ever.
+    expect(result.overheard).toEqual([{ echo: first, afterPause: undefined }, { echo: undefined, afterPause: undefined }])
     expect(result.responded.map(({ heard, echo, lines }) => ({ heard, echo, lines }))).toEqual([
       { heard: "the pull request merge it", echo: first, lines: [{ speaker: "yapd", text: "Over in yapd,…" }] },
       {
@@ -1976,6 +1985,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
         return {
           responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
           replies: yield* helper.replies,
+          overheard: yield* helper.overheard,
           heard: yield* Fiber.join(helper.fiber),
         }
       }),
@@ -1986,6 +1996,8 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
         { heard: "Hmm, hold on. No, that's fine, leave it.", told: true },
       ],
       replies: ["Hmm, hold on. No, that's fine, leave it."],
+      // Kept with what may have been its own voice, and what he said after a pause, for the brain reading it back later.
+      overheard: [{ echo: first, afterPause: "No, that's fine, leave it." }],
       heard: true,
     })
   })
