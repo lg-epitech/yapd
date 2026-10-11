@@ -3067,6 +3067,29 @@ describe("Daemon", () => {
   })
 })
 
+describe("Daemon headline first", () => {
+  test("what was said last of the same work goes to the summary, by its session, so progress can be told from news", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, condensed } = yield* daemon
+        yield* finish("review", "Pass 6 found nothing new.")
+        yield* wait(11)
+        yield* wait(60)
+        yield* finish("review", "Pass 7 is running.")
+        yield* wait(11)
+        yield* finish("other", "The Mina tickets are open.")
+        yield* wait(11)
+        return condensed.map(({ message, previous }) => [message, previous === undefined ? undefined : [previous.said, Math.round(previous.ago)]])
+      }),
+    )
+    expect(result).toEqual([
+      ["Pass 6 found nothing new.", undefined],
+      ["Pass 7 is running.", ["yapd. Pass 6 found nothing new.", 1]],
+      ["The Mina tickets are open.", undefined],
+    ])
+  })
+})
+
 describe("Daemon with threads muted", () => {
   test("a muted thread's progress is kept quiet: kept for what he missed, its hook let go at once, and never rendered or said", async () => {
     const result = await run(

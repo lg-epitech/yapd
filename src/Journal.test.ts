@@ -194,4 +194,54 @@ describe("Journal", () => {
     ])
     expect(found.loud).toEqual([found.loudId])
   })
+
+  test("what was held for later is read apart, unheard and unmuted only, and kept out of what he was told lately", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const said = Option.getOrThrow(yield* journal.write({ at: 10, kind: "update", thread: "t-tezos", said: "Tezos is merged." }))
+        const progress = Option.getOrThrow(yield* journal.write({ at: 20, kind: "update", thread: "t-review", said: "Review pass 7 is running.", detail: { held: "progress" } }))
+        const muted = Option.getOrThrow(yield* journal.write({ at: 30, kind: "update", thread: "t-noisy", said: "Still going.", detail: { held: "focus", muted: true } }))
+        const focus = Option.getOrThrow(yield* journal.write({ at: 40, kind: "update", thread: "t-mina", said: "Mina's tickets are open." }))
+        const heard = Option.getOrThrow(yield* journal.write({ at: 50, kind: "update", thread: "t-std", said: "std's cache is fixed." }))
+        // Held as focus began, and one he heard of since, as from the menu.
+        yield* journal.hold([focus, heard], "focus")
+        yield* journal.markHeard([heard], 60)
+        return {
+          held: (yield* journal.held(0)).map(({ id, detail }) => [id, (detail as { held: string }).held]),
+          lately: (yield* journal.since(0, { kinds: ["update"], held: false })).map(({ id }) => id),
+          unheard: (yield* journal.unheard(0, 10, false, false)).map(({ id }) => id),
+          ids: { said, progress, muted, focus },
+        }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept.held).toEqual([
+      [kept.ids.progress, "progress"],
+      [kept.ids.focus, "focus"],
+    ])
+    expect(kept.lately).toEqual([kept.ids.said])
+    expect(kept.unheard).toEqual([kept.ids.said])
+  })
+
+  test("what was last said or held of the same work is found by its session, the session it was tied under, or its thread", async () => {
+    const found = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        yield* journal.write({ at: 10, kind: "update", thread: "claude:s1", said: "Untied, from its session." })
+        yield* journal.write({ at: 20, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Tied to its thread.", detail: { session: "claude:s2" } })
+        yield* journal.write({ at: 30, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Held for later.", detail: { session: "finished:Rosie:t-tezos", held: "progress" } })
+        yield* journal.write({ at: 40, kind: "reply", thread: "claude:s1", said: "Not an update." })
+        const said = (found: Option.Option<Journal.Kept>) => Option.getOrUndefined(Option.map(found, ({ said }) => said))
+        return {
+          session: said(yield* journal.previous(0, "claude:s1")),
+          tied: said(yield* journal.previous(0, "claude:s2")),
+          thread: said(yield* journal.previous(0, "claude:s9", { machine: "Rosie", id: "t-tezos" })),
+          tooOld: said(yield* journal.previous(35, "claude:s1")),
+          other: said(yield* journal.previous(0, "claude:s9", { machine: "rig", id: "t-tezos" })),
+        }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(found).toEqual({ session: "Untied, from its session.", tied: "Tied to its thread.", thread: "Held for later.", tooOld: undefined, other: undefined })
+  })
+
 })

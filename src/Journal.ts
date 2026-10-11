@@ -26,9 +26,18 @@ export type Kind =
   | "notice"
   /** yapd answered something the user asked it. */
   | "answer"
+  /** yapd briefed him on what it held for later: a digest, or the rundown once focus or quiet ends. */
+  | "brief"
 
 /** Every kind of entry, as the API takes them. */
-export const kinds = ["update", "reply", "sent", "dictation", "started", "action", "notice", "answer"] as const satisfies ReadonlyArray<Kind>
+export const kinds = ["update", "reply", "sent", "dictation", "started", "action", "notice", "answer", "brief"] as const satisfies ReadonlyArray<Kind>
+
+/**
+ * Why an update was held for later rather than said: focus or quiet was on,
+ * it only said how work that carries on was going, or it finished while yapd
+ * was offline.
+ */
+export type Held = "focus" | "quiet" | "progress" | "offline"
 
 export interface Entry {
   readonly at: number
@@ -81,7 +90,10 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * are more: with `muted`, only those kept quiet because he muted their
      * thread, or only the others.
      */
-    readonly since: (at: number, options?: { readonly most?: number; readonly kinds?: ReadonlyArray<Kind>; readonly muted?: boolean }) => Effect.Effect<ReadonlyArray<Kept>>
+    readonly since: (
+      at: number,
+      options?: { readonly most?: number; readonly kinds?: ReadonlyArray<Kind>; readonly muted?: boolean; readonly held?: boolean },
+    ) => Effect.Effect<ReadonlyArray<Kept>>
     /** A page of entries, newest written first: `most` of them, only older than the entry `before` and of `kinds` when given. */
     readonly page: (options: { readonly most: number; readonly before?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
     /** The latest entries about a thread, newest first. */
@@ -89,13 +101,26 @@ export class Journal extends Context.Tag("yapd/Journal")<
     /**
      * Updates and notices since `at` the user hasn't heard, oldest first, the
      * latest `most` of them: with `muted`, only those kept quiet because he
-     * muted their thread, or only the others.
+     * muted their thread, or only the others; with `held`, only those held
+     * for later, or only the others.
      */
-    readonly unheard: (at: number, most: number, muted?: boolean) => Effect.Effect<ReadonlyArray<Kept>>
+    readonly unheard: (at: number, most: number, muted?: boolean, held?: boolean) => Effect.Effect<ReadonlyArray<Kept>>
     /** Each thread's newest update or notice since `at`, newest first, `most` threads at most. */
     readonly latest: (at: number, most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Notes that these were kept quiet because he muted their thread, like updates dropped as he did. */
     readonly mute: (ids: ReadonlyArray<number>) => Effect.Effect<void>
+    /** Notes that these were held for later, and why, like updates dropped as focus began. */
+    readonly hold: (ids: ReadonlyArray<number>, why: Held) => Effect.Effect<void>
+    /**
+     * The updates held for later since `at` that he hasn't heard, and that
+     * aren't muted, oldest first, the latest `most` of them.
+     */
+    readonly held: (at: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
+    /**
+     * What yapd last said, or held, about the same work since `at`: the newest
+     * update kept under the session, tied to it, or kept under the thread.
+     */
+    readonly previous: (at: number, session: string, ref?: { readonly machine: string; readonly id: string }) => Effect.Effect<Option.Option<Kept>>
     /** Each update and notice as it's kept. */
     readonly kept: Stream.Stream<Kept>
     /** The latest thing the user heard. */
@@ -200,6 +225,9 @@ const told: ReadonlySet<Kind> = new Set<Kind>(["update", "notice"])
 /** Whether a row was kept quiet because he muted its thread, as SQLite reads its detail. */
 const quiet = "coalesce(json_extract(detail, '$.muted'), 0)"
 
+/** Whether a row was held for later, as SQLite reads its detail. */
+const heldBack = "(json_extract(detail, '$.held') is not null)"
+
 /**
  * The journal in `store`, naming machines by `called`, and telling `written`
  * of each update and notice as it's kept, when there's one to tell.
@@ -272,8 +300,10 @@ export const fromStore = (
       reading(
         store.transaction((database: Database) => {
           const kinds = options.kinds ?? []
-          const { muted } = options
-          const filter = `${kinds.length === 0 ? "" : ` and kind in (${kinds.map(() => "?").join(", ")})`}${muted === undefined ? "" : ` and ${quiet} = ?`}`
+          const { muted, held } = options
+          const filter = `${kinds.length === 0 ? "" : ` and kind in (${kinds.map(() => "?").join(", ")})`}${muted === undefined ? "" : ` and ${quiet} = ?`}${
+            held === undefined ? "" : ` and ${heldBack} = ${held ? 1 : 0}`
+          }`
           const rows = database
             .query<Row, Array<string | number>>(`select * from journal where at >= ?${filter} order by at desc, id desc limit ?`)
             .all(at, ...kinds, ...(muted === undefined ? [] : [muted ? 1 : 0]), options.most ?? 200)
@@ -300,12 +330,14 @@ export const fromStore = (
             .map(kept),
         ),
       ),
-    unheard: (at, most, muted) =>
+    unheard: (at, most, muted, held) =>
       reading(
         store.transaction((database: Database) =>
           database
             .query<Row, Array<number>>(
-              `select * from journal where heard_at is null and kind in ('update', 'notice') and at >= ?${muted === undefined ? "" : ` and ${quiet} = ?`} order by at desc, id desc limit ?`,
+              `select * from journal where heard_at is null and kind in ('update', 'notice') and at >= ?${muted === undefined ? "" : ` and ${quiet} = ?`}${
+                held === undefined ? "" : ` and ${heldBack} = ${held ? 1 : 0}`
+              } order by at desc, id desc limit ?`,
             )
             .all(at, ...(muted === undefined ? [] : [muted ? 1 : 0]), most)
             .reverse()
@@ -339,6 +371,46 @@ export const fromStore = (
                 .run(...ids)
             })
             .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what I kept quiet in my journal", error))),
+    hold: (ids, why) =>
+      ids.length === 0
+        ? Effect.void
+        : store
+            .transaction((database: Database) => {
+              database
+                .query<never, Array<string | number>>(
+                  `update journal set detail = json_set(coalesce(detail, '{}'), '$.held', ?) where id in (${ids.map(() => "?").join(", ")})`,
+                )
+                .run(why, ...ids)
+            })
+            .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what I held for later in my journal", error))),
+    held: (at, most = 200) =>
+      reading(
+        store.transaction((database: Database) =>
+          database
+            .query<Row, [number, number]>(
+              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0 and at >= ? order by at desc, id desc limit ?`,
+            )
+            .all(at, most)
+            .reverse()
+            .map(kept),
+        ),
+      ),
+    previous: (at, session, ref) =>
+      store
+        .transaction((database: Database) =>
+          Option.map(
+            Option.fromNullable(
+              database
+                .query<Row, [number, string, string, string | null, string | null]>(
+                  `select * from journal where kind = 'update' and at >= ? and (thread = ? or json_extract(detail, '$.session') = ? or (machine = ? and thread = ?))
+                   order by at desc, id desc limit 1`,
+                )
+                .get(at, session, session, ref?.machine ?? null, ref?.id ?? null),
+            ),
+            kept,
+          ),
+        )
+        .pipe(Effect.catchAll((error) => Effect.logWarning("Could not read my journal", error).pipe(Effect.as(Option.none<Kept>())))),
     kept: written === undefined ? Stream.never : Stream.fromPubSub(written),
     lastHeard: store
       .transaction((database: Database) =>

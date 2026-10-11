@@ -2254,7 +2254,7 @@ const scripted = (answers: ReadonlyArray<unknown>) => {
 describe("Language check", () => {
   test("translates a summary that let another language through", async () => {
     const { asked, layer } = scripted([
-      { priority: "done", spoken: "In right price, I've added the table before “Données traitées,” sir." },
+      { priority: "done", headline: "In right price, I've added the table before “Données traitées,” sir.", more: "" },
       { spoken: "In right price, I've added the table before the processed data section, sir." },
     ])
     const summary = await Effect.runPromise(
@@ -2262,12 +2262,12 @@ describe("Language check", () => {
         condense("right-price", { prompt: Option.none(), message: "J'ai ajouté le tableau avant « Données traitées »." }),
       ).pipe(Effect.provide(Condenser.ProviderCondenser.pipe(Layer.provide(layer)))),
     )
-    expect(summary).toEqual({ priority: "done", spoken: "In right price, I've added the table before the processed data section, sir." })
+    expect(summary).toEqual({ priority: "done", spoken: "In right price, I've added the table before the processed data section, sir.", more: "" })
     expect(asked[1]).toContain("What's about to be said:\nIn right price, I've added the table before “Données traitées,” sir.")
   })
 
   test("asks nothing more when it's all in English", async () => {
-    const { asked, layer } = scripted([{ priority: "done", spoken: "yapd's tests pass now." }])
+    const { asked, layer } = scripted([{ priority: "done", headline: "yapd's tests pass now.", more: "" }])
     await Effect.runPromise(
       Effect.flatMap(Condenser.Condenser, ({ condense }) => condense("yapd", { prompt: Option.none(), message: "Les tests passent." })).pipe(
         Effect.provide(Condenser.ProviderCondenser.pipe(Layer.provide(layer))),

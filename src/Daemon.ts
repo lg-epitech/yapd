@@ -60,6 +60,9 @@ const forgotten = 60 * 60_000
 /** How long finding the T3 Code thread a hook came from can take, after which its update goes the old way. */
 const lookup = "3 seconds"
 
+/** How far back what yapd last said about the same work is looked for, to tell progress from news. */
+const lastDay = 24 * 60 * 60_000
+
 /**
  * Updates are condensed and rendered in parallel, then spoken one at a time,
  * along with what yapd has to say for itself. `link` finds the T3 Code thread
@@ -612,6 +615,8 @@ export const make = (
     readonly about: Effect.Effect<Option.Option<Threads.Ref>>
     /** The T3 Code thread on another machine it's known to be from, worked out alongside too, for what's kept, shown and muted of it only. */
     readonly owner: Effect.Effect<Option.Option<Threads.Ref>>
+    /** The T3 Code thread it's known to be from before anything is worked out, like a turn T3 Code told of, to find what was said of it last. */
+    readonly known?: Threads.Ref
     /** For a turn no hook told of, said in its hook's place, which is said once, ever, under its key. */
     readonly fallback?: Fallback
     /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
@@ -740,9 +745,15 @@ export const make = (
   const prepare = (finished: Finished) => {
     const { session, project, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     return Effect.gen(function* () {
+      // What was said or held of the same work lately, by its session or its thread, read here rather than once its thread is found,
+      // which can take seconds: so "another review round" is told from news.
+      const previous = Option.map(yield* journal.previous(arrivedAt - lastDay, session, finished.known), (kept) => ({
+        said: kept.said ?? "",
+        ago: (arrivedAt - kept.at) / 60_000,
+      }))
       const [[summary, summarized], about, owner] = yield* Effect.all(
         [
-          condenser.condense(project, turn).pipe(
+          condenser.condense(project, Option.match(previous, { onNone: () => turn, onSome: (previous) => ({ ...turn, previous }) })).pipe(
             Effect.retry({ times: 1 }),
             Effect.map((summary) => [summary, true] as const),
             Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as([unsummarized(project), false] as const))),
@@ -1091,6 +1102,7 @@ export const make = (
           turns: input.turns,
           about: Effect.succeedSome(input.about),
           owner: Effect.succeedNone,
+          known: input.about,
           fallback,
           answering: input.answering === true || followedUp,
           // Its run's prompt and start, so a message yapd sent the thread for him, steered into it or begun in its words, is told as a hook's is.

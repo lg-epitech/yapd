@@ -3,18 +3,41 @@ import * as Config from "./Config.ts"
 import { Model } from "./Model.ts"
 import type * as T3Actions from "./T3Actions.ts"
 
-export const Priority = Schema.Literal("needs-you", "done", "trivial")
+/**
+ * How much an update matters to him: what needs him, what finished, what
+ * only says how work that carries on by itself is going, which can wait for
+ * a digest, and what says nothing new.
+ */
+export const Priority = Schema.Literal("needs-you", "done", "progress", "trivial")
 export type Priority = typeof Priority.Type
 
+/** An update summed up: `spoken` is its headline, and `more` the rest, said only when he asks, or "" when there's none. */
 export const Summary = Schema.Struct({
   priority: Priority,
   spoken: Schema.String,
+  more: Schema.optional(Schema.String),
 })
 export type Summary = typeof Summary.Type
+
+/** How long a headline is at most, in words, which he judges on use. */
+export const headlineWords = 15
+
+/** How long the rest is at most, in words. */
+export const moreWords = 45
+
+/** What the model is asked for: the headline and the rest apart, which `condense` makes a summary of. */
+export const Condensed = Schema.Struct({
+  priority: Priority,
+  headline: Schema.String,
+  more: Schema.String,
+})
+export type Condensed = typeof Condensed.Type
 
 export interface Turn {
   readonly prompt: Option.Option<string>
   readonly message: string
+  /** What yapd last said, or held, about the same work, and how many minutes ago, which tells progress from news. */
+  readonly previous?: { readonly said: string; readonly ago: number }
 }
 
 /**
@@ -59,20 +82,26 @@ export const aloud = [
   `- Names the way a person would say them, like "cryptio sources" for cryptio-sources or "Fable" for claude-fable-5-1. One that was generated rather than chosen, like a date, a few words and a hash, goes by what the work is about, like "the picture transcription".`,
 ].join("\n")
 
-const instructions = `You're yapd, the voice that tells a developer how the work they gave their coding agents went. One just finished, and you turn its final message into a short spoken update. The user is listening, not reading.
+const instructions = `You're yapd, the voice that tells a developer how the work they gave their coding agents went. One just finished, and you turn its final message into a short spoken update: a headline said at once, and the rest, said only if they ask for more. The user is listening, not reading.
 
-Reply with only a JSON object with the keys "spoken" and "priority".
+Reply with only a JSON object with the keys "priority", "headline" and "more".
 
-"spoken":
-- At most 50 words, one to three sentences. Lead with the outcome, then anything the user must decide or do.
+"headline":
+- At most ${headlineWords} words, one sentence. The outcome first. If the agent asks a question or needs a decision, the headline carries it in full, as a question, with its choices when there are only two or three.
 - If the user's prompt is given, answer what they asked rather than recounting everything the agent did.
+- Mention the project once, as part of the sentence: its subject, a possessive, or "in" the project, like "yapd's tests pass now" or "Over in yapd, the fix is in". Never as a label before the sentence.
+
+"more":
+- The rest worth hearing if they ask for more, at most ${moreWords} words, or "" when the headline says it all. Never repeat the headline.
+
+Both:
 - Contractions, connected sentences. Say "the config loader", not "src/config/loader.ts". Round numbers that are hard to say, like 1,847 or 0.3127, but keep simple ones like 81.
-- Mention the project once, in the first sentence, as part of it: its subject, a possessive, or "in" the project, like "yapd's tests pass now" or "Over in yapd, the fix is in". Never as a label before the sentence.
 - No filler like "I have successfully".
 ${aloud}
 
 "priority":
 - "needs-you" if the agent asks a question, needs a decision or permission, or failed.
+- "progress" if the work carries on by itself and this only says how it's going, like "another review round" or "the checks are still running", or says what your last line about this work said. Never a result, finished work, an answer to the user's prompt, a failure, or the end of the work.
 - "trivial" if there's nothing new to hear: a bare acknowledgement, or a reply that only confirms what the user just said or restates work they already know about, like "Understood, the checks are still running". Something the agent did or found since isn't trivial.
 - "done" otherwise.`
 
@@ -86,6 +115,9 @@ export const prompt = (project: string, turn: Turn, style: Option.Option<string>
     ...Option.toArray(Option.map(style, styled)),
     `Project: ${project}`,
     ...Option.match(turn.prompt, { onNone: () => [], onSome: (prompt) => [`User's prompt:\n${prompt}`] }),
+    ...(turn.previous === undefined || turn.previous.said.trim() === ""
+      ? []
+      : [`What you last said about this work, ${Math.max(0, Math.round(turn.previous.ago))} min ago: ${fence(turn.previous.said)}`]),
     `Agent's message:\n${turn.message}`,
   ].join("\n\n")
 
@@ -203,6 +235,10 @@ export const inEnglish = (model: Model["Type"], spoken: string) =>
         Effect.catchAll((error) => Effect.logWarning("Could not translate", error).pipe(Effect.as(spoken))),
       )
 
+/** A headline and the rest as a summary: with no headline, the rest is all there is to say. */
+export const summed = (priority: Priority, headline: string, more: string): Summary =>
+  headline === "" ? { priority, spoken: more, more: "" } : { priority, spoken: headline, more }
+
 export const ProviderCondenser = Layer.effect(
   Condenser,
   Effect.gen(function* () {
@@ -210,9 +246,14 @@ export const ProviderCondenser = Layer.effect(
     const style = yield* Config.style
     return {
       condense: (project, turn) =>
-        model.ask(Summary, prompt(project, turn, style)).pipe(
+        model.ask(Condensed, prompt(project, turn, style)).pipe(
           Effect.mapError((cause) => new CondenseError({ cause })),
-          Effect.flatMap((summary) => Effect.map(inEnglish(model, summary.spoken), (spoken) => ({ ...summary, spoken }))),
+          Effect.flatMap((condensed) =>
+            Effect.map(
+              Effect.all([inEnglish(model, condensed.headline.trim()), inEnglish(model, condensed.more.trim())], { concurrency: 2 }),
+              ([headline, more]) => summed(condensed.priority, headline.trim(), more.trim()),
+            ),
+          ),
         ),
       ask: (request, called) =>
         model.ask(Asked, asked(request, called, style)).pipe(
