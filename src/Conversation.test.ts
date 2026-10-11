@@ -1198,7 +1198,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
 
   test.each([
     ["nothing Whisper can make out", ""],
-    ["what Whisper makes up", "Thank you."],
+    ["what Whisper makes up", "You."],
     ["yapd's own words around then", "Over in yapd, the tests pass."],
     ["yapd's own words with its name misheard", "Of Erin yapped. The tests pass now."],
   ])("picks up again from just before where it stopped, saying nothing and asking nobody, when what stopped it is heard as %s", async (_, heard) => {
@@ -1568,13 +1568,14 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(await after(false, false)).toEqual({ commands: ["play", "volume"], responded: [], sent: [], offered: [], before: false, done: true })
   })
 
-  test.each(["Stop.", "Thank you."])("takes \"%s\" over its first seconds for his once it goes on past where yapd stopped, though yapd was saying \"stopped\" and Whisper makes up \"Thank you.\", and for its own voice when it doesn't", async (heard) => {
-    const over = (frames: number) =>
+  test.each(["Stop.", "Thank you.", "Of course."])("takes \"%s\" over its first seconds for his to judge, however short, though yapd was saying \"stopped\" and Whisper makes up \"Thank you.\"", async (heard) => {
+    const over = (frames: number, live = false) =>
       overHelperScoped(
         Effect.gen(function* () {
           const helper = yield* overHelper([[0.9, heard]], {
             spoken: "Over in yapd, the agent stopped at the next step and is waiting on you, sir.",
             duration: 5,
+            live,
             reply: () => ({ intent: "dismiss", spoken: "", message: "" }),
           })
           yield* helper.wait(0.3)
@@ -1590,10 +1591,30 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
           }
         }),
       )
-    // Sixteen frames of speech, half a second past where it stopped.
+    // Sixteen frames of speech, half a second past where it stopped, or less once the time it takes to stop has gone by.
     expect(await over(16)).toEqual({ commands: ["play", "volume", "stop"], plays: [0], responded: [{ heard, told: true }], done: true })
-    // Twelve, no longer than its own voice can go on after.
-    expect(await over(12)).toEqual({ commands: ["play", "volume", "stop", "play"], plays: [0, 0], responded: [], done: false })
+    expect(await over(16, true)).toEqual({ commands: ["play", "volume", "stop"], plays: [0], responded: [{ heard, told: true }], done: true })
+    // Twelve, no longer than its own voice can go on after: still his to judge, told it may be its own voice.
+    expect(await over(12)).toEqual({ commands: ["play", "volume", "stop"], plays: [0], responded: [{ heard, told: true }], done: true })
+  })
+
+  test.each(["You.", "The agent stopped."])("takes \"%s\" over its first seconds, no longer than its own voice can go on after, for its own voice, as what Whisper makes up or yapd's own words", async (heard) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, heard]], {
+          spoken: "Over in yapd, the agent stopped at the next step and is waiting on you, sir.",
+          duration: 5,
+          reply: () => ({ intent: "dismiss", spoken: "", message: "" }),
+        })
+        yield* helper.wait(0.3)
+        yield* helper.talk(0, defaults.lead)
+        yield* helper.talk(0.9, 12)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { commands: helper.commands, plays: helper.plays, responded: helper.responded, done: Option.isSome(yield* Fiber.poll(helper.fiber)) }
+      }),
+    )
+    expect(result).toEqual({ commands: ["play", "volume", "stop", "play"], plays: [0, 0], responded: [], done: false })
   })
   test("keeps listening however often the model carries on after a nod, like an \"Okay.\" or a \"Yeah.\" before the agent's question, unlike for talk that wasn't meant for it", async () => {
     for (const nod of ["Okay.", "Yeah."]) {

@@ -7,7 +7,7 @@ import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
-import { agreed, gist, hallucinated, type Line, noted, type Reply, Responder } from "./Responder.ts"
+import { agreed, enough, gist, hallucinated, type Line, noted, type Reply, Responder } from "./Responder.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -462,6 +462,12 @@ const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
  * wasn't saying, nor with a sentence of only words that fill a pause Whisper
  * doesn't make up whole, like "Okay, thanks.", which may be him taking it in.
  */
+/** Whether what was heard is what he'd say back to a line himself, short as it is: hearing enough, taking it in, or going ahead. */
+const likeReply = (heard: string) => {
+  const said = gist(heard)
+  return enough.has(said) || noted.has(said) || agreed.has(said)
+}
+
 export const own = (heard: string, saying: string) => {
   const yapd = vocabulary(saying)
   const its = (word: string) => yapd.some((spoken) => alike(word, spoken))
@@ -937,13 +943,15 @@ export const make = (options: {
      * you.", which he says too; and when it had said all of it by then, its
      * own voice can only be its last word or so before him, as after any
      * line, so the model isn't told. Otherwise all of it may yet have been its
-     * own voice, `unsure`.
+     * own voice, `unsure`, though what he'd say back himself, like "Stop.",
+     * "Thank you." or "Of course.", is never taken for it by its words alone,
+     * however short: the model judges that, told it may be its own voice.
      */
     const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
       const { echo, onset = outcome.at } = outcome
       if (echo === undefined) return { itself: false, unsure: false }
       const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
-      if (past ? first === "" : own(first, "") || own(first, echo)) return { itself: true, unsure: true }
+      if (past ? first === "" : !likeReply(first) && (own(first, "") || own(first, echo))) return { itself: true, unsure: true }
       return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
     }
 
