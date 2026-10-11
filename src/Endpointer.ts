@@ -58,8 +58,17 @@ export type Event =
   | { readonly _tag: "Speech" }
   /** It wasn't. */
   | { readonly _tag: "Abandoned" }
-  /** They've finished. The audio starts just before the onset. */
-  | { readonly _tag: "Utterance"; readonly audio: Float32Array }
+  /**
+   * It went quiet short of what makes it surely the user, as only what began
+   * `capped` can, but there was as much of it as a word of theirs: it's kept
+   * whole, with what may come next, till they've finished.
+   */
+  | { readonly _tag: "Lapsed" }
+  /**
+   * They've finished. The audio starts just before the onset. `brief` when it
+   * never became surely speech, after it lapsed.
+   */
+  | { readonly _tag: "Utterance"; readonly audio: Float32Array; readonly brief?: true }
 
 /** How sure to be that it's speech: as ever, `wary` of what may be yapd's own voice, or surer still once that stopped it for nothing, `capped`. */
 export type Care = "plain" | "wary" | "capped"
@@ -67,14 +76,19 @@ export type Care = "plain" | "wary" | "capped"
 const onset: Event = { _tag: "Onset" }
 const speech: Event = { _tag: "Speech" }
 const abandoned: Event = { _tag: "Abandoned" }
+const lapsed: Event = { _tag: "Lapsed" }
 
 /** Follows Silero's own iterator: silence starts under `off` and only a voiced frame ends it. */
 export class Endpointer {
-  private phase: "quiet" | "onset" | "speech" = "quiet"
+  private phase: "quiet" | "onset" | "lapsed" | "speech" = "quiet"
   private frames: Array<Float32Array> = []
   private voiced = 0
+  /** Voiced frames since the onset, over all the times it lapsed. */
+  private all = 0
   private quiet = 0
   private needed = 0
+  /** Voiced frames from which what goes quiet short of `needed` is kept, as it may be a word of the user's: only for what began `capped`. */
+  private keeping = Number.POSITIVE_INFINITY
 
   constructor(private readonly options: Options = defaults) {}
 
@@ -92,13 +106,16 @@ export class Endpointer {
         }
         this.phase = "onset"
         this.voiced = 1
+        this.all = 1
         this.needed = care === "plain" ? confirm : this.options[care]
+        this.keeping = care === "capped" ? this.options.wary : Number.POSITIVE_INFINITY
         return onset
 
       case "onset": {
         const kept = this.frames
         if (isVoiced) {
           this.voiced++
+          this.all++
           this.quiet = 0
         } else {
           this.quiet++
@@ -108,6 +125,10 @@ export class Endpointer {
           this.quiet = 0
           return speech
         }
+        if (this.quiet >= abandon && this.all >= this.keeping) {
+          this.phase = "lapsed"
+          return lapsed
+        }
         if (this.quiet >= abandon) {
           this.reset()
           // Still before whatever comes next, as when nothing came, so speech begun just after isn't clipped.
@@ -115,6 +136,22 @@ export class Endpointer {
           return abandoned
         }
         return undefined
+      }
+
+      case "lapsed": {
+        // More of it, which takes as much again to be surely speech, with all before it kept.
+        if (isVoiced) {
+          this.phase = "onset"
+          this.voiced = 1
+          this.all++
+          this.quiet = 0
+          return onset
+        }
+        this.quiet++
+        if (this.quiet < silence && this.frames.length < longest) return undefined
+        const kept = this.frames.slice(0, this.frames.length - Math.max(0, this.quiet - tail))
+        this.reset()
+        return { _tag: "Utterance", audio: concat(kept), brief: true }
       }
 
       case "speech": {
@@ -132,11 +169,13 @@ export class Endpointer {
     this.phase = "quiet"
     this.frames = []
     this.voiced = 0
+    this.all = 0
     this.quiet = 0
   }
 }
 
-const concat = (frames: ReadonlyArray<Float32Array>) => {
+/** Audio, one piece after the other. */
+export const concat = (frames: ReadonlyArray<Float32Array>) => {
   const audio = new Float32Array(frames.reduce((length, frame) => length + frame.length, 0))
   let offset = 0
   for (const frame of frames) {

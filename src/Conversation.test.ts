@@ -1668,6 +1668,86 @@ describe("Once its own voice has stopped a line over its first seconds, and it p
     expect(result).toEqual({ once: ["play", "volume 0.25", "stop", "play"], after: ["volume 0.25", "volume 1"], offered: [] })
   })
 
+  /** Its own voice stops the line at once, as Whisper's "Over in yapd" for its own words tells, and it picks up again with the cap on. */
+  const stoppedOnItself = (helper: Effect.Effect.Success<ReturnType<typeof overHelper>>) =>
+    Effect.gen(function* () {
+      yield* helper.wait(0.5)
+      yield* helper.talk(0.8, defaults.wary)
+      yield* helper.quiet
+      yield* helper.wait(0.3)
+    })
+
+  test("stops for a word of his too short to stop for at once, like a lone \"No.\", once Whisper hears it isn't its own voice", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "No."]], {
+          live: true,
+          reply: ({ heard }) => (heard === "No." ? { intent: "dismiss", spoken: "", message: "" } : { intent: "resume", spoken: "", message: "" }),
+        })
+        yield* stoppedOnItself(helper)
+        const before = helper.timeline.length
+        yield* helper.talk(0.9, defaults.capped - 1)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return {
+          after: read(helper.timeline.slice(before)),
+          responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
+          done: (yield* Fiber.join(helper.fiber)) === false,
+        }
+      }),
+    )
+    expect(result).toEqual({ after: ["volume 0.25", "volume 1", "stop"], responded: [{ heard: "No.", told: true }], done: true })
+  })
+
+  test("keeps his first word whole with what he says after a pause, as one", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "No,"], [0.95, "leave it as it is."]], {
+          live: true,
+          reply: ({ heard }) => (heard === "Over in yapd, the tests pass." ? { intent: "resume", spoken: "", message: "" } : { intent: "dismiss", spoken: "", message: "" }),
+        })
+        yield* stoppedOnItself(helper)
+        yield* helper.talk(0.9, defaults.wary + 2)
+        // A pause too long to keep in the lead-in, but not long enough to end what he says.
+        yield* helper.talk(0, defaults.abandon + 4)
+        yield* helper.talk(0.95, 20)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return helper.responded.map(({ heard }) => heard)
+      }),
+    )
+    expect(result).toEqual(["No, leave it as it is."])
+  })
+
+  test("plays on, turned back up, when Whisper hears only its own words in a sound too short to stop for", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."]], { live: true })
+        yield* stoppedOnItself(helper)
+        const before = helper.timeline.length
+        yield* helper.talk(0.8, defaults.capped - 1)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { after: read(helper.timeline.slice(before)), plays: helper.plays, transcribed: helper.transcribed.length, responded: helper.responded }
+      }),
+    )
+    expect(result).toEqual({ after: ["volume 0.25", "volume 1"], plays: [0, 0], transcribed: 2, responded: [] })
+  })
+
+  test("offers a word of his too short to stop for at once over an answer for a follow-up", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Over in yapd, the tests pass."], [0.9, "Stop."]], { answer: true, live: true })
+        yield* stoppedOnItself(helper)
+        yield* helper.talk(0.9, defaults.wary)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { offered: helper.offered.map(({ heard, echo }) => ({ heard, told: echo !== undefined })), followed: helper.followed }
+      }),
+    )
+    expect(result).toEqual({ offered: [{ heard: "Stop.", told: true }], followed: ["Stop."] })
+  })
+
   test("stops for him past its first seconds as ever, though its own voice stopped the line before", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
