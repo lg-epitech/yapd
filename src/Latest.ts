@@ -4,6 +4,7 @@ import type * as Icons from "./Icons.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import * as Mutes from "./Mutes.ts"
 import type * as Server from "./Server.ts"
+import type * as T3Live from "./T3Live.ts"
 import type * as Threads from "./Threads.ts"
 
 // The threads with the latest updates, as a menu lists them: each thread's
@@ -52,6 +53,14 @@ export interface Latest {
   readonly under: (key: string) => Effect.Effect<ReadonlyArray<string>>
 }
 
+/**
+ * Whether yapd can reach a thread to act on it, so that hearing it again from
+ * the menu can make it what "it" means: it's on its machine's desk, which
+ * means that machine's threads can be seen now and it isn't archived.
+ * Deleted, it isn't found at all.
+ */
+export const reachable = (thread: Option.Option<T3Live.Thread>) => Option.exists(thread, ({ archivedAt }) => archivedAt === null)
+
 /** How long until the list is built again while a machine's threads can't be seen yet, as just after a start or while its T3 Code reconnects. */
 const blindly = "5 seconds"
 
@@ -67,9 +76,17 @@ export const make = (options: {
   readonly mutes: Mutes.Mutes
   readonly icons: Icons.Icons
   readonly threads: Pick<Threads.Threads["Type"], "find" | "project" | "changes" | "unseen">
+  /**
+   * The newest update he heard under a key, kept at `at` or since, which the
+   * menu can say again as it was said: none without a daemon.
+   */
+  readonly heard?: (key: string, at: number) => Effect.Effect<Option.Option<string>>
+  /** Each time what he heard changes, so whether a row can be heard again is worked out again. */
+  readonly hearing?: Stream.Stream<unknown>
 }) =>
   Effect.gen(function* () {
     const { here, journal, mutes, icons, threads } = options
+    const heard = options.heard ?? (() => Effect.succeedNone)
 
     /** Nothing listed yet, and the keys nothing is muted under. */
     const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), blind: false }
@@ -129,6 +146,8 @@ export const make = (options: {
           const project = yield* threads.project(machine, session ? (kept.directory === undefined ? {} : { directory: kept.directory }) : { thread: id })
           const icon = Option.isSome(project) ? Option.some(yield* icons.icon(machine, project.value)) : Option.none<Icons.Icon>()
           const name = Option.match(project, { onNone: () => kept.project, onSome: ({ title }) => title })
+          // Heard again as it was said while it's still among what he heard; otherwise only a thread yapd can reach, which "it" then means.
+          const still = Option.firstSomeOf(yield* Effect.forEach([key, ...by], (key) => heard(key, last.at)))
           return {
             key,
             machine,
@@ -148,6 +167,7 @@ export const make = (options: {
             muted: mute !== undefined,
             ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
             waiting: Option.exists(thread, ({ pendingRuntimeRequest }) => pendingRuntimeRequest !== null),
+            replayable: Option.isSome(still) || reachable(thread),
           } satisfies Server.Recent
         }),
       )
@@ -174,6 +194,7 @@ export const make = (options: {
         mutes.changes,
         icons.changes,
         Stream.filter(threads.changes, ({ change }) => shows.has(change._tag)).pipe(Stream.map(() => undefined)),
+        Stream.map(options.hearing ?? Stream.never, () => undefined),
         Stream.fromSchedule(Schedule.spaced("1 minute")).pipe(Stream.map(() => undefined)),
         // T3 Code tells of no change as it catches up, here or on another machine, so while one's threads can't be seen it's looked at again.
         Stream.fromSchedule(Schedule.spaced(blindly)).pipe(
@@ -227,7 +248,10 @@ export const menu = (options: {
     /**
      * Says a thread's latest update again, by its key: as it was said, when
      * it's one he heard, so a reply to it still gets there, otherwise what was
-     * kept of it, as an answer that makes "it" the thread.
+     * kept of it, as an answer that makes "it" the thread. A session's row, or
+     * a thread yapd can't reach now, as when it was archived or its machine
+     * can't be seen, isn't said again then: "it" would be something nothing
+     * he says can act on.
      */
     replayThread: (key: string) =>
       Effect.gen(function* () {
@@ -240,12 +264,15 @@ export const menu = (options: {
           Effect.forEach([key, ...(yield* latest.under(key))], (key) => daemon.latestHeard(key, at)),
           (all) => Option.firstSomeOf(all),
         )
-        if (Option.isSome(heard)) return yield* daemon.replay(heard.value)
+        // Said for this row, so "mute it" over it mutes the row's key.
+        if (Option.isSome(heard)) return yield* daemon.replay(heard.value, key)
         if (row.text.trim() === "") return "unknown" as const
+        if (row.thread === null) return "unreachable" as const
+        const ref = { machine: row.machine, id: row.thread }
+        if (!reachable(yield* threads.find(ref))) return "unreachable" as const
         const { on, turns } = yield* daemon.power
         if (!on) return "off" as const
         const now = yield* Clock.currentTimeMillis
-        const ref = row.thread === null ? undefined : { machine: row.machine, id: row.thread }
         yield* daemon.tell(
           {
             id: `again:${key}:${now}`,
@@ -254,7 +281,7 @@ export const menu = (options: {
             spoken: row.text,
             at: now,
             stale: Effect.succeed(false),
-            ...(ref === undefined ? {} : { saying: mention(ref, row.text) }),
+            saying: mention(ref, row.text),
           },
           turns,
         )

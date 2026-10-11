@@ -67,6 +67,12 @@ export interface Recent {
   readonly until?: string
   /** Whether it waits on him. */
   readonly waiting: boolean
+  /**
+   * Whether it can be heard again from the menu: its latest update is still
+   * one he heard, or it's a thread yapd can reach. Never a session's row he
+   * didn't hear just now, nor an archived thread or one on a machine away.
+   */
+  readonly replayable: boolean
 }
 
 /** A card as `/state` points at it. */
@@ -166,8 +172,8 @@ export interface Api {
   readonly mute: (key: string, until?: number) => Effect.Effect<"muted" | "unknown" | "invalid">
   /** Unmutes a thread by its key, whether it was muted or not. */
   readonly unmute: (key: string) => Effect.Effect<void>
-  /** Says a thread's latest update again, by its key. */
-  readonly replayThread: (key: string) => Effect.Effect<"queued" | "off" | "unknown", unknown>
+  /** Says a thread's latest update again, by its key: unreachable when it's a row that can't be heard again. */
+  readonly replayThread: (key: string) => Effect.Effect<"queued" | "off" | "unknown" | "unreachable", unknown>
   /** A project's image, by its machine and id. */
   readonly icon: (machine: string, project: string) => Effect.Effect<Option.Option<Icons.Image>>
 }
@@ -371,7 +377,9 @@ export const serve = (port: number, api: Api) =>
                   ? new Response(null, { status: 202 })
                   : result === "off"
                     ? new Response("yapd is off.", { status: 409 })
-                    : new Response("Nothing to say of it.", { status: 404 }),
+                    : result === "unreachable"
+                      ? new Response("yapd can't reach it from here, so it can't be heard again.", { status: 409 })
+                      : new Response("Nothing to say of it.", { status: 404 }),
               ),
               Effect.catchAll(failed("say a thread's update again")),
             )

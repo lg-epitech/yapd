@@ -71,7 +71,9 @@ const stateful = Effect.gen(function* () {
           return "muted" as const
         }),
       unmute: (key) => Effect.sync(() => void muted.delete(key)),
-      replayThread: (key) => Effect.map(SubscriptionRef.get(ref), (state) => (!known.has(key) ? "unknown" : state.on ? "queued" : "off")),
+      // A session's row it can't say again is turned away, as one yapd can't reach is.
+      replayThread: (key) =>
+        Effect.map(SubscriptionRef.get(ref), (state) => (!known.has(key) ? "unknown" : key.startsWith("session:") ? "unreachable" : state.on ? "queued" : "off")),
       icon: (machine, project) =>
         Effect.succeed(
           machine === "Rosie" && project === "p/1" ? Option.some({ bytes: new TextEncoder().encode("<svg/>"), type: "image/svg+xml", revision: "9f2c4e1a7b3d" }) : Option.none(),
@@ -447,7 +449,7 @@ describe("Server", () => {
       const url = `http://127.0.0.1:${server.port}`
       const call = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init))
       const replay = (key: string) => Effect.map(call(`/threads/${encodeURIComponent(key)}/replay`, { method: "POST" }), ({ status }) => status)
-      const heard = [yield* replay("t3:Rosie:850299f8"), yield* replay("t3:Rosie:nope")]
+      const heard = [yield* replay("t3:Rosie:850299f8"), yield* replay("t3:Rosie:nope"), yield* replay("session:rig:claude:s-1")]
       yield* call("/state", { method: "PUT", headers: { "content-type": "application/json" }, body: '{"on": false}' })
       const off = yield* replay("t3:Rosie:850299f8")
       const icon = yield* call(`/projects/Rosie/${encodeURIComponent("p/1")}/icon`)
@@ -456,7 +458,7 @@ describe("Server", () => {
       const changed = yield* call(`/projects/Rosie/${encodeURIComponent("p/1")}/icon`, { headers: { "if-none-match": '"0000"' } })
       const none = yield* call("/projects/rig/p-2/icon")
       const state = (yield* Effect.flatMap(call("/state"), (response) => Effect.promise(() => response.json()))) as Server.State
-      expect(heard).toEqual([202, 404])
+      expect(heard).toEqual([202, 404, 409])
       expect(off).toBe(409)
       expect({ status: icon.status, body, type: icon.headers.get("content-type"), etag: icon.headers.get("etag") }).toEqual({
         status: 200,

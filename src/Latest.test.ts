@@ -40,7 +40,12 @@ const integration: T3Live.Project = { id: "p-int", title: "integration", workspa
  * showing `shown` threads on each machine, all in the integration project,
  * and a session in its folder found to be in it too.
  */
-const listing = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, path = ":memory:") =>
+const listing = (
+  shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>,
+  path = ":memory:",
+  /** What he heard, and each time that changes. */
+  hearing: Pick<Parameters<typeof Latest.make>[0], "heard" | "hearing"> = {},
+) =>
   Effect.gen(function* () {
     const store = yield* Store.make(path)
     const journal = Journal.fromStore(store, (host) => host.split(".")[0] ?? host, yield* PubSub.unbounded<Journal.Kept>())
@@ -60,7 +65,7 @@ const listing = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, 
         )),
       changes: Stream.fromQueue(changes),
     }
-    const latest = yield* Latest.make({ here: "Rosie", journal, mutes, icons, threads })
+    const latest = yield* Latest.make({ here: "Rosie", journal, mutes, icons, threads, ...hearing })
     // Following what changes from here on.
     yield* flush
     return {
@@ -69,8 +74,11 @@ const listing = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, 
       mutes,
       /** How many times a row's project was looked for, which each time the list is built does. */
       looked: () => looked,
+      threads,
       /** T3 Code on a machine catches up, telling of no change as it does. */
       caughtUp: (machine: string, all: ReadonlyArray<T3Live.Thread>) => Effect.sync(() => void (views[machine] = all)),
+      /** A machine's threads can't be seen any more, as when it's away, which T3 Code there can't tell of. */
+      away: (machine: string) => Effect.sync(() => void (views[machine] = undefined)),
       /** T3 Code shows a thread as it is now, and tells of what changed. */
       becomes: (machine: string, after: T3Live.Thread, change: T3Live.Change["_tag"]) =>
         Effect.gen(function* () {
@@ -124,6 +132,7 @@ describe("Latest", () => {
       at: new Date(10 * day).toISOString(),
       muted: false,
       waiting: false,
+      replayable: true,
     })
   })
 
@@ -149,6 +158,58 @@ describe("Latest", () => {
       { key: "t3:Rosie:t-tezos", thread: "t-tezos", title: "Migrate the Tezos integration", project: "integration", id: "p-int", waiting: true },
     ])
     expect(result[2]?.muted).toBe(true)
+  })
+
+  test("can be heard again: a thread yapd can reach, here or on rig while it's seen, or a row whose update he heard is still there to hear again, never otherwise", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const heard = [{ id: "heard-s", key: "session:Rosie:claude:s-heard", at: 2 }]
+        const hearing = yield* Queue.unbounded<void>()
+        const { latest, journal, away, threads } = yield* listing(
+          {
+            Rosie: [thread("t-tezos", "Migrate the Tezos integration"), thread("t-old", "Old loader work", { archivedAt: "2026-10-08T00:00:00.000Z" })],
+            rig: [thread("t-rig", "Fix the rig cache")],
+          },
+          ":memory:",
+          {
+            heard: (key, at) => Effect.sync(() => Option.fromNullable(heard.find((one) => one.key === key && one.at >= at)?.id)),
+            hearing: Stream.fromQueue(hearing),
+          },
+        )
+        yield* journal.write({ at: 1, kind: "update", host: "Rosie", thread: "claude:s-term", directory: "/code/integration", said: "integration. Done." })
+        yield* journal.write({ at: 2, kind: "update", host: "Rosie", thread: "claude:s-heard", directory: "/code/integration", said: "integration. Heard." })
+        yield* journal.write({ at: 3, kind: "update", machine: "Rosie", thread: "t-old", said: "yapd. Old.", detail: { session: "claude:s-old" } })
+        yield* journal.write({ at: 4, kind: "update", machine: "Rosie", thread: "t-gone", said: "yapd. Gone.", detail: { session: "claude:s-gone" } })
+        yield* journal.write({ at: 5, kind: "update", machine: "rig", thread: "t-rig", said: "std. Cached.", detail: { session: "claude:s-rig" } })
+        yield* journal.write({ at: 6, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s-tezos" } })
+        const flags = Effect.map(latest.current, (rows) => Object.fromEntries(rows.map(({ key, replayable }) => [key, replayable])))
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const first = yield* flags
+        // What he heard moves on, so the session's update is no longer there to hear again.
+        heard.length = 0
+        yield* Queue.offer(hearing, undefined)
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const forgotten = yield* flags
+        // rig goes away, which T3 Code there can't tell of, so it's seen at the next look, a minute on.
+        yield* away("rig")
+        yield* TestClock.adjust("1 minute")
+        yield* flush
+        return { first, forgotten, away: yield* flags, found: Option.isSome(yield* threads.find({ machine: "rig", id: "t-rig" })) }
+      }),
+    )
+    expect(result.first).toEqual({
+      "t3:Rosie:t-tezos": true,
+      "t3:rig:t-rig": true,
+      "t3:Rosie:t-gone": false,
+      "t3:Rosie:t-old": false,
+      "session:Rosie:claude:s-heard": true,
+      "session:Rosie:claude:s-term": false,
+    })
+    expect(result.forgotten).toEqual({ ...result.first, "session:Rosie:claude:s-heard": false })
+    expect(result.away).toEqual({ ...result.forgotten, "t3:rig:t-rig": false })
+    expect(result.found).toBe(false)
   })
 
   test("a session's own row is the thread's once the thread shows an update of it, as when its link timed out once, and a session's mute shows on its thread", async () => {
@@ -286,27 +347,33 @@ describe("Latest", () => {
 
   describe("menu", () => {
     /** The menu over the latest threads, with a daemon that heard `heard` updates under their keys, each at its time, and is `on`. */
-    const menuOf = (heard: ReadonlyArray<{ readonly id: string; readonly key: string; readonly at: number }>, on = true) =>
+    const menuOf = (
+      heard: ReadonlyArray<{ readonly id: string; readonly key: string; readonly at: number }>,
+      on = true,
+      shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>> = { Rosie: [thread("t-tezos", "Migrate the Tezos integration")] },
+    ) =>
       Effect.gen(function* () {
-        const listed = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] })
+        // The newest he heard under the key, kept at `at` or since.
+        const latestHeard = (key: string, at: number) => Effect.succeed(Option.fromNullable(heard.filter((one) => one.key === key && one.at >= at).at(-1)?.id))
+        const listed = yield* listing(shown, ":memory:", { heard: latestHeard })
         const told: Array<string> = []
         const replayed: Array<string> = []
         const mentioned: Array<string> = []
         const controls = Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal })
         const menu = Latest.menu({
           latest: listed.latest,
-          threads: { find: (ref) => Effect.succeed(ref.id === "t-tezos" ? Option.some(thread("t-tezos", "Migrate the Tezos integration")) : Option.none()) },
+          threads: listed.threads,
           mutes: listed.mutes,
           controls,
           daemon: {
-            // The newest he heard under the key, kept at `at` or since.
-            latestHeard: (key, at) => Effect.succeed(Option.fromNullable(heard.filter((one) => one.key === key && one.at >= at).at(-1)?.id)),
-            replay: (id) => Effect.sync(() => void replayed.push(id)).pipe(Effect.as("queued" as const)),
+            latestHeard,
+            // Said again for the row, by its key, which only "mute it" over it uses.
+            replay: (id, menu) => Effect.sync(() => void replayed.push(`${id} for ${menu}`)).pipe(Effect.as("queued" as const)),
             power: Effect.succeed({ on, turns: 1 }),
             // Said at once, which makes "it" the thread it's about.
             tell: (notice) => Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.as(true)),
           } as Parameters<typeof Latest.menu>[0]["daemon"],
-          mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.id}: ${said}`)),
+          mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.machine}/${ref.id}: ${said}`)),
         })
         const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
         return { ...listed, menu, told, replayed, mentioned, settle }
@@ -328,16 +395,17 @@ describe("Latest", () => {
       )
       expect([result.quiet, result.notice, result.unknown]).toEqual(["queued", "queued", "unknown"])
       expect(result.told).toEqual(["integration. Halfway.", "The Tezos migration asks which network first."])
-      expect(result.mentioned).toEqual(["t-tezos: integration. Halfway.", "t-tezos: The Tezos migration asks which network first."])
+      expect(result.mentioned).toEqual(["Rosie/t-tezos: integration. Halfway.", "Rosie/t-tezos: The Tezos migration asks which network first."])
       expect(result.replayed).toEqual([])
     })
 
     test("hears again as it was said the update he heard that the row shows, under its thread or the session it's shown from", async () => {
       const result = await run(
         Effect.gen(function* () {
-          const { journal, menu, told, replayed, settle } = yield* menuOf([
+          const { journal, menu, told, replayed, mentioned, settle } = yield* menuOf([
             { id: "heard-a", key: "t3:Rosie:t-tezos", at: 1 },
             { id: "heard-b", key: "session:Rosie:claude:s", at: 2 },
+            { id: "heard-c", key: "session:Rosie:claude:s-term", at: 3 },
           ])
           yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Started.", detail: { session: "claude:s" } })
           yield* settle
@@ -346,12 +414,50 @@ describe("Latest", () => {
           yield* journal.write({ at: 2, kind: "update", host: "Rosie", thread: "claude:s", said: "integration. Done." })
           yield* settle
           const session = yield* menu.replayThread("t3:Rosie:t-tezos")
-          return { linked, session, told: [...told], replayed: [...replayed] }
+          // A terminal session's row whose update he heard is heard again as it was too, though yapd can't reach it.
+          yield* journal.write({ at: 3, kind: "update", host: "Rosie", thread: "claude:s-term", directory: "/code/integration", said: "integration. Done here." })
+          yield* settle
+          const terminal = yield* menu.replayThread("session:Rosie:claude:s-term")
+          return { linked, session, terminal, told: [...told], replayed: [...replayed], mentioned: [...mentioned] }
         }),
       )
-      expect([result.linked, result.session]).toEqual(["queued", "queued"])
-      expect(result.replayed).toEqual(["heard-a", "heard-b"])
+      expect([result.linked, result.session, result.terminal]).toEqual(["queued", "queued", "queued"])
+      // As "Hear Again" says an update: nothing makes "it" anything else.
+      expect(result.replayed).toEqual(["heard-a for t3:Rosie:t-tezos", "heard-b for t3:Rosie:t-tezos", "heard-c for session:Rosie:claude:s-term"])
       expect(result.told).toEqual([])
+      expect(result.mentioned).toEqual([])
+    })
+
+    test("hears again neither a session's row nor a thread yapd can't reach, archived, deleted or on rig while it's away, and says nothing of them", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, replayed, mentioned, settle, away } = yield* menuOf([], true, {
+            Rosie: [thread("t-tezos", "Migrate the Tezos integration"), thread("t-old", "Old loader work", { archivedAt: "2026-10-08T00:00:00.000Z" })],
+            rig: [thread("t-rig", "Fix the rig cache")],
+          })
+          yield* journal.write({ at: 1, kind: "update", host: "Rosie", thread: "claude:s-term", directory: "/code/integration", said: "integration. Done." })
+          yield* journal.write({ at: 2, kind: "update", host: "rig.local", thread: "codex:s-rig", directory: "/code/std", said: "std. Done on rig." })
+          yield* journal.write({ at: 3, kind: "update", machine: "Rosie", thread: "t-old", said: "yapd. Old.", detail: { session: "claude:s-old" } })
+          yield* journal.write({ at: 4, kind: "update", machine: "Rosie", thread: "t-gone", said: "yapd. Gone.", detail: { session: "claude:s-gone" } })
+          yield* journal.write({ at: 5, kind: "update", machine: "rig", thread: "t-rig", said: "std. Cached.", detail: { session: "claude:s-rig" } })
+          yield* settle
+          const outcomes = [
+            yield* menu.replayThread("session:Rosie:claude:s-term"),
+            yield* menu.replayThread("session:rig:codex:s-rig"),
+            yield* menu.replayThread("t3:Rosie:t-old"),
+            yield* menu.replayThread("t3:Rosie:t-gone"),
+            yield* menu.replayThread("t3:rig:t-rig"),
+          ]
+          // rig goes away: its thread is checked as it's asked for, whatever the list last said.
+          yield* away("rig")
+          outcomes.push(yield* menu.replayThread("t3:rig:t-rig"))
+          return { outcomes, told: [...told], replayed: [...replayed], mentioned: [...mentioned] }
+        }),
+      )
+      expect(result.outcomes).toEqual(["unreachable", "unreachable", "unreachable", "unreachable", "queued", "unreachable"])
+      expect(result.told).toEqual(["std. Cached."])
+      expect(result.mentioned).toEqual(["rig/t-rig: std. Cached."])
+      expect(result.replayed).toEqual([])
     })
 
     test("says nothing again while yapd is off", async () => {

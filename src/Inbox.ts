@@ -19,7 +19,7 @@ export interface Ready {
 export interface Replay {
   readonly id: string
   readonly turns: number
-  /** The menu's row it was asked for from, by its key, which "it" then means: that row's thread, or its session. */
+  /** The menu's row it was asked for from, by its key, which "mute it" or "unmute it" said over it is about. */
   readonly menu?: string
 }
 

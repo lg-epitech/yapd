@@ -132,7 +132,7 @@ export const make = (
         at: number
         playing: boolean
         readonly turns: number
-        /** The menu's row it's said again for, by its key, which "it" then means, rather than the update as it was first heard. */
+        /** The menu's row it's said again for, by its key, which "mute it" or "unmute it" said over it is about. */
         readonly menu?: string
       }
     | undefined
@@ -1633,7 +1633,7 @@ export const make = (
   /**
    * Says an update the user heard again, as it was said, and listens for a
    * reply like after any update. Asked for from the menu, it's said for that
-   * row, by its key, which "it" means once it starts playing.
+   * row, by its key, so "mute it" over it mutes that row.
    */
   const replay = (id: string, menu?: string) =>
     Effect.gen(function* () {

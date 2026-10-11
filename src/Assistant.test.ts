@@ -7,8 +7,10 @@ import { Condenser } from "./Condenser.ts"
 import type * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
+import * as Icons from "./Icons.ts"
 import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
+import * as Latest from "./Latest.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Mutes from "./Mutes.ts"
@@ -10176,6 +10178,74 @@ describe("Assistant muting", () => {
     expect(result.quieted).toBe(14)
     expect(result.card).toBe("- **1 min ago** · yapd: yapd. The loader fix is ready.\n- **1 min ago** · integration · muted, 14 updates: integration. Step 13.")
     expect(result.left).toEqual([])
+  })
+})
+
+describe("Assistant after the menu says a thread again", () => {
+  /**
+   * The menu over what the journal keeps now, saying again at once what it's
+   * asked to and he didn't just hear, as yapd says it: "it" is what's said,
+   * from when it starts playing.
+   */
+  const menuOver = (made: Effect.Effect.Success<ReturnType<typeof assistant>>) =>
+    Effect.gen(function* () {
+      const latest = yield* Latest.make({ here: "Rosie", journal: made.journal, mutes: made.mutes!, icons: yield* Icons.make({ actions: () => Option.none() }), threads: made.threads })
+      return Latest.menu({
+        latest,
+        threads: made.threads,
+        mutes: made.mutes!,
+        controls: Mutes.controls({ mutes: made.mutes!, journal: made.journal, silence: () => Effect.void }),
+        daemon: {
+          latestHeard: () => Effect.succeed(Option.none()),
+          replay: () => Effect.die("not expected"),
+          power: Effect.succeed({ on: true, turns: 1 }),
+          tell: (notice) => Effect.as(notice.saying ?? Effect.void, true),
+        } as Parameters<typeof Latest.menu>[0]["daemon"],
+        mention: made.mention,
+      })
+    })
+
+  /** What he heard of the Mina tickets, whatever he says. */
+  const minaTickets = (situation: Brain.Situation) => Brain.decision({ act: "answer", spoken: "The Mina tickets are filed, sir.", target: handle(situation, mina) })
+
+  test("a thread's row said again makes 'it' that thread, so 'interrupt it' stops it, not the one he heard of before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(minaTickets, undefined, { muting: true })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "integration. Comparing fee tables.", detail: { session: "claude:s-tez" } })
+        yield* made.dictate("How are the Mina tickets?")
+        const menu = yield* menuOver(made)
+        const replayed = yield* menu.replayThread(`t3:Rosie:${tezos.id}`)
+        yield* made.dictate("Interrupt it.")
+        return { replayed, interrupted: made.dispatched.filter(({ type }) => type === "run.interrupt").map(({ threadId }) => threadId), model: made.seen.length }
+      }),
+    )
+    expect(result.replayed).toBe("queued")
+    expect(result.interrupted).toEqual([tezos.id])
+    expect(result.model).toBe(1)
+  })
+
+  test("a session's row or a thread yapd can't reach isn't said again, so 'it' stays what he heard last", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir.", target: handle(situation, tezos) }),
+          undefined,
+          { muting: true },
+        )
+        yield* made.journal.write({ at: now - 120_000, kind: "update", host: "Rosie", thread: "claude:s-term", directory: "/code/yapd", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "t-gone", project: "yapd", said: "yapd. Old work.", detail: { session: "claude:s-gone" } })
+        yield* made.dictate("How's the Tezos migration?")
+        const menu = yield* menuOver(made)
+        const replayed = [yield* menu.replayThread("session:Rosie:claude:s-term"), yield* menu.replayThread("t3:Rosie:t-gone")]
+        yield* made.dictate("Interrupt it.")
+        return { replayed, spoken: made.spoken().slice(1), interrupted: made.dispatched.filter(({ type }) => type === "run.interrupt").map(({ threadId }) => threadId) }
+      }),
+    )
+    expect(result.replayed).toEqual(["unreachable", "unreachable"])
+    // Nothing was said again, so "it" is the Tezos migration he just heard of, as ever.
+    expect(result.spoken).toEqual(["Stopped, sir."])
+    expect(result.interrupted).toEqual([tezos.id])
   })
 })
 })

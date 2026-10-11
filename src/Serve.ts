@@ -135,7 +135,18 @@ export const serve = Effect.gen(function* () {
     sent: (to, since) => ledger.steps(since, { kinds: ["message", "reply", "start"], states: ["prepared", "sent", "unknown"], machine: to.machine, thread: to.id }),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
-  const latest = yield* Latest.make({ here: machine, journal, mutes, icons, threads })
+  const latest = yield* Latest.make({
+    here: machine,
+    journal,
+    mutes,
+    icons,
+    threads,
+    heard: daemon.latestHeard,
+    hearing: Stream.changesWith(
+      Stream.map(daemon.state, ({ heard }) => heard.map(({ id }) => id).join("\n")),
+      (one, other) => one === other,
+    ),
+  })
   // Muting from the menu or by voice: never anything that reaches an agent. A thread the menu shows muted by its session is unmuted by it too.
   const controls = Mutes.widened(
     Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, journal })),
