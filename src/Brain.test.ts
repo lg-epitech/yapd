@@ -415,6 +415,22 @@ describe("Brain", () => {
     expect(paused("Sir? Stop it.", false, "Stop it.")).toBe(paused("Sir? Stop it.", false))
   })
 
+  test("over yapd's first seconds, what he said after a pause isn't taken for nothing on the strength of yapd's own word before it", () => {
+    const echo = "For the loader fix, is that yapd or std?"
+    const over = (heard: string, afterPause?: string, voiced = 2) => {
+      const given = situation(heard)
+      return Brain.fast({ ...given, utterance: { ...given.utterance, via: "reply", voiced, echo, ...(afterPause === undefined ? {} : { afterPause }) } }, lines)?.act
+    }
+    // Its own "Yapd." heard first, then his "Yapd, yapd." after a pause: the model's to judge.
+    expect(over("Yapd. Yapd, yapd.", "Yapd, yapd.")).toBeUndefined()
+    // Said three times with no pause, or the same words three times after it too, it's nothing, as ever.
+    expect(over("Yapd. Yapd, yapd.")).toBe("resume")
+    expect(over("Yapd. Yapd, yapd, yapd.", "Yapd, yapd, yapd.")).toBe("resume")
+    // Nor is what came before a pause, which may be his, let go for a made-up word after it.
+    expect(over("Stop the loader. Thank you.", "Thank you.", 0.3)).not.toBe("resume")
+    expect(over("Thank you.", "Thank you.", 0.3)).toBe("resume")
+  })
+
   test("a write only fairly sure of its thread is confirmed on the focus thread when it's a stop, and asked about or left elsewhere", () => {
     const listed = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!
     const on: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }

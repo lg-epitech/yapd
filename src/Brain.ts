@@ -1327,16 +1327,27 @@ export const fast = (situation: Situation, lines: Lines): Decision | undefined =
   return decided !== undefined && situation.utterance.echo !== undefined && writes.has(decided.act) ? undefined : decided
 }
 
+/** Whisper repeats itself on noise, but "no, no, no" is still no. */
+const meaning = (heard: string) => {
+  const over = repeating(heard)
+  const meant = over !== undefined && (refused.has(over.phrase) || agreed.has(over.phrase) || enough.has(over.phrase))
+  return { over, meant, said: meant ? over.phrase : heard }
+}
+
+/** Nothing anyone said: no words, the same ones three times or more, or what Whisper makes up on a faint sound. */
+const nothing = (heard: string, voiced: number) => {
+  const { over, meant, said } = meaning(gist(heard))
+  return said === "" || (over !== undefined && over.times >= 3 && !meant) || (hallucinated.has(said) && voiced < faint)
+}
+
 const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   const { utterance, open, desk, subject } = situation
   const heard = gist(utterance.heard)
-  const over = repeating(heard)
-  // Whisper repeats itself on noise, but "no, no, no" is still no.
-  const meant = over !== undefined && (refused.has(over.phrase) || agreed.has(over.phrase) || enough.has(over.phrase))
-  const said = meant ? over.phrase : heard
-  if (said === "" || (over !== undefined && over.times >= 3 && !meant) || (hallucinated.has(said) && utterance.voiced < faint)) {
-    return decision({ act: "resume" })
-  }
+  const { said } = meaning(heard)
+  // Over yapd's first seconds, what he said after a pause is surely his, so it's never taken for nothing on the strength of what came
+  // before, which may be yapd's own last word, like "Yapd." ahead of his "Yapd, yapd.".
+  const paused = utterance.echo !== undefined && utterance.afterPause !== undefined && utterance.afterPause.trim() !== ""
+  if (nothing(utterance.heard, utterance.voiced) && (!paused || nothing(utterance.afterPause!, utterance.voiced))) return decision({ act: "resume" })
   // The name of an option of the thread's question open, like "Cancel the run", "Close it" or "Repeat it", is that option, said over it:
   // never stopping the work that asked it, taking a card down, or hearing it again. Unless he's hearing of another thread, whose run
   // those words may be to stop.
