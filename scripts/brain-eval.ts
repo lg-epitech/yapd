@@ -8,6 +8,7 @@ import * as Brain from "../src/Brain.ts"
 import * as Config from "../src/Config.ts"
 import { home, settings } from "../src/Home.ts"
 import { ProviderModel } from "../src/Model.ts"
+import * as Mutes from "../src/Mutes.ts"
 import * as Persona from "../src/Persona.ts"
 import * as Store from "../src/Store.ts"
 import * as T3Actions from "../src/T3Actions.ts"
@@ -29,14 +30,21 @@ import * as Threads from "../src/Threads.ts"
 //     answer to a question yapd asked, the request it was about, a piece of
 //     each thread it offered, and whether it was said over the question
 //     rather than dictated.
-//   bun scripts/brain-eval.ts run [--runs 5] [--effort low,minimal]
+//   bun scripts/brain-eval.ts run [--runs 5] [--effort low,minimal] [--phrases file] [--view file] [--out folder]
 //     Searches the threads for each phrase as the daemon does, reading only,
 //     then asks the model about it, the runs times over, at each effort, and
 //     says whether the gate passes at the first effort, the others being only
 //     to compare: the right thread every time, as its pick even when it asks,
 //     an answer to its question taken as one and settling it, no question in
 //     at least four runs in five of each phrase, and a median under 3.6 s.
-//     Each answer goes to results-<time>.jsonl.
+//     Each answer goes to results-<time>.jsonl. `--phrases` takes the phrases
+//     from another file, like a few new ones, leaving phrases.json as it is,
+//     and `--view` the threads, which are then nobody's, so nothing is searched
+//     and no work yapd started is read; `--out` keeps the results elsewhere.
+//     A phrase can say a piece of the title of threads he muted, how it's
+//     decided and whether with when it ends, or that it asks which thread.
+//     The cases for muting are in scripts/eval, with threads of their own:
+//       bun scripts/brain-eval.ts run --runs 1 --phrases scripts/eval/mutes.phrases.json --view scripts/eval/mutes.view.json --out /tmp/yapd-eval
 //   bun scripts/brain-eval.ts probe [--runs 20]
 //     Times orchestration.searchThreads, which only reads, to tell whether
 //     its hits are quick enough to add to every request.
@@ -85,6 +93,14 @@ const Phrases = Schema.Array(
     via: Schema.optional(Schema.Literal("shortcut", "reply")),
     /** When it was said, as ISO 8601: threads made after it, like the one it started, weren't there to be meant. */
     said: Schema.optional(Schema.String),
+    /** A piece of the title of each thread he muted. */
+    muted: Schema.optional(Schema.Array(Schema.String)),
+    /** How it should be decided, like "unmute" for a mute. */
+    how: Schema.optional(Schema.String),
+    /** Whether it should say when it ends, like a mute for an hour. */
+    until: Schema.optional(Schema.Boolean),
+    /** Whether it should ask which thread, since it could be either of two. */
+    asks: Schema.optional(Schema.Boolean),
   }),
 )
 const Shell = Schema.Struct({
@@ -127,9 +143,9 @@ const fixture = Effect.gen(function* () {
   }
 })
 
-/** The view as T3Live keeps it. */
-const viewed = Effect.gen(function* () {
-  const saved = yield* Effect.promise(() => Bun.file(viewFile).json() as Promise<unknown>)
+/** The view kept in `file` as T3Live keeps it. */
+const viewed = (file: string) => Effect.gen(function* () {
+  const saved = yield* Effect.promise(() => Bun.file(file).json() as Promise<unknown>)
   const shell = yield* Schema.decodeUnknown(Schema.extend(Shell, Schema.Struct({ at: Schema.Number })))(saved)
   const threads = shell.threads.flatMap((thread) => Option.toArray(Schema.decodeUnknownOption(T3Live.Thread)(thread)))
   const projects = shell.projects.flatMap((project) => Option.toArray(Schema.decodeUnknownOption(T3Live.Project)(project)))
@@ -209,13 +225,17 @@ const seconds = (ms: number) => `${(ms / 1000).toFixed(2)} s`
 const run = Effect.gen(function* () {
   const runs = Number(option("runs", "5"))
   const efforts = option("effort", "low").split(",").filter((effort) => effort !== "")
-  const phrases = yield* Effect.promise(() => Bun.file(phrasesFile).json() as Promise<unknown>).pipe(Effect.flatMap(Schema.decodeUnknown(Phrases)))
-  const { at, view } = yield* viewed
+  const phrases = yield* Effect.promise(() => Bun.file(option("phrases", phrasesFile)).json() as Promise<unknown>).pipe(Effect.flatMap(Schema.decodeUnknown(Phrases)))
+  // Threads of a view of the test's own are nobody's: nothing in T3 Code or yapd's database is about them.
+  const own = option("view", "") === ""
+  const { at, view } = yield* viewed(option("view", viewFile))
   const machine = Option.getOrElse(yield* Config.name, () => hostname().split(".")[0] ?? hostname())
   const remotes = yield* Config.remotes
-  const started = yield* startedWork(machine)
-  const found = yield* searchedFor(phrases, machine)
-  const results = join(folder, `results-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`)
+  const started = own ? yield* startedWork(machine) : new Map<string, Started>()
+  const found = own ? yield* searchedFor(phrases, machine) : new Map<string, ReadonlyArray<Threads.Ref>>()
+  const out = option("out", folder)
+  yield* Effect.promise(() => mkdir(out, { recursive: true }))
+  const results = join(out, `results-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`)
   const writer = Bun.file(results).writer()
   yield* Console.log(`${phrases.length} phrases, ${runs} runs each, against the threads as of ${new Date(at).toLocaleString()}.`)
   let passed = true
@@ -280,7 +300,10 @@ const run = Effect.gen(function* () {
               asked: [],
               acted: Option.none(),
               quieted: [],
-              mutes: [],
+              // The threads he muted, by a piece of their titles.
+              mutes: desk.threads
+                .filter((listed) => (phrase.muted ?? []).some((piece) => fits(listed, piece)))
+                .map(({ ref }) => ({ key: Mutes.key.thread(ref), at: now - 60 * 60_000 })),
               muteChange: Option.none(),
               now,
             }
@@ -302,15 +325,20 @@ const run = Effect.gen(function* () {
             const asking = checked._tag === "Ask" || decision.act === "clarify"
             // An answer to the question has to be taken as one, never as new work, and settle it: yapd leaves a request it would have to ask about twice.
             const answering = Option.isNone(open) || (decision.pending === "answers" && decision.act !== "start" && !asking)
+            // As it should be decided, how and whether with when it ends, when the phrase says, on the thread it names, or asking which.
+            // A time it ends is one that's to come, as ISO 8601, never only how long.
+            const ends = Date.parse(decision.when)
+            const taken = (phrase.how === undefined || decision.how === phrase.how) && (phrase.until === undefined || (!Number.isNaN(ends) && ends > now) === phrase.until)
             const right =
-              answering &&
-              (phrase.act !== undefined
-                ? decision.act === phrase.act
-                : phrase.thread === ""
-                  ? decision.target === "" || listed !== undefined
-                  : fits(listed, phrase.thread))
+              phrase.asks === true
+                ? asking
+                : answering &&
+                  taken &&
+                  (phrase.act === undefined || decision.act === phrase.act) &&
+                  (phrase.thread === "" ? phrase.act !== undefined || decision.target === "" || listed !== undefined : fits(listed, phrase.thread))
             if (right) correct++
-            if (asking) asked++
+            // One that should ask is never held to asking rarely.
+            if (asking && phrase.asks !== true) asked++
             const about = listed?.called ?? "no thread"
             yield* Console.log(`  ${right ? "ok  " : "MISS"} ${seconds(ms)} ${decision.act} → ${about}, ${decision.sure}${asking ? ", asked" : ""}: ${phrase.heard}`)
             writer.write(`${JSON.stringify({ effort, heard: phrase.heard, run, ms, decision, thread: listed?.thread.title ?? null, right, asking })}\n`)
@@ -362,7 +390,7 @@ const command = process.argv[2]
 const chosen: Effect.Effect<void, unknown> | undefined =
   command === "fixture" ? fixture : command === "run" ? run : command === "probe" ? probe : undefined
 if (chosen === undefined) {
-  console.error("usage: bun scripts/brain-eval.ts fixture | run [--runs 5] [--effort low,minimal] | probe [--runs 20]")
+  console.error("usage: bun scripts/brain-eval.ts fixture | run [--runs 5] [--effort low,minimal] [--phrases file] [--view file] [--out folder] | probe [--runs 20]")
   process.exit(1)
 }
 await Effect.runPromise(Effect.flatMap(settled(), (provider) => chosen.pipe(Effect.withConfigProvider(provider))))
