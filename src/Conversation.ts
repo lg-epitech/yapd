@@ -7,7 +7,7 @@ import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
-import { gist, hallucinated, type Line, type Reply, Responder } from "./Responder.ts"
+import { gist, hallucinated, type Line, noted, type Reply, Responder } from "./Responder.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -1077,9 +1077,11 @@ export const make = (options: {
                 if (echo !== undefined && listenOn()) continue
                 return true
               }
-              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
-              if (echo === undefined) carryOn()
-              else from = yield* again(outcome, unsure, from)
+              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so. Nor is
+              // a nod it carries on after, like an "Okay." said before the agent's question, so he hears it: that was meant for it.
+              if (echo !== undefined) from = yield* again(outcome, unsure, from)
+              else if (noted.has(gist(heard))) from = Math.max(from, outcome.at - rewind)
+              else carryOn()
               continue
             }
 

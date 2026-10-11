@@ -1594,6 +1594,27 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     // Twelve, no longer than its own voice can go on after.
     expect(await over(12)).toEqual({ commands: ["play", "volume", "stop", "play"], plays: [0, 0], responded: [], done: false })
   })
+  test("keeps listening however often the model carries on after a nod, like an \"Okay.\" before the agent's question, unlike for talk that wasn't meant for it", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Okay."]], { reply: () => ({ intent: "resume", spoken: "", message: "" }) })
+        yield* helper.wait(4)
+        for (let time = 0; time < 4; time++) {
+          yield* helper.talk(0.9, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+        }
+        return { commands: helper.commands, plays: helper.plays.map(seconds), responded: helper.responded.map(({ heard, echo }) => ({ heard, echo })) }
+      }),
+    )
+    expect(result).toEqual({
+      commands: ["play", ...Array.from({ length: 4 }, () => ["volume", "stop", "play"]).flat()],
+      // Each time from a moment back, as after any talk it carries on after, never further back than the time before, so he hears the question.
+      plays: [0, 2.5, 2.5, 2.5, 2.5],
+      responded: Array.from({ length: 4 }, () => ({ heard: "Okay.", echo: undefined })),
+    })
+  })
+
 })
 
 describe("Responder", () => {
