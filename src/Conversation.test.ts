@@ -1097,7 +1097,9 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       Effect.gen(function* () {
         const helper = yield* overHelper([[0.9, said]], { reply: () => ({ intent: "dismiss", spoken: "", message: "" }) })
         yield* helper.wait(1)
-        yield* helper.talk(0.9, 10)
+        // Going on past where it stopped, so surely his.
+        yield* helper.talk(0, defaults.lead)
+        yield* helper.talk(0.9, 16)
         yield* helper.quiet
         yield* helper.wait(15)
         return {
