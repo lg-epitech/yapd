@@ -372,6 +372,13 @@ export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.
 /** What's said of an approval or an answer for a thread no longer waiting on it, as when it was dealt with in T3 Code. */
 export const dealtWith = (lines: Lines) => `That's already been dealt with${addressed(lines)}.`
 
+/**
+ * What's said when he asks for something to be done to a thread without
+ * naming it, while "it" is a menu's row yapd can't reach: nothing's done,
+ * and nothing's asked.
+ */
+export const nameIt = (lines: Lines) => `I can't reach that one from here${addressed(lines)}. Name the thread you mean.`
+
 /** What's said instead of answering a thread that waits on a secret, which is only ever given in T3 Code. */
 export const secretly = (lines: Lines) => `That one needs T3 Code; I never take a secret by voice${addressed(lines)}.`
 
@@ -1350,20 +1357,64 @@ export const outOfReach = (situation: Pick<Situation, "subject" | "desk">): Opti
     })
   })
 
+/** What he said that's surely his: all of it, or when he began over yapd's own voice, only what he said after a pause. */
+const his = (said: Overheard & { readonly heard: string }) => (said.echo === undefined ? said.heard : (said.afterPause ?? ""))
+
+/** Whether the question open was asked over a menu's row yapd can't reach, which "it" meant then. */
+const overRow = (situation: Pick<Situation, "subject" | "open">) => {
+  const { subject } = situation
+  return subject._tag === "Answer" && subject.row !== undefined && Option.exists(situation.open, (open) => subject.question?.id === open.id)
+}
+
+/** Whether a decision answers the question open: said as its answer, and what it asked about. */
+const answersOpen = (choice: Decision, situation: Pick<Situation, "open" | "desk">) =>
+  choice.pending === "answers" && Option.exists(situation.open, (open) => agrees(open, choice, situation.desk))
+
+/**
+ * Whether his words name a thread, as `Threads.names` has it: what he said,
+ * surely his, and for a later step of his request, what he said in all too.
+ * Answering a question asked over a menu's row yapd can't reach, like "the
+ * first one", the words he asked for it in count too.
+ */
+const naming = (choice: Decision, situation: Situation, listed: Threads.Listed) => {
+  const { utterance } = situation
+  if (Threads.names(his(utterance), listed) && (utterance.whole === undefined || Threads.names(utterance.whole, listed))) return true
+  const open = Option.getOrUndefined(situation.open)
+  return open !== undefined && overRow(situation) && answersOpen(choice, situation) && Threads.names(his(open), listed)
+}
+
+/**
+ * Whether what's to be done to a thread, like a message, an answer, an
+ * allowing, stopping it or taking something back, waits for him to name it:
+ * while "it" is a menu's row yapd can't reach, the model may take "it" for a
+ * thread he heard of before, so nothing's done to a thread his words don't
+ * name, and nothing's asked about it either. Reading what a thread asks
+ * isn't doing anything to it, and a plain yes to a question asked before the
+ * row was said again is that question's, as ever.
+ */
+export const unnamed = (choice: Decision, listed: Threads.Listed | undefined, situation: Situation) => {
+  if (Option.isNone(outOfReach(situation))) return false
+  if (choice.act === "reply" && choice.text.trim() === "" && choice.how === "") return false
+  if (answersOpen(choice, situation) && !overRow(situation) && agreed.has(meaning(gist(situation.utterance.heard)).said)) return false
+  return listed === undefined || !naming(choice, situation, listed)
+}
+
 /**
  * What "it" means once yapd has said something back, when it meant a menu's
  * row yapd can't reach: still that row, whatever was said about it, like
- * that it can't be reached, so "mute it" and a second "interrupt it" are
- * about the row too. A question asked over it is what "it" means while it's
- * open, about the row still. Anything about another thread, like one he
- * named, makes "it" that thread, as ever.
+ * that it can't be reached or another thread the model took it for, so
+ * "mute it" and a second "interrupt it" are about the row too. A question
+ * asked over it is what "it" means while it's open, about the row still.
+ * Only a thread his words named, as `thought` had them, makes "it" that
+ * thread, as ever.
  */
-export const held = (before: Assistant.Subject, after: Assistant.Subject, desk: Threads.Desk): Assistant.Subject => {
-  const row = rowOf(before)
+export const held = (thought: Pick<Assistant.Thought, "subject" | "decision" | "situation">, after: Assistant.Subject): Assistant.Subject => {
+  const { desk } = thought.situation
+  const row = rowOf(thought.subject)
   if (row === undefined || after._tag !== "Answer" || Option.isNone(outOfReach({ subject: row, desk }))) return after
+  const told = Option.flatMap(after.about, (ref) => Option.fromNullable(desk.threads.find((listed) => Threads.same(listed.ref, ref))))
+  if (Option.exists(told, (listed) => naming(thought.decision, thought.situation, listed))) return after
   if (after.question !== undefined) return { ...after, row }
-  const told = after.about
-  if (Option.isSome(told) && !Option.exists(about(row), (ref) => Threads.same(ref, told.value))) return after
   return { ...row, said: after.said }
 }
 
@@ -1546,7 +1597,8 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     const when = minutes === undefined ? "" : new Date(situation.now + minutes * 60_000).toISOString()
     if (how === "clear") return decision({ act: "mute", how, pending: replacing })
     if (Option.isSome(on)) return decision({ act: "mute", how, target: on.value.handle, when, pending: replacing })
-    if (Option.isSome(about(subject)) || subject._tag === "Session") return decision({ act: "mute", how, when, pending: replacing })
+    // A question asked over a menu's row yapd can't reach is about that row, which is what's muted.
+    if (Option.isSome(about(subject)) || (rowOf(subject) ?? subject)._tag === "Session") return decision({ act: "mute", how, when, pending: replacing })
     return undefined
   }
   if (hiding.has(said) && situation.showing !== undefined) return decision({ act: "show", how: "hide", pending: replacing })
@@ -1743,30 +1795,14 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
   }
 }
 
-/** What a write does to a thread, as a yes or no question about it puts it: "send that to the Tezos migration". */
-const confirmed = (choice: Decision, thread: string) => {
-  switch (choice.act) {
-    case "send":
-      return `send that to ${thread}`
-    case "reply":
-      return `send that answer to ${thread}`
-    case "decide":
-      return choice.how === "decline" ? `turn down what ${thread} asks` : `allow what ${thread} asks`
-    case "undo":
-      return choice.how === "carry" ? `have ${thread} carry on` : `take back what I sent ${thread}`
-    default:
-      return `stop ${thread}`
-  }
-}
-
 /**
  * Whether a write goes ahead: on a thread he plainly meant, or fairly surely
  * the one he's on about, which the confirmation names when it isn't. A stop
  * that's only fairly sure is confirmed first, since it can't be taken back
- * mid-thought. So is any write while "it" is a menu's row yapd can't reach,
- * however sure: he may have meant that row. Otherwise he's asked which,
- * naming them, or told it couldn't be told with nothing to choose between,
- * as the confidence policy says.
+ * mid-thought. Otherwise he's asked which, naming them, or told it couldn't
+ * be told with nothing to choose between, as the confidence policy says.
+ * While "it" is a menu's row yapd can't reach, a thread his words don't name
+ * gets nothing, and he's told to name it, as `unnamed` has it.
  */
 const writing = (
   choice: Decision,
@@ -1779,6 +1815,7 @@ const writing = (
   const { utterance, desk } = situation
   // Said over something, too little speech is talk or noise nearby, never something to do.
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
+  if (unnamed(choice, Option.getOrUndefined(target), situation)) return { _tag: "Say", spoken: nameIt(lines) }
   // Taking back what was just done needs no thread named: it's what was just done.
   if (choice.act === "undo" && Option.isNone(target)) return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target } }
   if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
@@ -1786,7 +1823,7 @@ const writing = (
   if (choice.act === "stop" && !stoppable(listed)) return { _tag: "Say", spoken: `${capital(listed.called)} isn't doing anything right now${addressed(lines)}.` }
   const on = Option.exists(focused(situation), (focus) => focus.handle === listed.handle)
   const confirm = (): Checked => {
-    const doing = confirmed(choice, named(listed, desk.threads))
+    const doing = `stop ${named(listed, desk.threads)}`
     const asked = confirming(doing, lines, situation.asked)
     if (asked === undefined) return { _tag: "Say", spoken: lines.cantTell }
     return {
@@ -1805,9 +1842,6 @@ const writing = (
       },
     }
   }
-  // Said again from the menu, a row yapd can't reach is what "it" means, so what's aimed at a thread waits for his yes, naming it, unless this is it.
-  const yes = Option.exists(situation.open, (open) => open.kind === "confirm" && choice.pending === "answers" && agrees(open, choice, desk))
-  if (Option.isSome(outOfReach(situation)) && !yes) return confirm()
   if (choice.sure === "high") return { _tag: "Do", plan: { decision: choice, target } }
   if (choice.sure === "medium" && on) return choice.act === "stop" ? confirm() : { _tag: "Do", plan: { decision: choice, target } }
   return ask(candidates)

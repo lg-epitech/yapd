@@ -43,6 +43,8 @@ export interface Utterance {
   readonly echo?: string
   /** With `echo`, what he said once he carried on after a pause, which is surely his, as yapd had stopped by then. */
   readonly afterPause?: string
+  /** For a later step of his request, whose words are the model's, what he said in all that's surely his. */
+  readonly whole?: string
 }
 
 /** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
@@ -1906,13 +1908,15 @@ export const make = (options: {
     const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         // What he went on to say after, which yapd's own voice was never in.
-        const { echo: _, afterPause: __, ...before } = thought.utterance
-        const utterance: Utterance = { ...before, heard: thought.decision.rest }
+        const { echo, afterPause, ...before } = thought.utterance
+        // What names a thread is in his words as well as the model's.
+        const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: before.whole ?? (echo === undefined ? before.heard : (afterPause ?? "")) }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
         const thinking = yield* job(
-          think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on }), [
+          // A menu's row yapd can't reach stays what "it" means unless he named the thread the step before was about.
+          think(utterance, along(thought, Brain.held(thought, { _tag: "Answer", said: first.say, about: on })), [
             // All he said, still with what of it may have been yapd's own voice, so none of that is taken for more he asked.
             { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance.echo, thought.utterance.afterPause) },
             // Nothing said of the step before, like a thanks, is nothing to show.
@@ -2165,6 +2169,13 @@ export const make = (options: {
         if (Option.isNone(why)) {
           const listed = situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))
           const now = listed ?? (yield* threads.desk(Option.none(), [ref], 1)).threads.find((listed) => Threads.same(listed.ref, ref))
+          // Asked over a menu's row yapd can't reach, an answer that doesn't name its thread goes nowhere, and he's told to name it. The
+          // question's asked again after, as when something else takes its place.
+          if (Brain.unnamed(decision, now, situation)) {
+            yield* Effect.logInfo("Not answering it, since he didn't name its thread while hearing a row I can't reach")
+            yield* close(open, "replaced", utterance.id)
+            return Either.left(reply(Brain.nameIt(said), thought.subject))
+          }
           return Either.right(Option.fromNullable(now))
         }
         yield* Effect.logInfo(`Not answering it, since ${ref.machine}'s threads can't be seen right now`)
@@ -2516,8 +2527,9 @@ export const make = (options: {
       }
       // Only "mute it", worked out without the model, means what he's on about with nothing named.
       if (thought.source !== "fast") return Option.none()
-      const { subject } = situation
-      // A session's row said again from the menu is muted by that row's key, whatever hostname its hook reported then.
+      // A session's row said again from the menu is muted by that row's key, whatever hostname its hook reported then, even with a
+      // question asked over it open.
+      const subject = Brain.rowOf(situation.subject) ?? situation.subject
       const row = Brain.saidAgain(subject)
       if (subject._tag === "Session" && !Option.exists(row, ({ _tag }) => _tag === "Thread")) {
         const { update } = subject
@@ -3019,8 +3031,8 @@ export const make = (options: {
               })
         yield* Effect.logInfo(`Said: ${outcome.say}`)
         const { missed, card } = outcome
-        // A menu's row yapd can't reach stays what "it" means, whatever's said about it.
-        const subject = "utterance" in of ? along(of, Brain.held(of.subject, outcome.subject, of.situation.desk)) : outcome.subject
+        // A menu's row yapd can't reach stays what "it" means, whatever's said about it, unless he named another thread.
+        const subject = "utterance" in of ? along(of, Brain.held(of, outcome.subject)) : outcome.subject
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
         let unsaid: Effect.Effect<void> = Effect.void
         // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
