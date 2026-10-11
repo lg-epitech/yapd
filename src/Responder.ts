@@ -49,7 +49,7 @@ const instructions = `You're yapd, the voice that tells a developer how the work
 Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
 "intent":
-- "dismiss" if they've heard enough or want you to be quiet, however they put it. That includes acknowledging, like "sounds good", "okay" or "thanks", unless the agent is waiting on them and those words answer what it asked. They only answer it if they heard you say what it asked: cut off before that, acknowledging is "resume", so they hear the rest.
+- "dismiss" if they've heard enough or want you to be quiet, however they put it. That includes acknowledging, like "sounds good", "okay" or "thanks", unless the agent is waiting on them and those words answer what it asked.
 - "answer" if they asked something the agent's message or the conversation answers, including asking you to repeat.
 - "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
@@ -144,17 +144,6 @@ const asked = ({ needsYou, turn, lines }: Interruption) => {
   return said !== "" && !said.endsWith("…") && (question.test(said) || question.test(turn.message.trim()))
 }
 
-/**
- * Whether yapd was cut off before it got to what the agent asked, so they
- * can't have heard it: the update itself, said only up to where they spoke,
- * with no question in that.
- */
-const unasked = ({ needsYou, lines }: Interruption) => {
-  if (!needsYou || lines.some(({ speaker }) => speaker === "user")) return false
-  const said = lines.findLast(({ speaker }) => speaker === "yapd")?.text.trim() ?? ""
-  return said.endsWith("…") && !said.includes("?")
-}
-
 /** What they said, as they'd have typed it. */
 const typed = (heard: string) => {
   const trimmed = heard.trim().replace(/[\s.!,]+$/, "")
@@ -180,8 +169,6 @@ export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): 
       : Effect.succeed(undefined)
   }
   if (noted.has(said) && !interruption.needsYou) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
-  // Taking in what they heard of an update cut off before its question answers nothing it asked: it carries on, so they hear it.
-  if (noted.has(said) && unasked(interruption)) return Effect.succeed({ intent: "resume", spoken: "", message: "" })
   return Effect.succeed(undefined)
 }
 
