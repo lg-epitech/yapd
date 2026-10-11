@@ -1,5 +1,6 @@
-import { Clock, Effect, Option, PubSub, Schema, Stream } from "effect"
+import { Clock, Effect, Either, Option, PubSub, Schema, Stream } from "effect"
 import * as T3Actions from "./T3Actions.ts"
+import * as Server from "./T3CodeServer.ts"
 import type * as T3Live from "./T3Live.ts"
 
 // Each project's icon as T3 Code draws it, for a menu to show beside its
@@ -96,6 +97,13 @@ interface Known {
   /** When T3 Code was last asked. */
   readonly asked: number
   readonly asking: boolean
+  /**
+   * The image T3 Code named that was too large to be an icon, so it isn't
+   * fetched again while T3 Code names the same one, and the image he chose
+   * for the project when that was logged, so it's logged once until he
+   * chooses another.
+   */
+  readonly tooLarge?: { readonly file: string; readonly faviconPath: string | null }
 }
 
 export interface Icons {
@@ -127,7 +135,7 @@ export const make = (options: { readonly actions: (machine: string) => Option.Op
         const file = decodeURIComponent(relativeUrl.split("/").at(-1) ?? "")
         const now = yield* Clock.currentTimeMillis
         if (file === T3Actions.noIcon) {
-          known.set(key, { root: project.workspaceRoot, asked: now, asking: false })
+          known.set(key, { root: project.workspaceRoot, asked: now, asking: false, ...(before?.tooLarge === undefined ? {} : { tooLarge: before.tooLarge }) })
           if (before?.image !== undefined) yield* PubSub.publish(changed, undefined)
           return
         }
@@ -136,7 +144,26 @@ export const make = (options: { readonly actions: (machine: string) => Option.Op
           known.set(key, { ...before, asked: now, asking: false })
           return
         }
-        const { bytes, type } = yield* actions.value.asset(relativeUrl)
+        // Named by its hash, it's the one that was too large last time.
+        if (before?.tooLarge?.file === file && before.root === project.workspaceRoot) {
+          known.set(key, { ...before, asked: now, asking: false })
+          return
+        }
+        const fetched = yield* Effect.either(actions.value.asset(relativeUrl))
+        if (Either.isLeft(fetched) && T3Actions.reason(fetched.left) === Server.tooLarge) {
+          const faviconPath = project.faviconPath ?? null
+          const logged = before?.tooLarge !== undefined && before.tooLarge.faviconPath === faviconPath
+          known.set(key, {
+            root: project.workspaceRoot,
+            ...(before?.file === undefined || before.image === undefined ? {} : { file: before.file, image: before.image }),
+            asked: now,
+            asking: false,
+            tooLarge: { file, faviconPath },
+          })
+          if (!logged) yield* Effect.logWarning(`Could not fetch ${project.title}'s icon: ${Server.tooLarge}`)
+          return
+        }
+        const { bytes, type } = yield* fetched
         if (!type.toLowerCase().startsWith("image/")) {
           known.set(key, { root: project.workspaceRoot, asked: now, asking: false })
           return yield* Effect.logWarning(`T3 Code sent ${project.title}'s icon as something other than an image`)
@@ -149,7 +176,14 @@ export const make = (options: { readonly actions: (machine: string) => Option.Op
         Effect.catchAll((error) =>
           Effect.gen(function* () {
             const at = known.get(key)
-            known.set(key, { root: project.workspaceRoot, ...(at?.file === undefined ? {} : { file: at.file }), ...(at?.image === undefined ? {} : { image: at.image }), asked: yield* Clock.currentTimeMillis, asking: false })
+            known.set(key, {
+              root: project.workspaceRoot,
+              ...(at?.file === undefined ? {} : { file: at.file }),
+              ...(at?.image === undefined ? {} : { image: at.image }),
+              ...(at?.tooLarge === undefined ? {} : { tooLarge: at.tooLarge }),
+              asked: yield* Clock.currentTimeMillis,
+              asking: false,
+            })
             yield* Effect.logWarning(`Could not fetch ${project.title}'s icon: ${T3Actions.reason(error)}`)
           }),
         ),

@@ -239,6 +239,9 @@ const asked = <A, I>(
 /** The most a file T3 Code sends, like a project's icon, can be: anything larger isn't one. */
 export const largest = 256 * 1024
 
+/** Why a file T3 Code sent wasn't taken: it was larger than `largest`. */
+export const tooLarge = "T3 Code sent a file too large to be an icon."
+
 /** Reads a body up to `most` bytes, and none past that. */
 const capped = async (response: Response, most: number) => {
   const reader = response.body?.getReader()
@@ -251,7 +254,7 @@ const capped = async (response: Response, most: number) => {
     size += value.byteLength
     if (size > most) {
       await reader.cancel().catch(() => {})
-      throw new Trouble({ reason: "T3 Code sent a file too large to be an icon." })
+      throw new Trouble({ reason: tooLarge })
     }
     chunks.push(value)
   }
@@ -290,7 +293,7 @@ export const asset =
           }
           if (Number(response.headers.get("content-length") ?? 0) > largest) {
             await response.body?.cancel().catch(() => {})
-            throw new Trouble({ reason: "T3 Code sent a file too large to be an icon." })
+            throw new Trouble({ reason: tooLarge })
           }
           const bytes = await capped(response, largest).catch((error) => {
             throw error instanceof Trouble ? error : new Trouble({ reason: "T3 Code stopped sending the file." })

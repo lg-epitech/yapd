@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Effect, Logger, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Icons from "./Icons.ts"
 import * as T3Actions from "./T3Actions.ts"
-import type * as Server from "./T3CodeServer.ts"
+import * as Server from "./T3CodeServer.ts"
 import type * as T3Live from "./T3Live.ts"
 
 const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>) => Effect.runPromise(effect.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
@@ -16,7 +16,7 @@ const project = (overrides: Partial<T3Live.Project> = {}): T3Live.Project => ({ 
  * A machine's T3 Code that serves a project's icon under `file`, or none,
  * keeping what it was asked: by which folder, and which files were fetched.
  */
-const serving = (name: string, given: { file: string; bytes?: Uint8Array; type?: string }) => {
+const serving = (name: string, given: { file: string; bytes?: Uint8Array; type?: string; large?: boolean }) => {
   const asked: Array<string> = []
   const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
     api: (() => Effect.die("not expected")) as Server.Transport["api"],
@@ -27,12 +27,22 @@ const serving = (name: string, given: { file: string; bytes?: Uint8Array; type?:
         return Schema.decodeUnknown(schema)({ relativeUrl: `/api/assets/signed-token-${asked.length}/${encodeURIComponent(given.file)}`, expiresAt: 0 }).pipe(Effect.orDie)
       })) as Server.Transport["call"],
     asset: (path) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         asked.push(`${name} fetch ${decodeURIComponent(path.split("/").at(-1) ?? "")}`)
-        return { bytes: given.bytes ?? new Uint8Array([137, 80, 78, 71]), type: given.type ?? "image/png" }
+        return given.large === true
+          ? Effect.fail(new Server.Trouble({ reason: Server.tooLarge }))
+          : Effect.succeed({ bytes: given.bytes ?? new Uint8Array([137, 80, 78, 71]), type: given.type ?? "image/png" })
       }),
   })
-  return { actions: T3Actions.make(reach), asked, serves: (file: string, bytes?: Uint8Array) => { given.file = file; if (bytes !== undefined) given.bytes = bytes } }
+  return {
+    actions: T3Actions.make(reach),
+    asked,
+    serves: (file: string, bytes?: Uint8Array, large?: boolean) => {
+      given.file = file
+      if (bytes !== undefined) given.bytes = bytes
+      if (large !== undefined) given.large = large
+    },
+  }
 }
 
 describe("Icons", () => {
@@ -140,6 +150,44 @@ describe("Icons", () => {
     expect(result.here).toEqual(Option.none())
     expect(here.asked).toEqual([])
     expect(rig.asked).toEqual(["rig assets.createUrl project-favicon /home/laurent/code/integration", "rig fetch v9-favicon.ico"])
+  })
+
+  test("an icon too large to fetch is logged once until he picks another image for the project, and isn't fetched again while T3 Code names the same file", async () => {
+    const t3 = serving("Rosie", { file: "v1-favicon.png", large: true })
+    const warnings: Array<string> = []
+    const logger = Logger.make(({ message }) => void warnings.push([message].flat().join(" ")))
+    const result = await run(
+      Effect.gen(function* () {
+        const icons = yield* Icons.make({ actions: () => Option.some(t3.actions) })
+        const look = (faviconPath?: string) => Effect.zipLeft(icons.icon("Rosie", project(faviconPath === undefined ? {} : { faviconPath })), flush)
+        yield* look()
+        // Asked again every ten minutes, the same file is neither fetched nor logged again.
+        for (let round = 0; round < 3; round++) {
+          yield* TestClock.adjust("10 minutes")
+          yield* look()
+        }
+        const quiet = warnings.length
+        // A new file under the same choice is fetched, and still isn't logged again.
+        t3.serves("v2-favicon.png")
+        yield* TestClock.adjust("10 minutes")
+        yield* look()
+        // He picks another image for it, also too large: logged once more.
+        t3.serves("v4-favicon.png")
+        yield* TestClock.adjust("10 minutes")
+        yield* look("public/icon.png")
+        yield* TestClock.adjust("10 minutes")
+        yield* look("public/icon.png")
+        // One that fits is fetched and served.
+        t3.serves("v3-favicon.png", undefined, false)
+        yield* TestClock.adjust("10 minutes")
+        yield* look("public/icon.png")
+        return { quiet, icon: yield* icons.icon("Rosie", project({ faviconPath: "public/icon.png" })) }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result.quiet).toBe(1)
+    expect(warnings).toEqual(["Could not fetch integration's icon: T3 Code sent a file too large to be an icon.", "Could not fetch integration's icon: T3 Code sent a file too large to be an icon."])
+    expect(t3.asked.filter((line) => line.includes("fetch"))).toEqual(["Rosie fetch v1-favicon.png", "Rosie fetch v2-favicon.png", "Rosie fetch v4-favicon.png", "Rosie fetch v3-favicon.png"])
+    expect(result.icon.kind).toBe("image")
   })
 
   test("what T3 Code sends that isn't an image is never served as one", async () => {
