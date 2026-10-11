@@ -43,6 +43,8 @@ export interface Interruption {
   readonly afterPause?: string
   /** When yapd was cut off, the words of its line they spoke over that it hadn't said yet. */
   readonly unsaid?: string
+  /** What yapd left out of its update to say only its headline, which asking for more gets. */
+  readonly more?: string
 }
 
 export class RespondError extends Data.TaggedError("RespondError")<{ readonly cause: unknown }> {}
@@ -62,6 +64,7 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
 - Muting or unmuting this thread or any other, like "mute this", "silence it for now" or "unmute the Tezos one", or asking what's muted, is for you, never the agent: never "send". It's "answer", telling them in a few words to ask you that with their shortcut. Taking back a mute or unmute you just told them of, like "scratch that" or "undo that" right after you said you muted it, is never "send" either: it's "answer", asking them in a few words to say it again.
+- How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full, like "let me focus till three", "I'm off to bed" or "stop giving me the short version". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 
 "spoken": what you say back. They're listening, not reading.
 ${aloud}
@@ -81,7 +84,7 @@ const earlier = ({ echo, afterPause }: Line) =>
         afterPause === undefined || afterPause.trim() === "" ? "" : `; what they said after a pause, "${afterPause}", is surely theirs`
       })`
 
-export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid }: Interruption, style: Option.Option<string>) =>
+export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid, more }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
@@ -91,6 +94,9 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause
     needsYou
       ? "The agent is waiting on the user: it asked something, needs a decision or permission, or failed."
       : "The agent isn't waiting on the user.",
+    ...(more === undefined || more.trim() === ""
+      ? []
+      : [`What you left out of your update, to say only if they ask for more or for the details, as "answer" with these words as they are:\n${more}`]),
     `Conversation so far, where "…" marks where you were cut off:\n${lines
       .map((line) => `${line.speaker === "yapd" ? "You" : "User"}: ${line.text}${earlier(line)}`)
       .join("\n")}`,
@@ -148,6 +154,9 @@ export const noted: ReadonlySet<string> = new Set([
   "well done", "excellent", "brilliant", "lovely", "good to know", "ok cool", "okay cool", "great thanks", "perfect thanks",
 ])
 
+/** Asking for the rest of an update yapd said only the headline of. */
+export const morePlease: ReadonlySet<string> = new Set(["more", "tell me more", "more please", "details", "more details", "what else", "the details"])
+
 /** Going ahead with what was asked. Only ever taken as that after a question. */
 export const agreed: ReadonlySet<string> = new Set([
   "yes", "yeah", "yep", "yup", "sure", "go ahead", "do it", "yes do it", "yes go ahead", "go for it", "yes go for it",
@@ -188,6 +197,9 @@ export const quick = (interruption: Interruption, onIt: Effect.Effect<string>): 
   const said = gist(interruption.heard)
   if (said === "") return Effect.succeed(undefined)
   if (enough.has(said)) return Effect.succeed({ intent: "dismiss", spoken: "", message: "" })
+  // The rest of an update said in its headline. Begun while yapd's own voice could still get into the microphone, "more" may be its own word: the model weighs that.
+  const more = interruption.more?.trim() ?? ""
+  if (more !== "" && interruption.echo === undefined && morePlease.has(said)) return Effect.succeed({ intent: "answer", spoken: more, message: "" })
   // Begun while yapd's own voice could still get into the microphone, a yes may be its own words, like its "sir?" heard as "Sure.": the model weighs that.
   if (asked(interruption) && interruption.echo === undefined) {
     // Only picked: it's noted as said once it's passed on, since he may yet carry on talking and this reply be dropped.

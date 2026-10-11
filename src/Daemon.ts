@@ -11,8 +11,9 @@ import * as Conversation from "./Conversation.ts"
 import * as Floor from "./Floor.ts"
 import * as Inbox from "./Inbox.ts"
 import * as Hands from "./Hands.ts"
-import { type Entry, Journal, type Naming } from "./Journal.ts"
+import { type Entry, type Held, Journal, type Naming } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import type * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import type { Origin } from "./Origin.ts"
@@ -86,6 +87,16 @@ export const make = (
       to: Threads.Ref,
       since: number,
     ) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null; readonly how?: Ledger.How | null }>>
+    /** Focus or quiet, while one is on, which holds for later what a mute would keep quiet: none without modes. */
+    readonly holding?: Effect.Effect<Option.Option<Modes.Hold>>
+    /** How much of an update is said: its headline, or all of it once he asked for everything. The headline without modes. */
+    readonly detail?: Effect.Effect<Modes.Detail>
+    /**
+     * When all he said over an update is to change how yapd talks, in so many
+     * words, like "focus" or "talk shorter", how that's done, giving back
+     * what's said of it: never anything sent to the agent.
+     */
+    readonly command?: (heard: string) => Option.Option<Effect.Effect<string>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -535,6 +546,12 @@ export const make = (
       const muted = controls
       const plain = echo === undefined && voiced >= Brain.faintest
       const made = changedOver.get(update)
+      // How yapd talks, like "focus" or "talk shorter", plainly his and in so many words, is changed here, and never reaches the agent.
+      const commanded = plain && options.command !== undefined ? options.command(heard) : Option.none()
+      if (Option.isSome(commanded)) {
+        changedOver.delete(update)
+        return commanded
+      }
       if (muted === undefined || !plain) return Option.none()
       if (made !== undefined && Brain.takesBack(heard)) {
         changedOver.delete(update)
@@ -673,16 +690,20 @@ export const make = (
       detail: { through: over.key, session },
     })
 
+  /** Why an update is kept quiet: he muted its thread, or it's held for later, by focus or quiet, or as progress for the digest. */
+  type Quieting = { readonly _tag: "Muted"; readonly mute: Mutes.Mute } | { readonly _tag: "Held"; readonly why: Held }
+
   /**
-   * Keeps quiet an update whose thread he muted: its Stop hook is let go of
-   * at once, and it's kept, marked as kept quiet, for what he missed, but
-   * never said; a turn said in a hook's place, kept so under its key, is the
-   * turn's, so its own Stop coming late isn't said either. Nothing of it is
-   * kept once yapd was turned off since. Muted by its session, the mute
-   * becomes its thread's. `claimed` is its entry under its key, when it was
-   * kept already, as when the mute came while it was being rendered.
+   * Keeps quiet an update whose thread he muted, or that's held for later:
+   * its Stop hook is let go of at once, and it's kept, marked as kept quiet
+   * or held, for what he missed, but never said; a turn said in a hook's
+   * place, kept so under its key, is the turn's, so its own Stop coming late
+   * isn't said either, unless it needs him. Nothing of it is kept once yapd
+   * was turned off since. Muted by its session, the mute becomes its
+   * thread's. `claimed` is its entry under its key, when it was kept already,
+   * as when the mute or the mode came while it was being rendered.
    */
-  const hush = (finished: Finished, entry: Entry, detail: Readonly<Record<string, unknown>>, keys: ReadonlyArray<string>, mute: Mutes.Mute, claimed?: Option.Option<number>) =>
+  const hush = (finished: Finished, entry: Entry, detail: Readonly<Record<string, unknown>>, keys: ReadonlyArray<string>, quieting: Quieting, claimed?: Option.Option<number>) =>
     Effect.gen(function* () {
       const { fallback, hook, turns, project } = finished
       yield* release(hook)
@@ -692,9 +713,9 @@ export const make = (
         if (fallback !== undefined && claimed === undefined && fallbacks.get(fallback.key) === fallback) fallbacks.delete(fallback.key)
         return yield* Effect.logInfo("Skipped update, since yapd is off")
       }
-      const quiet = { ...detail, muted: true }
+      const quiet = quieting._tag === "Muted" ? { ...detail, muted: true } : { ...detail, held: quieting.why }
       if (fallback === undefined) yield* journal.write({ ...entry, detail: quiet })
-      else if (claimed !== undefined) yield* journal.mute(Option.toArray(claimed))
+      else if (claimed !== undefined) yield* quieting._tag === "Muted" ? journal.mute(Option.toArray(claimed)) : journal.hold(Option.toArray(claimed), quieting.why)
       else {
         // Given way since to a Stop of its own, or its thread started again or went, it's left to that.
         if (fallbacks.get(fallback.key) !== fallback || !(yield* fallback.current)) {
@@ -711,10 +732,24 @@ export const make = (
         fallback.quiet = true
       }
       yield* quieten(finished.stop)
+      if (quieting._tag === "Held") return yield* Effect.logInfo(`Held update for ${project}, for later (${quieting.why})`)
       const thread = keys.find((key) => key.startsWith("t3:"))
-      if (thread !== undefined && mute.key !== thread && options.mutes !== undefined) yield* options.mutes.rekey(mute.key, thread)
+      if (thread !== undefined && quieting.mute.key !== thread && options.mutes !== undefined) yield* options.mutes.rekey(quieting.mute.key, thread)
       yield* Effect.logInfo(`Muted update for ${project}`)
     })
+
+  /** Focus or quiet, while one is on. */
+  const holdingNow = options.holding ?? Effect.succeedNone
+
+  /**
+   * Why an update a mute could keep quiet is held for later instead, if it
+   * is: focus or quiet, or, said only in its headline, that it's progress,
+   * for the digest. Never what a mute couldn't keep quiet.
+   */
+  const holds = (priority: Inbox.Ready["priority"], full: boolean) =>
+    Effect.map(holdingNow, (mode): Option.Option<Held> =>
+      Option.isSome(mode) ? mode : priority === "progress" && !full ? Option.some("progress") : Option.none(),
+    )
 
   /** How long before a turn's prompt came what yapd sent its thread still counts as what began it, as it's kept before it goes out. */
   const sending = 60_000
@@ -763,8 +798,12 @@ export const make = (
         ],
         { concurrency: 3 },
       )
+      // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
+      // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.
+      const full = needsYou || summary.priority === "needs-you" || (yield* options.detail ?? Effect.succeed<Modes.Detail>("brief")) === "full"
       // Whoever sent it knows it needs the user, whatever the summary makes of it.
-      const priority = needsYou ? "needs-you" : summary.priority
+      const priority = needsYou ? "needs-you" : full && summary.priority === "progress" ? "done" : summary.priority
+      const more = full ? "" : (summary.more ?? "").trim()
       /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
       const tied = Option.orElse(about, () => owner)
       // What answers what yapd sent its thread for him, as a message by the shortcut, is his own ask too.
@@ -785,12 +824,14 @@ export const make = (
         return yield* Effect.logInfo("Skipped trivial update")
       }
 
-      const spoken = introduce(project, summary.spoken)
-      // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread.
+      const spoken = introduce(project, full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken)
+      // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread. What's said for more is
+      // kept with it, so it's there once yapd restarts.
       const detail = {
         priority,
         ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }),
         ...(Option.isSome(tied) ? { session } : {}),
+        ...(more === "" ? {} : { more }),
       }
       const entry: Entry = {
         at: arrivedAt,
@@ -809,7 +850,10 @@ export const make = (
       }
       const keys = Mutes.keysOf({ session, thread, ...ties }, called)
       const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
-      if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, muted.value)
+      if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: muted.value })
+      // Muted first, then held by the mode, then held as progress: kept the same way, by the same rule, and never rendered.
+      const held = mutable ? yield* holds(priority, full) : Option.none<Held>()
+      if (Option.isSome(held)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: held.value })
 
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       // Rendering takes about as long as the speaker takes to get ready.
@@ -821,6 +865,7 @@ export const make = (
         turn,
         needsYou: priority === "needs-you",
         spoken,
+        ...(more === "" ? {} : { more }),
         audio,
         thread,
         at: arrivedAt,
@@ -860,11 +905,16 @@ export const make = (
         yield* removeFile(audio)
         return yield* Effect.logInfo(`Skipped update, said already: ${spoken}`)
       }
-      // Muted while it was rendered, it's kept quiet all the same.
+      // Muted while it was rendered, it's kept quiet all the same, and held all the same once focus or quiet began meanwhile.
       const late = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(late)) {
         yield* removeFile(audio)
-        return yield* hush(finished, entry, detail, keys, late.value, claimed === undefined ? undefined : Option.flatten(claimed))
+        return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
+      }
+      const lateHeld = mutable ? yield* holds(priority, full) : Option.none<Held>()
+      if (Option.isSome(lateHeld)) {
+        yield* removeFile(audio)
+        return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       if (fallback !== undefined) standing.set(update, fallback)
       if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns))) {
@@ -1266,10 +1316,12 @@ export const make = (
    */
   const keep = (ready: Inbox.Entry, done: boolean, turns: number) =>
     Effect.gen(function* () {
-      // Muted since it began, even while what cut it off was being said, it's kept quiet from then on, rather than read again.
-      if (!done && "update" in ready && (yield* quieted(ready))) {
+      // Muted since it began, even while what cut it off was being said, it's kept quiet from then on, rather than read again, and held for
+      // later once focus or quiet began.
+      const why = !done && "update" in ready ? yield* quieted(ready) : Option.none<"muted" | Modes.Hold>()
+      if (Option.isSome(why) && "update" in ready) {
         const row = rows.get(ready.update)
-        if (row !== undefined) yield* journal.mute([row])
+        if (row !== undefined) yield* why.value === "muted" ? journal.mute([row]) : journal.hold([row], why.value)
         yield* quieten(stopOf.get(ready.update))
         return false
       }
@@ -1417,8 +1469,13 @@ export const make = (
    */
   const quiet = (ready: Inbox.Ready) => ready.priority !== "needs-you" && ready.replay === undefined && !audible.has(ready.update)
 
-  /** Whether an update waiting to be read is muted now. */
-  const quieted = (ready: Inbox.Ready) => (quiet(ready) ? Effect.map(muting(Mutes.keysOf(ready.update, called)), Option.isSome) : Effect.succeed(false))
+  /** Whether an update waiting to be read is muted now, or held by focus or quiet. */
+  const quieted = (ready: Inbox.Ready): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
+    quiet(ready)
+      ? Effect.flatMap(muting(Mutes.keysOf(ready.update, called)), (mute): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
+          Option.isSome(mute) ? Effect.succeedSome("muted") : holdingNow,
+        )
+      : Effect.succeedNone
 
   /**
    * A thread was just muted under these keys: its updates waiting to be read
@@ -1429,14 +1486,25 @@ export const make = (
    * own Stop coming late isn't said either. What's still being prepared looks
    * for itself.
    */
-  const silence = (keys: ReadonlyArray<string>): Effect.Effect<void> =>
+  const silence = (keys: ReadonlyArray<string>): Effect.Effect<void> => {
+    const muted = new Set(keys)
+    return drop((entry) => Mutes.keysOf(entry.update, called).some((key) => muted.has(key)), { _tag: "Muted" })
+  }
+
+  /**
+   * Focus or quiet just began: the updates waiting to be read that a mute
+   * could keep quiet are dropped and kept as held for later, as `silence`
+   * keeps them, but never what needs him, one he asked to hear again, the
+   * line being said, or what yapd has to say for itself.
+   */
+  const hold = (why: Modes.Hold): Effect.Effect<void> => drop(() => true, { _tag: "Held", why })
+
+  /** Drops the updates waiting to be read that a mute could keep quiet and `which` picks, kept as muted or held. */
+  const drop = (which: (entry: Inbox.Ready) => boolean, as: { readonly _tag: "Muted" } | { readonly _tag: "Held"; readonly why: Modes.Hold }): Effect.Effect<void> =>
     Effect.gen(function* () {
-      const muted = new Set(keys)
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => {
-          const quietened = [...current.values()].filter(
-            (entry): entry is Inbox.Ready => "update" in entry && quiet(entry) && Mutes.keysOf(entry.update, called).some((key) => muted.has(key)),
-          )
+          const quietened = [...current.values()].filter((entry): entry is Inbox.Ready => "update" in entry && quiet(entry) && which(entry))
           return [quietened, quietened.reduce((left, entry) => Inbox.remove(left, entry.session), current)] as const
         }),
       )
@@ -1455,8 +1523,8 @@ export const make = (
         if (row !== undefined) kept.push(row)
         yield* quieten(stopOf.get(entry.update))
       }
-      yield* journal.mute(kept)
-      yield* Effect.logInfo(`Muted ${dropped.length === 1 ? "an update" : `${dropped.length} updates`} waiting to be said`)
+      yield* as._tag === "Muted" ? journal.mute(kept) : journal.hold(kept, as.why)
+      yield* Effect.logInfo(`${as._tag === "Muted" ? "Muted" : "Held"} ${dropped.length === 1 ? "an update" : `${dropped.length} updates`} waiting to be said`)
     })
 
   if (options.mutes !== undefined) controls = Mutes.controls({ mutes: options.mutes, silence, journal })
@@ -1501,6 +1569,31 @@ export const make = (
       Effect.timeoutOption(patience),
       Effect.raceFirst(Effect.as(turnedOff(turns), Option.none())),
     )
+  })
+
+  /** When the last line yapd said ended, or when it started, for how long it's been quiet. */
+  let lastEnded = yield* Clock.currentTimeMillis
+
+  /**
+   * How long it's been quiet since the last line ended, in ms: none while
+   * anything waits to be said, is about to be, is being said or listened
+   * after, an answer is on its way, an update is being summed up, or he's
+   * dictating.
+   */
+  const idle = Effect.gen(function* () {
+    const busy = yield* STM.commit(
+      STM.gen(function* () {
+        return (
+          (yield* TRef.get(inbox)).size > 0 ||
+          (yield* TRef.get(floor.reading)) ||
+          (yield* TRef.get(coming)) ||
+          (yield* TRef.get(awaited)).length > 0 ||
+          (yield* Floor.dictating(floor))
+        )
+      }),
+    )
+    if (busy || (yield* FiberMap.size(preparing)) > 0) return Option.none<number>()
+    return Option.some((yield* Clock.currentTimeMillis) - lastEnded)
   })
 
   const speakNext = Effect.gen(function* () {
@@ -1591,8 +1684,9 @@ export const make = (
       Effect.ensuring(Effect.suspend(() => (fallback === undefined || through ? Effect.void : unheard(fallback)))),
       Effect.ensuring(
         Effect.gen(function* () {
-          if (!("update" in ready)) return
           const at = yield* Clock.currentTimeMillis
+          lastEnded = at
+          if (!("update" in ready)) return
           if (latest?.update === ready.update) latest = { ...latest, at, playing: false }
         }),
       ),
@@ -1692,11 +1786,13 @@ export const make = (
     turn,
     replay,
     tell,
-    /** What the user was told lately, newest first: never what was kept quiet, since he never heard it. */
+    /** What the user was told lately, newest first: never what was kept quiet or held for later, since he never heard it. */
     recent: Effect.flatMap(Clock.currentTimeMillis, (now) =>
-      journal.since(now - Recent.lifetime, { most: Recent.most, kinds: ["update", "started"], muted: false }),
+      journal.since(now - Recent.lifetime, { most: Recent.most, kinds: ["update", "started"], muted: false, held: false }),
     ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
     silence,
+    hold,
+    idle,
     /** Muting from the menu or by voice, which drops what of a thread waits to be said: none without mutes. */
     controls: Option.fromNullable(controls),
     /**

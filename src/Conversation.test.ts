@@ -2290,6 +2290,40 @@ describe("Language check", () => {
   })
 })
 
+describe("more, and how yapd talks, over an update", () => {
+  const over = (heard: string, more?: string, echo?: string) => ({
+    project: "yapd",
+    turn: { prompt: Option.none(), message: "Fixed the loader. Retries back off now." },
+    needsYou: false,
+    lines: [{ speaker: "yapd" as const, text: "yapd's loader is fixed." }],
+    heard,
+    ...(more === undefined ? {} : { more }),
+    ...(echo === undefined ? {} : { echo }),
+  })
+  const quickly = (interruption: Responder.Interruption) => Effect.runSync(Responder.quick(interruption, Effect.succeed("On it, sir.")))
+
+  test("asking for more of a headline gets the rest without the model, only in so many words, plainly his, and only when there's more", () => {
+    const rest = "Retries back off now, and the flaky test is gone."
+    for (const heard of ["More.", "Tell me more.", "More, please.", "Details?", "What else?"]) {
+      expect(quickly(over(heard, rest))).toEqual({ intent: "answer", spoken: rest, message: "" })
+    }
+    // Over its own first seconds, the model weighs it; with nothing more, or more said around it, so does the model.
+    expect(quickly(over("More.", rest, "yapd's loader"))).toBeUndefined()
+    expect(quickly(over("More."))).toBeUndefined()
+    expect(quickly(over("More tests, please.", rest))).toBeUndefined()
+    // "Go on" stays a yes, never the rest.
+    expect(Responder.agreed.has("go on")).toBe(true)
+  })
+
+  test("the model is given the rest to say if he asks for more, and told how yapd talks is never for the agent", () => {
+    const prompt = Responder.prompt(over("Can you tell me the rest?", "Retries back off now."), Option.none())
+    expect(prompt).toContain(`What you left out of your update, to say only if they ask for more or for the details, as "answer" with these words as they are:\nRetries back off now.`)
+    expect(prompt).toContain(`How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full`)
+    expect(prompt).toContain(`Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`)
+    expect(Responder.prompt(over("Thanks."), Option.none())).not.toContain("What you left out")
+  })
+})
+
 describe("quick replies", () => {
   const reply = (heard: string, message = "The PR is up. Should I merge it?", needsYou = true, said?: string) =>
     Effect.runSync(

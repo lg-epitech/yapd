@@ -1,4 +1,4 @@
-import { Clock, type Duration, Effect, Fiber, Option, Queue, Scope, Stream } from "effect"
+import { Clock, type Duration, Effect, Exit, Fiber, Option, Queue, Scope, Stream } from "effect"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Audio, AudioError, type Playback } from "./Audio.ts"
@@ -20,7 +20,10 @@ export interface Update {
   readonly turn: Turn
   /** Whether the agent asked something, needs a decision or permission, or failed. */
   readonly needsYou: boolean
+  /** Its headline, or all of it when it's said in full. */
   readonly spoken: string
+  /** The rest, said when he asks for more, when only its headline is said. */
+  readonly more?: string
   readonly audio: string
   readonly thread: Thread
   /** When its turn stopped. */
@@ -697,8 +700,19 @@ export const make = (options: {
           /** Said to the end, the line's length, when only its own voice, or what may have been, stopped it as it ended: it listens on once for his reply. */
           let ended: number | undefined
           let lingered = false
+          /**
+           * The rest of the update, rendered as its headline starts to play, so "more" plays it at once: not before, since one voice
+           * renders one thing at a time, and the next update's headline would wait behind it.
+           */
+          const more = update.more?.trim() ?? ""
+          let rest: { readonly path: string; readonly fiber: Fiber.RuntimeFiber<void, unknown> } | undefined
 
           while (true) {
+            if (rest === undefined && more !== "") {
+              const path = join(options.dir, `${crypto.randomUUID()}${extension}`)
+              rendered.push(path)
+              rest = { path, fiber: yield* Effect.forkScoped(voice.render(more, path)) }
+            }
             const listening = missed < misses ? ear : Effect.succeed(undefined)
             const outcome: Outcome =
               ended === undefined
@@ -745,7 +759,7 @@ export const make = (options: {
             const fraction = outcome.duration > 0 ? outcome.at / outcome.duration : 1
             const said = cut(text, fraction)
             // What it hadn't said yet, so the model knows whether he could have heard what he answers, like the agent's question.
-            const rest = unsaid(text, fraction)
+            const left = unsaid(text, fraction)
             /** What the model makes of what he said, as ever. */
             const responding = (heard: string, afterPause: string) =>
               responder
@@ -756,7 +770,8 @@ export const make = (options: {
                   lines: [...lines, { speaker: "yapd", text: said }],
                   heard,
                   ...(echo === undefined ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }),
-                  ...(rest === "" ? {} : { unsaid: rest }),
+                  ...(left === "" ? {} : { unsaid: left }),
+                  ...(more === "" ? {} : { more }),
                 })
                 .pipe(
                   Effect.catchAll((error) =>
@@ -826,9 +841,14 @@ export const make = (options: {
             )
             text = reply.intent === "send" ? yield* pass(update, reply) : answer
             if (text === "") return true
-            path = join(options.dir, `${crypto.randomUUID()}${extension}`)
-            rendered.push(path)
-            yield* voice.render(text, path)
+            // The rest he asked for, rendered already, or still rendering, is played as it is; rendered again only if that failed.
+            const early = rest !== undefined && text === more && Exit.isSuccess(yield* Fiber.await(rest.fiber)) ? rest.path : undefined
+            if (early !== undefined) path = early
+            else {
+              path = join(options.dir, `${crypto.randomUUID()}${extension}`)
+              rendered.push(path)
+              yield* voice.render(text, path)
+            }
             yield* options.saying(update, text)
             from = 0
             missed = 0

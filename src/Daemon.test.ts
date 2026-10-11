@@ -12,7 +12,7 @@ import { defaults } from "./Endpointer.ts"
 import * as Floor from "./Floor.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import { key } from "./Payload.ts"
-import { Responder } from "./Responder.ts"
+import { quick, Responder } from "./Responder.ts"
 import type { Handle } from "./Server.ts"
 import * as Show from "./Show.ts"
 import { Transcriber } from "./Transcriber.ts"
@@ -81,6 +81,18 @@ const make = (says?: string, options: {
   readonly unsummarizable?: ReadonlyArray<string>
   /** What yapd sent each thread for him, as the ledger has it. */
   readonly sent?: (to: Threads.Ref, since: number) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null }>>
+  /** Messages the summary reads as only how work that carries on is going. */
+  readonly progressMessages?: ReadonlyArray<string>
+  /** What the summary keeps for "more" of each message, beside its headline, which is the message. */
+  readonly mores?: Readonly<Record<string, string>>
+  /** Focus or quiet, while one is on. */
+  readonly holding?: Effect.Effect<Option.Option<"focus" | "quiet">>
+  /** How much of an update is said. */
+  readonly detail?: Effect.Effect<"brief" | "full">
+  /** What changes how yapd talks, said over an update. */
+  readonly command?: (heard: string) => Option.Option<Effect.Effect<string>>
+  /** Whether what he says over an update is first worked out as the Responder does without the model. */
+  readonly quickly?: boolean
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -125,8 +137,15 @@ const make = (says?: string, options: {
       condense: (_, turn) => options.unsummarizable?.includes(turn.message) ? Effect.fail(new CondenseError({ cause: "the model is down" })) : Effect.sync(() => {
         condensed.push(turn)
         return {
-          priority: options.trivialMessages?.includes(turn.message) ? "trivial" as const : options.urgentMessages?.includes(turn.message) ? "needs-you" as const : "done" as const,
+          priority: options.trivialMessages?.includes(turn.message)
+            ? "trivial" as const
+            : options.urgentMessages?.includes(turn.message)
+              ? "needs-you" as const
+              : options.progressMessages?.includes(turn.message)
+                ? "progress" as const
+                : "done" as const,
           spoken: turn.message,
+          ...(options.mores?.[turn.message] === undefined ? {} : { more: options.mores[turn.message] }),
         }
       }),
       ask: (request) => Effect.succeed({ spoken: `wants to ${request.what}`, risk: "low" as const }),
@@ -188,8 +207,12 @@ const make = (says?: string, options: {
         }),
     }),
     Layer.succeed(Responder, {
-      respond: ({ heard }) =>
-        says === undefined
+      respond: (interruption) => {
+        const { heard } = interruption
+        const fast = options.quickly === true ? Effect.runSync(quick(interruption, Effect.succeed("On it."))) : undefined
+        return fast !== undefined
+          ? Effect.succeed(fast)
+          : says === undefined
           ? Effect.die("nothing to respond to")
           : Effect.sync(() => void responded.push(heard)).pipe(
               Effect.zipRight(Effect.sleep(`${options.thinking ?? 0} seconds`)),
@@ -200,7 +223,8 @@ const make = (says?: string, options: {
                     ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
                     : { intent: "answer" as const, spoken: options.answer, message: "" },
               ),
-            ),
+            )
+      },
     }),
     Layer.succeed(Relays, {
       send: (thread, text) =>
@@ -227,6 +251,9 @@ const make = (says?: string, options: {
     ...(options.mutes === undefined ? {} : { mutes: options.mutes }),
     ...(options.owner === undefined ? {} : { owner: options.owner }),
     ...(options.sent === undefined ? {} : { sent: options.sent }),
+    ...(options.holding === undefined ? {} : { holding: options.holding }),
+    ...(options.detail === undefined ? {} : { detail: options.detail }),
+    ...(options.command === undefined ? {} : { command: options.command }),
     // This machine is Rosie, as yapd serves it.
     naming,
   }).pipe(Effect.provide(context))
@@ -3087,6 +3114,266 @@ describe("Daemon headline first", () => {
       ["Pass 7 is running.", ["yapd. Pass 6 found nothing new.", 1]],
       ["The Mina tickets are open.", undefined],
     ])
+  })
+
+  test("only the headline is said, its rest kept for more, while what needs him is said in full, question and all", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, played, journal, lastHeard } = yield* make(undefined, {
+          urgentMessages: ["Which network first?"],
+          mores: { "The loader is fixed.": "Retries back off now, and the flaky test is gone.", "Which network first?": "Tezos has its fee table ready, Mina doesn't." },
+        })
+        yield* finish("loader", "The loader is fixed.")
+        yield* wait(5)
+        const playing = Option.map(yield* lastHeard, ({ update }) => update.more)
+        yield* wait(6)
+        yield* finish("ask", "Which network first?")
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], playing, kept: updates.map(({ said, detail }) => [said, (detail as { more?: string }).more]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The loader is fixed.", "yapd. Which network first? Tezos has its fee table ready, Mina doesn't."])
+    expect(result.playing).toEqual(Option.some("Retries back off now, and the flaky test is gone."))
+    expect(result.kept).toEqual([
+      ["yapd. The loader is fixed.", "Retries back off now, and the flaky test is gone."],
+      ["yapd. Which network first? Tezos has its fee table ready, Mina doesn't.", undefined],
+    ])
+  })
+
+  test("progress is held for the digest, never rendered, while what needs him, finished work and a turn that couldn't be summed up never are", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, turn, wait, played, renders, followUps, journal } = yield* make(undefined, {
+          progressMessages: ["Pass 7 is running.", "Pass 8 is running."],
+          unsummarizable: ["Garbled."],
+        })
+        yield* finish("review", "Pass 7 is running.", true)
+        yield* wait(11)
+        yield* turn("review2", "Pass 8 is running.", 120, { needsYou: true })
+        yield* wait(11)
+        yield* finish("tezos", "The Tezos migration is merged.")
+        yield* wait(11)
+        yield* finish("garbled", "Garbled.")
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], renders: renders(), followUps: [...followUps], kept: updates.map(({ said, detail }) => [said, (detail as { held?: string }).held]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Pass 8 is running.", "yapd. The Tezos migration is merged.", "yapd finished a turn, but I couldn't summarize it."])
+    expect(result.renders).toBe(3)
+    // Its hook isn't kept waiting for a reply to what wasn't said.
+    expect(result.followUps).toEqual(["claude:review let go"])
+    expect(result.kept).toEqual([
+      ["yapd. Pass 7 is running.", "progress"],
+      ["yapd. Pass 8 is running.", undefined],
+      ["yapd. The Tezos migration is merged.", undefined],
+      ["yapd finished a turn, but I couldn't summarize it.", undefined],
+    ])
+  })
+
+  test("'give me everything' says updates in full and holds no progress, and 'talk shorter' goes back to headlines", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let detail: "brief" | "full" = "full"
+        const { finish, wait, played, journal } = yield* make(undefined, {
+          detail: Effect.sync(() => detail),
+          progressMessages: ["Pass 7 is running."],
+          mores: { "Pass 7 is running.": "Two comments are left.", "The loader is fixed.": "Retries back off now." },
+        })
+        yield* finish("review", "Pass 7 is running.")
+        yield* wait(11)
+        yield* finish("loader", "The loader is fixed.")
+        yield* wait(11)
+        detail = "brief"
+        yield* finish("review", "Pass 7 is running.")
+        yield* wait(11)
+        yield* finish("loader", "The loader is fixed.")
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: updates.map(({ detail }) => [(detail as { priority: string }).priority, (detail as { held?: string }).held]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Pass 7 is running. Two comments are left.", "yapd. The loader is fixed. Retries back off now.", "yapd. The loader is fixed."])
+    // In full, progress is said as finished work is.
+    expect(result.kept).toEqual([
+      ["done", undefined],
+      ["done", undefined],
+      ["progress", "progress"],
+      ["done", undefined],
+    ])
+  })
+
+  test("focus holds finished work, condensed but never rendered, and lets through what needs him and the answer to his own message", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let mode = Option.none<"focus" | "quiet">()
+        const { finish, speak, wait, nextEvent, nextPlayback, played, renders, journal } = yield* make("Use the fee table.", {
+          holding: Effect.sync(() => mode),
+          urgentMessages: ["The tests failed."],
+          send: () => Effect.void,
+        })
+        yield* finish("tezos", "The migration compiles.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        mode = Option.some("focus")
+        yield* finish("tezos", "The fee table is in.")
+        yield* wait(11)
+        yield* finish("other", "The Mina tickets are open.")
+        yield* wait(11)
+        yield* finish("urgent", "The tests failed.")
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], renders: renders(), kept: updates.map(({ said, detail }) => [said, (detail as { held?: string }).held]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in.", "yapd. The tests failed."])
+    expect(result.renders).toBe(4)
+    expect(result.kept).toEqual([
+      ["yapd. The migration compiles.", undefined],
+      ["yapd. The fee table is in.", undefined],
+      ["yapd. The Mina tickets are open.", "focus"],
+      ["yapd. The tests failed.", undefined],
+    ])
+  })
+
+  test("a muted thread stays muted in focus rather than held, so it never comes up as held for later", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, wait, played, journal } = yield* make(undefined, { mutes, holding: Effect.succeed(Option.some("quiet" as const)) })
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* finish("noisy", "Still going.")
+        yield* wait(11)
+        yield* finish("other", "The Mina tickets are open.")
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: updates.map((kept) => [kept.said, quieted(kept), (kept.detail as { held?: string }).held]), held: (yield* journal.held(0)).map(({ said }) => said) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([
+      ["yapd. Still going.", true, undefined],
+      ["yapd. The Mina tickets are open.", false, "quiet"],
+    ])
+    expect(result.held).toEqual(["yapd. The Mina tickets are open."])
+  })
+
+  test("entering focus drops what waits to be said as held, but never what needs him, what he asked to hear again, a notice, or the line being said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let mode = Option.none<"focus" | "quiet">()
+        const { made, finish, notice, wait, played, followUps, journal, heard, replay } = yield* make(undefined, {
+          holding: Effect.sync(() => mode),
+          urgentMessages: ["The tests failed."],
+        })
+        yield* finish("noisy", "Earlier news.", true)
+        yield* wait(11)
+        const [earlier] = yield* heard
+        yield* finish("playing", "Something long.")
+        yield* finish("noisy", "Still going.", true)
+        yield* finish("other", "The Mina tickets are open.")
+        yield* finish("urgent", "The tests failed.")
+        yield* notice("t3:Rosie:t-noisy", "The noisy thread wants your go-ahead.")
+        yield* replay(earlier!)
+        yield* wait(0)
+        mode = Option.some("focus")
+        yield* made.hold("focus")
+        for (let i = 0; i < 6; i++) yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], followUps: [...followUps], kept: updates.map(({ said, detail }) => [said, (detail as { held?: string }).held]) }
+      }),
+    )
+    expect(result.played).toEqual([
+      "yapd. Earlier news.",
+      "yapd. Something long.",
+      "yapd. The tests failed.",
+      "yapd. Earlier news.",
+      "The noisy thread wants your go-ahead.",
+    ])
+    expect(result.followUps).toEqual(["claude:noisy let go"])
+    expect(result.kept).toEqual([
+      ["yapd. Earlier news.", undefined],
+      ["yapd. Something long.", undefined],
+      ["yapd. Still going.", "focus"],
+      ["yapd. The Mina tickets are open.", "focus"],
+      ["yapd. The tests failed.", undefined],
+    ])
+  })
+
+  test("'more' over a headline, or just after it, plays the rest at once without the model, rendered once as the headline began", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, wait, nextPlayback, played, renders, responded, journal } = yield* make("More.", {
+          quickly: true,
+          mores: { "The loader is fixed.": "Retries back off now.", "The Mina tickets are open.": "Three of them are for the fee table." },
+        })
+        yield* finish("loader", "The loader is fixed.")
+        yield* nextPlayback
+        yield* wait(2)
+        yield* speak
+        yield* wait(14)
+        yield* finish("mina", "The Mina tickets are open.")
+        yield* nextPlayback
+        // Once it has said all of it, in the moment left for a reply.
+        yield* wait(10)
+        yield* speak
+        yield* wait(14)
+        const replies = yield* journal.since(0, { kinds: ["reply"] })
+        return { played: [...played], renders: renders(), responded: [...responded], replies: replies.map(({ said, detail }) => [said, (detail as { intent: string }).intent]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The loader is fixed.", "Retries back off now.", "yapd. The Mina tickets are open.", "Three of them are for the fee table."])
+    // Each headline and each rest once.
+    expect(result.renders).toBe(4)
+    expect(result.responded).toEqual([])
+    expect(result.replies).toEqual([
+      ["Retries back off now.", "answer"],
+      ["Three of them are for the fee table.", "answer"],
+    ])
+  })
+
+  test("'more' begun while yapd's own voice could still get into the microphone is the model's to make something of", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, wait, nextPlayback, responded } = yield* make("More.", {
+          quickly: true,
+          echoing: 1000,
+          answer: "Retries back off now.",
+          mores: { "The loader is fixed.": "Retries back off now." },
+        })
+        yield* finish("loader", "The loader is fixed.")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(14)
+        return { responded: [...responded] }
+      }),
+    )
+    expect(result.responded).toEqual(["More."])
+  })
+
+  test("words that change how yapd talks, said over an update, plainly his, change it there and never reach the agent or the model", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const changed: Array<string> = []
+        const { finish, talk, wait, played, responded, followUps } = yield* make("Focus.", {
+          command: (heard) =>
+            heard === "Focus." ? Option.some(Effect.sync(() => void changed.push("focus")).pipe(Effect.as("Only what needs you until three."))) : Option.none(),
+        })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(14)
+        return { played: [...played], responded: [...responded], followUps: [...followUps], changed }
+      }),
+    )
+    expect(result.changed).toEqual(["focus"])
+    expect(result.played).toEqual(["yapd. Still going.", "Only what needs you until three."])
+    expect(result.responded).toEqual([])
+    expect(result.followUps).toEqual([])
   })
 })
 
