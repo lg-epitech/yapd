@@ -62,7 +62,8 @@ The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux 
 
 Say anything while yapd is talking and it stops. The model that writes the summaries then works out what you meant:
 
-- "Got it", "sounds good" or "mute it" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
+- "Got it", "sounds good" or "quiet" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
+- "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and "what did I miss?" sums up what it said. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
 - Ask something the update answers, like "which PR was that?", and it answers.
 - Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one, unless the agent only says it understood.
 - If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
