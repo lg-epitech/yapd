@@ -461,6 +461,8 @@ describe("Server", () => {
       // Shown as an image, never run as a page, whatever's in it.
       expect(icon.headers.get("x-content-type-options")).toBe("nosniff")
       expect(icon.headers.get("content-security-policy")).toBe("default-src 'none'")
+      // Its address stays the same when the image changes, so nothing keeps it without asking yapd again.
+      expect(icon.headers.get("cache-control")).toBe("no-cache")
       expect(again.status).toBe(304)
       expect(changed.status).toBe(200)
       expect(none.status).toBe(404)

@@ -133,6 +133,8 @@ describe.skipIf(swiftc === undefined)("App", () => {
       // An image is fetched only from yapd's own API, and anything it can't draw is drawn as the icon's monogram.
       const icons = await Bun.file(join(app, "yapd", "Icons.swift")).text()
       expect(icons.match(/URLRequest\(url: [^)]*\)/g)).toEqual(["URLRequest(url: address)"])
+      // Kept by revision, never by URLSession's cache under an address that stays the same when the image changes.
+      expect(icons).toMatch(/request\.cachePolicy = \.reloadIgnoringLocalCacheData/)
       expect(icons).toMatch(/guard let address = imageAddress\(url, at: api\) else/)
       expect(icons).toMatch(/guard let monogram = row\.monogram else/)
     },

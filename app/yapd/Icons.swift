@@ -84,6 +84,8 @@ final class Icons {
     if case .image = images[key] { return }
     images[key] = .fetching
     var request = URLRequest(url: address)
+    // Kept here by revision: the address stays the same when the image changes, so nothing cached under it is used.
+    request.cachePolicy = .reloadIgnoringLocalCacheData
     request.timeoutInterval = 10
     guard let (body, response) = try? await URLSession.shared.data(for: request),
       let http = response as? HTTPURLResponse, http.statusCode == 200,

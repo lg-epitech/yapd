@@ -381,10 +381,11 @@ export const serve = (port: number, api: Api) =>
           const image = Option.isNone(machine) || Option.isNone(project) ? Option.none<Icons.Image>() : yield* api.icon(machine.value, project.value)
           if (Option.isNone(image)) return new Response("No such icon.", { status: 404 })
           const etag = `"${image.value.revision}"`
-          // Only what the image is, never anything a browser would run, whatever's in it.
+          // Only what the image is, never anything a browser would run, whatever's in it. Asked again each time, as its address never changes
+          // when the image does: the ETag spares sending it again.
           const headers = {
             etag,
-            "cache-control": "max-age=3600",
+            "cache-control": "no-cache",
             "x-content-type-options": "nosniff",
             "content-security-policy": "default-src 'none'",
           }
