@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Option, PubSub, Queue, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
-import { hostname, tmpdir } from "node:os"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Icons from "./Icons.ts"
 import * as Journal from "./Journal.ts"
@@ -292,9 +292,8 @@ describe("Latest", () => {
         const told: Array<string> = []
         const replayed: Array<string> = []
         const mentioned: Array<string> = []
-        /** The sessions "it" was made, by the keys they're muted by, as the assistant names this Mac Rosie. */
+        /** The sessions "it" was made, by their rows' keys. */
         const sessions: Array<string> = []
-        const naming = (host: string) => (host.toLowerCase() === hostname().toLowerCase() ? "Rosie" : (host.split(".")[0] ?? host))
         const controls = Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal })
         const menu = Latest.menu({
           latest: listed.latest,
@@ -304,13 +303,15 @@ describe("Latest", () => {
           daemon: {
             // The newest he heard under the key, kept at `at` or since.
             latestHeard: (key, at) => Effect.succeed(Option.fromNullable(heard.filter((one) => one.key === key && one.at >= at).at(-1)?.id)),
-            replay: (id) => Effect.sync(() => void replayed.push(id)).pipe(Effect.as("queued" as const)),
+            replay: (id, menu) => Effect.sync(() => void replayed.push(`${id} for ${menu}`)).pipe(Effect.as("queued" as const)),
             power: Effect.succeed({ on, turns: 1 }),
             // Said at once, which makes "it" the thread it's about.
             tell: (notice) => Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.as(true)),
           } as Parameters<typeof Latest.menu>[0]["daemon"],
-          mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.machine}/${ref.id}: ${said}`)),
-          mentionSession: (update, said) => Effect.sync(() => void sessions.push(`${Mutes.keysOf(update, naming).join(" ")} (${update.project}): ${said}`)),
+          assistant: {
+            mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.machine}/${ref.id}: ${said}`)),
+            mentionSession: (update, said, key) => Effect.sync(() => void sessions.push(`${key} (${update.project}): ${said}`)),
+          },
         })
         const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
         return { ...listed, menu, told, replayed, mentioned, sessions, settle }
@@ -354,9 +355,9 @@ describe("Latest", () => {
         }),
       )
       expect([result.linked, result.session]).toEqual(["queued", "queued"])
-      expect(result.replayed).toEqual(["heard-a", "heard-b"])
+      // Said again as it was, for the row, which "it" means once it plays, rather than the session it may have been heard as.
+      expect(result.replayed).toEqual(["heard-a for t3:Rosie:t-tezos", "heard-b for t3:Rosie:t-tezos"])
       expect(result.told).toEqual([])
-      // Said again as it was, "it" is what playing it makes it, as the first time, never set from the menu.
       expect([...result.mentioned, ...result.sessions]).toEqual([])
     })
 
@@ -386,6 +387,42 @@ describe("Latest", () => {
         "session:rig:codex:s-rig (integration): integration. Done on rig.",
       ])
       expect(result.mentioned).toEqual(["Rosie/t-tezos: integration. Halfway.", "rig/t-rig: integration. Halfway on rig."])
+    })
+
+    test("says nothing of a session's row gone from the list while it was being said again, as once its session is found to be a thread's", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const listed = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] })
+          const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
+          const told: Array<string> = []
+          yield* listed.journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. Done." })
+          yield* settle
+          const before = brief(yield* listed.latest.current)
+          const menu = Latest.menu({
+            latest: listed.latest,
+            threads: { find: () => Effect.succeedNone },
+            mutes: listed.mutes,
+            controls: Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal }),
+            daemon: {
+              latestHeard: () => Effect.succeedNone,
+              replay: () => Effect.die("not expected"),
+              // Meanwhile its session is found to be the Tezos migration's, which its row is then shown under.
+              power: Effect.as(
+                Effect.zipRight(listed.journal.write({ at: 2, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s-term" } }), settle),
+                { on: true, turns: 1 },
+              ),
+              tell: (notice) => Effect.as(Effect.sync(() => void told.push(notice.spoken)), true),
+            } as Parameters<typeof Latest.menu>[0]["daemon"],
+            assistant: { mention: () => Effect.die("not expected"), mentionSession: () => Effect.die("not expected") },
+          })
+          const outcome = yield* menu.replayThread("session:Rosie:claude:s-term")
+          return { before, outcome, told: [...told], after: brief(yield* listed.latest.current) }
+        }),
+      )
+      expect(result.before).toEqual(["session:Rosie:claude:s-term · Claude session · integration. Done."])
+      expect(result.outcome).toBe("unknown")
+      expect(result.told).toEqual([])
+      expect(result.after).toEqual(["t3:Rosie:t-tezos · Migrate the Tezos integration · integration. Halfway."])
     })
 
     test("says nothing again while yapd is off", async () => {

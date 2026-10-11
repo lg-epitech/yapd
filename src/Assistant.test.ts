@@ -428,7 +428,14 @@ const assistant = (
       Effect.provide(persona),
     )
     let power = { on: true, turns: 1 }
-    let listening = Option.none<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>()
+    let listening = Option.none<{
+      readonly update: Conversation.Update
+      readonly said: string
+      readonly at: number
+      readonly playing: boolean
+      readonly turns: number
+      readonly menu?: string
+    }>()
     /** What threads wait on him for, worded as notices word them, by a model that says what the agent wrote it wants, and whether it's risky. */
     const compose = yield* Notices.composer(threads).pipe(
       Effect.provide(
@@ -543,6 +550,13 @@ const assistant = (
         Effect.flatMap(TestClock.currentTimeMillis, (at) =>
           Effect.sync(() => {
             listening = Option.some({ update: update(project, spoken, at), said: spoken, at, playing: true, turns: power.turns })
+          }),
+        ),
+      /** An update he heard starts being read to him again, as the daemon says it again for the menu's row `menu`. */
+      again: (heard: Conversation.Update, menu: string) =>
+        Effect.flatMap(TestClock.currentTimeMillis, (at) =>
+          Effect.sync(() => {
+            listening = Option.some({ update: heard, said: heard.spoken, at, playing: true, turns: power.turns, menu })
           }),
         ),
       /** yapd starts saying something back over the update being read, like an answer to what he asked over it. */
@@ -10182,65 +10196,102 @@ describe("Assistant muting", () => {
 })
 
 describe("Assistant after the menu says a thread again", () => {
+  /** A thread at work in the integration project beside the Tezos migration, here or on rig. */
+  const fees = thread("fee5f00d-6a1f-4b7e-9d3c-1f0e8a7b6c5d", "Compare Fee Tables", "integration", {
+    activeRunId: "run-7",
+    activityRunStatus: "running",
+    latestRunStartedAt: "2026-10-01T02:00:00.000Z",
+    updatedAt: "2026-10-01T02:12:00.000Z",
+  })
+
+  /** As the assistant names this Mac Rosie. */
+  const naming = (host: string) => (host.toLowerCase() === hostname().toLowerCase() ? "Rosie" : (host.split(".")[0] ?? host))
+
   /**
-   * The menu over what the journal keeps now, saying again at once what it's
-   * asked to and he never heard, as yapd says it: "it" is what's said, from
-   * when it starts playing.
+   * The menu over what the journal keeps now, as yapd wires it to the
+   * assistant, saying again at once what it's asked to: with `heard`, the
+   * daemon heard that update under its keys, and says it again for the row
+   * as it does, from when it starts playing.
    */
-  const menuOver = (made: Effect.Effect.Success<ReturnType<typeof assistant>>) =>
+  const menuOver = (made: Effect.Effect.Success<ReturnType<typeof assistant>>, heard?: { readonly id: string; readonly update: Conversation.Update }) =>
     Effect.gen(function* () {
       const latest = yield* Latest.make({ here: "Rosie", journal: made.journal, mutes: made.mutes!, icons: yield* Icons.make({ actions: () => Option.none() }), threads: made.threads })
+      yield* made.flush
       return Latest.menu({
         latest,
         threads: made.threads,
         mutes: made.mutes!,
         controls: Mutes.controls({ mutes: made.mutes!, journal: made.journal, silence: () => Effect.void }),
         daemon: {
-          latestHeard: () => Effect.succeed(Option.none()),
-          replay: () => Effect.die("not expected"),
+          latestHeard: (key, at) =>
+            Effect.succeed(Option.fromNullable(heard !== undefined && heard.update.at >= at && Mutes.keysOf(heard.update, naming).includes(key) ? heard.id : undefined)),
+          replay: (id, menu) => (heard?.id === id && menu !== undefined ? Effect.as(made.again(heard.update, menu), "queued" as const) : Effect.die("not expected")),
           power: Effect.succeed({ on: true, turns: 1 }),
           tell: (notice) => Effect.as(notice.saying ?? Effect.void, true),
         } as Parameters<typeof Latest.menu>[0]["daemon"],
-        mention: made.mention,
-        mentionSession: made.mentionSession,
+        assistant: made,
       })
     })
 
-  /** What he heard of the Tezos migration, and with no thread doing the work he means, nothing the model can act on. */
-  const tezosThenNothing = (situation: Brain.Situation) =>
-    situation.utterance.heard === "How's the Tezos migration?"
-      ? Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir.", target: handle(situation, tezos) })
-      : Brain.decision({ act: situation.utterance.heard === "Interrupt it." ? "stop" : "send", text: "Use the fee table.", how: "now" })
+  /**
+   * A model that goes by FOCUS, and for an update not tied to a thread, as
+   * its rule says, the thread in THREADS doing that work: of its project, the
+   * one he asked about last, the Tezos migration here.
+   */
+  const following = (situation: Brain.Situation) => {
+    const { subject, desk, utterance } = situation
+    if (utterance.heard === "How's the Tezos migration?") return Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir.", target: handle(situation, tezos) })
+    const untied = subject._tag === "Session" && Option.isNone(Brain.about(subject)) ? desk.threads.filter(({ project }) => project === subject.update.project) : []
+    const named = utterance.heard.includes("Tezos") ? desk.threads.find(({ ref }) => ref.id === tezos.id) : undefined
+    const target = named ?? Option.getOrUndefined(Brain.focused(situation)) ?? untied.find(({ ref }) => ref.id === tezos.id) ?? untied[0]
+    return Brain.decision({ act: utterance.heard.startsWith("Interrupt") ? "stop" : "send", target: target?.handle ?? "", text: "Use the fee table.", how: "now", sure: "high" })
+  }
 
-  /** The keys muted, in order. */
-  const keys = (mutes: Mutes.Mutes | undefined) => Effect.map(mutes!.list, (all) => all.map(({ key }) => key))
+  /** A session in a terminal in the integration project, which T3 Code doesn't run, as he first heard it. */
+  const terminal = (at: number): Conversation.Update => ({
+    ...update("integration", "integration. The loader fix is ready.", at),
+    session: "claude:s-term",
+    thread: { agent: "claude", session: "s-term", cwd: "/code/integration", message: "The loader fix is ready.", origin: {} },
+  })
 
-  test("'interrupt it' or 'tell it to' after a muted session's row is said again is about that session, never the thread he heard of before it", async () => {
-    for (const heard of ["Interrupt it.", "Tell it to use the fee table."]) {
-      const result = await run(
-        Effect.gen(function* () {
-          const made = yield* assistant(tezosThenNothing, undefined, { muting: true })
-          yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/yapd", project: "yapd", said: "yapd. The loader fix is ready." })
-          yield* made.mutes!.mute({ key: "session:Rosie:claude:s-term", called: "the Claude session in yapd", project: "yapd" })
-          yield* made.dictate("How's the Tezos migration?")
-          const menu = yield* menuOver(made)
-          const replayed = yield* menu.replayThread("session:Rosie:claude:s-term")
-          yield* made.dictate(heard)
-          return { replayed, spoken: made.spoken().slice(1), about: made.seen.slice(1).map(({ subject }) => subject), commands: made.dispatched.map(({ type }) => type) }
-        }),
-      )
-      expect(result.replayed).toBe("queued")
-      // Nothing goes to the Tezos migration: the model is asked about the session, which no thread it can act on is doing.
-      expect(result.commands).toEqual([])
-      expect(result.spoken).toEqual([lines.cantTell])
-      expect(result.about).toEqual([expect.objectContaining({ _tag: "Session", said: "yapd. The loader fix is ready.", update: expect.objectContaining({ session: "claude:s-term", project: "yapd" }) })])
+  /** What was sent to which thread, and what was said, after he heard of the Tezos migration and the menu said a session's row again. */
+  const afterSessionRow = (heard: string, as: "kept" | "heard") =>
+    run(
+      Effect.gen(function* () {
+        const made = yield* assistant(following, undefined, { muting: true })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. The loader fix is ready." })
+        yield* made.dictate("How's the Tezos migration?")
+        const menu = yield* menuOver(made, as === "heard" ? { id: "h1", update: terminal(now - 60_000) } : undefined)
+        const replayed = yield* menu.replayThread("session:Rosie:claude:s-term")
+        yield* made.dictate(heard)
+        return {
+          replayed,
+          spoken: made.spoken().slice(1),
+          asked: made.seen.length,
+          sent: made.dispatched.map(({ type, threadId }) => `${type} ${threadId === tezos.id ? "Tezos" : threadId}`),
+        }
+      }),
+    )
+
+  test("'interrupt it' or 'tell it to' after a session's row is said again, kept or heard, is said to be out of reach, never sent to the thread he heard of before", async () => {
+    for (const as of ["kept", "heard"] as const) {
+      for (const heard of ["Interrupt it.", "Tell it to use the fee table.", "Approve it."]) {
+        const result = await afterSessionRow(heard, as)
+        expect(result).toEqual({ replayed: "queued", spoken: ["That's a terminal session, sir; I can't reach it from here."], asked: 1, sent: [] })
+      }
     }
+  })
+
+  test("a thread he names after a session's row is said again still gets what he tells it", async () => {
+    const result = await afterSessionRow("Tell the Tezos migration to use the fee table.", "kept")
+    expect(result.sent).toEqual(["message.dispatch Tezos"])
+    expect(result.asked).toBe(2)
   })
 
   test("'mute it', 'unmute it' and 'scratch that' after a muted session's row is said again are for that session, never the thread he heard of before it", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const made = yield* assistant(tezosThenNothing, undefined, { muting: true })
+        const made = yield* assistant(following, undefined, { muting: true })
         yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/yapd", project: "yapd", said: "yapd. The loader fix is ready." })
         yield* made.mutes!.mute({ key: "session:Rosie:claude:s-term", called: "the Claude session in yapd", project: "yapd" })
         yield* made.dictate("How's the Tezos migration?")
@@ -10249,7 +10300,7 @@ describe("Assistant after the menu says a thread again", () => {
         const steps: Array<ReadonlyArray<string>> = []
         for (const heard of ["Mute it.", "Unmute it.", "Scratch that."]) {
           yield* made.dictate(heard)
-          steps.push(yield* keys(made.mutes))
+          steps.push((yield* made.mutes!.list).map(({ key }) => key))
         }
         return { spoken: made.spoken().slice(1), steps, model: made.seen.length }
       }),
@@ -10260,31 +10311,31 @@ describe("Assistant after the menu says a thread again", () => {
     expect(result.model).toBe(1)
   })
 
-  test("a thread's row said again makes 'it' that thread, so 'interrupt it' stops it, not the one he heard of before", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const made = yield* assistant(
-          (situation) => Brain.decision({ act: "answer", spoken: "The Mina tickets are filed, sir.", target: handle(situation, mina) }),
-          undefined,
-          { muting: true },
-        )
-        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "integration. Comparing fee tables.", detail: { session: "claude:s-tez" } })
-        yield* made.dictate("How are the Mina tickets?")
-        const menu = yield* menuOver(made)
-        const replayed = yield* menu.replayThread(`t3:Rosie:${tezos.id}`)
-        yield* made.dictate("Interrupt it.")
-        return { replayed, interrupted: made.dispatched.filter(({ type }) => type === "run.interrupt").map(({ threadId }) => threadId), model: made.seen.length }
-      }),
-    )
-    expect(result.replayed).toBe("queued")
-    expect(result.interrupted).toEqual([tezos.id])
-    expect(result.model).toBe(1)
+  test("'mute it' after a session's row is said again mutes that row by its key, named by its agent, whatever hostname its hook reported then", async () => {
+    const muted = (session: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(following, undefined, { muting: true })
+          // Kept as Rosie's when this Mac went by another hostname.
+          yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", host: "old-name.local", thread: session, directory: "/code/integration", project: "integration", said: "integration. Done." })
+          const menu = yield* menuOver(made)
+          const replayed = yield* menu.replayThread(`session:Rosie:${session}`)
+          yield* made.dictate("Mute it.")
+          return { replayed, muted: (yield* made.mutes!.list).map(({ key, called }) => ({ key, called })), spoken: made.spoken() }
+        }),
+      )
+    expect(await muted("claude:s-term")).toEqual({
+      replayed: "queued",
+      muted: [{ key: "session:Rosie:claude:s-term", called: "the Claude session in integration" }],
+      spoken: ["Muted it, sir. I'll still tell you if it needs you."],
+    })
+    expect((await muted("codex:s-cx")).muted).toEqual([{ key: "session:Rosie:codex:s-cx", called: "the Codex session in integration" }])
   })
 
-  test("a session's row on rig said again makes 'it' that session there: 'mute it' mutes it, and 'interrupt it' goes to no thread", async () => {
+  test("a session's row on rig said again makes 'it' that session there: 'mute it' mutes it, and 'interrupt it' is said to be out of reach", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const made = yield* assistant(tezosThenNothing, undefined, { muting: true })
+        const made = yield* assistant(following, undefined, { muting: true })
         yield* made.journal.write({ at: now - 60_000, kind: "update", host: "rig", thread: "claude:s-rig", directory: "/code/integration", project: "integration", said: "integration. Done on rig." })
         yield* made.dictate("How's the Tezos migration?")
         const menu = yield* menuOver(made)
@@ -10297,8 +10348,75 @@ describe("Assistant after the menu says a thread again", () => {
     )
     expect(result.replayed).toBe("queued")
     expect(result.muted).toEqual([{ key: "session:rig:claude:s-rig", called: "the Claude session in integration on rig" }])
-    expect(result.spoken).toEqual(["Muted it, sir. I'll still tell you if it needs you.", lines.cantTell])
+    expect(result.spoken).toEqual(["Muted it, sir. I'll still tell you if it needs you.", "That's a terminal session, sir; I can't reach it from here."])
     expect(result.commands).toEqual([])
+  })
+
+  test("a thread's row said again makes 'it' that thread, so 'interrupt it' stops it, not the one he heard of before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(following, undefined, { muting: true, others: [fees] })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: fees.id, project: "integration", said: "integration. Comparing fee tables.", detail: { session: "claude:s-fees" } })
+        yield* made.dictate("How's the Tezos migration?")
+        const menu = yield* menuOver(made)
+        const replayed = yield* menu.replayThread(`t3:Rosie:${fees.id}`)
+        yield* made.dictate("Interrupt it.")
+        return { replayed, interrupted: made.dispatched.filter(({ type }) => type === "run.interrupt").map(({ threadId }) => threadId), model: made.seen.length }
+      }),
+    )
+    expect(result.replayed).toBe("queued")
+    expect(result.interrupted).toEqual([fees.id])
+    expect(result.model).toBe(1)
+  })
+
+  test("a rig thread's row he heard, said again as it was, makes 'it' that thread, so 'interrupt it' stops it on rig, never the one he heard of here", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const rig: Array<Record<string, unknown>> = []
+        const made = yield* assistant(following, undefined, { muting: true, rig: { status: Effect.succeed({ _tag: "Up" }), threads: [fees], dispatched: rig } })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "rig", thread: fees.id, project: "integration", said: "integration. Comparing fee tables.", detail: { session: "claude:s-r" } })
+        yield* made.dictate("How's the Tezos migration?")
+        // Rig's hook, tied to its thread there for what's shown and muted only.
+        const heard: Conversation.Update = {
+          ...update("integration", "integration. Comparing fee tables.", now - 60_000),
+          session: "claude:s-r",
+          thread: { agent: "claude", session: "s-r", cwd: "/code/integration", message: "Comparing fee tables.", origin: { host: "rig" } },
+          owner: { machine: "rig", id: fees.id },
+        }
+        const menu = yield* menuOver(made, { id: "h1", update: heard })
+        const replayed = yield* menu.replayThread(`t3:rig:${fees.id}`)
+        yield* made.dictate("Interrupt it.")
+        return {
+          replayed,
+          rig: rig.filter(({ type }) => type === "run.interrupt").map(({ threadId }) => threadId),
+          here: made.dispatched.map(({ type }) => type),
+          model: made.seen.length,
+        }
+      }),
+    )
+    expect(result).toEqual({ replayed: "queued", rig: [fees.id], here: [], model: 1 })
+  })
+
+  test("a thread's row shown from a session whose link timed out, heard and said again as it was, makes 'it' that thread, never the one he heard of before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(following, undefined, { muting: true, others: [fees] })
+        yield* made.journal.write({ at: now - 120_000, kind: "update", machine: "Rosie", thread: fees.id, project: "integration", said: "integration. Started.", detail: { session: "claude:s-fees" } })
+        // Its next turn's link to the thread timed out, so it's kept under its session, which the thread's row shows.
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "claude:s-fees", directory: "/code/integration", project: "integration", said: "integration. Comparing fee tables." })
+        yield* made.dictate("How's the Tezos migration?")
+        const heard: Conversation.Update = {
+          ...update("integration", "integration. Comparing fee tables.", now - 60_000),
+          session: "claude:s-fees",
+          thread: { agent: "claude", session: "s-fees", cwd: "/code/integration", message: "Comparing fee tables.", origin: {} },
+        }
+        const menu = yield* menuOver(made, { id: "h1", update: heard })
+        const replayed = yield* menu.replayThread(`t3:Rosie:${fees.id}`)
+        yield* made.dictate("Interrupt it.")
+        return { replayed, interrupted: made.dispatched.filter(({ type }) => type === "run.interrupt").map(({ threadId }) => threadId), model: made.seen.length }
+      }),
+    )
+    expect(result).toEqual({ replayed: "queued", interrupted: [fees.id], model: 1 })
   })
 })
 })

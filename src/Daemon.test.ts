@@ -1736,6 +1736,30 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
   })
 
+  test("an update said again for the menu's row carries that row's key as what he hears, which one said again otherwise doesn't", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, heard, replay, lastHeard, played } = yield* daemon
+        yield* finish("a", "The PR is ready.")
+        yield* wait(11)
+        const [id] = yield* heard
+        const rows: Array<string> = []
+        const hearing = Effect.flatMap(lastHeard, (last) => Effect.sync(() => void rows.push(Option.match(last, { onNone: () => "nothing", onSome: ({ menu }) => menu ?? "as heard" }))))
+        yield* hearing
+        yield* replay(id!, "t3:Rosie:t-tezos")
+        yield* wait(0)
+        yield* hearing
+        yield* wait(11)
+        yield* replay(id!)
+        yield* wait(0)
+        yield* hearing
+        return { rows, played: [...played] }
+      }),
+    )
+    expect(result.rows).toEqual(["as heard", "t3:Rosie:t-tezos", "as heard"])
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready.", "yapd. The PR is ready."])
+  })
+
   test("an update cut off by turning yapd off is heard once it's said again to the end", async () => {
     const result = await run(
       Effect.gen(function* () {

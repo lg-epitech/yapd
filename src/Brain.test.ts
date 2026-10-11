@@ -200,6 +200,41 @@ describe("Brain", () => {
     expect(shown).toContain(`yet: «${update.spoken}»\nWhat you said last, over it: «${answered}»`)
   })
 
+  test("a session's row said again from the menu is out of reach for what only a thread can do, and a thread's row is that thread, however the update was tied", () => {
+    const update: Conversation.Update = {
+      session: "claude:s-term",
+      project: "integration",
+      turn: { prompt: Option.none(), message: "The loader fix is ready." },
+      needsYou: false,
+      spoken: "integration. The loader fix is ready.",
+      audio: "/tmp/update.wav",
+      thread: { agent: "claude", session: "s-term", cwd: "/code/integration", message: "The loader fix is ready.", origin: {} },
+      at: now - 20_000,
+    }
+    const session: Assistant.Subject = { _tag: "Session", update, said: update.spoken, menu: "session:Rosie:claude:s-term" }
+    const fast = (heard: string, subject: Assistant.Subject, open = Option.none<Assistant.Open>()) =>
+      Brain.fast(situation(heard, { subject, open, desk: desk([ref(tezos)]) }), lines)
+    const outOfReach = { act: "answer", spoken: "That's a terminal session, sir; I can't reach it from here." }
+    for (const heard of ["Interrupt it.", "Stop the run.", "Tell it to use the fee table.", "Ask it whether the tests pass.", "Reply to it saying yes.", "Approve it.", "Decline it."]) {
+      expect(fast(heard, session)).toMatchObject(outOfReach)
+    }
+    // Named, or not for a thread, it's as ever: the model's, or yapd's own.
+    expect(fast("Tell the Tezos migration to use the fee table.", session)).toBeUndefined()
+    expect(fast("Mute it.", session)).toMatchObject({ act: "mute", how: "mute" })
+    // With a question open, allowing or turning something down answers it.
+    expect(fast("Approve it.", session, Option.some(which([ref(tezos)])))?.spoken).not.toBe(outOfReach.spoken)
+    // The same update heard the normal way, or said again for a thread's row, is as it was, and the thread's row is that thread.
+    expect(fast("Interrupt it.", { _tag: "Session", update, said: update.spoken })).toBeUndefined()
+    const row: Assistant.Subject = { _tag: "Session", update: { ...update, owner: ref(mina) }, said: update.spoken, menu: `t3:Rosie:${tezos.id}` }
+    expect(Brain.about(row)).toEqual(Option.some(ref(tezos)))
+    expect(Brain.about(session)).toEqual(Option.none())
+    expect(fast("Interrupt it.", row)).toMatchObject({ act: "stop" })
+    // The model is told it can't reach the session, and never that it may be a thread doing that work.
+    const shown = Brain.prompt(situation("Stop it.", { subject: session }), Option.none())
+    expect(shown).toContain("that T3 Code doesn't run, which you can't reach from here")
+    expect(shown).not.toContain("that yapd hasn't tied to a thread yet")
+  })
+
   test("the OPEN section shows the part being asked, its options with what they mean, whether several can be picked, yapd's pick and what's answered already", () => {
     const { open } = questionOpen(1)
     const shown = Brain.prompt(situation("Alpha, and Gamma too.", { open: Option.some(open), desk: desk([ref(tezos)]) }), Option.none())
