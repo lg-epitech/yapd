@@ -18,6 +18,10 @@ export type Reply = typeof Reply.Type
 export interface Line {
   readonly speaker: "yapd" | "user"
   readonly text: string
+  /** For the user, what yapd was saying around when they began, when its own voice could still get into their microphone. */
+  readonly echo?: string
+  /** With `echo`, what they said once they carried on after a pause, which is surely theirs. */
+  readonly afterPause?: string
 }
 
 /** The user said something while yapd was reading an update, or right after. */

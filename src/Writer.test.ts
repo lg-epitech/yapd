@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Option } from "effect"
 import type { Catalog } from "./Launcher.ts"
+import type { Line } from "./Responder.ts"
 import * as Writer from "./Writer.ts"
 
 const now = Date.parse("2026-09-29T18:00:00.000Z")
@@ -110,5 +111,26 @@ describe("Writer", () => {
     expect(answering).toContain(`- "drop" when they call the request off`)
     expect(answering).toContain(`- "wait" when what they said after your question wasn't an answer to it`)
     expect(answering.endsWith("What they dictated:\nFix the loader.\n\nYou asked: Is that yapd or std?\n\nThey said, right after: Never mind.")).toBe(true)
+  })
+
+  test("tells it what of an answer may be its own voice and what he said after a pause, only when it's known yapd could be heard", () => {
+    const answer = (line: Partial<Line> = {}) =>
+      Writer.prompt(
+        material({
+          lines: [
+            { speaker: "user", text: "Fix the loader." },
+            { speaker: "yapd", text: "For the loader fix, is that yapd or std?" },
+            { speaker: "user", text: "Std. Yapd.", ...line },
+          ],
+        }),
+        Option.none(),
+      )
+    expect(answer({ echo: "For the loader fix, is that yapd or std?", afterPause: "Yapd." }).endsWith(
+      `They said, right after: Std. Yapd.\nThey began that while your own voice could still get into their microphone, so what came first may be your own words, from around «For the loader fix, is that yapd or std?», misheard or not, and words that sound like yours there are yours. What they said after a pause, «Yapd.», is surely theirs, even where it repeats your words, like naming one of the projects you offered.`,
+    )).toBe(true)
+    // With nothing after a pause, only the first part.
+    expect(answer({ echo: "For the loader fix, is that yapd or std?" }).endsWith("misheard or not, and words that sound like yours there are yours.")).toBe(true)
+    // Without the note on its own voice, his words alone, as ever.
+    expect(answer({ afterPause: "Yapd." }).endsWith("They said, right after: Std. Yapd.")).toBe(true)
   })
 })

@@ -1501,7 +1501,7 @@ export const make = (options: {
         const { utterance } = thought
         const lines: ReadonlyArray<Line> = [
           { speaker: "yapd", text: open.asked },
-          { speaker: "user", text: utterance.heard },
+          { speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) },
         ]
         const ready = yield* written(utterance, lines, Option.getOrUndefined(open.material))
         if (Option.isNone(ready)) return quiet(thought.subject)

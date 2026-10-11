@@ -14,6 +14,7 @@ import { Model, ModelError } from "./Model.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
 import * as Research from "./Research.ts"
+import type { Line } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
@@ -4387,6 +4388,33 @@ describe("Assistant", () => {
         started: ["/code/yapd"],
       })
     }
+  })
+
+  test("his answer to which project, said over the first seconds of the question, reaches the prompt writer with what yapd was saying and what he said after a pause, and only then", async () => {
+    const answered = (echo?: string) =>
+      run(
+        Effect.gen(function* () {
+          const told: Array<Line> = []
+          const { dictate, answer, started } = yield* assistant(
+            (situation) => Brain.decision({ act: "start", text: situation.utterance.heard, pending: Option.isNone(situation.open) ? "" : "answers" }),
+            ({ lines }) => {
+              if (lines.length === 1) return written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" })
+              told.push(lines.at(-1)!)
+              return written({ project: "yapd", evidence: "Yapd", spoken: "In yapd, on Opus, without a worktree." })
+            },
+          )
+          yield* dictate("Fix the loader.")
+          // Its own last word heard first, then his answer, after a pause.
+          yield* answer("Std. Yapd.", undefined, echo, "Yapd.")
+          return { told, started: started.map(({ project }) => project) }
+        }),
+      )
+    expect(await answered("For the loader fix, is that yapd or std?")).toEqual({
+      told: [{ speaker: "user", text: "Std. Yapd.", echo: "For the loader fix, is that yapd or std?", afterPause: "Yapd." }],
+      started: ["/code/yapd"],
+    })
+    // Without the note on its own voice, nothing is set apart, as ever.
+    expect(await answered()).toEqual({ told: [{ speaker: "user", text: "Std. Yapd." }], started: ["/code/yapd"] })
   })
 
   test("a request with fewer than two candidates says it couldn't tell, without asking", async () => {
