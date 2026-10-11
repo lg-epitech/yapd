@@ -41,8 +41,8 @@ export interface Listed {
   readonly state: State
   /** When it got to that state, in ms. */
   readonly since: number
-  /** What the user said to start it, when yapd started it. */
-  readonly started: Option.Option<{ readonly dictated: string; readonly description: string | null }>
+  /** What the user said to start it, when yapd started it, with what of that may have been yapd's own voice. */
+  readonly started: Option.Option<{ readonly dictated: string; readonly description: string | null } & Overheard>
   /** The latest thing yapd said about it. */
   readonly last: Option.Option<{ readonly at: number; readonly said: string }>
   /** One of the many below the likeliest, which the model sees by name only, to pick by how it sounds. */
@@ -195,11 +195,33 @@ export const called = (title: string, description: string | null | undefined, pr
 /** Threads that are part of another, which the user never addresses on their own. */
 const subagent = (thread: T3Live.Thread) => thread.lineage?.relationshipToParent === "subagent"
 
+/**
+ * What yapd was saying around when he began words of his, when its own voice
+ * could still get into the microphone, and only with that, what he said after
+ * a pause, which is surely his.
+ */
+export interface Overheard {
+  readonly echo?: string | undefined
+  readonly afterPause?: string | undefined
+}
+
 /** What was noted about work yapd started, by thread id. */
-export interface Started {
+export interface Started extends Overheard {
   readonly dictated: string
   readonly description: string | null
   readonly at: number
+}
+
+/** What the journal's entry for starting it kept of yapd's own voice in what he dictated: nothing for an older one. */
+const overheardIn = (detail: string | null): Overheard => {
+  if (detail === null) return {}
+  try {
+    const { dictated } = JSON.parse(detail) as { readonly dictated?: { readonly echo?: unknown; readonly afterPause?: unknown } }
+    if (typeof dictated?.echo !== "string") return {}
+    return { echo: dictated.echo, ...(typeof dictated.afterPause === "string" && dictated.afterPause.trim() !== "" ? { afterPause: dictated.afterPause } : {}) }
+  } catch {
+    return {}
+  }
 }
 
 /** One machine's threads as T3 Code there last sent them, and what yapd noted and said about them. */
@@ -293,7 +315,12 @@ export const shortlist = (input: {
         thread,
         state: doing,
         since: since(thread, doing),
-        started: Option.map(Option.fromNullable(own), ({ dictated, description }) => ({ dictated, description })),
+        started: Option.map(Option.fromNullable(own), ({ dictated, description, echo, afterPause }) => ({
+          dictated,
+          description,
+          ...(echo === undefined ? {} : { echo }),
+          ...(afterPause === undefined ? {} : { afterPause }),
+        })),
         last: Option.fromNullable(said.get(thread.id)),
         brief: index >= most,
       }
@@ -528,8 +555,11 @@ export const make = (options: {
     const startedWork = store
       .transaction((database: Database) =>
         database
-          .query<{ machine: string; id: string; dictated: string | null; prompt: string | null; description: string | null; at: string }, []>(
-            "select machine, id, dictated, prompt, description, at from threads where started = 1",
+          // With the first journal entry for starting it, which keeps what of what he dictated may have been yapd's own voice.
+          .query<{ machine: string; id: string; dictated: string | null; prompt: string | null; description: string | null; at: string; detail: string | null }, []>(
+            `select machine, id, dictated, prompt, description, at,
+               (select detail from journal where kind = 'started' and journal.machine = threads.machine and journal.thread = threads.id order by journal.id limit 1) as detail
+             from threads where started = 1`,
           )
           .all(),
       )
@@ -538,7 +568,9 @@ export const make = (options: {
           const started = new Map<string, Map<string, Started>>()
           for (const row of rows) {
             const noted = started.get(row.machine) ?? new Map<string, Started>()
-            noted.set(row.id, { dictated: row.dictated ?? row.prompt ?? "", description: row.description, at: time(row.at) ?? 0 })
+            // Only for what he dictated, never for the prompt it stands in for.
+            const overheard = row.dictated === null ? {} : overheardIn(row.detail)
+            noted.set(row.id, { dictated: row.dictated ?? row.prompt ?? "", description: row.description, at: time(row.at) ?? 0, ...overheard })
             started.set(row.machine, noted)
           }
           return started

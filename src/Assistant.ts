@@ -44,8 +44,7 @@ export interface Utterance {
 }
 
 /** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
-const overItself = (echo?: string, afterPause?: string): Pick<Utterance, "echo" | "afterPause"> =>
-  echo === undefined ? {} : { echo, ...(afterPause === undefined || afterPause === "" ? {} : { afterPause }) }
+const overItself = (echo?: string, afterPause?: string): Pick<Utterance, "echo" | "afterPause"> => Brain.overheard({ echo, afterPause })
 
 /** What a thread asks of the user, which a short answer can settle. */
 export type Asks =
@@ -149,6 +148,10 @@ export interface Open {
   readonly utterance: string
   /** What the user said in that request. */
   readonly heard: string
+  /** What yapd was saying around when he began it, when its own voice could still get into the microphone, so what came first may be its own. */
+  readonly echo?: string
+  /** With `echo`, what he said once he carried on after a pause, which is surely his. */
+  readonly afterPause?: string
   /** What was understood, minus what's being asked. */
   readonly decision: Brain.Decision
   readonly candidates: ReadonlyArray<Threads.Ref>
@@ -1303,7 +1306,12 @@ export const make = (options: {
             .filter(({ score }) => score > 0)
             .toSorted((one, other) => other.score - one.score || other.entry.at - one.entry.at)
             .slice(0, 8)
-            .map(({ entry }) => `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}`)
+            // His own words, where they're what's shown, with what of them may have been yapd's own voice.
+            .map(({ entry }) =>
+              `${ago(entry.at, now)}, ${entry.kind}${entry.project === undefined ? "" : ` in ${entry.project}`}: ${Brain.fenced(entry.said ?? entry.text ?? "")}${
+                entry.said === undefined && (entry.kind === "dictation" || entry.kind === "reply") ? Brain.ownVoice(Brain.overheardIn(entry)) : ""
+              }`,
+            )
         } else {
           const search = (words: string) =>
             Effect.map(threads.search(words), (searched) => {
@@ -1337,12 +1345,16 @@ export const make = (options: {
         return yield* answer(decided.right.spoken, about, thought, said, step, decided.right)
       })
 
-    /** Notes work as it starts, as part of starting it, so turning yapd off can't come between the two. */
+    /**
+     * Notes work as it starts, as part of starting it, so turning yapd off can't
+     * come between the two: with what he dictated for it, and what of that may
+     * have been yapd's own voice, which is kept with the journal's entry for it.
+     */
     const noting =
-      (utterance: Utterance, dictated: string): Drafts.Noted =>
+      (utterance: Utterance, dictated: { readonly heard: string } & Brain.Overheard): Drafts.Noted =>
       ({ started, machine, request, spoken, about }) =>
         Effect.gen(function* () {
-          yield* threads.keep({ machine: machine.name, id: started.thread }, { prompt: request.prompt, dictated, description: about })
+          yield* threads.keep({ machine: machine.name, id: started.thread }, { prompt: request.prompt, dictated: dictated.heard, description: about })
           const now = yield* Clock.currentTimeMillis
           yield* journal.write({
             at: now,
@@ -1354,6 +1366,7 @@ export const make = (options: {
             said: spoken,
             text: request.prompt,
             utterance: utterance.id,
+            ...(dictated.echo === undefined ? {} : { detail: { dictated: Brain.overheard(dictated) } }),
           })
           yield* Effect.logInfo(`Started ${started.thread}, ${((now - utterance.at) / 1000).toFixed(1)} s after it was said`)
         })
@@ -1414,6 +1427,8 @@ export const make = (options: {
                 kind: "project",
                 utterance: utterance.id,
                 heard: utterance.heard,
+                // With what may have been its own voice in it, for whatever reads it back.
+                ...overItself(utterance.echo, utterance.afterPause),
                 decision: Brain.decision({ act: "start", text: utterance.heard }),
                 candidates: [],
                 asked: words,
@@ -1485,7 +1500,7 @@ export const make = (options: {
         if (Option.isNone(ready)) return quiet(thought.subject)
         const prompt = ready.value
         if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
-        const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance.heard), undefined, { utterance: utterance.id, step })
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance), undefined, { utterance: utterance.id, step })
         const told = yield* begun(outcome, thought, said, false)
         // What comes of starting it is known only later, so the rest isn't done on the strength of it, and he's told so, ahead of any question.
         const rest = thought.decision.rest.trim()
@@ -1512,7 +1527,7 @@ export const make = (options: {
           yield* Effect.logInfo(`Leaving it, since that didn't settle the project. ${prompt.right.decision.why}`)
           return reply(said.leaving, thought.subject)
         }
-        const outcome = yield* drafts.start(prompt.right, noting(utterance, open.heard), undefined, { utterance: utterance.id, step: 0 })
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, open), undefined, { utterance: utterance.id, step: 0 })
         if (outcome._tag === "Asked") {
           yield* Effect.logInfo("Leaving it, since that didn't settle the project")
           return reply(said.leaving, thought.subject)
@@ -1698,7 +1713,13 @@ export const make = (options: {
             })
           })
         const asking = (open: Omit<Open, "id" | "version" | "at">) => free(opening(open, utterance))
-        const base = { utterance: utterance.id, heard: utterance.heard, material: Option.none(), candidates: ref === undefined ? [] : [ref] }
+        const base = {
+          utterance: utterance.id,
+          heard: utterance.heard,
+          ...overItself(utterance.echo, utterance.afterPause),
+          material: Option.none(),
+          candidates: ref === undefined ? [] : [ref],
+        }
         switch (outcome._tag) {
           case "Done": {
             // Gone as asked after a step said on its own, it's noted and not said; held behind a turn that's waiting, or in the queue a stop held till he says, he's told why.
@@ -1822,7 +1843,8 @@ export const make = (options: {
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
         const thinking = yield* job(
           think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on }), [
-            { speaker: "user", text: thought.utterance.heard },
+            // All he said, still with what of it may have been yapd's own voice, so none of that is taken for more he asked.
+            { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance.echo, thought.utterance.afterPause) },
             // Nothing said of the step before, like a thanks, is nothing to show.
             ...(first.say === "" ? [] : [{ speaker: "yapd", text: first.say } satisfies Line]),
           ]),
@@ -2335,6 +2357,7 @@ export const make = (options: {
             kind: asks._tag === "Approval" ? "approval" : "question",
             utterance: thought.utterance.id,
             heard: thought.utterance.heard,
+            ...overItself(thought.utterance.echo, thought.utterance.afterPause),
             decision: asks._tag === "Approval" ? Brain.decision({ act: "decide", how: "accept" }) : Brain.decision({ act: "reply" }),
             candidates: [waiting.ref],
             asked: words,
@@ -2708,7 +2731,7 @@ export const make = (options: {
             kind: "reply",
             ...(withheld ? {} : { text: heard }),
             utterance: utterance.id,
-            detail: { via: "reply", gone: open.asked, ...(withheld ? { withheld } : {}) },
+            detail: { via: "reply", ...(withheld ? {} : overItself(echo, afterPause)), gone: open.asked, ...(withheld ? { withheld } : {}) },
           })
           yield* deliver(regarding(Brain.dealtWith(yield* persona.lines), askedAbout(open)), utterance)
         })
@@ -2969,6 +2992,8 @@ export const make = (options: {
           utterance: utterance.id,
           detail: {
             via: utterance.via,
+            // What may have been its own voice in his words, kept with them for whatever reads them back.
+            ...(withheld ? {} : overItself(utterance.echo, utterance.afterPause)),
             source: thought.source,
             decision,
             ...(second === undefined ? {} : { second }),
@@ -3219,10 +3244,10 @@ export const make = (options: {
           // In case it's new work, or names the project asked about, the prompt is written while the model works out which.
           const asked = Option.filter(glanced.situation.open, ({ kind }) => kind === "project")
           const lines: ReadonlyArray<Line> = Option.match(asked, {
-            onNone: () => [{ speaker: "user", text: utterance.heard }],
+            onNone: () => [{ speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) }],
             onSome: (open) => [
               { speaker: "yapd", text: open.asked },
-              { speaker: "user", text: utterance.heard },
+              { speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) },
             ],
           })
           // Noted as it's begun, so it's stopped however this ends, even stopped while the model works it out.

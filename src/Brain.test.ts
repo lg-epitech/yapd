@@ -11,6 +11,7 @@ import type * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import * as Research from "./Research.ts"
+import type { Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
@@ -447,6 +448,28 @@ describe("Brain", () => {
     expect(between._tag === "Ask" ? between.open.kind : between).toBe("which")
   })
 
+  test("a question code asks about what he said over yapd's first seconds keeps what of it may have been yapd's own voice, and nothing when it wasn't", () => {
+    const listed = (of: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === of.id)!
+    const on: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
+    const over = (heard: string, more: Partial<Assistant.Utterance>, subject: Assistant.Subject = on) => {
+      const given = situation(heard, { subject })
+      return { ...given, utterance: { ...given.utterance, via: "reply" as const, ...more } }
+    }
+    const kept = (checked: Brain.Checked) => (checked._tag === "Ask" ? { kind: checked.open.kind, echo: checked.open.echo, afterPause: checked.open.afterPause } : checked)
+    const echo = "It's comparing fee tables."
+    // Which thread, and whether to stop one.
+    const which = Brain.decision({ act: "send", target: listed(tezos).handle, sure: "medium", others: listed(mina).handle, text: "Use the fee table." })
+    const stop = Brain.decision({ act: "stop", target: listed(tezos).handle, sure: "medium" })
+    expect(kept(Brain.check(which, over("Tables. Tell the migration one to use the fee table.", { echo, afterPause: "Tell the migration one to use the fee table." }, { _tag: "Nothing" }), lines))).toEqual({
+      kind: "which",
+      echo,
+      afterPause: "Tell the migration one to use the fee table.",
+    })
+    expect(kept(Brain.check(stop, over("Tables. Stop the migration.", { echo }), lines))).toEqual({ kind: "confirm", echo, afterPause: undefined })
+    const plain = Brain.check(stop, over("Stop the migration.", {}), lines)
+    expect(plain._tag === "Ask" && ("echo" in plain.open || "afterPause" in plain.open)).toBe(false)
+  })
+
   test("'show me that' shows what was just talked about without the model, and 'hide that' only takes a card down while one is up", () => {
     const subject: Assistant.Subject = { _tag: "Answer", said: "The Tezos migration is comparing fee tables, sir.", about: Option.some(ref(tezos)) }
     const shown = (heard: string, overrides: Partial<Brain.Situation> = {}) => {
@@ -599,6 +622,61 @@ describe("Brain", () => {
     const shown = Brain.prompt(situation("What did I just tell the Tezos one?", { lately: [sent] }), Option.none())
     const handle = desk().threads.find(({ ref }) => ref.id === tezos.id)?.handle
     expect(shown).toContain(`LATELY, oldest first:\n- 1 min ago, you sent his message to the thread (integration, ${handle}): «${message}»\n`)
+  })
+
+  test("his words from before, begun over yapd's own voice, show wherever the model sees them with what may have been its own, and what after a pause was his, only when they were", () => {
+    const echo = "Use staging, the Tezos thread says, sir."
+    const heard = "Use staging. Tell the migration one to add tests."
+    const note = `(he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «${echo}»)`
+    const paused = `(he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «${echo}»; what he said after a pause, «Tell the migration one to add tests.», is surely his)`
+    const shown = (overrides: Partial<Brain.Situation>) => Brain.prompt(situation("The Mina one, and run the full suite.", overrides), Option.none())
+
+    // OPEN, what he asked that the question is about.
+    const open = (given: Partial<Assistant.Open>) => shown({ open: Option.some({ ...which([ref(mina), ref(tezos)]), heard, ...given }), desk: desk([ref(mina), ref(tezos)]) })
+    expect(open({ echo })).toContain(`About what he asked: «${heard}» ${note}\n`)
+    expect(open({ echo, afterPause: "Tell the migration one to add tests." })).toContain(`About what he asked: «${heard}» ${paused}\n`)
+    expect(open({})).toContain(`About what he asked: «${heard}»\n`)
+    expect(open({ afterPause: "Tell the migration one to add tests." })).not.toContain("your own voice")
+
+    // This exchange so far, as for the rest of a request.
+    const exchange = (line: Partial<Line>) =>
+      shown({ lines: [{ speaker: "user", text: heard, ...line }, { speaker: "yapd", text: "Which one, sir?" }] })
+    expect(exchange({ echo })).toContain(`This exchange so far:\nHe: ${heard} ${note}\nYou: Which one, sir?`)
+    expect(exchange({})).toContain(`This exchange so far:\nHe: ${heard}\nYou: Which one, sir?`)
+
+    // LATELY and UNHEARD, as the journal kept what he dictated and said back.
+    const dictated: Kept = { id: 1, at: now - 60_000, kind: "dictation", utterance: "u0", text: heard, detail: { via: "reply", echo } }
+    const replied: Kept = { id: 2, at: now - 60_000, kind: "reply", project: "integration", text: heard, said: "Sending it.", detail: { intent: "send", echo, afterPause: "Tell the migration one to add tests." } }
+    const older: Kept = { id: 3, at: now - 60_000, kind: "dictation", utterance: "u0", text: heard, detail: { via: "shortcut" } }
+    expect(shown({ lately: [dictated, replied, older] })).toContain(
+      [
+        `LATELY, oldest first:`,
+        `- 1 min ago, he asked you: «${heard}» ${note}`,
+        `- 1 min ago, he said over it (integration): «${heard}» ${paused}, and you said «Sending it.»`,
+        `- 1 min ago, he asked you: «${heard}»\n`,
+      ].join("\n"),
+    )
+    expect(shown({ unheard: [replied] })).toContain(`UNHEARD, what he hasn't heard yet:\n- 1 min ago, he said over it (integration): «${heard}» ${paused}`)
+
+    // THREADS, what he said to start one.
+    const started = (more: Threads.Overheard) =>
+      shown({
+        desk: {
+          threads: Threads.shortlist({
+            machine: "Rosie",
+            view,
+            focus: Option.none(),
+            pending: [],
+            most: 30,
+            started: new Map([[mina.id, { dictated: heard, description: null, at: now - 60_000, ...more }]]),
+            said: new Map(),
+            now,
+          }),
+          away: [],
+        },
+      })
+    expect(started({ echo })).toContain(`you started it: «${heard}» ${note}`)
+    expect(started({})).toContain(`you started it: «${heard}»\n`)
   })
 
   test("what was done for him that he was never told of, since he turned yapd off meanwhile, shows in what happened lately with what would have been said", () => {

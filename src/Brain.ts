@@ -1494,6 +1494,8 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
         kind: "which",
         utterance: situation.utterance.id,
         heard: situation.utterance.heard,
+        // With what may have been your own voice in it, for whatever reads it back.
+        ...overheard(situation.utterance),
         decision: choice,
         candidates: among.slice(0, 3).map(({ ref }) => ref),
         asked,
@@ -1608,6 +1610,7 @@ const writing = (
         kind: "confirm",
         utterance: utterance.id,
         heard: utterance.heard,
+        ...overheard(utterance),
         decision: choice,
         candidates: [listed.ref],
         asked,
@@ -1826,7 +1829,7 @@ const line = (listed: Threads.Listed, now: number) =>
     listed.ref.machine,
     doing(listed, now),
     ...Option.toArray(Option.fromNullable(pullRequest(listed.thread))),
-    ...Option.match(listed.started, { onNone: () => [], onSome: ({ dictated }) => [`you started it: ${fenced(dictated, 160)}`] }),
+    ...Option.match(listed.started, { onNone: () => [], onSome: (started) => [`you started it: ${fenced(started.dictated, 160)}${ownVoice(started)}`] }),
     ...Option.match(listed.last, { onNone: () => [], onSome: ({ at, said }) => [`last you said (${lasted(now - at)} ago): ${fenced(said, 160)}`] }),
   ].join(" · ")
 
@@ -1839,13 +1842,42 @@ export const unsaid = (kept: Pick<Kept, "detail">) => {
   return typeof detail === "object" && detail !== null && typeof detail.unsaid === "string" ? detail.unsaid : undefined
 }
 
+/** What's known of yapd's own voice in words of his, as the threads keep it for what he dictated. */
+export type Overheard = Threads.Overheard
+
+/** Only what there is to know of it: nothing without an echo, and no pause that's empty. */
+export const overheard = ({ echo, afterPause }: Overheard): { readonly echo?: string; readonly afterPause?: string } =>
+  echo === undefined ? {} : { echo, ...(afterPause === undefined || afterPause.trim() === "" ? {} : { afterPause }) }
+
+/** What's known of it for words of his kept in the journal, like what he dictated or said back, as they were heard: nothing for an older entry. */
+export const overheardIn = (kept: Pick<Kept, "detail">): Overheard => {
+  const detail = kept.detail as { readonly echo?: unknown; readonly afterPause?: unknown } | null | undefined
+  if (typeof detail !== "object" || detail === null || typeof detail.echo !== "string") return {}
+  return overheard({ echo: detail.echo, afterPause: typeof detail.afterPause === "string" ? detail.afterPause : undefined })
+}
+
+/**
+ * A note after words of his from before, as the model sees them, when he
+ * began them over yapd's own voice: what came first may be yapd's, and what
+ * followed a pause is his. His words themselves are never touched.
+ */
+export const ownVoice = (said: Overheard) => {
+  const { echo, afterPause } = overheard(said)
+  return echo === undefined
+    ? ""
+    : ` (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around ${fenced(echo, 400)}${
+        afterPause === undefined ? "" : `; what he said after a pause, ${fenced(afterPause, 400)}, is surely his`
+      })`
+}
+
 /** A journal entry as the model sees it. */
 const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   const handle = handleOf(desk, kept.machine, kept.thread)
   const about = [kept.project, handle].filter(Boolean).join(", ")
   const where = about === "" ? "" : ` (${about})`
   const said = kept.said === undefined ? "" : fenced(kept.said)
-  const text = kept.text === undefined ? "" : fenced(kept.text)
+  // His own words, with what may have been yapd's voice in them noted, as when they were first heard.
+  const text = kept.text === undefined ? "" : `${fenced(kept.text)}${kept.kind === "reply" || kept.kind === "dictation" ? ownVoice(overheardIn(kept)) : ""}`
   const untold = unsaid(kept)
   const what = (() => {
     switch (kept.kind) {
@@ -2052,12 +2084,12 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
         : ""
     }`,
     `FOCUS, what "it" means:\n${focus(situation)}${
-      lines.length === 0 ? "" : `\nThis exchange so far:\n${lines.map(({ speaker, text }) => `${speaker === "yapd" ? "You" : "He"}: ${text}`).join("\n")}`
+      lines.length === 0 ? "" : `\nThis exchange so far:\n${lines.map((line) => (line.speaker === "yapd" ? `You: ${line.text}` : `He: ${line.text}${ownVoice(line)}`)).join("\n")}`
     }`,
     ...Option.match(open, {
       onNone: () => [],
       onSome: (open) => [
-        `OPEN, your question: ${fenced(open.asked)}${open.heard.trim() === "" ? "" : `\nAbout what he asked: ${fenced(open.heard, 400)}`}${
+        `OPEN, your question: ${fenced(open.asked)}${open.heard.trim() === "" ? "" : `\nAbout what he asked: ${fenced(open.heard, 400)}${ownVoice(open)}`}${
           open.candidates.length === 0
             ? ""
             : `\nIts choices, in the order you said them: ${open.candidates.map((ref) => handleOf(desk, ref.machine, ref.id) ?? "a thread that's gone").join(", ")}`

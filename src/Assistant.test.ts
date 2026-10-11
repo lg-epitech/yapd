@@ -3744,6 +3744,34 @@ describe("Assistant", () => {
     expect(result).toEqual({ dispatched: 0, replies: 1, kept: 0 })
   })
 
+  test("an answer said over the first seconds of a question answered in T3 Code meanwhile is kept with what of it may have been yapd's own voice, and shown so after", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const items = [{ type: "user_input_request", status: "waiting", requestId: "q1", questions: [{ id: "shown", header: "Question", question: "What does the dialog show?" }] }]
+    const result = await run(
+      Effect.gen(function* () {
+        const prompts: Array<string> = []
+        const made = yield* assistant(
+          (situation) => {
+            if (situation.utterance.via === "shortcut") prompts.push(Brain.prompt(situation, Option.none()))
+            return Brain.decision({ act: "reply", target: handle(situation, cloud), text: "An error.", pending: "answers" })
+          },
+          undefined,
+          { others: [cloud], items },
+        )
+        yield* asked(made, cloud)
+        const question = made.questions().at(-1)!
+        yield* made.becomes({ ...cloud, pendingRuntimeRequest: null })
+        yield* made.settled("q1")
+        yield* made.answer("Show. An error.", question, "What does the dialog show, sir?", "An error.")
+        yield* made.dictate("What did I just say?")
+        return prompts
+      }),
+    )
+    expect(result[0]).toContain(
+      `he said over it: «Show. An error.» (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «What does the dialog show, sir?»; what he said after a pause, «An error.», is surely his)`,
+    )
+  })
+
   test("a dictation while a question is open answers it, one answer is spoken, and the question is never said again", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -4253,6 +4281,176 @@ describe("Assistant", () => {
     ])
   })
 
+  test("asked which thread a request said over yapd's first seconds is for, the model deciding his answer is told what of it may have been yapd's own voice, in OPEN and in LATELY, even once he's had it said again", async () => {
+    const over = "Use staging, the Tezos thread says, sir."
+    const request = "Use staging. Tell the migration one to add tests."
+    const told = (echo?: string, afterPause?: string) =>
+      run(
+        Effect.gen(function* () {
+          const prompts: Array<string> = []
+          const { dictate, followUp, answer, spoken } = yield* assistant((situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("What")) return Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: over })
+            // As the model did: yapd's own "Use staging" taken out, it couldn't tell which thread.
+            if (heard.startsWith("Use")) return Brain.decision({ act: "send", target: handle(situation, mina), sure: "low", others: handle(situation, tezos), text: "Add tests.", how: "now" })
+            prompts.push(Brain.prompt(situation, Option.none()))
+            if (heard.startsWith("Say")) return Brain.decision({ act: "again", how: "same", pending: "replaces" })
+            return Brain.decision({ act: "send", target: handle(situation, mina), sure: "high", text: "Add tests, and run the full suite.", how: "now", pending: "answers" })
+          })
+          yield* dictate("What did the Tezos one say?")
+          yield* followUp(request, 3, undefined, echo, afterPause)
+          const asked = spoken().length
+          yield* answer("Say that again?")
+          yield* answer("The Mina one, and run the full suite.")
+          return { asked: spoken().slice(asked - 1), prompts }
+        }),
+      )
+    const note = `(he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «${over}»`
+    const { asked, prompts } = await told(over)
+    expect(asked[0]).toContain("Open Mina SSV2 Bug Tickets or Migrate Tezos Integration")
+    // "Say that again?" needs no model: only his answer to the question asked again does.
+    expect(prompts).toHaveLength(1)
+    for (const prompt of prompts) {
+      expect(prompt).toContain(`About what he asked: «${request}» ${note})`)
+      expect(prompt).toContain(`he said over it: «${request}» ${note})`)
+    }
+    // What he said after a pause, surely his, as it was when it was first heard.
+    for (const prompt of (await told(over, "Tell the migration one to add tests.")).prompts) {
+      expect(prompt).toContain(`About what he asked: «${request}» ${note}; what he said after a pause, «Tell the migration one to add tests.», is surely his)`)
+    }
+    // Begun once its own voice could no longer get in, his words alone, as ever.
+    for (const prompt of (await told()).prompts) {
+      expect(prompt).toContain(`About what he asked: «${request}»\n`)
+      expect(prompt).not.toContain("your own voice")
+    }
+  })
+
+  test("every question asked about what he said over yapd's first seconds keeps what of it may have been yapd's own voice, for the model deciding his answer", async () => {
+    const echo = "Two threads need you, sir."
+    const kept = (open: Option.Option<Assistant.Open>) => Option.map(open, ({ heard, echo, afterPause }) => ({ heard, echo, afterPause }))
+    // An approval read back, since what he said over an answer had more after it than the approve.
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const readBack = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("What")
+              ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: echo })
+              : Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", rest: "tell the Mina one to wait" }),
+          undefined,
+          { others: [cloud], items: approval("r1", "rm -rf build") },
+        )
+        yield* asked(made, cloud)
+        yield* made.answer("Never mind.")
+        yield* made.dictate("What's the Tezos one doing?")
+        yield* made.followUp("Sir. Approve the cloud one, and tell the Mina one to wait.", 3, undefined, echo, "Approve the cloud one, and tell the Mina one to wait.")
+        return { asked: made.spoken().at(-1), open: kept(yield* made.open) }
+      }),
+    )
+    expect(readBack).toEqual({
+      asked: expect.stringContaining("I left the rest, sir: tell the Mina one to wait."),
+      open: Option.some({ heard: "Sir. Approve the cloud one, and tell the Mina one to wait.", echo, afterPause: "Approve the cloud one, and tell the Mina one to wait." }),
+    })
+    // The same message again, asked about rather than sent twice.
+    const twice = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) =>
+          situation.utterance.heard.startsWith("What")
+            ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: echo })
+            : Brain.decision({ act: "send", target: handle(situation, tezos), sure: "high", text: "Use the fee table from the Mina work.", how: "now" }),
+        )
+        yield* made.dictate("Tell the Tezos one to use the fee table from the Mina work.")
+        yield* made.dictate("What's the Tezos one doing?")
+        yield* made.followUp("Sir. Tell it to use the fee table from the Mina work.", 3, undefined, echo)
+        return { asked: made.spoken().at(-1), open: kept(yield* made.open) }
+      }),
+    )
+    expect(twice).toEqual({
+      asked: "I sent that a minute ago, sir. Again?",
+      open: Option.some({ heard: "Sir. Tell it to use the fee table from the Mina work.", echo, afterPause: undefined }),
+    })
+    // Which project new work is for.
+    const project = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Who")
+              ? Brain.decision({ act: "answer", spoken: echo })
+              : Brain.decision({ act: "start", text: situation.utterance.heard }),
+          () => written({ action: "ask", project: "", evidence: "", spoken: "For the loader fix, is that yapd or std?" }),
+        )
+        yield* made.dictate("Who needs me?")
+        yield* made.followUp("Sir. Fix the loader.", 3, undefined, echo, "Fix the loader.")
+        return { asked: made.spoken().at(-1), open: kept(yield* made.open) }
+      }),
+    )
+    expect(project).toEqual({
+      asked: "For the loader fix, is that yapd or std?",
+      open: Option.some({ heard: "Sir. Fix the loader.", echo, afterPause: "Fix the loader." }),
+    })
+  })
+
+  test("the rest of a request said over yapd's first seconds is worked out with all he said shown as maybe beginning with yapd's own voice, and what after a pause as his", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const prompts: Array<string> = []
+        const { dictate, followUp } = yield* assistant((situation) => {
+          const { heard } = situation.utterance
+          if (heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+          if (heard.startsWith("Sir")) return Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "now", rest: "tell the Tezos one to wait" })
+          prompts.push(Brain.prompt(situation, Option.none()))
+          return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Wait.", how: "now" })
+        })
+        yield* dictate("Who needs me?")
+        yield* followUp("Sir. Tell the Mina one to add tests, then tell the Tezos one to wait.", 3, undefined, "Two threads need you, sir.", "Tell the Mina one to add tests, then tell the Tezos one to wait.")
+        return prompts
+      }),
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0]).toContain(
+      `This exchange so far:\nHe: Sir. Tell the Mina one to add tests, then tell the Tezos one to wait. (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «Two threads need you, sir.»; what he said after a pause, «Tell the Mina one to add tests, then tell the Tezos one to wait.», is surely his)\nYou: `,
+    )
+    // The rest itself, worked out by the model with yapd's voice already taken out, is his alone.
+    expect(result[0]).toContain("WHAT HE SAID, right after what you just said:\ntell the Tezos one to wait")
+    expect(result[0]).not.toContain("He began while your own voice")
+  })
+
+  test("work started from what he said over yapd's first seconds is shown to the model after with what of that may have been yapd's own voice", async () => {
+    const shown = (echo?: string) =>
+      run(
+        Effect.gen(function* () {
+          const prompts: Array<string> = []
+          const { dictate, followUp, started } = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+              if (heard.startsWith("Sir")) return Brain.decision({ act: "start", text: heard })
+              prompts.push(Brain.prompt(situation, Option.none()))
+              return Brain.decision({ act: "answer", spoken: "It's under way, sir." })
+            },
+            () => written({ project: "yapd", evidence: "yapd", spoken: "In yapd, on Opus, without a worktree." }),
+            // The thread T3 Code makes for it, as it then shows it.
+            { others: [thread("new-thread", "Fix the docs", "yapd", { updatedAt: new Date(now).toISOString() })] },
+          )
+          yield* dictate("Who needs me?")
+          yield* followUp("Sir. Start a session in yapd to fix the docs.", 3, undefined, echo, "Start a session in yapd to fix the docs.")
+          yield* dictate("How's the docs one doing?")
+          return { started: started.length, prompts }
+        }),
+      )
+    const told = await shown("Two threads need you, sir.")
+    expect(told.started).toBe(1)
+    expect(told.prompts[0]).toContain(
+      `you started it: «Sir. Start a session in yapd to fix the docs.» (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «Two threads need you, sir.»; what he said after a pause, «Start a session in yapd to fix the docs.», is surely his)`,
+    )
+    // Work started before such a note was kept reads as it always did.
+    expect(told.prompts[0]).toContain(`you started it: «Write up what we found about Mina's fee rounding.»\n`)
+    // Begun once its own voice could no longer get in, his words alone, as ever.
+    const plain = await shown()
+    expect(plain.prompts[0]).toContain(`you started it: «Sir. Start a session in yapd to fix the docs.»`)
+    expect(plain.prompts[0]).not.toContain("your own voice")
+  })
+
   test("a second clarification closes the request instead of asking again", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -4415,6 +4613,35 @@ describe("Assistant", () => {
     })
     // Without the note on its own voice, nothing is set apart, as ever.
     expect(await answered()).toEqual({ told: [{ speaker: "user", text: "Std. Yapd." }], started: ["/code/yapd"] })
+  })
+
+  test("words handed on with what may have been yapd's own voice in them reach the prompt writer begun ahead with that too, as the model gets them", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const told: Array<Line> = []
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "start", text: situation.utterance.heard }),
+          ({ lines }) => {
+            told.push(...lines)
+            return written({ project: "yapd", evidence: "yapd", spoken: "In yapd, on Opus, without a worktree." })
+          },
+        )
+        yield* made.heard({
+          heard: "Sir. Start a session in yapd to fix the docs.",
+          via: "shortcut",
+          at: now,
+          voiced: 3,
+          turns: 1,
+          echo: "Two threads need you, sir.",
+          afterPause: "Start a session in yapd to fix the docs.",
+        })
+        yield* made.flush
+        return told
+      }),
+    )
+    expect(result).toEqual([
+      { speaker: "user", text: "Sir. Start a session in yapd to fix the docs.", echo: "Two threads need you, sir.", afterPause: "Start a session in yapd to fix the docs." },
+    ])
   })
 
   test("new work said over the first seconds of an answer reaches the prompt writer with what yapd was saying and what he said after a pause, and only then", async () => {
@@ -4944,6 +5171,36 @@ describe("Assistant", () => {
     expect(result.taken).toEqual(Option.none())
     expect(result.asked).not.toContain("What's going on?")
     expect(result.noted).not.toContain("What's going on?")
+  })
+
+  test("his words a search of the journal turns up are shown on the second look with what of them may have been yapd's own voice, when they were begun over it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const found: Array<ReadonlyArray<string>> = []
+        const { dictate, journal } = yield* assistant((situation) => {
+          if (Option.isNone(situation.second)) return Brain.decision({ act: "find", how: "journal", text: "staging" })
+          if ("found" in situation.second.value) found.push(situation.second.value.found)
+          return Brain.decision({ act: "answer", spoken: "You asked for tests, sir." })
+        })
+        // As the journal keeps what he said back over yapd's first seconds, and what he dictated before it kept any such note.
+        yield* journal.write({
+          at: now - 120_000,
+          kind: "reply",
+          text: "Use staging. Tell the migration one to add tests.",
+          utterance: "u1",
+          detail: { via: "reply", echo: "Use staging, the Tezos thread says, sir.", afterPause: "Tell the migration one to add tests." },
+        })
+        yield* journal.write({ at: now - 60_000, kind: "dictation", text: "Use staging for the fee tables.", utterance: "u2", detail: { via: "shortcut" } })
+        yield* dictate("What did I say about staging?")
+        return found
+      }),
+    )
+    expect(result).toEqual([
+      [
+        `1 min ago, dictation: «Use staging for the fee tables.»`,
+        `2 min ago, reply: «Use staging. Tell the migration one to add tests.» (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «Use staging, the Tezos thread says, sir.»; what he said after a pause, «Tell the migration one to add tests.», is surely his)`,
+      ],
+    ])
   })
 
   test("a catch-up told on a second look is one too: cut off, what it told him is told again, and heard once it's heard to the end", async () => {
