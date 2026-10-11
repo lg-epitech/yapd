@@ -47,12 +47,14 @@ const listing = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, 
     const mutes = yield* Mutes.make(store)
     const icons = yield* Icons.make({ actions: () => Option.none() })
     const changes = yield* Queue.unbounded<{ readonly machine: string; readonly change: T3Live.Change }>()
-    const views = { ...shown }
-    const threads: Pick<Threads.Threads["Type"], "find" | "project" | "changes"> = {
+    const views: Record<string, ReadonlyArray<T3Live.Thread> | undefined> = { ...shown }
+    const threads: Pick<Threads.Threads["Type"], "find" | "project" | "changes" | "unseen"> = {
+      // A machine's threads are seen once T3 Code there has caught up.
+      unseen: (machine) => Effect.sync(() => (views[machine] === undefined ? Option.some(`I can't see ${machine}'s threads yet.`) : Option.none())),
       find: (ref) => Effect.sync(() => Option.fromNullable(views[ref.machine]?.find(({ id }) => id === ref.id))),
       project: (_, where) =>
         Effect.succeed(
-          where.thread !== undefined ? (Object.values(views).flat().some(({ id }) => id === where.thread) ? Option.some(integration) : Option.none()) : where.directory?.startsWith("/code/integration") === true ? Option.some(integration) : Option.none(),
+          where.thread !== undefined ? (Object.values(views).flatMap((all) => all ?? []).some(({ id }) => id === where.thread) ? Option.some(integration) : Option.none()) : where.directory?.startsWith("/code/integration") === true ? Option.some(integration) : Option.none(),
         ),
       changes: Stream.fromQueue(changes),
     }
@@ -63,6 +65,8 @@ const listing = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, 
       latest,
       journal,
       mutes,
+      /** T3 Code on a machine catches up, telling of no change as it does. */
+      caughtUp: (machine: string, all: ReadonlyArray<T3Live.Thread>) => Effect.sync(() => void (views[machine] = all)),
       /** T3 Code shows a thread as it is now, and tells of what changed. */
       becomes: (machine: string, after: T3Live.Thread, change: T3Live.Change["_tag"]) =>
         Effect.gen(function* () {
@@ -158,6 +162,44 @@ describe("Latest", () => {
       }),
     )
     expect(brief(result)).toEqual(["t3:Rosie:t-tezos · Migrate the Tezos integration · integration. Done. · muted"])
+  })
+
+  test("a session's row stays the thread's, and the thread muted by it, once a question the thread asked is its newest", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { latest, journal, mutes } = yield* listing({ rig: [thread("t-tezos", "Migrate the Tezos integration")] })
+        // rig's T3 Code took too long the first time, then it was tied.
+        yield* journal.write({ at: 1, kind: "update", host: "rig.local", thread: "claude:s-tezos", directory: "/code/integration", said: "integration. Started." })
+        yield* mutes.mute({ key: "session:rig:claude:s-tezos" })
+        yield* journal.write({ at: 2, kind: "update", machine: "rig", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s-tezos" } })
+        yield* journal.write({ at: 3, kind: "notice", machine: "rig", thread: "t-tezos", said: "The Tezos migration asks which network first." })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { rows: brief(yield* latest.current), under: yield* latest.under("t3:rig:t-tezos") }
+      }),
+    )
+    expect(result.rows).toEqual(["t3:rig:t-tezos · Migrate the Tezos integration · The Tezos migration asks which network first. · muted"])
+    expect(result.under).toEqual(["session:rig:claude:s-tezos"])
+  })
+
+  test("is built again a few seconds after a machine's threads come in, which T3 Code tells of no change for", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { latest, journal, caughtUp } = yield* listing({})
+        yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Done.", detail: { session: "claude:s" } })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const before = brief(yield* latest.current)
+        yield* caughtUp("Rosie", [thread("t-tezos", "Migrate the Tezos integration")])
+        yield* TestClock.adjust("5 seconds")
+        yield* flush
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { before, after: (yield* latest.current).map(({ title, project }) => `${title} · ${project?.id}`) }
+      }),
+    )
+    expect(result.before).toEqual(["t3:Rosie:t-tezos · A thread · integration. Done."])
+    expect(result.after).toEqual(["Migrate the Tezos integration · p-int"])
   })
 
   test("is built again a moment after something is kept or claimed, a mute changes or a thread is renamed, and from the journal after a restart", async () => {

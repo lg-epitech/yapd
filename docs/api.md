@@ -195,7 +195,7 @@ Each row of `recent` in the [state](#state) is a thread, by its newest update or
 
 - `key`: the thread's key, the same as in [`/threads`](#threads), to [mute](#muting-a-thread) it or [hear it again](#hearing-a-thread-again) by. Treat it as a name, not something to take apart. A session yapd can't tie to a T3 Code thread, like one run in a terminal, has a key of its own.
 - `machine`: where it runs. `thread`: its id in T3 Code, as [`/threads`](#threads) has it, or `null` for a session yapd can't tie to one.
-- `title`: the thread's title in T3 Code, or for a session, "Claude session" or "Codex session", with "on rig" after it when it's not this machine.
+- `title`: the thread's title in T3 Code, or for a session, "Claude session" or "Codex session", with "on rig" after it when it's not this machine. While yapd can't see a thread in T3 Code, as for a few seconds after it starts or while another machine can't be reached, it's what yapd calls the thread when it's muted, else "A thread", and the thread has no `project` `id` or `icon` until it's seen again.
 - `project`: there when yapd knows the project. `name` is how it's called, and `id` and `icon` are there only for a project T3 Code has.
 - `text`: what yapd said of its latest update, or would have, had it not been muted. `at`: when the agent's turn ended.
 - `muted`: whether it's muted, and `until`, when the mute ends on its own, only then.
@@ -215,7 +215,7 @@ Every icon carries `text` and `color` too, the monogram to draw for a kind you d
 
 Some threads are noisy. Muting one stops yapd saying its progress and what it finished, but anything that needs you still comes through: a question it asks, an approval it waits on, a run that failed or hit a limit, and the answer to a message you sent it yourself. What's muted is still kept, so "what did I miss?" tells you of it, a thread at a time, and `recent` still shows it.
 
-`PUT /threads/{key}/mute` mutes the thread by its `key`, percent-encoded, and drops what of it was waiting to be said, but never what's being said. With `{"until": "2026-10-02T15:00:00.000Z"}` as JSON, the mute ends on its own then. Without a body, it lasts until you take it off. `DELETE /threads/{key}/mute` takes it off, whether it was muted or not.
+`PUT /threads/{key}/mute` mutes the thread by its `key`, percent-encoded, and drops what of it was waiting to be said, but never what's being said. With `{"until": "2026-10-02T15:00:00.000Z"}` as JSON, the mute ends on its own then. Without a body, it lasts until you take it off. `DELETE /threads/{key}/mute` takes it off, whether it was muted or not, along with the mute of the session its latest update came from, which `recent` shows as the thread's.
 
 ```sh
 curl -X PUT 'http://127.0.0.1:4747/threads/t3%3ARosie%3A850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f/mute'

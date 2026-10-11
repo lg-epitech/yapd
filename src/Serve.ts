@@ -134,10 +134,13 @@ export const serve = Effect.gen(function* () {
     // What went to a thread for him and may have got there: what answers it is his to hear, however he muted the thread.
     sent: (to, since) => ledger.steps(since, { kinds: ["message", "reply", "start"], states: ["prepared", "sent", "unknown"], machine: to.machine, thread: to.id }),
   })
-  // Muting from the menu or by voice: never anything that reaches an agent.
-  const controls = Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, journal }))
   const icons = yield* Icons.make({ actions: threads.actions })
   const latest = yield* Latest.make({ here: machine, journal, mutes, icons, threads })
+  // Muting from the menu or by voice: never anything that reaches an agent. A thread the menu shows muted by its session is unmuted by it too.
+  const controls = Mutes.widened(
+    Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, journal })),
+    latest.under,
+  )
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),

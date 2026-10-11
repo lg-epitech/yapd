@@ -43,7 +43,16 @@ export interface Latest {
   readonly rows: Stream.Stream<ReadonlyArray<Server.Recent>>
   /** The threads as listed now. */
   readonly current: Effect.Effect<ReadonlyArray<Server.Recent>>
+  /**
+   * The other keys a thread listed now may be muted under, beside its own:
+   * the session of its latest update, muted before that session was found
+   * to be the thread's. Unmuting the thread takes those off too.
+   */
+  readonly under: (key: string) => Effect.Effect<ReadonlyArray<string>>
 }
+
+/** How long until the list is built again while a machine's threads can't be seen yet, as just after a start or while its T3 Code reconnects. */
+const blindly = "5 seconds"
 
 /**
  * The threads with the latest updates on every machine yapd follows, `here`
@@ -56,34 +65,55 @@ export const make = (options: {
   readonly journal: Journal["Type"]
   readonly mutes: Mutes.Mutes
   readonly icons: Icons.Icons
-  readonly threads: Pick<Threads.Threads["Type"], "find" | "project" | "changes">
+  readonly threads: Pick<Threads.Threads["Type"], "find" | "project" | "changes" | "unseen">
 }) =>
   Effect.gen(function* () {
     const { here, journal, mutes, icons, threads } = options
+
+    /** Nothing listed yet, and the keys nothing is muted under. */
+    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), blind: false }
 
     const compute = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
       const latest = yield* journal.latest(now - week, read)
       const muted = new Map((yield* mutes.list).map((mute) => [mute.key, mute]))
+      const sessions = latest.some(sessionRow)
+      // The session of each thread's latest update, even when what came since, like a question it asked, has none.
+      const owned = new Map(
+        yield* Effect.forEach(latest, (kept) =>
+          Effect.gen(function* () {
+            if (sessionRow(kept)) return [kept, undefined] as const
+            const own = sessionOf(kept)
+            if (own !== undefined || kept.thread === undefined) return [kept, own] as const
+            const before = yield* journal.byThread(kept.machine ?? here, kept.thread, read)
+            return [kept, before.filter(({ kind }) => kind === "update").map(sessionOf).find((session) => session !== undefined)] as const
+          }),
+        ),
+      )
       // A session's own row, once a thread shown has its update under it, as when its link timed out once, is that thread's.
       const tied = new Set(
         latest.flatMap((kept) => {
-          const session = sessionOf(kept)
-          return session === undefined ? [] : [`${kept.machine ?? here}\n${session}`]
+          const session = owned.get(kept)
+          return session === undefined || !sessions ? [] : [`${kept.machine ?? here}\n${session}`]
         }),
       )
       const rows = latest.filter((kept) => !(sessionRow(kept) && tied.has(`${kept.machine ?? here}\n${kept.thread}`))).slice(0, shown)
-      return yield* Effect.forEach(rows, (kept) =>
+      const under = new Map<string, ReadonlyArray<string>>()
+      let blind = false
+      const listed = yield* Effect.forEach(rows, (kept) =>
         Effect.gen(function* () {
           const machine = kept.machine ?? here
           const id = kept.thread ?? ""
           const session = sessionRow(kept)
           const key = session ? Mutes.key.session(machine, id) : Mutes.key.thread({ machine, id })
           // Muted by its session, before that session was found to be the thread's.
-          const own = session ? undefined : sessionOf(kept)
+          const own = owned.get(kept)
           const by = own === undefined || own.startsWith("finished:") ? [] : [Mutes.key.session(machine, own)]
+          under.set(key, by)
           const mute = [key, ...by].map((key) => muted.get(key)).find((mute) => mute !== undefined)
           const thread = session ? Option.none() : yield* threads.find({ machine, id })
+          // Its machine's threads not in yet, what it's called and its project are looked for again soon.
+          if (Option.isNone(thread) && Option.isSome(yield* threads.unseen(machine))) blind = true
           const project = yield* threads.project(machine, session ? (kept.directory === undefined ? {} : { directory: kept.directory }) : { thread: id })
           const icon = Option.isSome(project) ? Option.some(yield* icons.icon(machine, project.value)) : Option.none<Icons.Icon>()
           const name = Option.match(project, { onNone: () => kept.project, onSome: ({ title }) => title })
@@ -109,12 +139,21 @@ export const make = (options: {
           } satisfies Server.Recent
         }),
       )
-    }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not list the latest threads", cause), [] as ReadonlyArray<Server.Recent>)))
+      return { rows: listed, under, blind }
+    }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not list the latest threads", cause), none)))
 
-    const ref = yield* SubscriptionRef.make(yield* compute)
+    const first = yield* compute
+    const ref = yield* SubscriptionRef.make(first.rows)
+    let { under, blind } = first
     /** Built again, and kept only when it changed, so nothing that follows the state hears of what didn't. */
-    const refresh = Effect.flatMap(compute, (rows) =>
-      SubscriptionRef.update(ref, (before) => (JSON.stringify(before) === JSON.stringify(rows) ? before : rows)),
+    const refresh = Effect.flatMap(compute, (built) =>
+      Effect.zipRight(
+        Effect.sync(() => {
+          under = built.under
+          blind = built.blind
+        }),
+        SubscriptionRef.update(ref, (before) => (JSON.stringify(before) === JSON.stringify(built.rows) ? before : built.rows)),
+      ),
     )
     const shows = new Set(["Renamed", "Asked", "Answered", "Removed"])
     yield* Stream.mergeAll(
@@ -124,11 +163,17 @@ export const make = (options: {
         icons.changes,
         Stream.filter(threads.changes, ({ change }) => shows.has(change._tag)).pipe(Stream.map(() => undefined)),
         Stream.fromSchedule(Schedule.spaced("1 minute")).pipe(Stream.map(() => undefined)),
+        // T3 Code tells of no change as it catches up, here or on another machine, so while one's threads can't be seen it's looked at again.
+        Stream.fromSchedule(Schedule.spaced(blindly)).pipe(
+          Stream.filter(() => blind),
+          Stream.map(() => undefined),
+        ),
       ],
       { concurrency: "unbounded" },
     ).pipe(Stream.debounce("250 millis"), Stream.runForEach(() => refresh), Effect.forkScoped)
     return {
       rows: Stream.changesWith(ref.changes, (one, other) => one === other),
       current: SubscriptionRef.get(ref),
+      under: (key) => Effect.sync(() => under.get(key) ?? []),
     } satisfies Latest
   })

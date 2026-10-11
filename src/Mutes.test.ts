@@ -187,6 +187,29 @@ describe("Mutes", () => {
     expect(result.noted.map(({ detail }) => Object.keys(detail as object)[0])).toEqual(["mute", "undo", "undo", "unmute", "undo", "mute", "unmute", "undo"])
   })
 
+  test("unmuting a thread shown muted by its session takes that mute off too, as one change taken back as one", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        const mutes = yield* Mutes.make(yield* Store.make(":memory:"))
+        const session = Mutes.key.session("Rosie", "claude:s-tezos")
+        const controls = Mutes.widened(Mutes.controls({ mutes, journal, silence: () => Effect.void }), (key) => Effect.succeed(key === tezos ? [session] : []))
+        const keys = Effect.map(mutes.list, (all) => all.map(({ key }) => key))
+        yield* mutes.mute({ key: session })
+        yield* mutes.mute({ key: terminal })
+        const unmuted = yield* controls.unmute(tezos)
+        const left = yield* keys
+        yield* controls.undo
+        const back = yield* keys
+        return { unmuted, left, back, again: yield* controls.unmute(mina) }
+      }),
+    )
+    expect(result.unmuted).toBe(true)
+    expect(result.left).toEqual([terminal])
+    expect(result.back).toEqual(["session:Rosie:claude:s-tezos", terminal].toSorted())
+    expect(result.again).toBe(false)
+  })
+
   test("muting what he's on about is understood in so many words, with how long, and anything more is left to the model", () => {
     const heard = (said: string) => Option.getOrUndefined(Mutes.command(said))
     expect(heard("Mute it.")).toEqual({ how: "mute" })

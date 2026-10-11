@@ -132,8 +132,8 @@ export interface Mutes {
   readonly muted: (keys: ReadonlyArray<string>) => Effect.Effect<Option.Option<Mute>>
   /** Mutes a thread, or changes when its mute ends, and says whether that changed anything. */
   readonly mute: (mute: Omit<Mute, "at">) => Effect.Effect<boolean>
-  /** Takes a thread's mute off, and gives it back, or none when it wasn't muted. */
-  readonly unmute: (key: string) => Effect.Effect<Option.Option<Mute>>
+  /** Takes a thread's mute off, and any under the `also` keys with it, as one change, and gives back the first taken off, or none when none was muted. */
+  readonly unmute: (key: string, also?: ReadonlyArray<string>) => Effect.Effect<Option.Option<Mute>>
   /** Takes every mute off, and gives them back. */
   readonly clear: Effect.Effect<ReadonlyArray<Mute>>
   /** Undoes the last change, if it was made in the last two minutes, and gives back what undoing it changed. */
@@ -235,13 +235,13 @@ export const make = (store: Store.Store["Type"]) =>
           yield* change("mute", [mute], before === undefined ? [] : [before])
           return true
         }),
-      unmute: (key) =>
+      unmute: (key, also = []) =>
         Effect.gen(function* () {
           yield* lapsed
-          const before = mutes.get(key)
-          if (before === undefined) return Option.none()
-          yield* change("unmute", [], [before])
-          return Option.some(before)
+          const before = [...new Set([key, ...also])].flatMap((key) => Option.toArray(Option.fromNullable(mutes.get(key))))
+          if (before.length === 0) return Option.none()
+          yield* change("unmute", [], before)
+          return Option.fromNullable(before[0])
         }),
       clear: Effect.gen(function* () {
         yield* lapsed
@@ -281,8 +281,8 @@ export const make = (store: Store.Store["Type"]) =>
 export interface Controls {
   /** Mutes a thread, drops what of it is waiting to be said, and notes it. Whether it wasn't muted already, as it is now. */
   readonly mute: (target: Omit<Mute, "at" | "ends">, ends?: number) => Effect.Effect<boolean>
-  /** Unmutes a thread, and notes it. Whether it was muted. */
-  readonly unmute: (key: string) => Effect.Effect<boolean>
+  /** Unmutes a thread, and what it's muted under by the `also` keys, and notes it. Whether it was muted. */
+  readonly unmute: (key: string, also?: ReadonlyArray<string>) => Effect.Effect<boolean>
   /** Unmutes every thread, and notes it. The mutes taken off. */
   readonly clear: Effect.Effect<ReadonlyArray<Mute>>
   /** Takes back the last change to what's muted, made in the last two minutes, and notes it. What taking it back changed. */
@@ -319,9 +319,9 @@ export const controls = (options: {
         yield* noted({ mute: target.key, ...(ends === undefined ? {} : { until: new Date(ends).toISOString() }) }, target.key)
         return true
       }),
-    unmute: (key) =>
+    unmute: (key, also) =>
       Effect.gen(function* () {
-        const was = yield* mutes.unmute(key)
+        const was = yield* mutes.unmute(key, also)
         if (Option.isSome(was)) yield* noted({ unmute: key }, key)
         return Option.isSome(was)
       }),
@@ -340,3 +340,14 @@ export const controls = (options: {
     }),
   }
 }
+
+/**
+ * Controls whose unmuting also takes off what a thread is muted under
+ * besides its own key, as `under` says, like the session of its latest
+ * update, muted before that session was found to be the thread's: the
+ * thread shows muted by it, so unmuting the thread unmutes it.
+ */
+export const widened = (controls: Controls, under: (key: string) => Effect.Effect<ReadonlyArray<string>>): Controls => ({
+  ...controls,
+  unmute: (key, also = []) => Effect.flatMap(under(key), (more) => controls.unmute(key, [...also, ...more])),
+})

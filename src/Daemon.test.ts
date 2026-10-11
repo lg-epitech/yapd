@@ -3493,6 +3493,29 @@ describe("Daemon muting over an update", () => {
     expect(result.mutes).toEqual([])
   })
 
+  test("'unmute it' over a thread's update takes off the mute of its session, made before the session was found to be the thread's", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { handle, talk, wait, played, responded } = yield* make("Unmute it.", {
+          mutes,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          urgentMessages: ["The tests failed."],
+        })
+        yield* mutes.mute({ key: sessionKey("s-tezos") })
+        // Said, as it needs him, so the mute stays the session's.
+        yield* stopHere(handle, "s-tezos", "The tests failed.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        return { played: [...played], responded: [...responded], mutes: yield* mutes.list }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The tests failed.", "Unmuted it."])
+    expect(result.responded).toEqual([])
+    expect(result.mutes).toEqual([])
+  })
+
   test("'undo that' over an update with no mute made over it just before is the model's, as ever", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -519,9 +519,10 @@ export const make = (
           const said = Brain.muteLines(lines, "it", now)
           if (how === "clear") return said.cleared(yield* noted((yield* muted.clear).length > 0))
           // By its thread when it's tied to one, else by its session.
-          const [key] = Mutes.keysOf(update, called)
+          const [key, ...also] = Mutes.keysOf(update, called)
           if (key === undefined) return lines.cantTell
-          if (how === "unmute") return (yield* noted(yield* muted.unmute(key))) ? said.unmuted : said.notMuted
+          // Muted by its session too, before it was found to be its thread's.
+          if (how === "unmute") return (yield* noted(yield* muted.unmute(key, also))) ? said.unmuted : said.notMuted
           const ends = minutes === undefined ? undefined : now + minutes * 60_000
           const session = update.about === undefined && update.owner === undefined
           const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
