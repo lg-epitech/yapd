@@ -2434,6 +2434,39 @@ describe("Daemon", () => {
     expect(result).toEqual({ played: [line, line], told: kind === "answer" ? ["heard"] : ["heard", "unanswered"] })
   })
 
+  test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s told over its first seconds tells what he said back that it may be its own voice", async (_, kind) => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Its own voice gets in, as before the echo cancellation has learnt it, and Whisper hears words of his in it.
+        const { made, wait, flush, speak } = yield* make(undefined, { microphone: true, echoing: 40, transcripts: ["Stop it now."] })
+        const echoes: Array<string> = []
+        const taken = (heard: string, _voiced: number, echo?: string) =>
+          Effect.sync(() => void echoes.push(`${heard} over ${echo ?? "nothing"}`)).pipe(Effect.as(Option.some(Effect.void)))
+        yield* Effect.forkScoped(
+          made.tell({
+            id: "a",
+            kind,
+            ...(kind === "question" ? { open: "open-a" } : {}),
+            priority: "needs-you",
+            spoken: "Stop the yapd thread, sir?",
+            at: 0,
+            stale: Effect.succeed(false),
+            ...(kind === "answer"
+              ? { followUp: taken }
+              : { question: { answer: taken, unanswered: Effect.void, unsaid: Effect.void } }),
+          }),
+        )
+        yield* flush
+        yield* wait(1)
+        yield* speak
+        yield* wait(20)
+        return echoes
+      }),
+    )
+    // What yapd was saying around then, so the handler can tell its own words from his.
+    expect(result).toEqual(["Stop it now. over Stop the yapd"])
+  })
+
   test("a notice that goes stale while the words said in its place are rendered is never played, nor told it was said in them", async () => {
     const result = await run(
       Effect.gen(function* () {

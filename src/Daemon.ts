@@ -1029,8 +1029,8 @@ export const make = (
         yield* said.notice.heard ?? Effect.void
         return yield* dealtWith
       }
-      const answer = (heard: string, voiced: number) =>
-        question.answer(heard, voiced).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
+      const answer = (heard: string, voiced: number, echo?: string) =>
+        question.answer(heard, voiced, echo).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))
       const asked = {
         audio: played,
         spoken,
