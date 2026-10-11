@@ -95,7 +95,8 @@ export class Endpointer {
         this.needed = care === "plain" ? confirm : this.options[care]
         return onset
 
-      case "onset":
+      case "onset": {
+        const kept = this.frames
         if (isVoiced) {
           this.voiced++
           this.quiet = 0
@@ -109,9 +110,12 @@ export class Endpointer {
         }
         if (this.quiet >= abandon) {
           this.reset()
+          // Still before whatever comes next, as when nothing came, so speech begun just after isn't clipped.
+          this.frames = kept.slice(-lead)
           return abandoned
         }
         return undefined
+      }
 
       case "speech": {
         if (isVoiced) this.quiet = 0

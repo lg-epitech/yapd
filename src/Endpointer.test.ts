@@ -62,6 +62,14 @@ describe("Endpointer", () => {
     expect(events.map(({ event }) => event._tag)).toEqual(["Onset", "Abandoned"])
   })
 
+  test("keeps the lead-in after a noise it let go, so speech that starts just after it isn't clipped", () => {
+    const events = feed([...quiet(3), ...voiced(2), ...quiet(defaults.abandon), ...voiced(10), ...quiet(defaults.silence)])
+    const last = events.at(-1)?.event
+    const audio = last?._tag === "Utterance" ? [...last.audio] : []
+    const began = 5 + defaults.abandon
+    expect(audio[0]).toBe(began - defaults.lead)
+  })
+
   test("ends the utterance after enough silence, keeping the lead-in", () => {
     const events = feed([...quiet(20), ...voiced(10), ...quiet(defaults.silence)])
     const last = events.at(-1)?.event
