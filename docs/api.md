@@ -284,7 +284,7 @@ You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "wha
 ]
 ```
 
-- `kind`: `update` for an agent's turn yapd summed up, whether it said it, the thread was muted, or yapd held it for later, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, `brief` for a digest or a rundown of what it held, and `action` for anything else it did, like turning off, muting a thread or changing its mode.
+- `kind`: `update` for an agent's turn yapd summed up, whether it said it, the thread was muted, or yapd held it for later, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, `brief` for a digest of what it held for later, and `action` for anything else it did, like turning off, muting a thread or changing its mode.
 - `said` is what yapd said, `text` the words it was about, like what you said or an agent's message, and `heard` when you heard it through.
 - `machine` and `project` are where it happened, `thread` the id of the T3 Code thread it's about, as [`/threads`](#threads) has it, and `utterance` the id of the request it came from, as [`/utterances`](#asking-yapd-something) gives it.
 - Each is there only when there's one.

@@ -26,7 +26,7 @@ export type Kind =
   | "notice"
   /** yapd answered something the user asked it. */
   | "answer"
-  /** yapd briefed him on what it held for later: a digest, or the rundown once focus or quiet ends. */
+  /** yapd briefed him on what it held for later, in a digest of its own accord. */
   | "brief"
 
 /** Every kind of entry, as the API takes them. */
