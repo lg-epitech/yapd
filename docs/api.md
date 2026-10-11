@@ -231,7 +231,7 @@ You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "wha
 
 ## Hearing a thread again
 
-`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When that latest update is one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there; otherwise yapd says what it kept of it. Either way, "it" then means what was said again: the thread, or for a session's row, the session, so "mute it" mutes the session and "interrupt it" never goes to a thread you heard of before.
+`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When that latest update is one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there; otherwise yapd says what it kept of it. Either way, once it starts playing, "it" means the row: for a thread's row, that thread, here or on another machine, so "interrupt it" stops it; for a session's row, that session, by the row's `key`, so "mute it" mutes that row. yapd can't reach a session's row from here, so "interrupt it", "tell it to…" or "approve it" gets an answer that it can't, and never goes to a thread; a thread you name, like "tell the Tezos one to…", still gets it.
 
 | Status | |
 | --- | --- |
