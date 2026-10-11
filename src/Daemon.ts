@@ -125,7 +125,17 @@ export const make = (
    * user, with how many times yapd had been turned on or off as it was read:
    * once it's turned off, it's no longer what "it" means.
    */
-  let latest: { readonly update: Conversation.Update; readonly said: string; at: number; playing: boolean; readonly turns: number } | undefined
+  let latest:
+    | {
+        readonly update: Conversation.Update
+        readonly said: string
+        at: number
+        playing: boolean
+        readonly turns: number
+        /** The menu's row it's said again for, by its key, which "it" then means, rather than the update as it was first heard. */
+        readonly menu?: string
+      }
+    | undefined
   /** Follow-ups the user just sent by voice, whose answers they'll want to hear however short. */
   interface FollowUp {
     readonly update: Conversation.Update
@@ -1498,7 +1508,8 @@ export const make = (
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
-      latest = { update: ready.update, said: ready.update.spoken, at: yield* Clock.currentTimeMillis, playing: true, turns }
+      const menu = ready.replay?.menu
+      latest = { update: ready.update, said: ready.update.spoken, at: yield* Clock.currentTimeMillis, playing: true, turns, ...(menu === undefined ? {} : { menu }) }
     }
     let kept = false
     let dealtWith = false
@@ -1611,8 +1622,12 @@ export const make = (
       }
     })
 
-  /** Says an update the user heard again, as it was said, and listens for a reply like after any update. */
-  const replay = (id: string) =>
+  /**
+   * Says an update the user heard again, as it was said, and listens for a
+   * reply like after any update. Asked for from the menu, it's said for that
+   * row, by its key, which "it" means once it starts playing.
+   */
+  const replay = (id: string, menu?: string) =>
     Effect.gen(function* () {
       const found = (yield* SubscriptionRef.get(state)).heard.find((heard) => heard.id === id)
       if (found === undefined) return "unknown" as const
@@ -1620,7 +1635,7 @@ export const make = (
       if (!on) return "off" as const
       // Once, however many times it's asked for before it's said.
       if (replays.get(id)?.turns === turns) return "queued" as const
-      const asked: Inbox.Replay = { id, turns }
+      const asked: Inbox.Replay = { id, turns, ...(menu === undefined ? {} : { menu }) }
       replays.set(id, asked)
       return yield* again(found, asked).pipe(
         Effect.tap((result) => (result === "queued" ? Effect.void : replayed(asked))),

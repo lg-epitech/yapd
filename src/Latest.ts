@@ -1,4 +1,5 @@
 import { Clock, Effect, Option, Schedule, Stream, SubscriptionRef } from "effect"
+import type * as Assistant from "./Assistant.ts"
 import type * as Conversation from "./Conversation.ts"
 import type * as Daemon from "./Daemon.ts"
 import type * as Icons from "./Icons.ts"
@@ -60,9 +61,10 @@ export interface Latest {
 
 /**
  * A session's latest update as the journal kept it, for "it" to mean the
- * session once it's said again: muted by its own key, and named by its agent,
- * project and machine, as when he first heard it. Nothing of it waits on him
- * any more, since its hook was let go of long ago.
+ * session once it's said again: named by its agent, project and machine, as
+ * when he first heard it, and muted by its row's key, never one made again
+ * from the hostname its hook reported. Nothing of it waits on him any more,
+ * since its hook was let go of long ago.
  */
 const updateOf = (kept: Kept, here: string): Conversation.Update => {
   const session = kept.thread ?? ""
@@ -238,7 +240,10 @@ export const make = (options: {
     } satisfies Latest
   })
 
-/** What of the daemon the menu needs: what he heard, to say it again, and saying what was kept of the rest. */
+/**
+ * What of the daemon the menu needs: what he heard, to say it again for a
+ * row, and saying what was kept of the rest.
+ */
 type Speaker = Pick<Effect.Effect.Success<ReturnType<typeof Daemon.make>>, "latestHeard" | "replay" | "power" | "tell">
 
 /**
@@ -251,12 +256,10 @@ export const menu = (options: {
   readonly mutes: Pick<Mutes.Mutes, "muted">
   readonly controls: Mutes.Controls
   readonly daemon: Speaker
-  /** Makes "it" the thread what's said is about, as an answer about it does. */
-  readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
-  /** Makes "it" the session whose update is said, never a thread, as hearing it the first time did. */
-  readonly mentionSession: (update: Conversation.Update, said: string) => Effect.Effect<void>
+  /** What makes "it" the row said again: its thread, as an answer about it does, or its session, by the row's key, never a thread. */
+  readonly assistant: Pick<Assistant.Assistant["Type"], "mention" | "mentionSession">
 }) => {
-  const { latest, threads, mutes, controls, daemon, mention, mentionSession } = options
+  const { latest, threads, mutes, controls, daemon, assistant } = options
   return {
     /**
      * Mutes a thread from the menu, by its key: one it lists, one /threads
@@ -277,9 +280,9 @@ export const menu = (options: {
     /**
      * Says a thread's latest update again, by its key: as it was said, when
      * it's one he heard, so a reply to it still gets there, otherwise what was
-     * kept of it, as an answer that makes "it" the thread, or for a session's
-     * row, the session, so nothing he says next goes to a thread he heard of
-     * before.
+     * kept of it. Either way, from when it starts playing, "it" is the row:
+     * its thread, or for a session's row, that session, by the row's key, so
+     * nothing he says next goes to a thread he heard of before.
      */
     replayThread: (key: string) =>
       Effect.gen(function* () {
@@ -292,7 +295,8 @@ export const menu = (options: {
           Effect.forEach([key, ...(yield* latest.under(key))], (key) => daemon.latestHeard(key, at)),
           (all) => Option.firstSomeOf(all),
         )
-        if (Option.isSome(heard)) return yield* daemon.replay(heard.value)
+        // Said for this row, which "it" then means, rather than the update as it was first heard, which may be tied to no thread.
+        if (Option.isSome(heard)) return yield* daemon.replay(heard.value, key)
         if (row.text.trim() === "") return "unknown" as const
         const { on, turns } = yield* daemon.power
         if (!on) return "off" as const
@@ -300,8 +304,8 @@ export const menu = (options: {
         // list since it was looked up, as when it was built again, is gone.
         const saying =
           row.thread === null
-            ? Option.map(yield* latest.session(key), (update) => mentionSession(update, row.text))
-            : Option.some(mention({ machine: row.machine, id: row.thread }, row.text))
+            ? Option.map(yield* latest.session(key), (update) => assistant.mentionSession(update, row.text, key))
+            : Option.some(assistant.mention({ machine: row.machine, id: row.thread }, row.text))
         if (Option.isNone(saying)) return "unknown" as const
         const now = yield* Clock.currentTimeMillis
         yield* daemon.tell(

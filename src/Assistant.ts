@@ -133,7 +133,18 @@ export type Subject =
       readonly row: number
     }
   /** An update from a session T3 Code doesn't run, and what of it was said last, like an answer over it. */
-  | { readonly _tag: "Session"; readonly update: Conversation.Update; readonly said: string }
+  | {
+      readonly _tag: "Session"
+      readonly update: Conversation.Update
+      readonly said: string
+      /**
+       * The menu's row it was said again for, by its key, which "it" means
+       * then: the row's thread, or for a session's row, that session, by
+       * that key, which yapd can't reach from here, being no thread T3 Code
+       * runs.
+       */
+      readonly menu?: string
+    }
   | {
       readonly _tag: "Answer"
       readonly said: string
@@ -279,11 +290,11 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
     /**
      * yapd starts saying again a session's update he asked to hear from the
-     * menu, which "it" then means: the session, as when he first heard it,
-     * so muting it mutes the session, and nothing meant for a thread goes to
-     * one he heard of before.
+     * menu, by its row's key, which "it" then means: that session, so muting
+     * it mutes that row, and nothing meant for a thread goes to one he heard
+     * of before.
      */
-    readonly mentionSession: (update: Conversation.Update, said: string) => Effect.Effect<void>
+    readonly mentionSession: (update: Conversation.Update, said: string, key: string) => Effect.Effect<void>
     /**
      * What a thread waits on him for, to ask once nothing else is asked and
      * he isn't dictating, while it still waits on it: once, ever, and once
@@ -582,7 +593,15 @@ export const make = (options: {
    * been turned on or off as it was read.
    */
   readonly lastHeard: Effect.Effect<
-    Option.Option<{ readonly update: Conversation.Update; readonly said: string; readonly at: number; readonly playing: boolean; readonly turns: number }>
+    Option.Option<{
+      readonly update: Conversation.Update
+      readonly said: string
+      readonly at: number
+      readonly playing: boolean
+      readonly turns: number
+      /** The menu's row it's said again for, by its key, which "it" means then. */
+      readonly menu?: string
+    }>
   >
   /** Something is about to be said, so the speaker can get ready while it's worked out. */
   readonly coming: Effect.Effect<void>
@@ -816,7 +835,9 @@ export const make = (options: {
       const update = Option.filter(yield* options.lastHeard, (heard) => heard.turns === turns && (heard.playing || now - heard.at < recall))
       const said = answered !== undefined && answered.turns === turns && now - answered.at < recall ? answered : undefined
       if (Option.isSome(update) && (said === undefined || update.value.playing || update.value.at >= said.at)) {
-        return { _tag: "Session", update: update.value.update, said: update.value.said } satisfies Subject
+        // Said again from the menu, it's that row's thread or session, never the update as it was first heard, which may be tied to none.
+        const { menu } = update.value
+        return { _tag: "Session", update: update.value.update, said: update.value.said, ...(menu === undefined ? {} : { menu }) } satisfies Subject
       }
       return said?.subject ?? ({ _tag: "Nothing" } satisfies Subject)
     })
@@ -2485,12 +2506,14 @@ export const make = (options: {
       // Only "mute it", worked out without the model, means what he's on about with nothing named.
       if (thought.source !== "fast") return Option.none()
       const { subject } = situation
-      if (subject._tag === "Session") {
+      // A session's row said again from the menu is muted by that row's key, whatever hostname its hook reported then.
+      const row = Brain.saidAgain(subject)
+      if (subject._tag === "Session" && !Option.exists(row, ({ _tag }) => _tag === "Thread")) {
         const { update } = subject
         const called = options.naming ?? ((host: string) => host.split(".")[0] ?? host)
-        const [key] = Mutes.keysOf(update, called)
+        const key = Option.isSome(row) ? subject.menu : Mutes.keysOf(update, called)[0]
         if (key === undefined) return Option.none()
-        const machine = called(update.thread.origin.host ?? hostname())
+        const machine = Option.isSome(row) && row.value._tag === "Session" ? row.value.machine : called(update.thread.origin.host ?? hostname())
         const where = machine === called(hostname()) ? "" : ` on ${machine}`
         const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
         return Option.some({ key, called: `the ${agent} session in ${Threads.spoken(update.project)}${where}`, project: update.project, it: true })
@@ -3540,10 +3563,10 @@ export const make = (options: {
             answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at, turns }
           }),
         ),
-      mentionSession: (update, said) =>
+      mentionSession: (update, said, key) =>
         Effect.flatMap(Effect.all([Clock.currentTimeMillis, options.power]), ([at, { turns }]) =>
           Effect.sync(() => {
-            answered = { subject: { _tag: "Session", update, said }, at, turns }
+            answered = { subject: { _tag: "Session", update, said, menu: key }, at, turns }
           }),
         ),
       ask: (waiting) =>

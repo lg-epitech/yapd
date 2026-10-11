@@ -19,6 +19,8 @@ export interface Ready {
 export interface Replay {
   readonly id: string
   readonly turns: number
+  /** The menu's row it was asked for from, by its key, which "it" then means: that row's thread, or its session. */
+  readonly menu?: string
 }
 
 /**

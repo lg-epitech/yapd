@@ -372,6 +372,9 @@ export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.
 /** What's said of an approval or an answer for a thread no longer waiting on it, as when it was dealt with in T3 Code. */
 export const dealtWith = (lines: Lines) => `That's already been dealt with${addressed(lines)}.`
 
+/** What's said when he asks a session said again from the menu for what only a thread T3 Code runs can do, like stopping it or telling it something. */
+export const unreachable = (lines: Lines) => `That's a terminal session${addressed(lines)}; I can't reach it from here.`
+
 /** What's said instead of answering a thread that waits on a secret, which is only ever given in T3 Code. */
 export const secretly = (lines: Lines) => `That one needs T3 Code; I never take a secret by voice${addressed(lines)}.`
 
@@ -1230,6 +1233,21 @@ const stopping: ReadonlySet<string> = new Set([
   "stop working", "stop the run", "interrupt it", "cancel the run", "stop the work", "interrupt the run", "stop it working",
 ])
 
+/**
+ * Asking "it" for what only a thread T3 Code runs can do, with no thread
+ * named: stopping its run, telling or asking it something, or answering it.
+ */
+const forThread = (said: string) =>
+  stopping.has(said) ||
+  /^(interrupt|halt) (it|that|this|this one|that one)( now)?$/.test(said) ||
+  /^(tell|ask|message) (it|that|this|this one|that one)( |$)/.test(said) ||
+  /^(reply|respond|answer|say|send|write) (back )?to (it|that|this|this one|that one)( |$)/.test(said) ||
+  /^answer (it|that|this one|that one)$/.test(said)
+
+/** Allowing or turning down what "it" waits on, with no thread named. */
+const decidingIt = (said: string) =>
+  allows.has(said) || /^(deny|decline|reject|don't allow|don't approve|do not allow|do not approve)( (it|that|this|this one|that one))?$/.test(said)
+
 /** Taking back what yapd just did. */
 const scratching: ReadonlySet<string> = new Set(["scratch that", "cancel that", "undo that", "take that back"])
 
@@ -1284,7 +1302,15 @@ export const takesBack = (heard: string) => scratching.has(gist(heard))
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
 
-/** The thread what he heard last is about, if it's one: an update's when its hook was tied to the thread. */
+/** The menu's row an update was said again for, when it was: a thread, or a session T3 Code doesn't run. */
+export const saidAgain = (subject: Assistant.Subject): Option.Option<Mutes.About> =>
+  subject._tag === "Session" && subject.menu !== undefined ? Mutes.parse(subject.menu) : Option.none()
+
+/**
+ * The thread what he heard last is about, if it's one: an update's when its
+ * hook was tied to the thread, or said again from the menu, that row's
+ * thread, and none for a session's row, however the update was tied.
+ */
 export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> => {
   switch (subject._tag) {
     case "Thread":
@@ -1292,7 +1318,10 @@ export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> =>
     case "Answer":
       return subject.about
     case "Session":
-      return Option.fromNullable(subject.update.about)
+      return Option.match(saidAgain(subject), {
+        onNone: () => Option.fromNullable(subject.update.about),
+        onSome: (row) => (row._tag === "Thread" ? Option.some(row.ref) : Option.none()),
+      })
     case "Nothing":
       return Option.none()
   }
@@ -1437,6 +1466,12 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     return decision({ act: "answer", spoken: used(situation.usage, said, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   }
   const replacing = Option.isSome(open) ? "replaces" : ""
+  // A session's row said again from the menu is no thread T3 Code runs, so what only a thread can do, asked of "it", is said to be out of
+  // reach here: never the model's, which takes an update not tied to a thread for the one doing that work, maybe one he heard of before.
+  // Allowing or turning something down answers the question open instead, when there is one.
+  if (Option.exists(saidAgain(subject), ({ _tag }) => _tag === "Session") && (forThread(said) || (Option.isNone(open) && decidingIt(said)))) {
+    return decision({ act: "answer", spoken: unreachable(lines), pending: replacing })
+  }
   // Said of the work he's hearing about while it's at it, it can only mean stopping that.
   const on = focused(situation)
   // With nothing open, what's asked is what the thread he's on about asks him, when it asks him something: it's read to him again.
@@ -2030,11 +2065,15 @@ const focus = (situation: Situation) => {
     }
     case "Session": {
       const { update } = subject
-      const handle = update.about === undefined ? undefined : handleOf(desk, update.about.machine, update.about.id)
+      const ref = about(subject)
+      const handle = Option.getOrUndefined(Option.flatMap(ref, (ref) => Option.fromNullable(handleOf(desk, ref.machine, ref.id))))
+      const unreached = Option.exists(saidAgain(subject), ({ _tag }) => _tag === "Session")
       return [
-        handle === undefined
-          ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
-          : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
+        unreached
+          ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, said again just now as he asked from the menu: from a session in ${fenced(update.thread.cwd, 120)} that T3 Code doesn't run, which you can't reach from here, so "it" is never a thread in THREADS: ${fenced(update.spoken, 400)}`
+          : handle === undefined
+            ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
+            : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
         // Like an answer to what he asked over it, which is what he heard last.
         ...(subject.said === update.spoken ? [] : [`What you said last, over it: ${fenced(subject.said, 400)}`]),
         ...Option.match(update.turn.prompt, { onNone: () => [], onSome: (prompt) => [`What it was asked: ${fenced(prompt, 300)}`] }),
