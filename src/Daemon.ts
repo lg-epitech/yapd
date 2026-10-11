@@ -53,7 +53,7 @@ const replayable = 5
 const lookedBack = 50
 
 /** What a kept update's detail says of it, as it was kept. */
-const told = (kept: Kept) => {
+const remembered = (kept: Kept) => {
   const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as Record<string, unknown>
   const text = (name: string) => (typeof detail[name] === "string" ? (detail[name] as string) : undefined)
   return { session: text("session"), host: text("host"), prompt: text("prompt"), more: text("more"), priority: text("priority"), quiet: detail.muted === true || text("held") !== undefined }
@@ -67,7 +67,7 @@ const told = (kept: Kept) => {
  * said, nor one too little was kept of. Its audio is rendered as it's asked for.
  */
 export const restored = (kept: Kept, here: string): Option.Option<Conversation.Update> => {
-  const was = told(kept)
+  const was = remembered(kept)
   const session = was.session ?? kept.thread
   if (kept.kind !== "update" || kept.heardAt === undefined || was.quiet || session === undefined || kept.said === undefined) return Option.none()
   const ref = was.session !== undefined && kept.machine !== undefined && kept.thread !== undefined ? { machine: kept.machine, id: kept.thread } : undefined
