@@ -2,6 +2,7 @@ import { Data, Effect, FiberSet, Option, Schema, type Scope, Stream } from "effe
 import type { Doing } from "./Audio.ts"
 import type * as Icons from "./Icons.ts"
 import { type Kind, kinds } from "./Journal.ts"
+import * as Mutes from "./Mutes.ts"
 import { Origin } from "./Origin.ts"
 import { Agent, Payload } from "./Payload.ts"
 
@@ -356,7 +357,8 @@ export const serve = (port: number, api: Api) =>
                 : new Response("No such thread.", { status: 404 })
           }
           if (route === "DELETE mute") {
-            if (Option.isNone(key)) return new Response("That's no thread's key.", { status: 400 })
+            // A key yapd never makes, as one taken apart and put back wrong, was never muted: saying it's no longer muted would hide that.
+            if (Option.isNone(key) || Option.isNone(Mutes.parse(key.value))) return new Response("That's no thread's key.", { status: 400 })
             return yield* Effect.as(api.unmute(key.value), new Response(null, { status: 204 }))
           }
           if (route === "POST replay") {

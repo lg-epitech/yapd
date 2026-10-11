@@ -424,12 +424,18 @@ describe("Server", () => {
         undecodable: yield* call("/threads/%E0%A4%A/mute", { method: "PUT" }),
       }
       const mutedThen = [...muted.keys()]
-      const unmuted = [yield* call(`/threads/${key}/mute`, { method: "DELETE" }), yield* call(`/threads/${key}/mute`, { method: "DELETE" })]
+      const unmuted = [
+        yield* call(`/threads/${key}/mute`, { method: "DELETE" }),
+        yield* call(`/threads/${key}/mute`, { method: "DELETE" }),
+        // A key yapd never makes was never muted, nor one that can't be decoded.
+        yield* call(`/threads/${encodeURIComponent("whatever")}/mute`, { method: "DELETE" }),
+        yield* call("/threads/%E0%A4%A/mute", { method: "DELETE" }),
+      ]
       expect(statuses).toEqual({ bare: 204, until: 204, past: 400, garbled: 400, notTime: 400, unknown: 404, notKey: 400, undecodable: 400 })
       expect(mutedThen).toEqual(["t3:Rosie:850299f8", "session:rig:claude:s-1"])
       expect(muted.get("session:rig:claude:s-1")).toBe(Date.parse(later))
       // Unmuted, or not muted at all.
-      expect(unmuted).toEqual([204, 204])
+      expect(unmuted).toEqual([204, 204, 400, 400])
       expect([...muted.keys()]).toEqual(["session:rig:claude:s-1"])
     })))
   })
