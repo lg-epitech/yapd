@@ -2505,7 +2505,8 @@ export const make = (options: {
         if (decision.how === "clear") return stays(Brain.muteLines(said, "it", now).cleared((yield* controls.clear).length > 0))
         if (decision.how === "undo") {
           const undone = yield* controls.undo
-          return stays(Option.match(undone, { onNone: () => `There's no mute to take back${sir}.`, onSome: ({ added }) => Brain.muteLines(said, "it", now).again(added.length > 0) }))
+          const told = Brain.muteLines(said, "it", now)
+          return stays(Option.match(undone, { onNone: () => told.unchanged, onSome: ({ added }) => told.again(added.length > 0) }))
         }
         const target = muted(plan, thought)
         if (Option.isNone(target)) return reply(said.cantTell, thought.subject)

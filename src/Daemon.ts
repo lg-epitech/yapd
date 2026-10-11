@@ -169,6 +169,8 @@ export const make = (
   const standing = new WeakMap<Conversation.Update, Fallback>()
   /** Updates said however he muted their thread, since they answer what he asked of it himself, like a follow-up. */
   const own = new WeakSet<Conversation.Update>()
+  /** The change to what's muted he just made over an update, by when it was made, which "scratch that" said next takes back. */
+  const changedOver = new WeakMap<Conversation.Update, number>()
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
   /**
@@ -481,28 +483,51 @@ export const make = (
     // Only what goes to its thread by yapd's own hand, which is held back when it could give a secret away.
     withholds: (update, message) =>
       update.about !== undefined && options.hands !== undefined && steered(update) ? options.hands.keeps(update.about, message) : Effect.succeed(false),
-    // "Mute it" said over an update, plainly his and in so many words, is its thread muted: never anything sent to its agent.
+    // "Mute it" said over an update, plainly his and in so many words, is its thread muted: never anything sent to its agent. "Scratch that"
+    // said next takes it back, rather than be the model's to make something of, which could take it for something to tell the agent.
     mute: (update, heard, voiced, echo) => {
-      const asked = Mutes.command(heard)
       const muted = controls
-      if (muted === undefined || Option.isNone(asked) || echo !== undefined || voiced < Brain.faintest) return Option.none()
+      const plain = echo === undefined && voiced >= Brain.faintest
+      const made = changedOver.get(update)
+      changedOver.delete(update)
+      if (muted === undefined || !plain) return Option.none()
+      if (made !== undefined && Brain.takesBack(heard)) {
+        return Option.some(
+          Effect.gen(function* () {
+            const said = Brain.muteLines(yield* persona.lines, "it", yield* Clock.currentTimeMillis)
+            // Only while it's still the last change he made, made in the last two minutes.
+            const last = options.mutes === undefined ? Option.none<Mutes.Change>() : yield* options.mutes.last
+            if (!Option.exists(last, ({ at }) => at === made)) return said.unchanged
+            return Option.match(yield* muted.undo, { onNone: () => said.unchanged, onSome: ({ added }) => said.again(added.length > 0) })
+          }),
+        )
+      }
+      const asked = Mutes.command(heard)
+      if (Option.isNone(asked)) return Option.none()
       const { how, minutes } = asked.value
+      /** What he changed over it, for "scratch that" right after to take back. */
+      const noted = (changed: boolean) =>
+        Effect.gen(function* () {
+          const last = options.mutes === undefined || !changed ? Option.none<Mutes.Change>() : yield* options.mutes.last
+          if (Option.isSome(last)) changedOver.set(update, last.value.at)
+          return changed
+        })
       return Option.some(
         Effect.gen(function* () {
           const lines = yield* persona.lines
           const now = yield* Clock.currentTimeMillis
           const said = Brain.muteLines(lines, "it", now)
-          if (how === "clear") return said.cleared((yield* muted.clear).length > 0)
+          if (how === "clear") return said.cleared(yield* noted((yield* muted.clear).length > 0))
           // By its thread when it's tied to one, else by its session.
           const [key] = Mutes.keysOf(update, called)
           if (key === undefined) return lines.cantTell
-          if (how === "unmute") return (yield* muted.unmute(key)) ? said.unmuted : said.notMuted
+          if (how === "unmute") return (yield* noted(yield* muted.unmute(key))) ? said.unmuted : said.notMuted
           const ends = minutes === undefined ? undefined : now + minutes * 60_000
           const session = update.about === undefined && update.owner === undefined
           const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
           const where = update.thread.origin.host === undefined || called(update.thread.origin.host) === called(hostname()) ? "" : ` on ${called(update.thread.origin.host)}`
           const done = yield* muted.mute({ key, project: update.project, ...(session ? { called: `the ${agent} session in ${Threads.spoken(update.project)}${where}` } : {}) }, ends)
-          return done ? said.muted(ends) : said.already
+          return (yield* noted(done)) ? said.muted(ends) : said.already
         }),
       )
     },

@@ -982,6 +982,7 @@ export const muteLines = (lines: Lines, name: string, now: number) => {
     notMuted: `${name === "it" ? "It isn't" : `${capital(name)} isn't`} muted${sir}.`,
     cleared: (any: boolean) => (any ? `Unmuted everything${sir}.` : `Nothing's muted${sir}.`),
     again: (muted: boolean) => (muted ? `Muted it again${sir}. I'll still tell you if it needs you.` : `Unmuted it again${sir}.`),
+    unchanged: `There's no mute to take back${sir}.`,
   }
 }
 

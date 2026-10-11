@@ -3470,6 +3470,46 @@ describe("Daemon muting over an update", () => {
     expect(result.replies).toEqual([["Muted it. I'll still tell you if it needs you.", "mute"]])
   })
 
+  test("'undo that' right after 'mute it' over an update takes the mute back, never asking the model or sending the agent anything", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, talk, wait, played, responded, followUps } = yield* make("Mute it.", { mutes, transcripts: ["Mute it.", "Undo that."], answer: "Say that again?" })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(2)
+        // Over what yapd says of the mute.
+        yield* talk
+        yield* wait(11)
+        yield* finish("noisy", "Still going, again.")
+        yield* wait(11)
+        return { played: [...played], responded: [...responded], followUps: [...followUps], mutes: yield* mutes.list }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Still going.", "Muted it. I'll still tell you if it needs you.", "Unmuted it again.", "yapd. Still going, again."])
+    expect(result.responded).toEqual([])
+    expect(result.followUps).toEqual([])
+    expect(result.mutes).toEqual([])
+  })
+
+  test("'undo that' over an update with no mute made over it just before is the model's, as ever", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, talk, wait, responded } = yield* make("Undo that.", { mutes, answer: "Say that again?" })
+        yield* mutes.mute({ key: sessionKey("other") })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        return { responded: [...responded], mutes: (yield* mutes.list).map(({ key }) => key) }
+      }),
+    )
+    expect(result.responded).toEqual(["Undo that."])
+    expect(result.mutes).toEqual([sessionKey("other")])
+  })
+
   test("'mute it' begun over yapd's own voice, or too faint to be his, is the model's, which never sends it on", async () => {
     const result = await run(
       Effect.gen(function* () {
