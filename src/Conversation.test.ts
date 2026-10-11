@@ -1847,6 +1847,14 @@ describe("quick replies", () => {
     expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's done. Shall I merge it?")?.intent).toBe("send")
   })
 
+  test("leaves a nod to an update cut off before the agent's question to the model, which is told it answers only a question heard in full", () => {
+    const message = "The PR is ready. Should I merge it?"
+    expect(reply("Okay.", message, true, "The PR is…")).toBeUndefined()
+    expect(Responder.prompt({ project: "yapd", turn: { prompt: Option.none(), message }, needsYou: true, lines: [], heard: "Okay." }, Option.none())).toContain(
+      'cut off ("…") before you got to what the agent asked, acknowledging is "resume", so they hear it',
+    )
+  })
+
   test("leaves a yes begun while yapd's own voice could still get into the microphone to the model, which may be its own \"sir?\", but still ends it at a stop", () => {
     const said = "Codex asks whether to deploy to staging, sir?"
     const over = (heard: string) =>
