@@ -3210,6 +3210,25 @@ describe("Daemon with threads muted", () => {
     ])
   })
 
+  test("a turn no hook told of, dropped as it waited once its thread was muted, is the turn's, so its own Stop coming late isn't said, even untied", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, handle, wait, played, nextEvent } = yield* make(undefined, { mutes })
+        const { turns } = yield* made.power
+        yield* finish("playing", "Something long.")
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", turns))
+        yield* nextEvent("Ready: yapd. The loader")
+        yield* Option.getOrThrow(made.controls).mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        // Its own Stop, which can't be tied to its thread.
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: "The loader is fixed." }, { project: "yapd", host: hostname() }, false)
+        for (let index = 0; index < 3; index++) yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Something long."])
+  })
+
   test("a turn no hook told of that a message of yapd's started is said, though he muted its thread", async () => {
     const result = await run(
       Effect.gen(function* () {
