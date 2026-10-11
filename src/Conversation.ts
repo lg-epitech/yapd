@@ -495,7 +495,7 @@ export const make = (options: {
             unfinished(heard) && (hesitates || heard !== first)
               ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech, afterPause))
               : respond(heard, speech, afterPause)
-          if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, reply: yield* replying }
+          if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, afterPause, reply: yield* replying }
           const id = fresh()
           const fiber = yield* replying.pipe(
             Effect.flatMap((reply) => Queue.offer(ear.signals, { _tag: "Replied", id, reply })),
@@ -518,7 +518,7 @@ export const make = (options: {
                 // Once they carry on, even one that got in before it was stopped is out of date.
                 if (signal.id !== id || carryingOn) break
                 // Only this call's replies carry its id.
-                if (!speaking) return { heard, reply: signal.reply as R }
+                if (!speaking) return { heard, afterPause, reply: signal.reply as R }
                 held = signal.reply as R
                 break
               case "Onset":
@@ -526,7 +526,7 @@ export const make = (options: {
                 break
               case "Abandoned":
                 speaking = false
-                if (held !== undefined) return { heard, reply: held }
+                if (held !== undefined) return { heard, afterPause, reply: held }
                 break
               case "Speech":
                 carryingOn = true
@@ -539,7 +539,7 @@ export const make = (options: {
               case "Deaf":
                 speaking = false
                 if (carryingOn) break waiting
-                if (held !== undefined) return { heard, reply: held }
+                if (held !== undefined) return { heard, afterPause, reply: held }
                 break
               case "Finished":
               case "Broke":
@@ -725,7 +725,7 @@ export const make = (options: {
             const said = cut(text, fraction)
             // What it hadn't said yet, so the model knows whether he could have heard what he answers, like the agent's question.
             const rest = unsaid(text, fraction)
-            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard, _, afterPause) =>
+            const { heard, afterPause, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard, _, afterPause) =>
               responder
                 .respond({
                   project: update.project,
@@ -783,7 +783,11 @@ export const make = (options: {
               continue
             }
 
-            lines.push({ speaker: "yapd", text: said }, { speaker: "user", text: heard })
+            // With what may have been its own voice in it, so the model asked next still knows, as when he says it again.
+            lines.push(
+              { speaker: "yapd", text: said },
+              { speaker: "user", text: heard, ...(echo === undefined ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }) },
+            )
             text =
               reply.intent === "send"
                 ? yield* pass(update, reply)

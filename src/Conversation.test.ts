@@ -1139,7 +1139,8 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
         echo: undefined,
         lines: [
           { speaker: "yapd", text: "Over in yapd,…" },
-          { speaker: "user", text: "the pull request merge it" },
+          // Still marked as maybe its own voice, so the model asked next doesn't take it for more he asked.
+          { speaker: "user", text: "the pull request merge it", echo: first },
           { speaker: "yapd", text: again },
         ],
       },
@@ -2088,6 +2089,32 @@ describe("Responder", () => {
     expect(told.endsWith(`say it again. A question or a dismissal goes as usual.\n\nWhat the user just said:\nrevert it.`)).toBe(true)
     // Begun once its own voice could no longer get in, nothing's said of it.
     expect(Responder.prompt(interruption, Option.none())).not.toContain("your own voice")
+  })
+
+  test("tells the model what of what he said earlier on may have been yapd's own voice, and what after a pause was his, only for what he began over it", () => {
+    const told = (line: Partial<Responder.Line>) =>
+      Responder.prompt(
+        {
+          project: "yapd",
+          turn: { prompt: Option.none(), message: "The tests pass and the PR is ready." },
+          needsYou: false,
+          lines: [
+            { speaker: "yapd", text: "Over in yapd,…" },
+            { speaker: "user", text: "the pull request merge it", ...line },
+            { speaker: "yapd", text: "Once more, sir?" },
+          ],
+          heard: "Fix the tests.",
+        },
+        Option.none(),
+      )
+    expect(told({ echo: "Over in yapd, the tests pass now and the pull request" })).toContain(
+      `User: the pull request merge it (they began that while your own voice could still get into their microphone, so what came first may be your own words, from around "Over in yapd, the tests pass now and the pull request")\nYou: Once more, sir?`,
+    )
+    expect(told({ echo: "Over in yapd, the tests pass now and the pull request", afterPause: "merge it" })).toContain(
+      `from around "Over in yapd, the tests pass now and the pull request"; what they said after a pause, "merge it", is surely theirs)`,
+    )
+    // Begun once its own voice could no longer get in, his words alone, as ever.
+    expect(told({})).toContain("User: the pull request merge it\nYou: Once more, sir?")
   })
 
   test("tells the model what he said after a pause is surely his, even in its own words, only with what it was saying around when he began", () => {

@@ -72,6 +72,14 @@ ${aloud}
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Write "message" in the language they spoke.`
 
+/** What's known of your own voice in what they said earlier on, as they said it: what came first may be yours, and what followed a pause is theirs. */
+const earlier = ({ echo, afterPause }: Line) =>
+  echo === undefined
+    ? ""
+    : ` (they began that while your own voice could still get into their microphone, so what came first may be your own words, from around "${echo}"${
+        afterPause === undefined || afterPause.trim() === "" ? "" : `; what they said after a pause, "${afterPause}", is surely theirs`
+      })`
+
 export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
@@ -83,7 +91,7 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause
       ? "The agent is waiting on the user: it asked something, needs a decision or permission, or failed."
       : "The agent isn't waiting on the user.",
     `Conversation so far, where "…" marks where you were cut off:\n${lines
-      .map(({ speaker, text }) => `${speaker === "yapd" ? "You" : "User"}: ${text}`)
+      .map((line) => `${line.speaker === "yapd" ? "You" : "User"}: ${line.text}${earlier(line)}`)
       .join("\n")}`,
     ...(unsaid === undefined || unsaid === ""
       ? []
