@@ -283,4 +283,109 @@ describe("Latest", () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  describe("menu", () => {
+    /** The menu over the latest threads, with a daemon that heard `heard` updates under their keys, each at its time, and is `on`. */
+    const menuOf = (heard: ReadonlyArray<{ readonly id: string; readonly key: string; readonly at: number }>, on = true) =>
+      Effect.gen(function* () {
+        const listed = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] })
+        const told: Array<string> = []
+        const replayed: Array<string> = []
+        const mentioned: Array<string> = []
+        const controls = Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal })
+        const menu = Latest.menu({
+          latest: listed.latest,
+          threads: { find: (ref) => Effect.succeed(ref.id === "t-tezos" ? Option.some(thread("t-tezos", "Migrate the Tezos integration")) : Option.none()) },
+          mutes: listed.mutes,
+          controls,
+          daemon: {
+            // The newest he heard under the key, kept at `at` or since.
+            latestHeard: (key, at) => Effect.succeed(Option.fromNullable(heard.filter((one) => one.key === key && one.at >= at).at(-1)?.id)),
+            replay: (id) => Effect.sync(() => void replayed.push(id)).pipe(Effect.as("queued" as const)),
+            power: Effect.succeed({ on, turns: 1 }),
+            // Said at once, which makes "it" the thread it's about.
+            tell: (notice) => Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.as(true)),
+          } as Parameters<typeof Latest.menu>[0]["daemon"],
+          mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.id}: ${said}`)),
+        })
+        const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
+        return { ...listed, menu, told, replayed, mentioned, settle }
+      })
+
+    test("hears a thread again from the update it shows, not one he heard before what was kept quiet of it or a question it asked since", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, replayed, mentioned, settle } = yield* menuOf([{ id: "heard-a", key: "t3:Rosie:t-tezos", at: 1 }])
+          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Started.", detail: { session: "claude:s" } })
+          yield* journal.write({ at: 2, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s", muted: true } })
+          yield* settle
+          const quiet = yield* menu.replayThread("t3:Rosie:t-tezos")
+          yield* journal.write({ at: 3, kind: "notice", machine: "Rosie", thread: "t-tezos", said: "The Tezos migration asks which network first." })
+          yield* settle
+          const notice = yield* menu.replayThread("t3:Rosie:t-tezos")
+          return { quiet, notice, told: [...told], replayed: [...replayed], mentioned: [...mentioned], unknown: yield* menu.replayThread("t3:Rosie:t-nope") }
+        }),
+      )
+      expect([result.quiet, result.notice, result.unknown]).toEqual(["queued", "queued", "unknown"])
+      expect(result.told).toEqual(["integration. Halfway.", "The Tezos migration asks which network first."])
+      expect(result.mentioned).toEqual(["t-tezos: integration. Halfway.", "t-tezos: The Tezos migration asks which network first."])
+      expect(result.replayed).toEqual([])
+    })
+
+    test("hears again as it was said the update he heard that the row shows, under its thread or the session it's shown from", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, replayed, settle } = yield* menuOf([
+            { id: "heard-a", key: "t3:Rosie:t-tezos", at: 1 },
+            { id: "heard-b", key: "session:Rosie:claude:s", at: 2 },
+          ])
+          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Started.", detail: { session: "claude:s" } })
+          yield* settle
+          const linked = yield* menu.replayThread("t3:Rosie:t-tezos")
+          // Its link timed out, so it's kept under its session.
+          yield* journal.write({ at: 2, kind: "update", host: "Rosie", thread: "claude:s", said: "integration. Done." })
+          yield* settle
+          const session = yield* menu.replayThread("t3:Rosie:t-tezos")
+          return { linked, session, told: [...told], replayed: [...replayed] }
+        }),
+      )
+      expect([result.linked, result.session]).toEqual(["queued", "queued"])
+      expect(result.replayed).toEqual(["heard-a", "heard-b"])
+      expect(result.told).toEqual([])
+    })
+
+    test("says nothing again while yapd is off", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, settle } = yield* menuOf([], false)
+          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s", muted: true } })
+          yield* settle
+          return { result: yield* menu.replayThread("t3:Rosie:t-tezos"), told: [...told] }
+        }),
+      )
+      expect(result).toEqual({ result: "off", told: [] })
+    })
+
+    test("mutes a thread it lists or T3 Code has, by its title and project, but no key yapd never made or thread it doesn't know", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, mutes, settle } = yield* menuOf([])
+          yield* journal.write({ at: 1, kind: "update", host: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. Done." })
+          yield* settle
+          const outcomes = [
+            yield* menu.mute("session:Rosie:claude:s-term"),
+            yield* menu.mute("t3:Rosie:t-tezos", 10 * 60_000),
+            yield* menu.mute("t3:Rosie:t-nope"),
+            yield* menu.mute("whatever"),
+          ]
+          return { outcomes, mutes: (yield* mutes.list).map(({ key, called, project, ends }) => ({ key, called, project, ends })) }
+        }),
+      )
+      expect(result.outcomes).toEqual(["muted", "muted", "unknown", "invalid"])
+      expect(result.mutes).toEqual([
+        { key: "session:Rosie:claude:s-term", called: "Claude session", project: "integration", ends: undefined },
+        { key: "t3:Rosie:t-tezos", called: "Migrate the Tezos integration", project: undefined, ends: 10 * 60_000 },
+      ])
+    })
+  })
 })

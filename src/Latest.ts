@@ -1,4 +1,5 @@
 import { Clock, Effect, Option, Schedule, Stream, SubscriptionRef } from "effect"
+import type * as Daemon from "./Daemon.ts"
 import type * as Icons from "./Icons.ts"
 import type { Journal, Kept } from "./Journal.ts"
 import * as Mutes from "./Mutes.ts"
@@ -188,3 +189,76 @@ export const make = (options: {
       under: (key) => Effect.sync(() => under.get(key) ?? []),
     } satisfies Latest
   })
+
+/** What of the daemon the menu needs: what he heard, to say it again, and saying what was kept of the rest. */
+type Speaker = Pick<Effect.Effect.Success<ReturnType<typeof Daemon.make>>, "latestHeard" | "replay" | "power" | "tell">
+
+/**
+ * What the menu does to a thread it lists, by its key: mutes it, which never
+ * reaches an agent, or says its latest update again.
+ */
+export const menu = (options: {
+  readonly latest: Latest
+  readonly threads: Pick<Threads.Threads["Type"], "find">
+  readonly mutes: Pick<Mutes.Mutes, "muted">
+  readonly controls: Mutes.Controls
+  readonly daemon: Speaker
+  /** Makes "it" the thread what's said is about, as an answer about it does. */
+  readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
+}) => {
+  const { latest, threads, mutes, controls, daemon, mention } = options
+  return {
+    /**
+     * Mutes a thread from the menu, by its key: one it lists, one /threads
+     * lists, or one muted already, named as it's listed, or by its title.
+     */
+    mute: (key: string, until?: number) =>
+      Effect.gen(function* () {
+        const about = Mutes.parse(key)
+        if (Option.isNone(about)) return "invalid" as const
+        const row = (yield* latest.current).find((row) => row.key === key)
+        const found = about.value._tag === "Thread" ? yield* threads.find(about.value.ref) : Option.none()
+        if (row === undefined && Option.isNone(found) && Option.isNone(yield* mutes.muted([key]))) return "unknown" as const
+        const title = row?.title ?? Option.getOrUndefined(Option.map(found, ({ title }) => title))
+        const project = row?.project?.name
+        yield* controls.mute({ key, ...(title === undefined ? {} : { called: title }), ...(project === undefined ? {} : { project }) }, until)
+        return "muted" as const
+      }),
+    /**
+     * Says a thread's latest update again, by its key: as it was said, when
+     * it's one he heard, so a reply to it still gets there, otherwise what was
+     * kept of it, as an answer that makes "it" the thread.
+     */
+    replayThread: (key: string) =>
+      Effect.gen(function* () {
+        const row = (yield* latest.current).find((row) => row.key === key)
+        if (row === undefined) return "unknown" as const
+        // Only the one the menu shows: not an older one he heard before what was kept quiet of it, or before a question it asked
+        // since. Under its own key, or the session's it's shown from, as when its link timed out.
+        const at = Date.parse(row.at)
+        const heard = yield* Effect.map(
+          Effect.forEach([key, ...(yield* latest.under(key))], (key) => daemon.latestHeard(key, at)),
+          (all) => Option.firstSomeOf(all),
+        )
+        if (Option.isSome(heard)) return yield* daemon.replay(heard.value)
+        if (row.text.trim() === "") return "unknown" as const
+        const { on, turns } = yield* daemon.power
+        if (!on) return "off" as const
+        const now = yield* Clock.currentTimeMillis
+        const ref = row.thread === null ? undefined : { machine: row.machine, id: row.thread }
+        yield* daemon.tell(
+          {
+            id: `again:${key}:${now}`,
+            kind: "answer",
+            priority: "needs-you",
+            spoken: row.text,
+            at: now,
+            stale: Effect.succeed(false),
+            ...(ref === undefined ? {} : { saying: mention(ref, row.text) }),
+          },
+          turns,
+        )
+        return "queued" as const
+      }),
+  }
+}

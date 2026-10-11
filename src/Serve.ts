@@ -258,54 +258,8 @@ export const serve = Effect.gen(function* () {
     })),
   )
 
-  /**
-   * Mutes a thread from the menu, by its key: one it lists, one /threads
-   * lists, or one muted already, named as it's listed, or by its title.
-   */
-  const mute = (key: string, until?: number) =>
-    Effect.gen(function* () {
-      const about = Mutes.parse(key)
-      if (Option.isNone(about)) return "invalid" as const
-      const row = (yield* latest.current).find((row) => row.key === key)
-      const found = about.value._tag === "Thread" ? yield* threads.find(about.value.ref) : Option.none()
-      if (row === undefined && Option.isNone(found) && Option.isNone(yield* mutes.muted([key]))) return "unknown" as const
-      const title = row?.title ?? Option.getOrUndefined(Option.map(found, ({ title }) => title))
-      const project = row?.project?.name
-      yield* controls.mute({ key, ...(title === undefined ? {} : { called: title }), ...(project === undefined ? {} : { project }) }, until)
-      return "muted" as const
-    })
-
-  /**
-   * Says a thread's latest update again, by its key: as it was said, when it's
-   * one he heard, so a reply to it still gets there, otherwise what was kept
-   * of it, as an answer that makes "it" the thread.
-   */
-  const replayThread = (key: string) =>
-    Effect.gen(function* () {
-      const row = (yield* latest.current).find((row) => row.key === key)
-      if (row === undefined) return "unknown" as const
-      // Only the one the menu shows: not an older one he heard before what was kept quiet of it, or before a question it asked since.
-      const heard = yield* daemon.latestHeard(key, Date.parse(row.at))
-      if (Option.isSome(heard)) return yield* daemon.replay(heard.value)
-      if (row.text.trim() === "") return "unknown" as const
-      const { on, turns } = yield* daemon.power
-      if (!on) return "off" as const
-      const at = yield* Clock.currentTimeMillis
-      const ref = row.thread === null ? undefined : { machine: row.machine, id: row.thread }
-      yield* daemon.tell(
-        {
-          id: `again:${key}:${at}`,
-          kind: "answer",
-          priority: "needs-you",
-          spoken: row.text,
-          at,
-          stale: Effect.succeed(false),
-          ...(ref === undefined ? {} : { saying: assistant.mention(ref, row.text) }),
-        },
-        turns,
-      )
-      return "queued" as const
-    })
+  // What the menu does to a thread it lists: mute it, or hear it again.
+  const { mute, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention })
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
