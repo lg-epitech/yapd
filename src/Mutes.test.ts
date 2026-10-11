@@ -185,6 +185,42 @@ describe("Mutes", () => {
     expect(result.later).toEqual([`${tezos} (the Claude session in yapd)`])
   })
 
+  test("taking back a mute after another session's mute moved to its thread takes back only that mute, never muting the other again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const fresh = Effect.flatMap(Store.make(":memory:"), Mutes.make)
+        const listed = (mutes: Mutes.Mutes) => Effect.map(mutes.list, (all) => all.map(({ key, called, at, ends }) => ({ key, called, at, ends })))
+        // The terminal session was muted earlier, then Mina just now, then the session was found to be Tezos's.
+        const moved = yield* fresh
+        yield* moved.mute({ key: terminal, called: "the Claude session in yapd" })
+        yield* TestClock.adjust("1 minute")
+        yield* moved.mute({ key: mina, called: "the Mina indexer" })
+        yield* moved.rekey(terminal, tezos)
+        const before = yield* listed(moved)
+        const undone = yield* moved.undo
+        const after = yield* listed(moved)
+        // Tezos had a mute of its own for an hour, kept as the session's moved to it; taking back Mina leaves it just as it was.
+        const merged = yield* fresh
+        yield* merged.mute({ key: tezos, called: "the Tezos migration", ends: 60 * 60_000 })
+        yield* merged.mute({ key: terminal, called: "the Claude session in yapd" })
+        yield* TestClock.adjust("1 minute")
+        yield* merged.mute({ key: mina, called: "the Mina indexer" })
+        yield* merged.rekey(terminal, tezos)
+        const mergedBefore = yield* listed(merged)
+        const mergedUndone = yield* merged.undo
+        const mergedAfter = yield* listed(merged)
+        return { before, undone, after, mergedBefore, mergedUndone, mergedAfter }
+      }),
+    )
+    const keysOf = (change: Option.Option<Mutes.Change>) => Option.map(change, ({ added, removed }) => ({ added: added.map(({ key }) => key), removed: removed.map(({ key }) => key) }))
+    expect(keysOf(result.undone)).toEqual(Option.some({ added: [], removed: [mina] }))
+    expect(result.after).toEqual(result.before.filter(({ key }) => key !== mina))
+    expect(result.after).toEqual([{ key: tezos, called: "the Claude session in yapd", at: 0, ends: undefined }])
+    expect(keysOf(result.mergedUndone)).toEqual(Option.some({ added: [], removed: [mina] }))
+    expect(result.mergedAfter).toEqual(result.mergedBefore.filter(({ key }) => key !== mina))
+    expect(result.mergedAfter).toEqual([{ key: tezos, called: "the Tezos migration", at: 60_000, ends: 60 * 60_000 }])
+  })
+
   test("muting drops what of the thread waits to be said and notes it; taking it back undoes a mute, an unmute and a clear, never sending a thread anything", async () => {
     const result = await run(
       Effect.gen(function* () {

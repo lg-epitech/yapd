@@ -185,6 +185,10 @@ interface Row {
   readonly ends_at: number | null
 }
 
+/** Whether two mutes are the same mute, made at the same time and ending at the same time, whichever copy each is. */
+const same = (one: Mute | undefined, other: Mute) =>
+  one !== undefined && one.key === other.key && one.called === other.called && one.project === other.project && one.at === other.at && one.ends === other.ends
+
 const fromRow = (row: Row): Mute => ({
   key: row.key,
   ...(row.called === null ? {} : { called: row.called }),
@@ -325,8 +329,9 @@ export const make = (store: Store.Store["Type"]) =>
         const undone = yield* lately
         if (Option.isNone(undone)) return Option.none()
         const after = without(undone.value)
-        const added = [...after.values()].filter((mute) => mutes.get(mute.key) !== mute)
-        const removed = [...mutes.values()].filter((mute) => after.get(mute.key) !== mute)
+        // By what each mute is, as one moved since is put back as a mute of its own, the same as the one there now.
+        const added = [...after.values()].filter((mute) => !same(mutes.get(mute.key), mute))
+        const removed = [...mutes.values()].filter((mute) => !same(after.get(mute.key), mute))
         // Nothing to take back, as when the thread was muted before the session he muted was found to be its own.
         if (added.length === 0 && removed.length === 0) return Option.none()
         // Taken back, it's a change of its own, so taking that back too puts things as they were before.
