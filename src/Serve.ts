@@ -180,6 +180,8 @@ export const serve = Effect.gen(function* () {
       Stream.map(daemon.state, ({ heard }) => heard.map(({ id }) => id).join("\n")),
       (one, other) => one === other,
     ),
+    // Every thread it can see, to count those that wait on him.
+    desk: threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER),
   })
   // Muting from the menu or by voice: never anything that reaches an agent. A thread the menu shows muted by its session is unmuted by it too.
   const controls = Mutes.widened(
@@ -295,10 +297,13 @@ export const serve = Effect.gen(function* () {
   const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number, at?: number) =>
     Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
-  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, latest.rows).pipe(
-    Stream.map(([state, activity, recent]) => ({
+  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, latest.rows, modes.changes, latest.waiting).pipe(
+    Stream.map(([state, activity, recent, { mode }, waiting]) => ({
       on: state.on,
       activity,
+      mode: mode.mode,
+      ...(mode.mode === "normal" || mode.until === undefined ? {} : { until: new Date(mode.until).toISOString() }),
+      waiting,
       updates: state.heard.map(({ id, update }) => ({
         id,
         project: update.project,
@@ -309,6 +314,16 @@ export const serve = Effect.gen(function* () {
     })),
   )
 
+  // Focus and quiet end on their own, the heartbeat is written, and what was held is brought up in a digest once it's quiet.
+  const running = yield* Modes.run(modes, {
+    settings,
+    journal,
+    power: daemon.power,
+    idle: daemon.idle,
+    hold: daemon.hold,
+    digest: assistant.digest,
+    rundown: assistant.rundown,
+  })
   // What the menu does to a thread it lists: mute it, or hear it again.
   const { mute, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal })
   yield* Server.serve(yield* Config.port, {
@@ -320,6 +335,12 @@ export const serve = Effect.gen(function* () {
         Effect.zipRight(Effect.flatMap(Clock.currentTimeMillis, (at) => journal.write({ at, kind: "action", detail: { on } }))),
         switching.withPermits(1),
       ),
+    // Ended from the menu, focus or quiet offers the rundown, as when its time runs out.
+    mode: (mode, until) =>
+      Effect.gen(function* () {
+        const { was, now } = yield* modes.set(mode, until)
+        if (now.mode === "normal") yield* running.leave(was)
+      }),
     replay: daemon.replay,
     // Typed words were never faint, so nothing typed is taken for Whisper hearing words in silence.
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
@@ -329,16 +350,6 @@ export const serve = Effect.gen(function* () {
     unmute: (key) => Effect.asVoid(controls.unmute(key)),
     replayThread,
     icon: icons.image,
-  })
-  // Focus and quiet end on their own, the heartbeat is written, and what was held is brought up in a digest once it's quiet.
-  yield* Modes.run(modes, {
-    settings,
-    journal,
-    power: daemon.power,
-    idle: daemon.idle,
-    hold: daemon.hold,
-    digest: assistant.digest,
-    rundown: assistant.rundown,
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))

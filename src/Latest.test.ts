@@ -44,7 +44,7 @@ const listing = (
   shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>,
   path = ":memory:",
   /** What he heard, and each time that changes. */
-  hearing: Pick<Parameters<typeof Latest.make>[0], "heard" | "hearing"> = {},
+  hearing: Pick<Parameters<typeof Latest.make>[0], "heard" | "hearing" | "desk"> = {},
 ) =>
   Effect.gen(function* () {
     const store = yield* Store.make(path)
@@ -92,6 +92,32 @@ const listing = (
 const brief = (rows: ReadonlyArray<Server.Recent>) => rows.map(({ key, title, text, muted }) => `${key} · ${title} · ${text}${muted ? " · muted" : ""}`)
 
 describe("Latest", () => {
+  test("counts the threads that wait on him, on every machine, as they come and go", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const states = new Map<string, Threads.State>([
+          ["Rosie/t-tezos", "question"],
+          ["rig/t-mina", "approval"],
+          ["Rosie/t-std", "running"],
+          ["rig/t-idle", "failed"],
+        ])
+        const desk = Effect.sync(() => ({ threads: [...states.values()].map((state) => ({ state })), away: [] }) as unknown as Threads.Desk)
+        const { latest, becomes } = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")], rig: [] }, ":memory:", { desk })
+        const counts: Array<number> = []
+        yield* Effect.forkScoped(Stream.runForEach(latest.waiting, (count) => Effect.sync(() => void counts.push(count))))
+        yield* flush
+        // Answered in T3 Code, it no longer waits on him.
+        states.set("Rosie/t-tezos", "running")
+        yield* becomes("Rosie", thread("t-tezos", "Migrate the Tezos integration"), "Answered")
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return counts
+      }),
+    )
+    expect(result).toEqual([2, 1])
+  })
+
+
   test("each thread's newest update or notice from the last week, newest first, muted ones too, eight at most", async () => {
     const result = await run(
       Effect.gen(function* () {

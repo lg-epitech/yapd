@@ -1,4 +1,4 @@
-import { Data, Effect, FiberSet, Option, Schema, type Scope, Stream } from "effect"
+import { Clock, Data, Effect, FiberSet, Option, Schema, type Scope, Stream } from "effect"
 import type { Doing } from "./Audio.ts"
 import type * as Icons from "./Icons.ts"
 import { type Kind, kinds } from "./Journal.ts"
@@ -21,10 +21,23 @@ export type Handle = (
   wait: boolean,
 ) => Effect.Effect<string | undefined>
 
+/** How yapd talks of its own accord: as usual, or holding for later what doesn't need him. */
+export const Mode = Schema.Literal("normal", "focus", "quiet")
+export type Mode = typeof Mode.Type
+
+/** The furthest off a mode can be set to end through the API: a day. */
+const furthest = 24 * 60 * 60_000
+
 /** What `/state` returns, documented in docs/api.md. */
 export interface State {
   readonly on: boolean
   readonly activity: Doing
+  /** How yapd talks of its own accord. */
+  readonly mode?: Mode
+  /** ISO 8601, when focus or quiet ends on its own, only while one is on. */
+  readonly until?: string
+  /** How many threads wait on him, on every machine yapd can see. */
+  readonly waiting?: number
   readonly updates: ReadonlyArray<{
     readonly id: string
     readonly project: string
@@ -155,6 +168,8 @@ export interface Api {
   /** The state, then each time it changes. */
   readonly state: Stream.Stream<State>
   readonly turn: (on: boolean) => Effect.Effect<void, unknown>
+  /** Changes how yapd talks, focus or quiet ending at `until` when given, or else when its default says. */
+  readonly mode: (mode: Mode, until?: number) => Effect.Effect<void, unknown>
   readonly replay: (id: string) => Effect.Effect<"queued" | "off" | "unknown", unknown>
   /** Takes what the user typed as if they'd said it, and gives its id once it's worked out. None while yapd is off. */
   readonly utter: (text: string) => Effect.Effect<Option.Option<string>, unknown>
@@ -178,7 +193,35 @@ export interface Api {
   readonly icon: (machine: string, project: string) => Effect.Effect<Option.Option<Icons.Image>>
 }
 
-const decodeTurn = Schema.decodeUnknown(Schema.Struct({ on: Schema.Boolean }))
+const decodeChange = Schema.decodeUnknownOption(
+  Schema.Struct({ on: Schema.optional(Schema.Boolean), mode: Schema.optional(Mode), until: Schema.optional(Schema.String) }),
+)
+
+/** What a `PUT /state` changes. */
+export interface Change {
+  readonly on?: boolean
+  readonly mode?: Mode
+  readonly until?: number
+}
+
+/**
+ * What a `PUT /state` body asks to change, as of `now`, or why it can't be
+ * done: it names `on`, `mode` or both, and `until` only with focus or quiet,
+ * a time to come within a day.
+ */
+export const changing = (body: unknown, now: number): Change | string => {
+  const asked = decodeChange(body)
+  if (Option.isNone(asked)) return 'Send {"on": true or false}, {"mode": "normal", "focus" or "quiet"}, or both.'
+  const { on, mode, until } = asked.value
+  if (on === undefined && mode === undefined) return 'Send {"on": true or false}, {"mode": "normal", "focus" or "quiet"}, or both.'
+  if (until === undefined) return { ...(on === undefined ? {} : { on }), ...(mode === undefined ? {} : { mode }) }
+  if (mode !== "focus" && mode !== "quiet") return "until only goes with focus or quiet."
+  const at = Date.parse(until)
+  if (Number.isNaN(at)) return "until is a time, like 2026-10-02T15:00:00.000Z."
+  if (at <= now) return "until has gone already."
+  if (at - now > furthest) return "until is at most a day off."
+  return { ...(on === undefined ? {} : { on }), mode, until: at }
+}
 const decodeUtterance = Schema.decodeUnknown(Schema.Struct({ text: Schema.String }))
 const decodeCard = Schema.decodeUnknown(Schema.Struct({ id: Schema.String, revision: Schema.optional(Schema.NonNegativeInt) }))
 const decodeMute = Schema.decodeUnknown(Schema.Struct({ until: Schema.optional(Schema.String) }))
@@ -262,12 +305,16 @@ export const serve = (port: number, api: Api) =>
         if (route === "PUT /state") {
           // Turning off can wait on what it stops.
           server.timeout(request, 0)
-          const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.flatMap(decodeTurn), Effect.option)
-          if (Option.isNone(body)) return new Response('Send {"on": true} or {"on": false}.', { status: 400 })
-          return yield* api.turn(body.value.on).pipe(
+          const body = yield* Effect.tryPromise(() => request.json()).pipe(Effect.option)
+          const change = Option.isNone(body) ? "Send the change as JSON." : changing(body.value, yield* Clock.currentTimeMillis)
+          if (typeof change === "string") return new Response(change, { status: 400 })
+          // Only what it names, on or off first.
+          const { on, mode, until } = change
+          return yield* (on === undefined ? Effect.void : api.turn(on)).pipe(
+            Effect.zipRight(mode === undefined ? Effect.void : api.mode(mode, until)),
             Effect.zipRight(current),
             Effect.map((state) => Response.json(state)),
-            Effect.catchAll(failed("turn yapd on or off")),
+            Effect.catchAll(failed("change yapd's state")),
           )
         }
         if (route === "POST /utterances") {

@@ -30,6 +30,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   handle,
   state: Stream.succeed<Server.State>({ on: true, activity: "idle", updates: [] }),
   turn: () => Effect.void,
+  mode: () => Effect.void,
   replay: () => Effect.succeed("unknown"),
   utter: () => Effect.succeed(Option.none()),
   card: () => Effect.succeed(Option.none()),
@@ -81,6 +82,8 @@ const stateful = Effect.gen(function* () {
       handle: () => Effect.succeed(undefined),
       state: ref.changes,
       turn: (on) => SubscriptionRef.update(ref, (state) => ({ ...state, on })),
+      mode: (mode, until) =>
+        SubscriptionRef.update(ref, ({ until: _, ...state }) => ({ ...state, mode, ...(until === undefined ? {} : { until: new Date(until).toISOString() }) })),
       replay: (id) =>
         Effect.map(SubscriptionRef.get(ref), (state) => (id !== update.id ? "unknown" : state.on ? "queued" : "off")),
       utter: (text) => Effect.map(SubscriptionRef.get(ref), (state) => (state.on ? Option.some(`u-${text.length}`) : Option.none())),
@@ -183,6 +186,49 @@ describe("Server", () => {
       expect((yield* turn('{"on": "no"}')).status).toBe(400)
       expect((yield* turn("{")).status).toBe(400)
       expect((yield* call("/nothing")).status).toBe(404)
+    })))
+  })
+
+  test("a partial state change changes only what it names, on first, and turns away an empty body, an unknown mode or a time that's gone", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api } = yield* stateful
+      const asked: Array<string> = []
+      const server = yield* Server.serve(0, {
+        ...api,
+        turn: (on) => Effect.zipRight(Effect.sync(() => void asked.push(`on ${on}`)), api.turn(on)),
+        mode: (mode, until) => Effect.zipRight(Effect.sync(() => void asked.push(`${mode}${until === undefined ? "" : " until"}`)), api.mode(mode, until)),
+      })
+      const put = (body: string) =>
+        Effect.promise(() => fetch(`http://127.0.0.1:${server.port}/state`, { method: "PUT", headers: { "content-type": "application/json" }, body }))
+      const state = (response: Response) => Effect.promise(() => response.json() as Promise<Server.State>)
+      const soon = new Date(Date.now() + 60 * 60_000).toISOString()
+
+      const focus = yield* put('{"mode": "focus"}')
+      expect(focus.status).toBe(200)
+      expect(yield* state(focus)).toMatchObject({ on: true, mode: "focus" })
+      const until = yield* state(yield* put(JSON.stringify({ mode: "quiet", until: soon })))
+      expect(until).toMatchObject({ on: true, mode: "quiet", until: soon })
+      const off = yield* state(yield* put('{"on": false}'))
+      // Turning off leaves the mode as it was.
+      expect(off).toMatchObject({ on: false, mode: "quiet" })
+      expect(yield* state(yield* put('{"on": true, "mode": "normal"}'))).toMatchObject({ on: true, mode: "normal" })
+      expect(asked).toEqual(["focus", "quiet until", "on false", "on true", "normal"])
+
+      for (const body of [
+        "{}",
+        "",
+        '{"mode": "loud"}',
+        '{"on": "yes"}',
+        JSON.stringify({ mode: "normal", until: soon }),
+        JSON.stringify({ until: soon }),
+        JSON.stringify({ mode: "focus", until: "at three" }),
+        JSON.stringify({ mode: "focus", until: new Date(Date.now() - 60_000).toISOString() }),
+        JSON.stringify({ mode: "focus", until: new Date(Date.now() + 2 * 24 * 60 * 60_000).toISOString() }),
+      ]) {
+        expect([body, (yield* put(body)).status]).toEqual([body, 400])
+      }
+      // Nothing it turned away was done.
+      expect(asked).toHaveLength(5)
     })))
   })
 

@@ -43,6 +43,8 @@ const sessionTitle = (session: string, machine: string, here: string) =>
 export interface Latest {
   /** The threads with the latest updates, then each time that changes. */
   readonly rows: Stream.Stream<ReadonlyArray<Server.Recent>>
+  /** How many threads wait on him, on every machine whose threads can be seen, then each time that changes. */
+  readonly waiting: Stream.Stream<number>
   /** The threads as listed now. */
   readonly current: Effect.Effect<ReadonlyArray<Server.Recent>>
   /**
@@ -85,13 +87,15 @@ export const make = (options: {
   readonly heard?: (key: string, at: number) => Effect.Effect<Option.Option<string>>
   /** Each time what he heard changes, so whether a row can be heard again is worked out again. */
   readonly hearing?: Stream.Stream<unknown>
+  /** Every thread yapd can see, on every machine, to count those that wait on him: none without it. */
+  readonly desk?: Effect.Effect<Threads.Desk>
 }) =>
   Effect.gen(function* () {
     const { here, journal, mutes, icons, threads } = options
     const heard = options.heard ?? (() => Effect.succeedNone)
 
     /** Nothing listed yet, and the keys nothing is muted under. */
-    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, number>(), blind: false }
+    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, number>(), waiting: 0, blind: false }
 
     const compute = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
@@ -175,11 +179,14 @@ export const make = (options: {
           } satisfies Server.Recent
         }),
       )
-      return { rows: listed, under, entries, blind }
+      const desk = options.desk === undefined ? undefined : yield* options.desk
+      const waiting = desk === undefined ? 0 : desk.threads.filter(({ state }) => state === "approval" || state === "question").length
+      return { rows: listed, under, entries, waiting, blind }
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not list the latest threads", cause), none)))
 
     const first = yield* compute
     const ref = yield* SubscriptionRef.make(first.rows)
+    const waiting = yield* SubscriptionRef.make(first.waiting)
     let { under, entries, blind } = first
     /** Built again, and kept only when it changed, so nothing that follows the state hears of what didn't. */
     const refresh = Effect.flatMap(compute, (built) =>
@@ -190,7 +197,7 @@ export const make = (options: {
           blind = built.blind
         }),
         SubscriptionRef.update(ref, (before) => (JSON.stringify(before) === JSON.stringify(built.rows) ? before : built.rows)),
-      ),
+      ).pipe(Effect.zipRight(SubscriptionRef.set(waiting, built.waiting))),
     )
     const shows = new Set(["Renamed", "Asked", "Answered", "Removed"])
     yield* Stream.mergeAll(
@@ -211,6 +218,7 @@ export const make = (options: {
     ).pipe(Stream.debounce("250 millis"), Stream.runForEach(() => refresh), Effect.forkScoped)
     return {
       rows: Stream.changesWith(ref.changes, (one, other) => one === other),
+      waiting: Stream.changes(waiting.changes),
       current: SubscriptionRef.get(ref),
       under: (key) => Effect.sync(() => under.get(key) ?? []),
       row: (key) => Effect.sync(() => Option.fromNullable(entries.get(key))),
