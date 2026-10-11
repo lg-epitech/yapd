@@ -200,7 +200,7 @@ describe("Brain", () => {
     expect(shown).toContain(`yet: «${update.spoken}»\nWhat you said last, over it: «${answered}»`)
   })
 
-  test("a menu's row yapd can't reach is what 'it' means: the model is told what it is and that it can't reach it, and what it aims at a thread is asked about first", () => {
+  test("a menu's row yapd can't reach is what 'it' means: the model is told what it is and that it can't reach it, and nothing's done to a thread he doesn't name", () => {
     const update: Conversation.Update = {
       session: "claude:s-term",
       project: "integration",
@@ -243,34 +243,39 @@ describe("Brain", () => {
       expect(Brain.fast(situation(heard, { subject: session }), lines)).toBeUndefined()
     }
     expect(Brain.fast(situation("Mute it.", { subject: session }), lines)).toMatchObject({ act: "mute", how: "mute" })
-    // Whatever the model aims at a thread, however sure, he's asked first, naming the thread, and a yes to that goes.
+    // Whatever the model aims at a thread his words don't name, however sure, nothing's done and nothing's asked: he's told to name it.
     const tezosHandle = desk().threads.find((listed) => listed.ref.id === tezos.id)!.handle
     const send = Brain.decision({ act: "send", target: tezosHandle, text: "Open a pull request.", how: "now", sure: "high" })
     const stop = Brain.decision({ act: "stop", target: tezosHandle, sure: "high" })
+    const refused = { _tag: "Say" as const, spoken: "I can't reach that one from here, sir. Name the thread you mean." }
     for (const subject of [session, gone, away, kept]) {
-      const asked = Brain.check(send, situation("Tell it to open a pull request.", { subject }), lines)
-      expect(asked).toMatchObject({ _tag: "Ask", open: { kind: "confirm", asked: "Send that to Migrate Tezos Integration, sir?", candidates: [ref(tezos)] } })
-      expect(Brain.check(stop, situation("Interrupt it.", { subject }), lines)).toMatchObject({ _tag: "Ask", open: { asked: "Stop Migrate Tezos Integration, sir?" } })
-      const open = Option.some({ ...(asked as Extract<Brain.Checked, { _tag: "Ask" }>).open, id: "o1", version: 1, at: now - 1_000 })
-      expect(Brain.check({ ...send, pending: "answers" }, situation("Yes.", { subject, open }), lines)._tag).toBe("Do")
-      // Something else he names instead is asked about again.
-      const mina2 = desk().threads.find((listed) => listed.ref.id === mina.id)!.handle
-      expect(Brain.check({ ...send, target: mina2, pending: "answers" }, situation("No, the Mina one.", { subject, open }), lines)._tag).toBe("Ask")
+      expect(Brain.check(send, situation("Tell it to open a pull request.", { subject }), lines)).toEqual(refused)
+      expect(Brain.check(stop, situation("Interrupt it.", { subject }), lines)).toEqual(refused)
+      expect(Brain.check({ ...stop, target: "" }, situation("Interrupt it.", { subject }), lines)).toEqual(refused)
+      expect(Brain.check(Brain.decision({ act: "undo", target: tezosHandle }), situation("Scratch that.", { subject }), lines)).toEqual(refused)
+      // Named, by a word of what it's called, it goes.
+      expect(Brain.check(send, situation("Tell this to the Tezos one as well.", { subject }), lines)._tag).toBe("Do")
     }
+    // Heard as it came, or a thread's row on the desk, it's as ever.
     for (const subject of [heard, onDesk]) expect(Brain.check(send, situation("Tell it to open a pull request.", { subject }), lines)._tag).toBe("Do")
-    // Answered about, it stays what "it" means; a question asked over it is about it until it's closed; another thread named is "it" then.
-    const told: Assistant.Subject = { _tag: "Answer", said: "I can't reach that from here, sir.", about: Option.none() }
-    for (const subject of [session, gone, kept]) expect(Brain.held(subject, told, desk())).toEqual({ ...subject, said: told.said })
-    expect(Brain.held(heard, told, desk())).toBe(told)
-    expect(Brain.held(onDesk, told, desk())).toBe(told)
-    const named: Assistant.Subject = { _tag: "Answer", said: "On it, sir.", about: Option.some(ref(tezos)) }
-    expect(Brain.held(session, named, desk())).toBe(named)
-    const question: Assistant.Subject = { _tag: "Answer", said: "Send that to Migrate Tezos Integration, sir?", about: Option.some(ref(tezos)), question: which([ref(tezos)]) }
-    const over = Brain.held(session, question, desk())
-    expect(over).toEqual({ ...question, row: session })
-    expect(Brain.about(over)).toEqual(Option.none())
-    expect(Brain.saidAgain(over)).toEqual(Brain.saidAgain(session))
-    expect(Brain.held(over, told, desk())).toEqual({ ...session, said: told.said })
+    // Answered about, it stays what "it" means, whatever thread the model took it for; a question asked over it is about it until it's
+    // closed; only a thread his words named is "it" then.
+    const over = (subject: Assistant.Subject, heard = "Interrupt it.") => ({ subject, decision: stop, situation: situation(heard, { subject }) })
+    const told: Assistant.Subject = { _tag: "Answer", said: "I can't reach that one from here, sir.", about: Option.none() }
+    for (const subject of [session, gone, kept]) expect(Brain.held(over(subject), told)).toEqual({ ...subject, said: told.said })
+    expect(Brain.held(over(heard), told)).toBe(told)
+    expect(Brain.held(over(onDesk), told)).toBe(told)
+    const named: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables, sir.", about: Option.some(ref(tezos)) }
+    expect(Brain.held(over(session, "How's the Tezos one?"), named)).toBe(named)
+    expect(Brain.held(over(session, "How's it going?"), named)).toEqual({ ...session, said: named.said })
+    const question: Assistant.Subject = { _tag: "Answer", said: "The Tezos one or the Mina one, sir?", about: Option.none(), question: which([ref(tezos), ref(mina)]) }
+    const asked = Brain.held(over(session), question)
+    expect(asked).toEqual({ ...question, row: session })
+    expect(Brain.about(asked)).toEqual(Option.none())
+    expect(Brain.saidAgain(asked)).toEqual(Brain.saidAgain(session))
+    expect(Brain.held(over(asked), told)).toEqual({ ...session, said: told.said })
+    // "Mute it" over it is the row's.
+    expect(Brain.fast(situation("Mute it.", { subject: asked, open: Option.some(which([ref(tezos), ref(mina)])) }), lines)).toMatchObject({ act: "mute", how: "mute", target: "" })
   })
 
   test("the OPEN section shows the part being asked, its options with what they mean, whether several can be picked, yapd's pick and what's answered already", () => {
