@@ -5,7 +5,7 @@ import * as Assistant from "./Assistant.ts"
 import { Audio, AudioError } from "./Audio.ts"
 import * as Brain from "./Brain.ts"
 import { Waiting, WaitingLive } from "./ClaudeCode.ts"
-import { Condenser, type Turn } from "./Condenser.ts"
+import { CondenseError, Condenser, type Turn } from "./Condenser.ts"
 import * as Daemon from "./Daemon.ts"
 import * as Drafts from "./Drafts.ts"
 import { defaults } from "./Endpointer.ts"
@@ -77,6 +77,10 @@ const make = (says?: string, options: {
   readonly owner?: (host: string, session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
   /** Messages the summary reads as needing the user, like a failure. */
   readonly urgentMessages?: ReadonlyArray<string>
+  /** Messages that can't be summed up, as when the model is down. */
+  readonly unsummarizable?: ReadonlyArray<string>
+  /** What yapd sent each thread for him, as the ledger has it. */
+  readonly sent?: (to: Threads.Ref, since: number) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null }>>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -118,7 +122,7 @@ const make = (says?: string, options: {
         }),
     Journal.memory,
     Layer.succeed(Condenser, {
-      condense: (_, turn) => Effect.sync(() => {
+      condense: (_, turn) => options.unsummarizable?.includes(turn.message) ? Effect.fail(new CondenseError({ cause: "the model is down" })) : Effect.sync(() => {
         condensed.push(turn)
         return {
           priority: options.trivialMessages?.includes(turn.message) ? "trivial" as const : options.urgentMessages?.includes(turn.message) ? "needs-you" as const : "done" as const,
@@ -222,6 +226,7 @@ const make = (says?: string, options: {
     ...(options.hands === undefined ? {} : { hands: options.hands }),
     ...(options.mutes === undefined ? {} : { mutes: options.mutes }),
     ...(options.owner === undefined ? {} : { owner: options.owner }),
+    ...(options.sent === undefined ? {} : { sent: options.sent }),
     // This machine is Rosie, as yapd serves it.
     naming,
   }).pipe(Effect.provide(context))
@@ -3103,6 +3108,65 @@ describe("Daemon with threads muted", () => {
     )
     expect(result.followUps).toEqual(["tezos sent: Use the fee table."])
     expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in."])
+  })
+
+  test("the answer to what he sent a linked thread by the shortcut is said, though it's muted, but not the turns he didn't ask for", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const asked = "Also run the integration tests."
+        // Sent through T3 Code a moment before its prompt came, and much earlier in the words a later turn began with, as when it waited in the queue.
+        const ledger: Array<{ readonly at: number; readonly digest: string | null }> = []
+        const { handle, wait, nextEvent, played, followUps } = yield* make(undefined, {
+          mutes,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          sent: (to, since) => Effect.succeed(to.machine === "Rosie" && to.id === "t-tezos" ? ledger.filter(({ at }) => at >= since) : []),
+        })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-tezos" }), called: "the Tezos migration" })
+        const turn = (prompt: string, message: string) =>
+          Effect.gen(function* () {
+            yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt }, { project: "yapd", host: hostname() }, false)
+            yield* wait(120)
+            yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: message }, { project: "yapd", host: hostname() }, true)
+          })
+        yield* wait(600)
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest(asked) })
+        yield* wait(2)
+        yield* turn(asked, "Integration tests pass.")
+        yield* nextEvent("Ready: yapd. Integration tests pass.")
+        yield* wait(11)
+        yield* turn("Go on.", "Still going.")
+        yield* nextEvent("Muted update for yapd")
+        // Queued behind other work for ten minutes, it began the turn in its own words.
+        const queued = "Then bump the fee table."
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest(queued) })
+        yield* wait(600)
+        yield* turn(queued, "The fee table is bumped.")
+        yield* nextEvent("Ready: yapd. The fee table is bumped.")
+        yield* wait(11)
+        return { played: [...played], followUps: [...followUps] }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Integration tests pass.", "yapd. The fee table is bumped."])
+    // Nothing went to the agent: the muted turn's hook was let go of without a reply.
+    expect(result.followUps).toEqual(["claude:s-tezos let go"])
+  })
+
+  test("a turn that couldn't be summed up is said on a muted thread, since it may be a question or a failure", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, wait, played, journal } = yield* make(undefined, { mutes, unsummarizable: ["Should I drop the old table too?"] })
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* finish("noisy", "Should I drop the old table too?")
+        yield* wait(11)
+        yield* finish("noisy", "Still going.")
+        yield* wait(11)
+        return { played: [...played], quiet: (yield* journal.since(0, { kinds: ["update"] })).filter(quieted).map(({ said }) => said) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd finished a turn, but I couldn't summarize it."])
+    expect(result.quiet).toEqual(["yapd. Still going."])
   })
 
   test("while yapd is off, a muted update isn't kept at all, as one it would have said isn't", async () => {

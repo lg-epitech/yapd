@@ -68,7 +68,8 @@ const lookup = "3 seconds"
  * thread, as T3 Code takes it: into the turn under way, or in its queue.
  * `owner` finds the thread a hook on another machine came from, in that
  * machine's T3 Code, for what's kept, shown and muted of it only. What's
- * `mutes` is kept quiet, by the keys `naming` gives an update.
+ * `mutes` is kept quiet, by the keys `naming` gives an update, but not the
+ * answer to what yapd `sent` its thread for him.
  */
 export const make = (
   options: {
@@ -77,6 +78,8 @@ export const make = (
     readonly hands?: Hands.Hands["Type"]
     readonly mutes?: Mutes.Mutes
     readonly naming?: Naming
+    /** What yapd sent a thread for him since then, like a message, an answer to its question or the work it started, by when and in what words. */
+    readonly sent?: (to: Threads.Ref, since: number) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null }>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -531,6 +534,8 @@ export const make = (
     readonly fallback?: Fallback
     /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
     readonly answering: boolean
+    /** The prompt its turn began with, through the hooks, and when, to tell whether it's one yapd sent its thread. */
+    readonly prompted?: { readonly text: string | undefined; readonly at: number }
   }
 
   /**
@@ -572,14 +577,34 @@ export const make = (
       yield* Effect.logInfo(`Muted update for ${project}`)
     })
 
+  /** How long before a turn's prompt came what yapd sent its thread still counts as what began it, as it's kept before it goes out. */
+  const sending = 60_000
+
+  /**
+   * Whether a hook's turn answers what yapd sent its thread for him: sent
+   * since its prompt came, or a little before, or sent in its prompt's words,
+   * as a message that waited in T3 Code's queue. Never for a turn whose
+   * prompt never came through the hooks, which can't be told.
+   */
+  const asked = (to: Threads.Ref, finished: Finished) =>
+    Effect.gen(function* () {
+      const { sent } = options
+      const { prompted, arrivedAt } = finished
+      if (sent === undefined || prompted === undefined) return false
+      const words = prompted.text === undefined ? "" : Ledger.digest(prompted.text)
+      const rows = yield* sent(to, arrivedAt - forgotten)
+      return rows.some(({ at, digest }) => at <= arrivedAt && (at >= prompted.at - sending || (words !== "" && digest === words)))
+    }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), false)))
+
   const prepare = (finished: Finished) => {
     const { session, project, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     return Effect.gen(function* () {
-      const [summary, about, owner] = yield* Effect.all(
+      const [[summary, summarized], about, owner] = yield* Effect.all(
         [
           condenser.condense(project, turn).pipe(
             Effect.retry({ times: 1 }),
-            Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(unsummarized(project)))),
+            Effect.map((summary) => [summary, true] as const),
+            Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as([unsummarized(project), false] as const))),
           ),
           finished.about,
           finished.owner,
@@ -619,8 +644,11 @@ export const make = (
         ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
       }
       const keys = Mutes.keysOf({ session, thread, ...ties }, called)
-      // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself.
-      const mutable = priority !== "needs-you" && !finished.answering
+      // What answers what yapd sent its thread for him, as a message by the shortcut, is his own ask too.
+      const answering = finished.answering || (priority !== "needs-you" && Option.isSome(tied) && (yield* asked(tied.value, finished)))
+      // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
+      // summed up may be either, as far as yapd can tell, so it's said.
+      const mutable = priority !== "needs-you" && !answering && summarized
       const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, muted.value)
 
@@ -641,7 +669,7 @@ export const make = (
       }
       generations.set(update, generation)
       if (finished.hooked) hooked.add(update)
-      if (priority !== "needs-you" && finished.answering) own.add(update)
+      if (priority !== "needs-you" && answering) own.add(update)
       // Said once ever: one already kept under its key was said, or held, before. Never kept for one yapd won't say, as it's off.
       const { fallback } = finished
       const power = yield* switched
@@ -1019,6 +1047,7 @@ export const make = (
               about: linking(payload.session_id, payload.cwd, origin),
               owner: owning(payload.session_id, payload.cwd, origin),
               answering: followedUp,
+              ...(prompt === undefined ? {} : { prompted: prompt }),
             }),
           )
           return hook

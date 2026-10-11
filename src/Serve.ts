@@ -131,6 +131,8 @@ export const serve = Effect.gen(function* () {
     hands,
     mutes,
     naming,
+    // What went to a thread for him and may have got there: what answers it is his to hear, however he muted the thread.
+    sent: (to, since) => ledger.steps(since, { kinds: ["message", "reply", "start"], states: ["prepared", "sent", "unknown"], machine: to.machine, thread: to.id }),
   })
   // Muting from the menu or by voice: never anything that reaches an agent.
   const controls = Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, journal }))
