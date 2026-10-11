@@ -111,6 +111,9 @@ const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["a
   second: Option.none(),
   asked: [],
   acted: Option.none(),
+  quieted: [],
+  mutes: [],
+  muteChange: Option.none(),
   now,
 })
 

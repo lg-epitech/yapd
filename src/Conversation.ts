@@ -170,6 +170,14 @@ export const between = (text: string, duration: number, start: number, end: numb
   return words.slice(Math.max(0, Math.floor((words.length * start) / duration)), Math.max(0, Math.ceil((words.length * end) / duration))).join(" ")
 }
 
+/** Muting the thread of an update he spoke over, in so many words: done once he's stopped, giving back what's said of it. */
+interface Muting {
+  readonly intent: "mute"
+  readonly spoken: ""
+  readonly message: ""
+  readonly muting: Effect.Effect<string>
+}
+
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
 export interface Question {
   readonly audio: string
@@ -231,6 +239,13 @@ export const make = (options: {
   readonly saying: (update: Update, line: string) => Effect.Effect<void>
   /** Whether what the user said to send over an update would be held back as it could give a secret away, so their words are kept and logged nowhere. */
   readonly withholds: (update: Update, message: string) => Effect.Effect<boolean>
+  /**
+   * When all he said over an update is to mute or unmute its thread, in so
+   * many words and plainly his, how that's done, giving back what's said of
+   * it: never anything sent to the agent. None for anything else, which is
+   * worked out as ever.
+   */
+  readonly mute?: (update: Update, heard: string, voiced: number, echo: string | undefined) => Option.Option<Effect.Effect<string>>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -731,7 +746,8 @@ export const make = (options: {
             const said = cut(text, fraction)
             // What it hadn't said yet, so the model knows whether he could have heard what he answers, like the agent's question.
             const rest = unsaid(text, fraction)
-            const { heard, afterPause, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard, _, afterPause) =>
+            /** What the model makes of what he said, as ever. */
+            const responding = (heard: string, afterPause: string) =>
               responder
                 .respond({
                   project: update.project,
@@ -749,12 +765,20 @@ export const make = (options: {
                       Effect.map((lines): Reply => ({ intent: "answer", spoken: lines.misheard, message: "" })),
                     ),
                   ),
-                ),
+                )
+            const { heard, afterPause, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard, voiced, afterPause) =>
+              Option.match(options.mute?.(update, heard, voiced, echo) ?? Option.none(), {
+                onSome: (muting) => Effect.succeed<Reply | Muting>({ intent: "mute", spoken: "", message: "", muting }),
+                onNone: () => responding(heard, afterPause),
+              }),
             )
+            // Muting its thread is done, and said, once he's stopped.
+            const muted = reply.intent === "mute" ? yield* reply.muting : undefined
+            const answer = muted ?? reply.spoken
             // Held back as it could give a secret away, it's kept and logged nowhere: whether it is, is known before either.
             const withheld = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
             yield* Effect.logInfo(withheld ? "Heard something to send that could give a secret away, so it's held back" : `Heard: ${heard}`)
-            yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
+            yield* Effect.logInfo(`Reply: ${reply.intent}${answer === "" ? "" : `, saying: ${answer}`}`)
             // Ended partway on no more than what may all have been its own voice, like its "Over—" heard as "Okay.", it's left
             // unheard, so "what did I miss?" brings it back, and nothing of it is noted as his.
             const doubted = reply.intent === "dismiss" && unsure && !after && heard === first
@@ -768,7 +792,7 @@ export const make = (options: {
                 // With the thread T3 Code knows it by, when it's tied to one, like the update itself.
                 ...(update.about === undefined ? { thread: update.session } : { machine: update.about.machine, thread: update.about.id }),
                 directory: update.thread.cwd,
-                said: reply.spoken,
+                said: answer,
                 ...(withheld ? {} : { text: heard }),
                 detail: {
                   intent: reply.intent,
@@ -800,10 +824,7 @@ export const make = (options: {
               { speaker: "yapd", text: said },
               { speaker: "user", text: heard, ...(echo === undefined ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }) },
             )
-            text =
-              reply.intent === "send"
-                ? yield* pass(update, reply)
-                : reply.spoken
+            text = reply.intent === "send" ? yield* pass(update, reply) : answer
             if (text === "") return true
             path = join(options.dir, `${crypto.randomUUID()}${extension}`)
             rendered.push(path)

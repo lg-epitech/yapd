@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { ConfigProvider, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, Schema, type Scope, Stream, Supervisor, TestClock, TestContext } from "effect"
+import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import * as Brain from "./Brain.ts"
 import { Condenser } from "./Condenser.ts"
@@ -10,6 +11,7 @@ import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Mutes from "./Mutes.ts"
 import { Model, ModelError } from "./Model.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
@@ -272,6 +274,8 @@ const assistant = (
       /** Its view a moment behind its T3 Code, so a thread there still shows what it waited on just after that's answered. */
       readonly behind?: boolean
     }
+    /** Whether threads can be muted, which drops what of them waits to be said, as kept in `silenced`. */
+    readonly muting?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -451,7 +455,15 @@ const assistant = (
         }),
       )
     const show = yield* Show.make(threads.detail, (address) => Effect.sync(() => void opened.push(address)))
+    /** What muting dropped from what waits to be said, by the keys it was muted by. */
+    const silenced: Array<ReadonlyArray<string>> = []
+    const mutes = given.muting === true ? yield* Mutes.make(store) : undefined
+    const controls = mutes === undefined ? undefined : Mutes.controls({ mutes, journal, silence: (keys) => Effect.sync(() => void silenced.push(keys)) })
     const made = yield* Assistant.make({
+      // This Mac is Rosie.
+      ...(mutes === undefined || controls === undefined
+        ? {}
+        : { mutes, controls, naming: (host: string) => (host.toLowerCase() === hostname().toLowerCase() ? "Rosie" : (host.split(".")[0] ?? host)) }),
       threads,
       journal,
       drafts,
@@ -507,6 +519,8 @@ const assistant = (
       threads,
       dispatched,
       ledger,
+      mutes,
+      silenced,
       told: said,
       noted,
       started,
@@ -9978,4 +9992,144 @@ describe("Assistant", () => {
     ])
     expect(result.answers).toEqual([{ [colour.id]: "Red" }])
   })
+
+describe("Assistant muting", () => {
+  /** The keys muted, in order. */
+  const keys = (mutes: Mutes.Mutes | undefined) => Effect.map(mutes!.list, (all) => all.map(({ key, ends }) => (ends === undefined ? key : `${key} until ${new Date(ends).toISOString()}`)))
+
+  test("'mute it' over what he heard about a thread mutes that thread, and each line after is said as Jarvis says it, never sending the thread anything", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, mutes, silenced, dispatched, seen } = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir.", target: handle(situation, tezos) }),
+          undefined,
+          { muting: true },
+        )
+        yield* dictate("How's the Tezos migration?")
+        const steps: Array<ReadonlyArray<string>> = []
+        for (const heard of ["Mute it.", "Mute it.", "Unmute it.", "Unmute it.", "Mute it for an hour.", "What's muted?", "Unmute everything.", "Unmute everything."]) {
+          yield* followUp(heard)
+          steps.push(yield* keys(mutes))
+        }
+        return { spoken: spoken(), steps, silenced, dispatched: dispatched.length, model: seen.length }
+      }),
+    )
+    const tezosKey = `t3:Rosie:${tezos.id}`
+    const hour = `${tezosKey} until ${new Date(now + 60 * 60_000).toISOString()}`
+    expect(result.spoken).toEqual([
+      "It's comparing fee tables, sir.",
+      "Muted it, sir. I'll still tell you if it needs you.",
+      "It's already muted, sir.",
+      "Unmuted it, sir.",
+      "It isn't muted, sir.",
+      `Muted it until ${Brain.time(now + 60 * 60_000)}, sir. I'll still tell you if it needs you.`,
+      `You've muted Migrate Tezos Integration until ${Brain.time(now + 60 * 60_000)}, sir.`,
+      "Unmuted everything, sir.",
+      "Nothing's muted, sir.",
+    ])
+    expect(result.steps).toEqual([[tezosKey], [tezosKey], [], [], [hour], [hour], [], []])
+    expect(result.silenced).toEqual([[tezosKey], [tezosKey]])
+    // Never anything sent to a thread, and none of it needed the model.
+    expect(result.dispatched).toBe(0)
+    expect(result.model).toBe(1)
+  })
+
+  test("a thread named to the model is muted by name, and 'it' is that thread from then on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, mutes, seen } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "Mute the Mina tickets."
+              ? Brain.decision({ act: "mute", how: "mute", target: handle(situation, mina) })
+              : Brain.decision({ act: "mute", how: "mute", sure: "low" }),
+          undefined,
+          { muting: true },
+        )
+        yield* dictate("Mute the Mina tickets.")
+        const named = yield* keys(mutes)
+        yield* dictate("Unmute it.")
+        const after = yield* keys(mutes)
+        // The model with no thread to name, and nothing to choose between: it can't tell.
+        yield* dictate("Mute the other thing.")
+        return { spoken: spoken(), named, after, asked: seen.length }
+      }),
+    )
+    expect(result.spoken).toEqual(["Muted Open Mina SSV2 Bug Tickets, sir. I'll still tell you if it needs you.", "Unmuted it, sir.", "I couldn't tell which one you meant, sir."])
+    expect(result.named).toEqual([`t3:Rosie:${mina.id}`])
+    expect(result.after).toEqual([])
+    // "Unmute it" needed no model: it's the thread just muted.
+    expect(result.asked).toBe(2)
+  })
+
+  test("'mute it' over a session's update mutes the session, called as it's said, and 'unmute it' after takes it off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { reading, heard, spoken, mutes, seen } = yield* assistant(() => undefined, undefined, { muting: true })
+        yield* reading("yapd", "yapd. The fee table is in.")
+        yield* heard({ heard: "Mute it.", via: "shortcut", at: now, voiced: 2, turns: 1 })
+        const muted = yield* mutes!.list
+        yield* heard({ heard: "Unmute it.", via: "shortcut", at: now, voiced: 2, turns: 1 })
+        return { spoken: spoken(), muted, after: yield* keys(mutes), model: seen.length }
+      }),
+    )
+    expect(result.spoken).toEqual(["Muted it, sir. I'll still tell you if it needs you.", "Unmuted it, sir."])
+    expect(result.muted).toEqual([{ key: "session:Rosie:claude:yapd", called: "the Claude session in yapd", project: "yapd", at: now }])
+    expect(result.after).toEqual([])
+    expect(result.model).toBe(0)
+  })
+
+  test("'scratch that' takes back a mute he just made, rather than a message sent before it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, followUp, spoken, mutes, dispatched, wait } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "Tell the Tezos one to use the fee table."
+              ? Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now" })
+              : Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir.", target: handle(situation, tezos) }),
+          undefined,
+          { muting: true },
+        )
+        yield* dictate("Tell the Tezos one to use the fee table.")
+        yield* wait(10)
+        yield* dictate("How's the Tezos migration?")
+        yield* followUp("Mute it.")
+        yield* wait(10)
+        yield* dictate("Scratch that.")
+        const after = yield* keys(mutes)
+        yield* dictate("Scratch that.")
+        return { spoken: spoken().slice(2), after, again: yield* keys(mutes), messages: dispatched.filter(({ type }) => type === "message.dispatch").length }
+      }),
+    )
+    expect(result.spoken).toEqual(["Muted it, sir. I'll still tell you if it needs you.", "Unmuted it again, sir.", "Muted it again, sir. I'll still tell you if it needs you."])
+    expect(result.after).toEqual([])
+    expect(result.again).toEqual([`t3:Rosie:${tezos.id}`])
+    // The message stays sent, and nothing else went.
+    expect(result.messages).toBe(1)
+  })
+
+  test("what he missed of a muted thread is told a thread at a time, after the rest, and all of it counts as heard once he's heard the catch-up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, seen, journal } = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", how: "missed", spoken: `${situation.unheard.length} and ${situation.quieted.length}, sir.` }),
+          undefined,
+          { muting: true },
+        )
+        // A noisy thread he muted said more than would fit, before and after the one update he wasn't kept from.
+        for (let index = 0; index < 14; index++) {
+          yield* journal.write({ at: now - 50_000 + index, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: `integration. Step ${index}.`, detail: { muted: true } })
+        }
+        yield* journal.write({ at: now - 30_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* dictate("What did I miss?")
+        const told = seen.at(-1)!
+        const card = Show.missed(told.unheard, now, told.quieted)
+        return { unheard: told.unheard.map(({ said }) => said), quieted: told.quieted.length, card: card.markdown, left: yield* journal.unheard(0, 50) }
+      }),
+    )
+    expect(result.unheard).toEqual(["yapd. The loader fix is ready."])
+    expect(result.quieted).toBe(14)
+    expect(result.card).toBe("- **1 min ago** · yapd: yapd. The loader fix is ready.\n- **1 min ago** · integration · muted, 14 updates: integration. Step 13.")
+    expect(result.left).toEqual([])
+  })
+})
 })

@@ -1,4 +1,5 @@
 import { Cause, Clock, Context, Duration, Effect, Either, Exit, Fiber, FiberSet, Option } from "effect"
+import { hostname } from "node:os"
 import * as Brain from "./Brain.ts"
 import type * as Conversation from "./Conversation.ts"
 import type * as Drafts from "./Drafts.ts"
@@ -6,6 +7,7 @@ import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal, Kept } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, Persona, unaddressed } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import { enough, gist, type Line } from "./Responder.ts"
@@ -304,6 +306,8 @@ const fresh = 10 * 60_000
 const lately = { span: 3 * 60 * 60_000, most: 8 }
 /** What it's told he missed. */
 const unheard = 12
+/** What it's told was kept quiet that he missed, grouped by thread. */
+const quietest = 50
 /** Threads on the desk: fewer for a reply, which is about what he just heard. */
 /** Threads the model sees in full, for a dictation and for a reply, then how many more by name only; and how many give Whisper their words. */
 const desk = { asked: 30, reply: 12, named: 120, vocabulary: 15 }
@@ -589,6 +593,11 @@ export const make = (options: {
   readonly upcoming: Effect.Effect<ReadonlyArray<number>>
   /** What a thread waits on him for, read and worded now, to read back what he answers by dictation, unless he's heard it. */
   readonly compose: (ref: Threads.Ref, requestId: string) => Effect.Effect<Option.Option<Worded>>
+  /** What's muted, and muting and unmuting threads, which never reaches an agent. Without them, muting is something yapd can't do yet. */
+  readonly mutes?: Mutes.Mutes
+  readonly controls?: Mutes.Controls
+  /** What the user calls each machine, for the keys an update is muted by. */
+  readonly naming?: (host: string) => string
 }) =>
   Effect.gen(function* () {
     const brain = yield* Brain.Brain
@@ -861,7 +870,7 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked, coming, acted] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action"] }),
           journal.since(now - day, { most: 20, kinds: ["dictation", "reply"] }),
@@ -870,12 +879,16 @@ export const make = (options: {
           options.upcoming,
           // The last thing done, whatever it was, so "scratch that" never reaches past it to something before.
           ledger.latest(scratchable),
+          options.mutes?.list ?? Effect.succeed<ReadonlyArray<Mutes.Mute>>([]),
+          options.mutes?.last ?? Effect.succeedNone,
         ])
         // What he hasn't heard since he last said something, other than catching up, which he may never have heard the
         // answer to, or something only heard as noise, like a cough taken for "Thank you.". Not what's waiting to be
-        // read, like an update his asking cut off: he's told of that as it's read, not twice.
+        // read, like an update his asking cut off: he's told of that as it's read, not twice. What was kept quiet is
+        // looked for on its own, so a noisy thread he muted can't crowd out the rest.
         const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
-        const missed = (yield* journal.unheard(since, unheard + coming.length)).filter(({ id }) => !coming.includes(id)).slice(-unheard)
+        const missed = (yield* journal.unheard(since, unheard + coming.length, false)).filter(({ id }) => !coming.includes(id)).slice(-unheard)
+        const quieted = (yield* journal.unheard(since, quietest, true)).filter(({ id }) => !coming.includes(id))
         // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing.
         const done = recent.filter((kept) => kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined).slice(-lately.most)
         const seen = yield* options.show.seen
@@ -887,6 +900,9 @@ export const make = (options: {
           desk: shortlist,
           lately: [...done, ...starting.values()].toSorted((one, other) => one.at - other.at),
           unheard: missed,
+          quieted,
+          mutes,
+          muteChange,
           usage,
           second: Option.none(),
           asked,
@@ -1261,8 +1277,8 @@ export const make = (options: {
         // What's waiting to be read was left out of a catch-up, so he's told it's coming up rather than told it twice.
         const coming = catching ? comingUp((yield* options.upcoming).length, said) : ""
         const text = `${spoken.trim() === "" ? said.misheard : spoken.trim()}${coming}`
-        // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop.
-        const missed = catching ? thought.situation.unheard.map(({ id }) => id) : []
+        // What he missed is heard once he's heard the model tell him, which a dictation can cut off and turning yapd off can stop, what was kept quiet with it.
+        const missed = catching ? [...thought.situation.unheard, ...thought.situation.quieted].map(({ id }) => id) : []
         const ref = Option.map(about, ({ ref }) => ref)
         const told = {
           say: text,
@@ -2438,6 +2454,74 @@ export const make = (options: {
         return (yield* still(heard.ref, heard.asks.requestId)) ? answered.asks : undefined
       })
 
+    /**
+     * What a mute is about: the thread picked, or, said in so many words, what
+     * he's on about, by its thread, or by its session when it has none. With
+     * what it's called, and whether that's "it".
+     */
+    const muted = (
+      plan: Brain.Plan,
+      thought: Thought,
+    ): Option.Option<{ readonly key: string; readonly called: string | undefined; readonly project: string | undefined; readonly it: boolean }> => {
+      const { situation } = thought
+      if (Option.isSome(plan.target)) {
+        const listed = plan.target.value
+        const it = Option.exists(Brain.focused(situation), ({ handle }) => handle === listed.handle)
+        return Option.some({ key: Mutes.key.thread(listed.ref), called: `${listed.called}${listed.here ? "" : ` on ${listed.ref.machine}`}`, project: listed.project, it })
+      }
+      // Only "mute it", worked out without the model, means what he's on about with nothing named.
+      if (thought.source !== "fast") return Option.none()
+      const { subject } = situation
+      if (subject._tag === "Session") {
+        const { update } = subject
+        const called = options.naming ?? ((host: string) => host.split(".")[0] ?? host)
+        const [key] = Mutes.keysOf(update, called)
+        if (key === undefined) return Option.none()
+        const machine = called(update.thread.origin.host ?? hostname())
+        const where = machine === called(hostname()) ? "" : ` on ${machine}`
+        const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
+        return Option.some({ key, called: `the ${agent} session in ${Threads.spoken(update.project)}${where}`, project: update.project, it: true })
+      }
+      return Option.map(Brain.about(subject), (ref) => ({ key: Mutes.key.thread(ref), called: undefined, project: undefined, it: true }))
+    }
+
+    /**
+     * Mutes or unmutes a thread, every thread, or takes back the last change
+     * to what's muted, and says so, naming the thread only when it isn't
+     * "it", which stays what "it" means. Never anything sent to a thread.
+     */
+    const muting = (plan: Brain.Plan, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { decision } = plan
+        const { controls } = options
+        const sir = addressed(said)
+        const stays = (line: string): Outcome => ({
+          say: line,
+          subject: thought.subject._tag === "Session" ? { ...thought.subject, said: line } : { _tag: "Answer", said: line, about: Brain.about(thought.subject) },
+          kind: "done",
+        })
+        if (controls === undefined) return reply(Brain.notYet(said), thought.subject)
+        const now = yield* Clock.currentTimeMillis
+        if (decision.how === "clear") return stays(Brain.muteLines(said, "it", now).cleared((yield* controls.clear).length > 0))
+        if (decision.how === "undo") {
+          const undone = yield* controls.undo
+          return stays(Option.match(undone, { onNone: () => `There's no mute to take back${sir}.`, onSome: ({ added }) => Brain.muteLines(said, "it", now).again(added.length > 0) }))
+        }
+        const target = muted(plan, thought)
+        if (Option.isNone(target)) return reply(said.cantTell, thought.subject)
+        const { key, called, project, it } = target.value
+        const told = Brain.muteLines(said, it || called === undefined ? "it" : called, now)
+        // Named, "it" is that thread from now on.
+        const about = Option.flatten(Option.map(Mutes.parse(key), (about) => (about._tag === "Thread" ? Option.some(about.ref) : Option.none<Threads.Ref>())))
+        const answered = (line: string): Outcome => (it ? stays(line) : { say: line, subject: { _tag: "Answer", said: line, about }, kind: "done" })
+        if (decision.how === "unmute") return answered((yield* controls.unmute(key)) ? told.unmuted : told.notMuted)
+        const ends = decision.when.trim() === "" ? undefined : Date.parse(decision.when)
+        // A time that's gone or can't be read leaves it muted until he unmutes it, which is the safer way to take it.
+        const lasts = ends === undefined || Number.isNaN(ends) || ends <= now ? undefined : ends
+        const done = yield* controls.mute({ key, ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, lasts)
+        return answered(done ? told.muted(lasts) : told.already)
+      })
+
     /** Does what was decided and checked: a step of its request, which changes a thread under that step's ids. */
     const perform = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping = { step: 0, twice: false }): Effect.Effect<Outcome> => {
       const { decision, target } = plan
@@ -2500,6 +2584,8 @@ export const make = (options: {
           })
         case "start":
           return start(thought, said, at.step)
+        case "mute":
+          return Effect.flatMap(muting(plan, thought, said), (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said))
         case "show": {
           // Shown, then the rest of the request, like "and tell it to fix the checks", with "it" the thread shown.
           // A later step of the request takes down only a card it put up, like "show me everything, then hide that", never one asked for after it.

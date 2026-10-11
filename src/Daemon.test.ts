@@ -3360,6 +3360,56 @@ describe("Daemon with threads muted", () => {
   })
 })
 
+describe("Daemon muting over an update", () => {
+  test("'mute it' said over an update, plainly his, mutes its thread and says so, never asking the model or sending the agent anything", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, talk, wait, played, responded, followUps, journal } = yield* make("Mute it.", { mutes })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        yield* finish("noisy", "Still going, again.")
+        yield* wait(11)
+        const replies = yield* journal.since(0, { kinds: ["reply"] })
+        return { played: [...played], responded: [...responded], followUps: [...followUps], mutes: yield* mutes.list, replies: replies.map(({ said, detail }) => [said, (detail as { intent: string }).intent]) }
+      }),
+    )
+    // The update said after it is kept quiet.
+    expect(result.played).toEqual(["yapd. Still going.", "Muted it. I'll still tell you if it needs you."])
+    expect(result.responded).toEqual([])
+    expect(result.followUps).toEqual([])
+    expect(result.mutes.map(({ key, called }) => [key, called])).toEqual([[sessionKey("noisy"), "the Claude session in yapd"]])
+    expect(result.replies).toEqual([["Muted it. I'll still tell you if it needs you.", "mute"]])
+  })
+
+  test("'mute it' begun over yapd's own voice, or too faint to be his, is the model's, which never sends it on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, talk, speak, wait, responded, followUps } = yield* make("Mute it.", { mutes, echoing: 30, answer: "Say that again?" })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        const echoed = [...responded]
+        // Faint, like talk across the room.
+        const faint = yield* make("Mute it.", { mutes, answer: "Say that again?" })
+        yield* faint.finish("other", "Done.")
+        yield* faint.wait(1)
+        yield* faint.speak
+        yield* faint.wait(11)
+        return { echoed, faint: [...faint.responded], muted: yield* mutes.list, followUps: [...followUps, ...faint.followUps] }
+      }),
+    )
+    expect(result.echoed).toEqual(["Mute it."])
+    expect(result.faint).toEqual(["Mute it."])
+    expect(result.muted).toEqual([])
+    expect(result.followUps).toEqual([])
+  })
+})
+
 /** A Stop from this machine's hook of `session`, which says where it came from, as a hook that can be tied to its thread does. */
 const stopHere = (handle: Handle, session: string, message: string) =>
   handle("claude", { hook_event_name: "Stop", session_id: session, cwd: "/code/yapd", last_assistant_message: message }, { project: "yapd", host: hostname() }, false).pipe(

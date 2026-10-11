@@ -61,6 +61,7 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - "answer" if they asked something the agent's message or the conversation answers, including asking you to repeat.
 - "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
+- Muting or unmuting this thread, like "mute this" or "silence it for now", is for you, never the agent: never "send". It's "answer", asking them in a few words to say it again.
 
 "spoken": what you say back. They're listening, not reading.
 ${aloud}

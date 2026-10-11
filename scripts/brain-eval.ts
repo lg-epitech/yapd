@@ -279,6 +279,9 @@ const run = Effect.gen(function* () {
               second: Option.none(),
               asked: [],
               acted: Option.none(),
+              quieted: [],
+              mutes: [],
+              muteChange: Option.none(),
               now,
             }
             const began = Date.now()

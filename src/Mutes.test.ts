@@ -186,4 +186,22 @@ describe("Mutes", () => {
     expect(result.noted[0]).toEqual({ machine: "Rosie", thread: "t-tezos", detail: { mute: tezos, until: "1970-01-01T01:00:00.000Z" } })
     expect(result.noted.map(({ detail }) => Object.keys(detail as object)[0])).toEqual(["mute", "undo", "undo", "unmute", "undo", "mute", "unmute", "undo"])
   })
+
+  test("muting what he's on about is understood in so many words, with how long, and anything more is left to the model", () => {
+    const heard = (said: string) => Option.getOrUndefined(Mutes.command(said))
+    expect(heard("Mute it.")).toEqual({ how: "mute" })
+    expect(heard("Jarvis, mute this one, please.")).toEqual({ how: "mute" })
+    expect(heard("Silence that thread.")).toEqual({ how: "mute" })
+    expect(heard("Mute it for an hour.")).toEqual({ how: "mute", minutes: 60 })
+    expect(heard("Mute that for half an hour.")).toEqual({ how: "mute", minutes: 30 })
+    expect(heard("Mute this for 20 minutes.")).toEqual({ how: "mute", minutes: 20 })
+    expect(heard("Mute it for two hours.")).toEqual({ how: "mute", minutes: 120 })
+    expect(heard("Mute it for forty-five minutes.")).toEqual({ how: "mute", minutes: 45 })
+    expect(heard("Unmute it.")).toEqual({ how: "unmute" })
+    expect(heard("Unmute everything.")).toEqual({ how: "clear" })
+    expect(heard("Unmute them all.")).toEqual({ how: "clear" })
+    for (const said of ["Mute.", "Mute the Tezos one.", "Mute it until tomorrow.", "Mute it for a while.", "Mute it for 0 minutes.", "Unmute it for an hour.", "Mute it and tell it to stop.", "Can you mute it?", "Quiet it."]) {
+      expect(heard(said)).toBeUndefined()
+    }
+  })
 })

@@ -74,6 +74,9 @@ const situation = (heard: string, overrides: Partial<Brain.Situation> = {}): Bra
   second: Option.none(),
   asked: [],
   acted: Option.none(),
+  quieted: [],
+  mutes: [],
+  muteChange: Option.none(),
   now,
   ...overrides,
 })
@@ -1488,5 +1491,141 @@ describe("Brain", () => {
     for (const subject of asking) expect(reply(subject)).toBeUndefined()
     // Dictated rather than said back, it's the model's too, which may take it for something else.
     expect(Brain.fast(situation("Thanks.", { subject: told[0]! }), lines)).toBeUndefined()
+  })
+
+  describe("muting", () => {
+    const tezosHandle = () => desk().threads.find(({ ref }) => ref.id === tezos.id)!.handle
+    const on: Assistant.Subject = { _tag: "Answer", said: "It's comparing fee tables.", about: Option.some(ref(tezos)) }
+    /** An update from a terminal session, which no thread on the desk has. */
+    const terminal: Assistant.Subject = {
+      _tag: "Session",
+      update: {
+        session: "claude:s-term",
+        project: "yapd",
+        turn: { prompt: Option.none(), message: "The fee table is in." },
+        needsYou: false,
+        spoken: "yapd. The fee table is in.",
+        audio: "/tmp/update.wav",
+        thread: { agent: "claude", session: "s-term", cwd: "/code/yapd", message: "The fee table is in.", origin: {} },
+        at: now - 20_000,
+      },
+      said: "yapd. The fee table is in.",
+    }
+    const mute = (heard: string, overrides: Partial<Brain.Situation> = {}) => Brain.fast(situation(heard, { subject: on, ...overrides }), lines)
+
+    test("'mute it' and 'unmute it', with or without how long, are the thread he's on about, with no model", () => {
+      for (const heard of ["Mute it.", "Mute that.", "Mute this thread.", "Mute that one, please.", "Silence it.", "Silence this thread."]) {
+        expect(mute(heard)).toMatchObject({ act: "mute", how: "mute", target: tezosHandle(), when: "" })
+      }
+      const hour = new Date(now + 60 * 60_000).toISOString()
+      expect(mute("Mute it for an hour.")).toMatchObject({ act: "mute", how: "mute", target: tezosHandle(), when: hour })
+      expect(mute("Mute this one for half an hour.")?.when).toBe(new Date(now + 30 * 60_000).toISOString())
+      expect(mute("Mute that for 20 minutes.")?.when).toBe(new Date(now + 20 * 60_000).toISOString())
+      expect(mute("Silence it for two hours.")?.when).toBe(new Date(now + 2 * 60 * 60_000).toISOString())
+      expect(mute("Unmute it.")).toMatchObject({ act: "mute", how: "unmute", target: tezosHandle() })
+      // A session's update off the desk is muted by its own keys, which the assistant knows.
+      expect(mute("Mute it.", { subject: terminal })).toMatchObject({ act: "mute", how: "mute", target: "" })
+      // With a question open, it takes its place.
+      expect(mute("Mute it.", { open: Option.some(which([ref(tezos), ref(mina)])) })?.pending).toBe("replaces")
+      // Nothing he's on about, a thread by name, a time it can't count or anything more: the model's.
+      for (const [heard, subject] of [
+        ["Mute it.", { _tag: "Nothing" }],
+        ["Mute the Tezos one.", on],
+        ["Mute it until tomorrow.", on],
+        ["Mute it for a while.", on],
+        ["Unmute it for an hour.", on],
+        ["Mute it and tell it to stop.", on],
+      ] as const) {
+        expect(mute(heard, { subject: subject as Assistant.Subject })).toBeUndefined()
+      }
+      // "Mute" or "silence" alone is still to stop talking, and "quiet" never mutes.
+      expect(mute("Mute.")?.act).toBe("dismiss")
+      expect(mute("Quiet it.")).toBeUndefined()
+    })
+
+    test("'mute it' begun over yapd's own voice is the model's, and said too faintly over something, it's dropped", () => {
+      const over = (heard: string, voiced: number, echo?: string) => {
+        const given = situation(heard, { subject: on })
+        return { ...given, utterance: { ...given.utterance, via: "reply" as const, voiced, ...(echo === undefined ? {} : { echo }) } }
+      }
+      expect(Brain.fast(over("Mute it.", 2, "Migrate Tezos Integration is done."), lines)).toBeUndefined()
+      expect(Brain.fast(over("Mute it.", 2), lines)?.act).toBe("mute")
+      const faint = Brain.check(Brain.decision({ act: "mute", how: "mute", target: tezosHandle() }), over("Mute it.", 0.2), lines)
+      expect(faint._tag === "Do" ? faint.plan.decision.act : faint).toBe("resume")
+    })
+
+    test("'what's muted' is told from what's muted, by name, and 'unmute everything' unmutes them all, with no model", () => {
+      const mutes = [
+        { key: `t3:Rosie:${tezos.id}`, at: now - 60_000 },
+        { key: "session:rig:claude:s-1", called: "the Claude session in integration on rig", at: now - 30_000, ends: now + 60 * 60_000 },
+      ]
+      const told = mute("What's muted?", { mutes })
+      expect(told).toMatchObject({ act: "answer" })
+      expect(told?.spoken).toBe(`You've muted Migrate Tezos Integration and the Claude session in integration on rig until ${Brain.time(now + 60 * 60_000)}, sir.`)
+      expect(mute("Which threads are muted?", { mutes: [] })?.spoken).toBe("Nothing's muted, sir.")
+      for (const heard of ["Unmute everything.", "Unmute all.", "Unmute them all."]) expect(mute(heard)).toMatchObject({ act: "mute", how: "clear" })
+      const checked = Brain.check(Brain.decision({ act: "mute", how: "clear" }), situation("Unmute everything."), lines)
+      expect(checked._tag === "Do" ? checked.plan.decision.how : checked).toBe("clear")
+    })
+
+    test("'scratch that' takes back a mute made since the last thing yapd did, and that thing when it came after", () => {
+      const sent: Ledger.Row = {
+        commandId: "yapd:u0:0",
+        messageId: "yapd:u0:0:m",
+        utterance: "u0",
+        step: 0,
+        kind: "message",
+        machine: "Rosie",
+        thread: tezos.id,
+        body: { _tag: "Send", text: "Use the fee table.", messageId: "yapd:u0:0:m", how: "now" },
+        digest: "use the fee table",
+        state: "sent",
+        how: "steered",
+        reason: null,
+        at: now - 60_000,
+      }
+      const change = (at: number) => Option.some({ how: "mute" as const, at, added: [{ key: `t3:Rosie:${tezos.id}`, at }], removed: [] })
+      // Muted after the message went: the mute is what's taken back, never the message.
+      expect(mute("Scratch that.", { acted: Option.some(sent), muteChange: change(now - 10_000) })).toMatchObject({ act: "mute", how: "undo" })
+      // Muted with nothing else done since.
+      expect(mute("Undo that.", { muteChange: change(now - 10_000) })).toMatchObject({ act: "mute", how: "undo" })
+      // The message went after the mute: it's what's taken back.
+      expect(mute("Scratch that.", { acted: Option.some(sent), muteChange: change(now - 90_000) })).toMatchObject({ act: "undo", target: tezosHandle() })
+      // With a question open, "cancel that" is about the question, the model's to judge, never a mute taken back.
+      expect(mute("Cancel that.", { open: Option.some(which([ref(tezos), ref(mina)])), muteChange: change(now - 10_000) })).toBeUndefined()
+      const checked = Brain.check(Brain.decision({ act: "mute", how: "undo" }), situation("Scratch that."), lines)
+      expect(checked._tag === "Do" ? checked.plan.decision.how : checked).toBe("undo")
+    })
+
+    test("a mute the model isn't sure of asks between the threads it could be, and one it names goes ahead", () => {
+      const handles = desk().threads.map(({ handle }) => handle)
+      const unsure = Brain.check(Brain.decision({ act: "mute", how: "mute", target: handles[0]!, sure: "low", others: handles[1]! }), situation("Mute the migration one."), lines)
+      expect(unsure._tag).toBe("Ask")
+      const sure = Brain.check(Brain.decision({ act: "mute", how: "mute", target: handles[0]!, sure: "high" }), situation("Mute the Mina one."), lines)
+      expect(sure._tag === "Do" ? Option.map(sure.plan.target, ({ handle }) => handle) : sure).toEqual(Option.some(handles[0]!))
+      const nothing = Brain.check(Brain.decision({ act: "mute", how: "mute", sure: "low", others: `${handles[0]}, ${handles[1]}` }), situation("Mute that one."), lines)
+      expect(nothing._tag).toBe("Ask")
+    })
+
+    test("the model sees which threads are muted, what was kept quiet as said in LATELY, and what he missed of a muted thread as one line", () => {
+      const tezosKey = `t3:Rosie:${tezos.id}`
+      const quiet = (id: number, at: number, said: string): Kept => ({ id, at, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said, detail: { priority: "done", muted: true } })
+      const told = Brain.prompt(
+        situation("What did I miss?", {
+          mutes: [{ key: tezosKey, at: now - 60 * 60_000 }],
+          lately: [quiet(1, now - 30 * 60_000, "integration. Still going.")],
+          quieted: [quiet(2, now - 20 * 60_000, "integration. Compiling."), quiet(3, now - 5 * 60_000, "integration. Tests running.")],
+          unheard: [{ id: 4, at: now - 3 * 60_000, kind: "update", machine: "Rosie", thread: mina.id, project: "integration-connectors", said: "The tickets are open." }],
+        }),
+        Option.none(),
+      )
+      expect(told).toContain(`«Migrate Tezos Integration» · integration · Rosie · running`)
+      expect(told).toMatch(/«Migrate Tezos Integration» · integration · Rosie · running [^\n]* · muted\n/)
+      expect(told).toContain(`MUTED, threads whose progress and finished work you keep to yourself, though what needs him still comes through: «Migrate Tezos Integration»`)
+      expect(told).toContain(`you kept quiet about it, since he muted it (integration, `)
+      expect(told).toContain(`- from muted integration (2 updates, latest 5 min ago): «integration. Tests running.»`)
+      expect(told).toContain(`you told him (integration-connectors, `)
+      expect(Brain.prompt(situation("What's going on?"), Option.none())).not.toContain("MUTED")
+    })
   })
 })

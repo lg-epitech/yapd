@@ -3,6 +3,7 @@ import { Clock, Effect, Option, PubSub, Stream } from "effect"
 import { hostname } from "node:os"
 import type * as Conversation from "./Conversation.ts"
 import type { Journal, Naming } from "./Journal.ts"
+import { gist } from "./Responder.ts"
 import type * as Store from "./Store.ts"
 import type * as Threads from "./Threads.ts"
 
@@ -48,6 +49,47 @@ export const keysOf = (update: Pick<Conversation.Update, "session" | "about" | "
     ...(ref === undefined ? [] : [key.thread(ref)]),
     ...(update.session.startsWith("finished:") ? [] : [key.session(called(update.thread.origin.host ?? hostname()), update.session)]),
   ]
+}
+
+/** Counts as they're said for how long a mute lasts, beside the digits Whisper often writes. */
+const counts: ReadonlyMap<string, number> = new Map([
+  ["a", 1], ["an", 1], ["one", 1], ["two", 2], ["three", 3], ["four", 4], ["five", 5], ["six", 6], ["seven", 7], ["eight", 8], ["nine", 9],
+  ["ten", 10], ["eleven", 11], ["twelve", 12], ["fifteen", 15], ["twenty", 20], ["thirty", 30], ["forty", 40], ["forty five", 45],
+  ["fifty", 50], ["sixty", 60], ["ninety", 90],
+])
+
+/** How many minutes "an hour", "half an hour", "ten minutes" or "2 hours" is, or none when it's said any other way. */
+const lasting = (said: string) => {
+  if (said === "half an hour") return 30
+  const asked = /^(.+?) (minute|minutes|hour|hours)$/.exec(said)
+  if (asked === null) return undefined
+  const count = /^\d{1,3}$/.test(asked[1]!) ? Number(asked[1]) : counts.get(asked[1]!)
+  if (count === undefined || count === 0) return undefined
+  return asked[2]!.startsWith("hour") ? count * 60 : count
+}
+
+/** What he's on about, said as a whole: never a thread by name, which is the model's to tell. */
+const it = "it|that|this|this thread|that thread|this one|that one"
+
+/** Unmuting every thread, said as a whole. */
+const everything: ReadonlySet<string> = new Set(["unmute everything", "unmute all", "unmute them all", "unmute all threads", "unmute every thread", "unmute all of them"])
+
+/**
+ * Muting or unmuting what he's on about, or unmuting everything, said in so
+ * many words, like "mute it", "silence this one for an hour" or "unmute
+ * that", with how many minutes a mute for a while lasts. Anything else, like
+ * a thread by name, a mute "until tomorrow", or more said around it, is
+ * none: the model's to work out.
+ */
+export const command = (heard: string): Option.Option<{ readonly how: "mute" | "unmute" | "clear"; readonly minutes?: number }> => {
+  const said = gist(heard)
+  if (everything.has(said)) return Option.some({ how: "clear" })
+  const asked = new RegExp(`^(mute|silence|unmute) (?:${it})(?: for (.+))?$`).exec(said)
+  if (asked === null) return Option.none()
+  const how = asked[1] === "unmute" ? "unmute" : "mute"
+  if (asked[2] === undefined) return Option.some({ how })
+  const minutes = how === "mute" ? lasting(asked[2]) : undefined
+  return minutes === undefined ? Option.none() : Option.some({ how, minutes })
 }
 
 /** A thread he muted. */

@@ -133,7 +133,7 @@ export const serve = Effect.gen(function* () {
     naming,
   })
   // Muting from the menu or by voice: never anything that reaches an agent.
-  const controls = Mutes.controls({ mutes, silence: daemon.silence, journal })
+  const controls = Option.getOrElse(daemon.controls, () => Mutes.controls({ mutes, silence: daemon.silence, journal }))
   const icons = yield* Icons.make({ actions: threads.actions })
   const latest = yield* Latest.make({ here: machine, journal, mutes, icons, threads })
   const drafts = yield* Drafts.make({
@@ -163,6 +163,9 @@ export const serve = Effect.gen(function* () {
     upcoming: daemon.upcoming,
     // What a thread waits on him for, worded as notices word it, to read back what he answers before he's heard it asked.
     compose: yield* Notices.composer(threads),
+    mutes,
+    controls,
+    naming,
   })
   // What threads need him for, what failed and what finished with no hook, each said once, ever.
   const notices = yield* Notices.make({

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import { Audio } from "./Audio.ts"
+import * as Brain from "./Brain.ts"
 import { type Ticket, Waiting, wake } from "./ClaudeCode.ts"
 import { Condenser, introduce, speakable, type Summary, type Turn } from "./Condenser.ts"
 import * as Config from "./Config.ts"
@@ -22,7 +23,7 @@ import * as Recent from "./Recent.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
 import * as T3Code from "./T3Code.ts"
-import type * as Threads from "./Threads.ts"
+import * as Threads from "./Threads.ts"
 import { extension, Voice } from "./Voice.ts"
 
 const squash = (text: string) => text.replace(/\s+/g, " ").trim()
@@ -91,6 +92,8 @@ export const make = (
   const called: Naming = options.naming ?? ((host) => host.split(".")[0] ?? host)
   /** The mute an update's keys are under, if any. */
   const muting = (keys: ReadonlyArray<string>) => (options.mutes === undefined ? Effect.succeedNone : options.mutes.muted(keys))
+  /** Muting from the menu or by voice, which drops what of a thread waits to be said: none without mutes. Never anything sent to an agent. */
+  let controls: Mutes.Controls | undefined
 
   const dir = yield* Effect.acquireRelease(
     Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-"))),
@@ -475,6 +478,31 @@ export const make = (
     // Only what goes to its thread by yapd's own hand, which is held back when it could give a secret away.
     withholds: (update, message) =>
       update.about !== undefined && options.hands !== undefined && steered(update) ? options.hands.keeps(update.about, message) : Effect.succeed(false),
+    // "Mute it" said over an update, plainly his and in so many words, is its thread muted: never anything sent to its agent.
+    mute: (update, heard, voiced, echo) => {
+      const asked = Mutes.command(heard)
+      const muted = controls
+      if (muted === undefined || Option.isNone(asked) || echo !== undefined || voiced < Brain.faintest) return Option.none()
+      const { how, minutes } = asked.value
+      return Option.some(
+        Effect.gen(function* () {
+          const lines = yield* persona.lines
+          const now = yield* Clock.currentTimeMillis
+          const said = Brain.muteLines(lines, "it", now)
+          if (how === "clear") return said.cleared((yield* muted.clear).length > 0)
+          // By its thread when it's tied to one, else by its session.
+          const [key] = Mutes.keysOf(update, called)
+          if (key === undefined) return lines.cantTell
+          if (how === "unmute") return (yield* muted.unmute(key)) ? said.unmuted : said.notMuted
+          const ends = minutes === undefined ? undefined : now + minutes * 60_000
+          const session = update.about === undefined && update.owner === undefined
+          const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
+          const where = update.thread.origin.host === undefined || called(update.thread.origin.host) === called(hostname()) ? "" : ` on ${called(update.thread.origin.host)}`
+          const done = yield* muted.mute({ key, project: update.project, ...(session ? { called: `the ${agent} session in ${Threads.spoken(update.project)}${where}` } : {}) }, ends)
+          return done ? said.muted(ends) : said.already
+        }),
+      )
+    },
   })
 
   const unsummarized = (project: string): Summary => ({
@@ -1201,7 +1229,7 @@ export const make = (
    * own Stop coming late isn't said either. What's still being prepared looks
    * for itself.
    */
-  const silence = (keys: ReadonlyArray<string>) =>
+  const silence = (keys: ReadonlyArray<string>): Effect.Effect<void> =>
     Effect.gen(function* () {
       const muted = new Set(keys)
       const dropped = yield* STM.commit(
@@ -1226,6 +1254,8 @@ export const make = (
       yield* journal.mute(kept)
       yield* Effect.logInfo(`Muted ${dropped.length === 1 ? "an update" : `${dropped.length} updates`} waiting to be said`)
     })
+
+  if (options.mutes !== undefined) controls = Mutes.controls({ mutes: options.mutes, silence, journal })
 
   /**
    * Drops an update the user told to stop, even one a dictation cut off and
@@ -1466,6 +1496,8 @@ export const make = (
       ),
     ),
     silence,
+    /** Muting from the menu or by voice, which drops what of a thread waits to be said: none without mutes. */
+    controls: Option.fromNullable(controls),
     /** The newest update he heard that's muted, or shown, under this key, by its id among those heard, to hear again. */
     latestHeard: (key: string) =>
       Effect.map(SubscriptionRef.get(state), ({ heard }) =>
