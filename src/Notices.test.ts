@@ -297,24 +297,35 @@ describe("Notices", () => {
 
   test("a failed run left to the Stop that told of it is said after all should what that Stop told of be kept quiet, as his muting the thread does", async () => {
     const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { status: "failed", latestRunId: "run-3", lastErrorClass: "provider_error" })
+    const tezos = thread("tezos", "Migrate Tezos Integration", { latestRunId: "run-1" })
     const stop: Notices.Stop = { at: now - 1_000, message: "The provider had an error, so I stopped." }
     const result = await run(
       Effect.gen(function* () {
         const left: Array<{ readonly stops: ReadonlyArray<Notices.Stop>; readonly failure: Effect.Effect<void> }> = []
-        const { hear, wait, told } = yield* notices({
-          view: [mina],
+        const { hear, wait, told, finished } = yield* notices({
+          view: [mina, tezos],
           bounded: {
             mina: {
               runs: [{ id: "run-3", status: "failed", ordinal: 1, startedAt: minutes(5) }],
               turnItems: [failure("run-3", "provider_error", "API Error: 500 Internal server error")],
               sessions: ["s-mina"],
             },
+            // A run that went well, which its Stop told of: nothing of it is a failure to say, kept quiet or not.
+            tezos: {
+              runs: [{ id: "run-1", status: "completed", ordinal: 1, startedAt: minutes(5), userMessageId: "m1" }],
+              messages: [{ id: "a1", runId: "run-1", role: "assistant", text: "Done, the fee table is in.", createdAt: minutes(0) }],
+              sessions: ["s-tezos"],
+            },
           },
-          stops: new Map([["s-mina", [stop]]]),
+          stops: new Map([
+            ["s-mina", [stop]],
+            ["s-tezos", [{ at: now - 2_000, message: "Done, the fee table is in." }]],
+          ]),
           left,
         })
-        yield* hear(ended(mina, "run-3"))
-        yield* wait(10)
+        yield* hear(ended(mina, "run-3"), ended(tezos, "run-1"))
+        yield* wait(20)
+        expect(finished).toEqual([])
         const before = [...told]
         // What the Stop told of was kept quiet.
         for (const { failure } of left) yield* failure
