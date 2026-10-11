@@ -17,13 +17,15 @@ export interface Options {
   /**
    * The same once its own voice has stopped the line it's saying and it
    * picked up again, for the rest of that line's first seconds: about a
-   * third of a second of speech, which its own voice ducked seldom lasts
-   * and his words do, even a short "Stop.". In a simulation with Silero,
-   * with its own voice dying away over those seconds as the echo
-   * cancellation learns it, a line stopped twice for it in 1 of 48 rather
-   * than 4, and none of his words was let go; half a second let a third of
-   * his short words go. Held at one level all along, its own voice is
-   * speech like his, and still stops most lines more than once.
+   * third of a second of speech, which its own voice ducked lasts less often
+   * than his words do. What goes quiet short of that after as much as `wary`
+   * is kept whole, as it may be a word of his, like "Yes.". In a simulation
+   * with Silero and Whisper, with its own voice dying away over those seconds
+   * as the echo cancellation learns it, 8 of 22 lines it stopped stopped more
+   * than once, against 14 with no cap; 13 or 16 frames cut that to 3, but let
+   * more of his short words run into its own voice and be lost. Held at one
+   * level all along, its own voice is speech like his, and still stops most
+   * lines more than once.
    */
   readonly capped: number
   /** Unvoiced frames in a row that end an onset that never became speech. */
