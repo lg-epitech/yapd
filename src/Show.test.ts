@@ -115,9 +115,18 @@ const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["a
 })
 
 /** yapd's API serving `show`'s cards and nothing else, and how an app asks it what revision it's at and to put a card back up. */
+/** What the API does with threads' mutes and icons, here nothing: no thread is known. */
+const unmuted: Pick<Server.Api, "mute" | "unmute" | "replayThread" | "icon"> = {
+  mute: () => Effect.succeed("unknown"),
+  unmute: () => Effect.void,
+  replayThread: () => Effect.succeed("unknown"),
+  icon: () => Effect.succeedNone,
+}
+
 const serving = (show: Show.Show["Type"]) =>
   Effect.map(
     Server.serve(0, {
+      ...unmuted,
       handle: () => Effect.succeed(undefined),
       state: Show.stated(Stream.succeed({ on: true, activity: "idle" as const, updates: [] }), show),
       turn: () => Effect.void,
@@ -292,17 +301,23 @@ describe("Show", () => {
           const asked: Array<Server.Page> = []
           const kept: Kept = { id: 7, at: now, kind: "update", project: "yapd", said: "yapd. The tests pass.", heardAt: now + 9_000 }
           const desk: Threads.Desk = { threads: [pulled("https://github.com/lg-epitech/yapd/pull/412")], away: [] }
+          const muted = new Set([`t3:${desk.threads[0]!.ref.machine}:${desk.threads[0]!.ref.id}`])
           const server = yield* Server.serve(0, {
+            ...unmuted,
             handle: () => Effect.succeed(undefined),
             state: Show.stated(Stream.succeed({ on: true, activity: "idle" as const, updates: [] }), show),
             turn: () => Effect.void,
             replay: () => Effect.succeed("unknown" as const),
             utter: () => Effect.succeed(Option.none()),
-            ...Show.served(show, Effect.succeed(desk), (page) =>
-              Effect.sync(() => {
-                asked.push(page)
-                return [kept]
-              }),
+            ...Show.served(
+              show,
+              Effect.succeed(desk),
+              (page) =>
+                Effect.sync(() => {
+                  asked.push(page)
+                  return [kept]
+                }),
+              Effect.succeed(muted),
             ),
           })
           const url = `http://127.0.0.1:${server.port}`
@@ -335,7 +350,8 @@ describe("Show", () => {
           expect(state).toEqual({ on: true, activity: "idle", updates: [], showing: { id: card.id, kind: "said", title: "What I said", at: new Date(card.at).toISOString(), revision: 1 }, revision: 1 })
           expect(state.showing?.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/)
           expect(served).toEqual({ id: card.id, kind: "said", title: "What I said", markdown: card.markdown, caption: "Two running, sir.", at: new Date(card.at).toISOString() })
-          expect(threads).toEqual(Show.listing(desk))
+          expect(threads).toEqual(Show.listing(desk, muted))
+          expect((threads as ReadonlyArray<Server.Machine>)[0]?.threads[0]).toMatchObject({ key: `t3:Rosie:${desk.threads[0]!.ref.id}`, muted: true })
           expect(journal).toEqual([{ id: 7, at: "2026-10-08T22:00:00.000Z", kind: "update", project: "yapd", said: "yapd. The tests pass.", heard: "2026-10-08T22:00:09.000Z" }])
           expect(asked).toEqual([{ most: 5, kinds: [] }])
           expect(after).toMatchObject({ showing: null, revision: 2 })
@@ -596,27 +612,40 @@ describe("Show", () => {
     const unsafe = ["javascript:alert(1)", "file:///Applications/Calculator.app", "vscode://file/etc/passwd", "http://github.com/lg-epitech/yapd/pull/7"].map((url, index) =>
       linked(`d-${index}`, url),
     )
-    const machines = Show.listing({
-      threads: [
-        listed,
-        { ...listed, handle: "t2", ref: { machine: "Rosie", id: tezos.id }, project: "integration", thread: tezos, state: "running", since: Date.parse("2026-10-08T21:40:00.000Z") },
-        { ...listed, handle: "t3", ref: { machine: "rig", id: relay.id }, here: false, thread: relay, state: "idle", since: Date.parse("2026-10-08T20:00:00.000Z") },
-        ...unsafe.map((thread, index): Threads.Listed => ({ ...listed, handle: `t${4 + index}`, ref: { machine: "laptop", id: thread.id }, thread, state: "idle", since: Date.parse("2026-10-08T19:00:00.000Z") })),
-      ],
-      away: [{ machine: "Alaska", reason: "I can't reach Alaska right now." }],
-    })
+    const machines = Show.listing(
+      {
+        threads: [
+          listed,
+          { ...listed, handle: "t2", ref: { machine: "Rosie", id: tezos.id }, project: "integration", thread: tezos, state: "running", since: Date.parse("2026-10-08T21:40:00.000Z") },
+          { ...listed, handle: "t3", ref: { machine: "rig", id: relay.id }, here: false, thread: relay, state: "idle", since: Date.parse("2026-10-08T20:00:00.000Z") },
+          ...unsafe.map((thread, index): Threads.Listed => ({ ...listed, handle: `t${4 + index}`, ref: { machine: "laptop", id: thread.id }, thread, state: "idle", since: Date.parse("2026-10-08T19:00:00.000Z") })),
+        ],
+        away: [{ machine: "Alaska", reason: "I can't reach Alaska right now." }],
+      },
+      // He muted the Tezos one, and rig's relay, by their keys.
+      new Set([`t3:Rosie:${tezos.id}`, `t3:rig:${relay.id}`]),
+    )
+    const keyed = (machine: string, id: string, muted = false) => ({ key: `t3:${machine}:${id}`, muted })
     expect(machines).toEqual([
       {
         machine: "Rosie",
         threads: [
-          { id: waiting.id, project: "yapd", title: "Clean up the build", state: "approval", since: "2026-10-08T21:55:00.000Z" },
-          { id: tezos.id, project: "integration", title: "Migrate the Tezos integration", state: "running", since: "2026-10-08T21:40:00.000Z", pr: { number: 412, url, state: "open", checks: "passing" } },
+          { id: waiting.id, ...keyed("Rosie", waiting.id), project: "yapd", title: "Clean up the build", state: "approval", since: "2026-10-08T21:55:00.000Z" },
+          {
+            id: tezos.id,
+            ...keyed("Rosie", tezos.id, true),
+            project: "integration",
+            title: "Migrate the Tezos integration",
+            state: "running",
+            since: "2026-10-08T21:40:00.000Z",
+            pr: { number: 412, url, state: "open", checks: "passing" },
+          },
         ],
       },
-      { machine: "rig", threads: [{ id: relay.id, project: "yapd", title: "Fix the relay", state: "idle", since: "2026-10-08T20:00:00.000Z" }] },
+      { machine: "rig", threads: [{ id: relay.id, ...keyed("rig", relay.id, true), project: "yapd", title: "Fix the relay", state: "idle", since: "2026-10-08T20:00:00.000Z" }] },
       {
         machine: "laptop",
-        threads: unsafe.map(({ id }) => ({ id, project: "yapd", title: "Tidy the docs", state: "idle", since: "2026-10-08T19:00:00.000Z", pr: { number: 7 } })),
+        threads: unsafe.map(({ id }) => ({ id, ...keyed("laptop", id), project: "yapd", title: "Tidy the docs", state: "idle", since: "2026-10-08T19:00:00.000Z", pr: { number: 7 } })),
       },
       { machine: "Alaska", reason: "I can't reach Alaska right now.", threads: [] },
     ])

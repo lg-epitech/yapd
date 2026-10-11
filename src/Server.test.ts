@@ -18,7 +18,9 @@ const card: Server.Card = {
 const machines: ReadonlyArray<Server.Machine> = [
   {
     machine: "Rosie",
-    threads: [{ id: "850299f8", project: "integration", title: "Migrate the Tezos integration", state: "running", since: "2026-10-02T09:40:00.000Z" }],
+    threads: [
+      { id: "850299f8", key: "t3:Rosie:850299f8", muted: false, project: "integration", title: "Migrate the Tezos integration", state: "running", since: "2026-10-02T09:40:00.000Z" },
+    ],
   },
   { machine: "rig", reason: "I can't see rig's threads yet.", threads: [] },
 ]
@@ -36,6 +38,10 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   threads: Effect.succeed([]),
   journal: () => Effect.succeed([]),
   watch: Effect.void,
+  mute: () => Effect.succeed("unknown"),
+  unmute: () => Effect.void,
+  replayThread: () => Effect.succeed("unknown"),
+  icon: () => Effect.succeedNone,
 })
 
 /**
@@ -48,11 +54,28 @@ const stateful = Effect.gen(function* () {
   const ref = yield* SubscriptionRef.make<Server.State>({ on: true, activity: "idle", updates: [update], showing: { id, kind, title, at, revision: 0 }, revision: 0 })
   const pages: Array<Server.Page> = []
   let watching = 0
+  /** The threads it lists, and which are muted, until when. */
+  const known = new Set(["t3:Rosie:850299f8", "session:rig:claude:s-1"])
+  const muted = new Map<string, number | undefined>()
   return {
     ref,
     pages,
+    muted,
     watching: () => watching,
     api: {
+      mute: (key, until) =>
+        Effect.sync(() => {
+          if (!/^(t3|session):/.test(key)) return "invalid" as const
+          if (!known.has(key) && !muted.has(key)) return "unknown" as const
+          muted.set(key, until)
+          return "muted" as const
+        }),
+      unmute: (key) => Effect.sync(() => void muted.delete(key)),
+      replayThread: (key) => Effect.map(SubscriptionRef.get(ref), (state) => (!known.has(key) ? "unknown" : state.on ? "queued" : "off")),
+      icon: (machine, project) =>
+        Effect.succeed(
+          machine === "Rosie" && project === "p/1" ? Option.some({ bytes: new TextEncoder().encode("<svg/>"), type: "image/svg+xml", revision: "9f2c4e1a7b3d" }) : Option.none(),
+        ),
       handle: () => Effect.succeed(undefined),
       state: ref.changes,
       turn: (on) => SubscriptionRef.update(ref, (state) => ({ ...state, on })),
@@ -379,6 +402,70 @@ describe("Server", () => {
       // The hooks, curl and the menu bar app say nowhere.
       expect((yield* utter({})).status).toBe(202)
       expect(typed).toEqual(["Open that PR."])
+    })))
+  })
+
+  test("mutes and unmutes a thread by its key, with or without when it ends, and turns away what isn't a thread or a time to come", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api, muted } = yield* stateful
+      const server = yield* Server.serve(0, api)
+      const url = `http://127.0.0.1:${server.port}`
+      const call = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init).then((response) => response.status))
+      const key = encodeURIComponent("t3:Rosie:850299f8")
+      const later = new Date(Date.now() + 60 * 60_000).toISOString()
+      const statuses = {
+        bare: yield* call(`/threads/${key}/mute`, { method: "PUT" }),
+        until: yield* call(`/threads/${encodeURIComponent("session:rig:claude:s-1")}/mute`, { method: "PUT", body: JSON.stringify({ until: later }) }),
+        past: yield* call(`/threads/${key}/mute`, { method: "PUT", body: JSON.stringify({ until: "2020-01-01T00:00:00.000Z" }) }),
+        garbled: yield* call(`/threads/${key}/mute`, { method: "PUT", body: "{until" }),
+        notTime: yield* call(`/threads/${key}/mute`, { method: "PUT", body: JSON.stringify({ until: "soon" }) }),
+        unknown: yield* call(`/threads/${encodeURIComponent("t3:Rosie:nope")}/mute`, { method: "PUT" }),
+        notKey: yield* call(`/threads/${encodeURIComponent("whatever")}/mute`, { method: "PUT" }),
+        undecodable: yield* call("/threads/%E0%A4%A/mute", { method: "PUT" }),
+      }
+      const mutedThen = [...muted.keys()]
+      const unmuted = [yield* call(`/threads/${key}/mute`, { method: "DELETE" }), yield* call(`/threads/${key}/mute`, { method: "DELETE" })]
+      expect(statuses).toEqual({ bare: 204, until: 204, past: 400, garbled: 400, notTime: 400, unknown: 404, notKey: 400, undecodable: 400 })
+      expect(mutedThen).toEqual(["t3:Rosie:850299f8", "session:rig:claude:s-1"])
+      expect(muted.get("session:rig:claude:s-1")).toBe(Date.parse(later))
+      // Unmuted, or not muted at all.
+      expect(unmuted).toEqual([204, 204])
+      expect([...muted.keys()]).toEqual(["session:rig:claude:s-1"])
+    })))
+  })
+
+  test("says a thread's latest update again by its key only while yapd is on, and serves a project's icon by its machine and id, once until it changes", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api } = yield* stateful
+      const server = yield* Server.serve(0, api)
+      const url = `http://127.0.0.1:${server.port}`
+      const call = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init))
+      const replay = (key: string) => Effect.map(call(`/threads/${encodeURIComponent(key)}/replay`, { method: "POST" }), ({ status }) => status)
+      const heard = [yield* replay("t3:Rosie:850299f8"), yield* replay("t3:Rosie:nope")]
+      yield* call("/state", { method: "PUT", headers: { "content-type": "application/json" }, body: '{"on": false}' })
+      const off = yield* replay("t3:Rosie:850299f8")
+      const icon = yield* call(`/projects/Rosie/${encodeURIComponent("p/1")}/icon`)
+      const body = yield* Effect.promise(() => icon.text())
+      const again = yield* call(`/projects/Rosie/${encodeURIComponent("p/1")}/icon`, { headers: { "if-none-match": '"9f2c4e1a7b3d"' } })
+      const changed = yield* call(`/projects/Rosie/${encodeURIComponent("p/1")}/icon`, { headers: { "if-none-match": '"0000"' } })
+      const none = yield* call("/projects/rig/p-2/icon")
+      const state = (yield* Effect.flatMap(call("/state"), (response) => Effect.promise(() => response.json()))) as Server.State
+      expect(heard).toEqual([202, 404])
+      expect(off).toBe(409)
+      expect({ status: icon.status, body, type: icon.headers.get("content-type"), etag: icon.headers.get("etag") }).toEqual({
+        status: 200,
+        body: "<svg/>",
+        type: "image/svg+xml",
+        etag: '"9f2c4e1a7b3d"',
+      })
+      // Shown as an image, never run as a page, whatever's in it.
+      expect(icon.headers.get("x-content-type-options")).toBe("nosniff")
+      expect(icon.headers.get("content-security-policy")).toBe("default-src 'none'")
+      expect(again.status).toBe(304)
+      expect(changed.status).toBe(200)
+      expect(none.status).toBe(404)
+      // What older apps read is still there.
+      expect(state.updates).toEqual([update])
     })))
   })
 })

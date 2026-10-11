@@ -2,6 +2,7 @@ import { Clock, Context, Effect, Option, type Scope, Stream, SubscriptionRef } f
 import * as Brain from "./Brain.ts"
 import { english } from "./Condenser.ts"
 import type { Kept } from "./Journal.ts"
+import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as Process from "./Process.ts"
 import type * as Server from "./Server.ts"
@@ -644,8 +645,12 @@ export const readable = (text: string) => {
 
 // ---------------------------------------------------------------- the API's
 
-/** The threads on each machine as `/threads` lists them, those that need him first, and the machines it can't see with why. */
-export const listing = (desk: Threads.Desk): ReadonlyArray<Server.Machine> => {
+/**
+ * The threads on each machine as `/threads` lists them, those that need him
+ * first, each with the key it's muted by and whether it is, by the keys in
+ * `muted`, and the machines it can't see with why.
+ */
+export const listing = (desk: Threads.Desk, muted: ReadonlySet<string> = new Set()): ReadonlyArray<Server.Machine> => {
   const machines = [...new Set(desk.threads.map(({ ref }) => ref.machine))]
   return [
     ...machines.map((machine) => ({
@@ -654,6 +659,8 @@ export const listing = (desk: Threads.Desk): ReadonlyArray<Server.Machine> => {
         .filter(({ ref }) => ref.machine === machine)
         .map((listed) => ({
           id: listed.ref.id,
+          key: Mutes.key.thread(listed.ref),
+          muted: muted.has(Mutes.key.thread(listed.ref)),
           project: listed.project,
           title: listed.thread.title,
           state: listed.state,
@@ -714,16 +721,21 @@ export const pointer = ({ card, since }: Up): Server.Showing | null =>
 export const stated = (state: Stream.Stream<Omit<Server.State, "showing" | "revision">>, show: Show["Type"]): Stream.Stream<Server.State> =>
   Stream.zipLatestWith(state, show.up, (state, up) => ({ ...state, showing: pointer(up), revision: up.revision }))
 
-/** What the API serves of the cards, the threads on `desk` and the journal's pages, and how it counts a UI that shows cards as watching. */
+/**
+ * What the API serves of the cards, the threads on `desk`, with which of them
+ * are `muted`, by their keys, and the journal's pages, and how it counts a UI
+ * that shows cards as watching.
+ */
 export const served = (
   show: Show["Type"],
   desk: Effect.Effect<Threads.Desk>,
   page: (page: Server.Page) => Effect.Effect<ReadonlyArray<Kept>>,
+  muted: Effect.Effect<ReadonlySet<string>> = Effect.succeed(new Set()),
 ): Pick<Server.Api, "card" | "hide" | "back" | "threads" | "journal" | "watch"> => ({
   card: (id) => Effect.map(show.card(id), Option.map(face)),
   hide: (id, shown) => Effect.asVoid(show.hide(id, shown)),
   back: show.back,
-  threads: Effect.map(desk, listing),
+  threads: Effect.map(Effect.zip(desk, muted), ([desk, muted]) => listing(desk, muted)),
   journal: (asked) => Effect.map(page(asked), (kept) => kept.map(entry)),
   watch: show.watch,
 })

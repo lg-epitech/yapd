@@ -1,5 +1,6 @@
 import { Data, Effect, FiberSet, Option, Schema, type Scope, Stream } from "effect"
 import type { Doing } from "./Audio.ts"
+import type * as Icons from "./Icons.ts"
 import { type Kind, kinds } from "./Journal.ts"
 import { Origin } from "./Origin.ts"
 import { Agent, Payload } from "./Payload.ts"
@@ -30,6 +31,8 @@ export interface State {
     /** ISO 8601, when the agent's turn ended. */
     readonly at: string
   }>
+  /** The threads with the latest updates, newest first. */
+  readonly recent?: ReadonlyArray<Recent>
   /** The card yapd is showing, or null. */
   readonly showing?: Showing | null
   /**
@@ -38,6 +41,31 @@ export interface State {
    * up only if nothing came since.
    */
   readonly revision?: number
+}
+
+/** A thread with a latest update, as `/state` lists it in `recent`. */
+export interface Recent {
+  /** What it's muted and heard again by. */
+  readonly key: string
+  readonly machine: string
+  /** T3 Code's id for it, or null for a session yapd can't tie to a thread. */
+  readonly thread: string | null
+  readonly title: string
+  readonly project?: {
+    readonly name: string
+    /** Only for a project T3 Code has. */
+    readonly id?: string
+    readonly icon?: Icons.Icon
+  }
+  /** What yapd said of its latest update, or would have. */
+  readonly text: string
+  /** ISO 8601, when the agent's turn ended. */
+  readonly at: string
+  readonly muted: boolean
+  /** ISO 8601, when the mute ends on its own, if it does. */
+  readonly until?: string
+  /** Whether it waits on him. */
+  readonly waiting: boolean
 }
 
 /** A card as `/state` points at it. */
@@ -71,6 +99,9 @@ export interface Machine {
   readonly reason?: string
   readonly threads: ReadonlyArray<{
     readonly id: string
+    /** What it's muted by. */
+    readonly key: string
+    readonly muted: boolean
     readonly project: string
     readonly title: string
     readonly state: string
@@ -130,11 +161,20 @@ export interface Api {
   readonly journal: (page: Page) => Effect.Effect<ReadonlyArray<Entry>>
   /** Counts a UI that follows the state and shows cards as watching for as long as the scope lasts, so yapd knows what it shows is seen. */
   readonly watch: Effect.Effect<void, never, Scope.Scope>
+  /** Mutes a thread by its key, until `until` when given: unknown when it's no thread yapd lists or has muted, invalid when it's no key at all. */
+  readonly mute: (key: string, until?: number) => Effect.Effect<"muted" | "unknown" | "invalid">
+  /** Unmutes a thread by its key, whether it was muted or not. */
+  readonly unmute: (key: string) => Effect.Effect<void>
+  /** Says a thread's latest update again, by its key. */
+  readonly replayThread: (key: string) => Effect.Effect<"queued" | "off" | "unknown", unknown>
+  /** A project's image, by its machine and id. */
+  readonly icon: (machine: string, project: string) => Effect.Effect<Option.Option<Icons.Image>>
 }
 
 const decodeTurn = Schema.decodeUnknown(Schema.Struct({ on: Schema.Boolean }))
 const decodeUtterance = Schema.decodeUnknown(Schema.Struct({ text: Schema.String }))
 const decodeCard = Schema.decodeUnknown(Schema.Struct({ id: Schema.String, revision: Schema.optional(Schema.NonNegativeInt) }))
+const decodeMute = Schema.decodeUnknown(Schema.Struct({ until: Schema.optional(Schema.String) }))
 
 /** How many journal entries a page has unless asked for fewer, and at most. */
 const pages = { usual: 50, most: 200 }
@@ -291,6 +331,65 @@ export const serve = (port: number, api: Api) =>
             ),
             Effect.catchAll(failed("replay an update")),
           )
+        }
+        const thread = /^\/threads\/([^/]+)\/(mute|replay)$/.exec(url.pathname)
+        if (thread !== null) {
+          const key = decoded(thread[1]!)
+          const route = `${request.method} ${thread[2]}`
+          if (route === "PUT mute") {
+            if (Option.isNone(key)) return new Response("That's no thread's key.", { status: 400 })
+            // A body is optional, and says when the mute ends.
+            const text = yield* Effect.tryPromise(() => request.text()).pipe(Effect.option)
+            if (Option.isNone(text)) return new Response('Send {"until": "an ISO 8601 time"}, or nothing.', { status: 400 })
+            const body =
+              text.value.trim() === ""
+                ? Option.some<{ readonly until?: string }>({})
+                : yield* Effect.try(() => JSON.parse(text.value) as unknown).pipe(Effect.flatMap(decodeMute), Effect.option)
+            if (Option.isNone(body)) return new Response('Send {"until": "an ISO 8601 time"}, or nothing.', { status: 400 })
+            const until = body.value.until === undefined ? undefined : Date.parse(body.value.until)
+            if (until !== undefined && (Number.isNaN(until) || until <= Date.now())) return new Response("until is a time to come, in ISO 8601.", { status: 400 })
+            const muted = yield* api.mute(key.value, until)
+            return muted === "muted"
+              ? new Response(null, { status: 204 })
+              : muted === "invalid"
+                ? new Response("That's no thread's key.", { status: 400 })
+                : new Response("No such thread.", { status: 404 })
+          }
+          if (route === "DELETE mute") {
+            if (Option.isNone(key)) return new Response("That's no thread's key.", { status: 400 })
+            return yield* Effect.as(api.unmute(key.value), new Response(null, { status: 204 }))
+          }
+          if (route === "POST replay") {
+            if (Option.isNone(key)) return new Response("No such thread.", { status: 404 })
+            // Rendering waits its turn, and for the voice to load.
+            server.timeout(request, 0)
+            return yield* api.replayThread(key.value).pipe(
+              Effect.map((result) =>
+                result === "queued"
+                  ? new Response(null, { status: 202 })
+                  : result === "off"
+                    ? new Response("yapd is off.", { status: 409 })
+                    : new Response("Nothing to say of it.", { status: 404 }),
+              ),
+              Effect.catchAll(failed("say a thread's update again")),
+            )
+          }
+        }
+        const icon = request.method === "GET" ? /^\/projects\/([^/]+)\/([^/]+)\/icon$/.exec(url.pathname) : null
+        if (icon !== null) {
+          const [machine, project] = [decoded(icon[1]!), decoded(icon[2]!)]
+          const image = Option.isNone(machine) || Option.isNone(project) ? Option.none<Icons.Image>() : yield* api.icon(machine.value, project.value)
+          if (Option.isNone(image)) return new Response("No such icon.", { status: 404 })
+          const etag = `"${image.value.revision}"`
+          // Only what the image is, never anything a browser would run, whatever's in it.
+          const headers = {
+            etag,
+            "cache-control": "max-age=3600",
+            "x-content-type-options": "nosniff",
+            "content-security-policy": "default-src 'none'",
+          }
+          if ((request.headers.get("if-none-match") ?? "").split(",").some((tag) => tag.trim() === etag)) return new Response(null, { status: 304, headers })
+          return new Response(image.value.bytes, { headers: { ...headers, "content-type": image.value.type } })
         }
         return new Response(null, { status: 404 })
       })

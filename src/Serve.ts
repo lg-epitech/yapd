@@ -13,8 +13,11 @@ import { Dictation, Turns, WhisperDictation } from "./Dictation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Floor from "./Floor.ts"
 import * as Hands from "./Hands.ts"
+import * as Icons from "./Icons.ts"
 import * as Journal from "./Journal.ts"
+import * as Latest from "./Latest.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import { machines } from "./Machines.ts"
 import { ProviderModel } from "./Model.ts"
@@ -117,8 +120,22 @@ export const serve = Effect.gen(function* () {
     store: yield* Store.Store,
   })
   const hands = Hands.make({ threads, ledger, started })
+  const naming = yield* Journal.naming
+  // What he muted, kept quiet whoever tells of it, until he unmutes it.
+  const mutes = yield* Mutes.make(yield* Store.Store)
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
-  const daemon = yield* Daemon.make({ link: (session, cwd) => threads.link(machine, session, cwd), hands })
+  // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
+  const daemon = yield* Daemon.make({
+    link: (session, cwd) => threads.link(machine, session, cwd),
+    owner: (host, session, cwd) => threads.link(naming(host), session, cwd),
+    hands,
+    mutes,
+    naming,
+  })
+  // Muting from the menu or by voice: never anything that reaches an agent.
+  const controls = Mutes.controls({ mutes, silence: daemon.silence, journal })
+  const icons = yield* Icons.make({ actions: threads.actions })
+  const latest = yield* Latest.make({ here: machine, journal, mutes, icons, threads })
   const drafts = yield* Drafts.make({
     machines: everywhere,
     rules: Preferences.load(preferences),
@@ -219,8 +236,8 @@ export const serve = Effect.gen(function* () {
   const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number, at?: number) =>
     Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
-  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes).pipe(
-    Stream.map(([state, activity]) => ({
+  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, latest.rows).pipe(
+    Stream.map(([state, activity, recent]) => ({
       on: state.on,
       activity,
       updates: state.heard.map(({ id, update }) => ({
@@ -229,8 +246,56 @@ export const serve = Effect.gen(function* () {
         text: update.spoken,
         at: new Date(update.at).toISOString(),
       })),
+      recent,
     })),
   )
+
+  /**
+   * Mutes a thread from the menu, by its key: one it lists, one /threads
+   * lists, or one muted already, named as it's listed, or by its title.
+   */
+  const mute = (key: string, until?: number) =>
+    Effect.gen(function* () {
+      const about = Mutes.parse(key)
+      if (Option.isNone(about)) return "invalid" as const
+      const row = (yield* latest.current).find((row) => row.key === key)
+      const found = about.value._tag === "Thread" ? yield* threads.find(about.value.ref) : Option.none()
+      if (row === undefined && Option.isNone(found) && Option.isNone(yield* mutes.muted([key]))) return "unknown" as const
+      const title = row?.title ?? Option.getOrUndefined(Option.map(found, ({ title }) => title))
+      const project = row?.project?.name
+      yield* controls.mute({ key, ...(title === undefined ? {} : { called: title }), ...(project === undefined ? {} : { project }) }, until)
+      return "muted" as const
+    })
+
+  /**
+   * Says a thread's latest update again, by its key: as it was said, when it's
+   * one he heard, so a reply to it still gets there, otherwise what was kept
+   * of it, as an answer that makes "it" the thread.
+   */
+  const replayThread = (key: string) =>
+    Effect.gen(function* () {
+      const heard = yield* daemon.latestHeard(key)
+      if (Option.isSome(heard)) return yield* daemon.replay(heard.value)
+      const row = (yield* latest.current).find((row) => row.key === key)
+      if (row === undefined || row.text.trim() === "") return "unknown" as const
+      const { on, turns } = yield* daemon.power
+      if (!on) return "off" as const
+      const at = yield* Clock.currentTimeMillis
+      const ref = row.thread === null ? undefined : { machine: row.machine, id: row.thread }
+      yield* daemon.tell(
+        {
+          id: `again:${key}:${at}`,
+          kind: "answer",
+          priority: "needs-you",
+          spoken: row.text,
+          at,
+          stale: Effect.succeed(false),
+          ...(ref === undefined ? {} : { saying: assistant.mention(ref, row.text) }),
+        },
+        turns,
+      )
+      return "queued" as const
+    })
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
@@ -244,7 +309,11 @@ export const serve = Effect.gen(function* () {
     // Typed words were never faint, so nothing typed is taken for Whisper hearing words in silence.
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
     // Every thread it can see, not only the likeliest, in the order the desk puts them.
-    ...Show.served(show, threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), journal.page),
+    ...Show.served(show, threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), journal.page, Effect.map(mutes.list, (all) => new Set(all.map(({ key }) => key)))),
+    mute,
+    unmute: (key) => Effect.asVoid(controls.unmute(key)),
+    replayThread,
+    icon: icons.image,
   })
   // Asked as the user starts talking, so it's there by the time they've finished.
   yield* Effect.forkScoped(Stream.runForEach(dictation.presses, ({ press, turns, began }) => assistant.prepare(press, turns, began)))

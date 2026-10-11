@@ -79,6 +79,8 @@ describe("Icons", () => {
       broken: { kind: "monogram", text: "IN", color: "indigo" },
     })
     expect(result.then).toEqual({ kind: "image", url: "/projects/Rosie/p-int/icon", revision: expect.stringMatching(/^[0-9a-f]{16}$/), text: "IN", color: "indigo" })
+    // Never T3 Code's own path to it, which is a key to the image while it lasts.
+    expect(JSON.stringify(result)).not.toMatch(/api\/assets|signed-token/)
     expect(Option.map(result.image, ({ type, bytes }) => ({ type, bytes: [...bytes] }))).toEqual(Option.some({ type: "image/png", bytes: [137, 80, 78, 71] }))
     // Only asked once, by the project's own folder, while the first was being fetched.
     expect(t3.asked).toEqual(["Rosie assets.createUrl project-favicon /code/integration", "Rosie fetch vabc123-favicon.svg"])
