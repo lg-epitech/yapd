@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Option, PubSub, Queue, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Icons from "./Icons.ts"
 import * as Journal from "./Journal.ts"
@@ -292,6 +292,9 @@ describe("Latest", () => {
         const told: Array<string> = []
         const replayed: Array<string> = []
         const mentioned: Array<string> = []
+        /** The sessions "it" was made, by the keys they're muted by, as the assistant names this Mac Rosie. */
+        const sessions: Array<string> = []
+        const naming = (host: string) => (host.toLowerCase() === hostname().toLowerCase() ? "Rosie" : (host.split(".")[0] ?? host))
         const controls = Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal })
         const menu = Latest.menu({
           latest: listed.latest,
@@ -306,10 +309,11 @@ describe("Latest", () => {
             // Said at once, which makes "it" the thread it's about.
             tell: (notice) => Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.as(true)),
           } as Parameters<typeof Latest.menu>[0]["daemon"],
-          mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.id}: ${said}`)),
+          mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.machine}/${ref.id}: ${said}`)),
+          mentionSession: (update, said) => Effect.sync(() => void sessions.push(`${Mutes.keysOf(update, naming).join(" ")} (${update.project}): ${said}`)),
         })
         const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
-        return { ...listed, menu, told, replayed, mentioned, settle }
+        return { ...listed, menu, told, replayed, mentioned, sessions, settle }
       })
 
     test("hears a thread again from the update it shows, not one he heard before what was kept quiet of it or a question it asked since", async () => {
@@ -328,14 +332,14 @@ describe("Latest", () => {
       )
       expect([result.quiet, result.notice, result.unknown]).toEqual(["queued", "queued", "unknown"])
       expect(result.told).toEqual(["integration. Halfway.", "The Tezos migration asks which network first."])
-      expect(result.mentioned).toEqual(["t-tezos: integration. Halfway.", "t-tezos: The Tezos migration asks which network first."])
+      expect(result.mentioned).toEqual(["Rosie/t-tezos: integration. Halfway.", "Rosie/t-tezos: The Tezos migration asks which network first."])
       expect(result.replayed).toEqual([])
     })
 
     test("hears again as it was said the update he heard that the row shows, under its thread or the session it's shown from", async () => {
       const result = await run(
         Effect.gen(function* () {
-          const { journal, menu, told, replayed, settle } = yield* menuOf([
+          const { journal, menu, told, replayed, mentioned, sessions, settle } = yield* menuOf([
             { id: "heard-a", key: "t3:Rosie:t-tezos", at: 1 },
             { id: "heard-b", key: "session:Rosie:claude:s", at: 2 },
           ])
@@ -346,12 +350,42 @@ describe("Latest", () => {
           yield* journal.write({ at: 2, kind: "update", host: "Rosie", thread: "claude:s", said: "integration. Done." })
           yield* settle
           const session = yield* menu.replayThread("t3:Rosie:t-tezos")
-          return { linked, session, told: [...told], replayed: [...replayed] }
+          return { linked, session, told: [...told], replayed: [...replayed], mentioned: [...mentioned], sessions: [...sessions] }
         }),
       )
       expect([result.linked, result.session]).toEqual(["queued", "queued"])
       expect(result.replayed).toEqual(["heard-a", "heard-b"])
       expect(result.told).toEqual([])
+      // Said again as it was, "it" is what playing it makes it, as the first time, never set from the menu.
+      expect([...result.mentioned, ...result.sessions]).toEqual([])
+    })
+
+    test("says a session's row again as that session, never a thread, here or on rig, and a thread's row as that thread, here or on rig", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, mentioned, sessions, settle } = yield* menuOf([])
+          // A session in a terminal here, one on rig, and a thread on each, none of them heard.
+          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. Done." })
+          yield* journal.write({ at: 2, kind: "update", host: "rig.local", thread: "codex:s-rig", directory: "/code/integration", project: "integration", said: "integration. Done on rig." })
+          yield* journal.write({ at: 3, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration. Halfway.", detail: { session: "claude:s" } })
+          yield* journal.write({ at: 4, kind: "update", machine: "rig", thread: "t-rig", said: "integration. Halfway on rig.", detail: { session: "claude:s-r" } })
+          yield* settle
+          const outcomes = [
+            yield* menu.replayThread("session:Rosie:claude:s-term"),
+            yield* menu.replayThread("session:rig:codex:s-rig"),
+            yield* menu.replayThread("t3:Rosie:t-tezos"),
+            yield* menu.replayThread("t3:rig:t-rig"),
+          ]
+          return { outcomes, told: [...told], mentioned: [...mentioned], sessions: [...sessions] }
+        }),
+      )
+      expect(result.outcomes).toEqual(["queued", "queued", "queued", "queued"])
+      expect(result.told).toEqual(["integration. Done.", "integration. Done on rig.", "integration. Halfway.", "integration. Halfway on rig."])
+      expect(result.sessions).toEqual([
+        "session:Rosie:claude:s-term (integration): integration. Done.",
+        "session:rig:codex:s-rig (integration): integration. Done on rig.",
+      ])
+      expect(result.mentioned).toEqual(["Rosie/t-tezos: integration. Halfway.", "rig/t-rig: integration. Halfway on rig."])
     })
 
     test("says nothing again while yapd is off", async () => {

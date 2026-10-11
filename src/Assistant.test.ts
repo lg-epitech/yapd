@@ -7,8 +7,10 @@ import { Condenser } from "./Condenser.ts"
 import type * as Conversation from "./Conversation.ts"
 import * as Drafts from "./Drafts.ts"
 import * as Hands from "./Hands.ts"
+import * as Icons from "./Icons.ts"
 import type { Notice } from "./Inbox.ts"
 import * as Journal from "./Journal.ts"
+import * as Latest from "./Latest.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Mutes from "./Mutes.ts"
@@ -10176,6 +10178,127 @@ describe("Assistant muting", () => {
     expect(result.quieted).toBe(14)
     expect(result.card).toBe("- **1 min ago** · yapd: yapd. The loader fix is ready.\n- **1 min ago** · integration · muted, 14 updates: integration. Step 13.")
     expect(result.left).toEqual([])
+  })
+})
+
+describe("Assistant after the menu says a thread again", () => {
+  /**
+   * The menu over what the journal keeps now, saying again at once what it's
+   * asked to and he never heard, as yapd says it: "it" is what's said, from
+   * when it starts playing.
+   */
+  const menuOver = (made: Effect.Effect.Success<ReturnType<typeof assistant>>) =>
+    Effect.gen(function* () {
+      const latest = yield* Latest.make({ here: "Rosie", journal: made.journal, mutes: made.mutes!, icons: yield* Icons.make({ actions: () => Option.none() }), threads: made.threads })
+      return Latest.menu({
+        latest,
+        threads: made.threads,
+        mutes: made.mutes!,
+        controls: Mutes.controls({ mutes: made.mutes!, journal: made.journal, silence: () => Effect.void }),
+        daemon: {
+          latestHeard: () => Effect.succeed(Option.none()),
+          replay: () => Effect.die("not expected"),
+          power: Effect.succeed({ on: true, turns: 1 }),
+          tell: (notice) => Effect.as(notice.saying ?? Effect.void, true),
+        } as Parameters<typeof Latest.menu>[0]["daemon"],
+        mention: made.mention,
+        mentionSession: made.mentionSession,
+      })
+    })
+
+  /** What he heard of the Tezos migration, and with no thread doing the work he means, nothing the model can act on. */
+  const tezosThenNothing = (situation: Brain.Situation) =>
+    situation.utterance.heard === "How's the Tezos migration?"
+      ? Brain.decision({ act: "answer", spoken: "It's comparing fee tables, sir.", target: handle(situation, tezos) })
+      : Brain.decision({ act: situation.utterance.heard === "Interrupt it." ? "stop" : "send", text: "Use the fee table.", how: "now" })
+
+  /** The keys muted, in order. */
+  const keys = (mutes: Mutes.Mutes | undefined) => Effect.map(mutes!.list, (all) => all.map(({ key }) => key))
+
+  test("'interrupt it' or 'tell it to' after a muted session's row is said again is about that session, never the thread he heard of before it", async () => {
+    for (const heard of ["Interrupt it.", "Tell it to use the fee table."]) {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* assistant(tezosThenNothing, undefined, { muting: true })
+          yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/yapd", project: "yapd", said: "yapd. The loader fix is ready." })
+          yield* made.mutes!.mute({ key: "session:Rosie:claude:s-term", called: "the Claude session in yapd", project: "yapd" })
+          yield* made.dictate("How's the Tezos migration?")
+          const menu = yield* menuOver(made)
+          const replayed = yield* menu.replayThread("session:Rosie:claude:s-term")
+          yield* made.dictate(heard)
+          return { replayed, spoken: made.spoken().slice(1), about: made.seen.slice(1).map(({ subject }) => subject), commands: made.dispatched.map(({ type }) => type) }
+        }),
+      )
+      expect(result.replayed).toBe("queued")
+      // Nothing goes to the Tezos migration: the model is asked about the session, which no thread it can act on is doing.
+      expect(result.commands).toEqual([])
+      expect(result.spoken).toEqual([lines.cantTell])
+      expect(result.about).toEqual([expect.objectContaining({ _tag: "Session", said: "yapd. The loader fix is ready.", update: expect.objectContaining({ session: "claude:s-term", project: "yapd" }) })])
+    }
+  })
+
+  test("'mute it', 'unmute it' and 'scratch that' after a muted session's row is said again are for that session, never the thread he heard of before it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(tezosThenNothing, undefined, { muting: true })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "claude:s-term", directory: "/code/yapd", project: "yapd", said: "yapd. The loader fix is ready." })
+        yield* made.mutes!.mute({ key: "session:Rosie:claude:s-term", called: "the Claude session in yapd", project: "yapd" })
+        yield* made.dictate("How's the Tezos migration?")
+        const menu = yield* menuOver(made)
+        yield* menu.replayThread("session:Rosie:claude:s-term")
+        const steps: Array<ReadonlyArray<string>> = []
+        for (const heard of ["Mute it.", "Unmute it.", "Scratch that."]) {
+          yield* made.dictate(heard)
+          steps.push(yield* keys(made.mutes))
+        }
+        return { spoken: made.spoken().slice(1), steps, model: made.seen.length }
+      }),
+    )
+    expect(result.spoken).toEqual(["It's already muted, sir.", "Unmuted it, sir.", "Muted it again, sir. I'll still tell you if it needs you."])
+    expect(result.steps).toEqual([["session:Rosie:claude:s-term"], [], ["session:Rosie:claude:s-term"]])
+    // None of it needed the model.
+    expect(result.model).toBe(1)
+  })
+
+  test("a thread's row said again makes 'it' that thread, so 'interrupt it' stops it, not the one he heard of before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => Brain.decision({ act: "answer", spoken: "The Mina tickets are filed, sir.", target: handle(situation, mina) }),
+          undefined,
+          { muting: true },
+        )
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "integration. Comparing fee tables.", detail: { session: "claude:s-tez" } })
+        yield* made.dictate("How are the Mina tickets?")
+        const menu = yield* menuOver(made)
+        const replayed = yield* menu.replayThread(`t3:Rosie:${tezos.id}`)
+        yield* made.dictate("Interrupt it.")
+        return { replayed, interrupted: made.dispatched.filter(({ type }) => type === "run.interrupt").map(({ threadId }) => threadId), model: made.seen.length }
+      }),
+    )
+    expect(result.replayed).toBe("queued")
+    expect(result.interrupted).toEqual([tezos.id])
+    expect(result.model).toBe(1)
+  })
+
+  test("a session's row on rig said again makes 'it' that session there: 'mute it' mutes it, and 'interrupt it' goes to no thread", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(tezosThenNothing, undefined, { muting: true })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", host: "rig", thread: "claude:s-rig", directory: "/code/integration", project: "integration", said: "integration. Done on rig." })
+        yield* made.dictate("How's the Tezos migration?")
+        const menu = yield* menuOver(made)
+        const replayed = yield* menu.replayThread("session:rig:claude:s-rig")
+        yield* made.dictate("Mute it.")
+        const muted = (yield* made.mutes!.list).map(({ key, called }) => ({ key, called }))
+        yield* made.dictate("Interrupt it.")
+        return { replayed, muted, spoken: made.spoken().slice(1), commands: made.dispatched.map(({ type }) => type) }
+      }),
+    )
+    expect(result.replayed).toBe("queued")
+    expect(result.muted).toEqual([{ key: "session:rig:claude:s-rig", called: "the Claude session in integration on rig" }])
+    expect(result.spoken).toEqual(["Muted it, sir. I'll still tell you if it needs you.", lines.cantTell])
+    expect(result.commands).toEqual([])
   })
 })
 })
