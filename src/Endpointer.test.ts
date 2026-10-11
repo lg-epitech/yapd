@@ -29,7 +29,7 @@ describe("Endpointer", () => {
     const frames = [...quiet(3), ...voiced(defaults.wary), ...quiet(defaults.silence)]
     frames.forEach((probability, at) => {
       // Only its first frame tells.
-      const event = endpointer.push(new Float32Array(512), probability, at === 3 ? "wary" : "plain")
+      const event = endpointer.push(new Float32Array(512), probability, at === 3)
       if (event !== undefined) events.push([at, event._tag])
     })
     expect(defaults.wary).toBeGreaterThan(defaults.confirm)
@@ -37,59 +37,6 @@ describe("Endpointer", () => {
       [3, "Onset"],
       [3 + defaults.wary - 1, "Speech"],
     ])
-  })
-
-  describe("once yapd's own voice has stopped it for nothing", () => {
-    /** Frames that each hold their index, all with the care due once its own voice stopped the line, and the events they give. */
-    const capped = (probabilities: ReadonlyArray<number>) => {
-      const endpointer = new Endpointer()
-      return probabilities.flatMap((probability, at) => {
-        const event = endpointer.push(new Float32Array([at]), probability, "capped")
-        return event === undefined ? [] : [{ at, event }]
-      })
-    }
-    const tags = (events: ReturnType<typeof capped>) => events.map(({ at, event }) => [at, event._tag])
-
-    test("waits longer still to be sure it's speech, taking all of it, from before it lapsed", () => {
-      const events = capped([...voiced(defaults.capped - 1), ...quiet(defaults.abandon), ...voiced(defaults.capped), ...quiet(defaults.silence)])
-      expect(defaults.capped).toBeGreaterThan(defaults.wary)
-      const again = defaults.capped - 1 + defaults.abandon
-      expect(tags(events).slice(0, 4)).toEqual([
-        [0, "Onset"],
-        [again - 1, "Lapsed"],
-        [again, "Onset"],
-        [again + defaults.capped - 1, "Speech"],
-      ])
-      const last = events.at(-1)?.event
-      expect(last?._tag === "Utterance" ? [last.audio[0], last.brief] : []).toEqual([0, undefined])
-    })
-
-    test("keeps a word too short for that whole, as one of his, rather than let it go", () => {
-      const events = capped([...voiced(defaults.wary), ...quiet(defaults.silence)])
-      expect(tags(events)).toEqual([
-        [0, "Onset"],
-        [defaults.wary - 1 + defaults.abandon, "Lapsed"],
-        [defaults.wary - 1 + defaults.silence, "Utterance"],
-      ])
-      const last = events.at(-1)?.event
-      expect(last?._tag === "Utterance" ? [[...last.audio], last.brief] : []).toEqual([
-        Array.from({ length: defaults.wary + defaults.tail }, (_, at) => at),
-        true,
-      ])
-    })
-
-    test("keeps a first word and what follows a pause after it as one", () => {
-      const events = capped([...voiced(defaults.wary + 2), ...quiet(defaults.abandon + 1), ...voiced(20), ...quiet(defaults.silence)])
-      const last = events.at(-1)?.event
-      expect(last?._tag === "Utterance" ? [last.audio[0], last.brief] : []).toEqual([0, undefined])
-    })
-
-    test("lets go what's shorter than any word", () => {
-      expect(tags(capped([...voiced(defaults.wary - 1), ...quiet(defaults.silence)]))).toEqual([
-        [0, "Onset"],
-        [defaults.wary - 2 + defaults.abandon, "Abandoned"],
-      ])
-    })
   })
 
   test("lets a short noise go", () => {

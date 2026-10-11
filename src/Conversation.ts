@@ -33,11 +33,9 @@ type Signal =
   | Exclude<Endpointer.Event, { readonly _tag: "Onset" }>
   /**
    * Might be the user, or with `echo`, yapd's own voice getting into the
-   * microphone, as it can until the echo cancellation has learnt it; `capped`
-   * when that voice had already stopped the line and it picked up again, so
-   * it takes more speech to stop it.
+   * microphone, as it can until the echo cancellation has learnt it.
    */
-  | { readonly _tag: "Onset"; readonly echo: boolean; readonly capped: boolean }
+  | { readonly _tag: "Onset"; readonly echo: boolean }
   /** The microphone stopped, like when the helper quits. */
   | { readonly _tag: "Deaf" }
   /** The rest carry the id of what sent them, so one that's no longer waited on is let go. */
@@ -47,8 +45,6 @@ type Signal =
   | { readonly _tag: "Lingered"; readonly id: number }
   /** The reply is whatever the one who asked for it works out: what to do about an update, or an answer to a question. */
   | { readonly _tag: "Replied"; readonly id: number; readonly reply: unknown }
-  /** What Whisper heard in a sound too short to stop for, and whether that may all be yapd's own voice. */
-  | { readonly _tag: "Judged"; readonly id: number; readonly heard: string; readonly its: boolean }
 
 /**
  * The microphone for a whole update, so nothing the user says is missed
@@ -57,13 +53,6 @@ type Signal =
 interface Ear {
   readonly signals: Queue.Queue<Signal>
   deaf: boolean
-  /**
-   * Its own voice stopped the line it's saying, and it picked up again: for
-   * the rest of the line's first seconds it still ducks at any sound, but
-   * stops only once that's surely someone talking, so its own voice stops a
-   * line once at most, as a rule.
-   */
-  capped: boolean
 }
 
 /** How a line went: played out, or talked over, with what the user said. */
@@ -84,10 +73,6 @@ type Outcome =
       readonly echo?: string
       /** How far into the line he began, then. */
       readonly onset?: number
-      /** Whether that took more speech to stop it, as its own voice had stopped the line before. */
-      readonly capped?: boolean
-      /** What Whisper heard in it, when that's known already. */
-      readonly heard?: string
     }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
@@ -143,9 +128,6 @@ export const voiced = (audio: Float32Array) =>
 /** Samples a second from the microphone, and in each frame of it. */
 const rate = 16000
 const frame = 512
-
-/** How much later after he begins it stops once its own voice has stopped a line, for the frames more of speech that takes. */
-const later = ((Endpointer.defaults.capped - Endpointer.defaults.wary) * frame) / rate
 
 /** The part of `text` heard in `fraction` of its audio, marked when it's cut short. */
 export const cut = (text: string, fraction: number) => {
@@ -553,16 +535,15 @@ export const make = (options: {
         if (Option.isNone(detect)) return undefined
         const microphone = yield* audio.microphone.pipe(Scope.extend(scope))
         if (Option.isNone(microphone)) return undefined
-        const ear: Ear = { signals: yield* Queue.unbounded<Signal>(), deaf: false, capped: false }
+        const ear: Ear = { signals: yield* Queue.unbounded<Signal>(), deaf: false }
         const endpointer = new Endpointer.Endpointer()
         yield* Stream.fromQueue(microphone.value).pipe(
           Stream.mapEffect((frame) =>
             Effect.gen(function* () {
               // As the frame came in, since by the time it's looked at, yapd may well have learnt its own voice.
               const echo = yield* audio.echo(frame)
-              const capped = echo && ear.capped
-              const event = endpointer.push(frame, yield* detect.value(frame), capped ? "capped" : echo ? "wary" : "plain")
-              return event?._tag === "Onset" ? ({ _tag: "Onset", echo, capped } satisfies Signal) : event
+              const event = endpointer.push(frame, yield* detect.value(frame), echo)
+              return event?._tag === "Onset" ? ({ _tag: "Onset", echo } satisfies Signal) : event
             }),
           ),
           Stream.runForEach((event) => (event === undefined ? Effect.void : Queue.offer(ear.signals, event))),
@@ -609,12 +590,10 @@ export const make = (options: {
         readonly begun?: Effect.Effect<void>
         readonly confirmed?: Effect.Effect<void>
         readonly through?: Effect.Effect<void>
-        /** How what he says is heard. */
-        readonly hear?: (audio: Float32Array) => Effect.Effect<string>
       } = {},
     ) =>
       Effect.gen(function* () {
-        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, hear = unlogged } = given
+        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void } = given
         const playback = yield* audio.play(path, from)
         yield* begun
         if (playback.confirmed) yield* confirmed
@@ -626,18 +605,10 @@ export const make = (options: {
           yield* played
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* listen(playback, listening, text, from, wait, played, hear)
+        return yield* listen(playback, listening, text, from, wait, played)
       }).pipe(Effect.scoped)
 
-    const listen = (
-      playback: Playback,
-      ear: Ear,
-      text: string,
-      from: number,
-      wait: Duration.DurationInput,
-      through: Effect.Effect<void>,
-      hear: (audio: Float32Array) => Effect.Effect<string>,
-    ) =>
+    const listen = (playback: Playback, ear: Ear, text: string, from: number, wait: Duration.DurationInput, through: Effect.Effect<void>) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
@@ -675,18 +646,6 @@ export const make = (options: {
         let stoppedAt: number | undefined
         /** How far into the line he began what he's saying, when that was while yapd's own voice could still get into the microphone. */
         let echoing: number | undefined
-        /** Whether what he began takes more speech to stop it. */
-        let capped = false
-        /**
-         * Sounds too short for that, over its first seconds, which may each
-         * be a word of his, like "Yes.", or its own voice: kept whole, with
-         * how far into the line each began, while Whisper hears whose they
-         * are, and the line plays on. One that isn't its own voice stops it,
-         * and is taken with all else he says.
-         */
-        const briefs: Array<{ readonly id: number; readonly audio: Float32Array; readonly onset: number; heard?: string }> = []
-        /** Whether one of those was his. */
-        let taken = false
         let lingering: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
         const stopLingering = Effect.suspend(() => {
           const fiber = lingering?.fiber
@@ -713,38 +672,13 @@ export const make = (options: {
         )
         /** How far into the line yapd has got, in seconds. */
         const position = Effect.map(Clock.currentTimeMillis, (now) => stoppedAt ?? Math.min(playback.duration, from + (now - began) / 1000))
-        /** What he said over it, `audio`, with all he said before that it kept, and what Whisper heard in it when that's known. */
-        const interrupted = (audio: Float32Array, heard?: string) => {
-          const at = stoppedAt ?? playback.duration
-          const onset = briefs[0]?.onset ?? echoing
-          return {
-            _tag: "Interrupted",
-            at,
-            duration: playback.duration,
-            audio: briefs.length === 0 ? audio : Endpointer.concat([...briefs.map((brief) => brief.audio), audio]),
-            ear,
-            ...(heard === undefined ? {} : { heard }),
-            // To where it stopped, or where he began, should the helper put that a moment before.
-            ...(onset === undefined
-              ? {}
-              : {
-                  echo: between(text, playback.duration, onset - reach, Math.max(at, onset) + reach),
-                  onset: Math.min(at, onset),
-                  ...(capped || briefs.length > 0 ? { capped: true } : {}),
-                }),
-          } satisfies Outcome
-        }
 
         while (true) {
           const signal = yield* next
           switch (signal._tag) {
             case "Onset":
-              // More of what lapsed is still what began then.
-              if (!speaking) {
-                echoing = signal.echo ? yield* position : undefined
-                capped = signal.capped
-              }
               speaking = true
+              echoing = signal.echo ? yield* position : undefined
               yield* stopLingering
               if (playing) yield* playback.volume(ducked)
               break
@@ -758,56 +692,22 @@ export const make = (options: {
               break
             case "Abandoned":
               speaking = false
-              // Stopped for a word of his it kept, which he only began to add to.
-              if (taken) return interrupted(new Float32Array(0), briefs.length === 1 ? briefs[0]!.heard : undefined)
-              if (playing) {
-                if (capped) yield* Effect.logInfo("Ducked for a sound over its first seconds too short to stop for, as its own voice stopped this line before, so it turns back up")
-                yield* playback.volume(1)
-              } else if (briefs.length === 0) yield* startLingering
-              break
-            case "Lapsed":
-              if (playing) {
-                yield* Effect.logInfo("Ducked for a sound over its first seconds too short to stop for, as its own voice stopped this line before, so it turns back up while it hears whose it was")
-                yield* playback.volume(1)
-              }
+              if (playing) yield* playback.volume(1)
+              else yield* startLingering
               break
             case "Utterance": {
-              speaking = false
-              if (signal.brief === true && playing) {
-                const brief = { id: fresh(), audio: signal.audio, onset: echoing ?? (yield* position) }
-                briefs.push(brief)
-                const saying = between(text, playback.duration, brief.onset - reach, (yield* position) + reach)
-                // As over its first seconds when it stops at once: nothing, what Whisper makes up, or its words then, are its own.
-                yield* hear(signal.audio).pipe(
-                  Effect.flatMap((heard) =>
-                    Queue.offer(signals, { _tag: "Judged", id: brief.id, heard, its: heard === "" || own(heard, "") || own(heard, saying) }),
-                  ),
-                  Effect.forkScoped,
-                )
-                break
-              }
-              return interrupted(signal.audio)
-            }
-            case "Judged": {
-              const index = briefs.findIndex((brief) => brief.id === signal.id)
-              if (index < 0) break
-              if (signal.its) {
-                briefs.splice(index, 1)
-                yield* Effect.logInfo("Heard only its own voice in a sound over its first seconds too short to stop for, so it played on")
-                if (!playing && !speaking && briefs.length === 0) yield* startLingering
-                break
-              }
-              yield* Effect.logInfo("Stopped for a sound over its first seconds too short to stop for at once, as it wasn't only its own voice")
-              briefs[index]!.heard = signal.heard
-              taken = true
-              if (playing) {
-                playing = false
-                cut = true
-                stoppedAt = yield* playback.stop
-              }
-              // Saying more, he's heard to the end of it.
-              if (speaking) break
-              return interrupted(new Float32Array(0), briefs.length === 1 ? signal.heard : undefined)
+              const at = stoppedAt ?? playback.duration
+              return {
+                _tag: "Interrupted",
+                at,
+                duration: playback.duration,
+                audio: signal.audio,
+                ear,
+                // To where it stopped, or where he began, should the helper put that a moment before.
+                ...(echoing === undefined
+                  ? {}
+                  : { echo: between(text, playback.duration, echoing - reach, Math.max(at, echoing) + reach), onset: Math.min(at, echoing) }),
+              } satisfies Outcome
             }
             case "Finished":
               // Heard already, as it finished. Also arrives for a playback the user stopped, which is already dealt with.
@@ -827,11 +727,6 @@ export const make = (options: {
               return yield* Effect.fail(signal.error)
             case "Lingered":
               if (signal.id !== lingering?.id) break
-              // Not before it's known whose a sound it kept was.
-              if (briefs.length > 0) {
-                yield* startLingering
-                break
-              }
               if (broken !== undefined) return yield* Effect.fail(broken)
               return { _tag: "Finished" } satisfies Outcome
             case "Deaf":
@@ -853,18 +748,12 @@ export const make = (options: {
      * the end, as for a reply to it: for when only its own voice, or what may
      * have been, got into the microphone as it ended.
      */
-    const harken = (
-      text: string,
-      duration: number,
-      ear: Effect.Effect<Ear | undefined>,
-      wait: Duration.DurationInput,
-      hear: (audio: Float32Array) => Effect.Effect<string>,
-    ) =>
+    const harken = (text: string, duration: number, ear: Effect.Effect<Ear | undefined>, wait: Duration.DurationInput) =>
       Effect.gen(function* () {
         const listening = yield* ear
         if (listening === undefined || listening.deaf) return { _tag: "Finished" } satisfies Outcome
         const ended: Playback = { duration, confirmed: true, finished: Effect.void, stop: Effect.succeed(duration), volume: () => Effect.void }
-        return yield* listen(ended, listening, text, duration, wait, Effect.void, hear)
+        return yield* listen(ended, listening, text, duration, wait, Effect.void)
       }).pipe(Effect.scoped)
 
     /**
@@ -939,8 +828,6 @@ export const make = (options: {
               case "Finished":
               case "Broke":
               case "Lingered":
-              case "Lapsed":
-              case "Judged":
                 break
             }
           }
@@ -1031,46 +918,19 @@ export const make = (options: {
      * taken for its own then, never even what Whisper makes up, like "Thank
      * you.", which he says too; and when it had said all of it by then, its
      * own voice can only be its last word or so before him, as after any
-     * line, so the model isn't told. Nor is what Whisper makes up taken for
-     * its own once it took more speech to stop it, which its own voice
-     * seldom lasts. Otherwise all of it may yet have been its own voice,
-     * `unsure`.
+     * line, so the model isn't told. Otherwise all of it may yet have been its
+     * own voice, `unsure`.
      */
-    const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
-      const { echo, onset = outcome.at } = outcome
-      if (echo === undefined) return { itself: false, unsure: false }
-      // Under the cap, from where it would have stopped otherwise, so as much of what he says counts as going on past it.
-      const stopped = outcome.capped === true ? outcome.at - later : outcome.at
-      const past = voiced(outcome.audio) - Math.max(0, stopped - onset) > overhang
-      if (first === "" || (!past && (outcome.capped === true ? !own(first, "") && own(first, echo) : own(first, "") || own(first, echo)))) {
-        return { itself: true, unsure: true }
-      }
-      return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
-    }
-
-    /**
-     * Picks up again just before where its own voice, or what the model took
-     * for it, stopped the line, `told` as by its words or by the model; from
-     * then on, over the rest of the line's first seconds, it takes more
-     * speech to stop it. Each time is logged, as how often it happens is
-     * only known on his speakers. Talk that went on past where it stopped,
-     * which its own voice can't, is logged apart, and takes no more to stop
-     * it after.
-     */
-    const again = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, told: "words" | "model", from: number, unsure: boolean) =>
+    const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) =>
       Effect.gen(function* () {
-        if (!unsure) {
-          yield* Effect.logInfo("Picked up again over its first seconds after talk not meant for it")
-          return Math.max(from, outcome.at - before)
+        const { echo, onset = outcome.at } = outcome
+        if (echo === undefined) return { itself: false, unsure: false }
+        const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
+        if (past ? first === "" : own(first, "") || own(first, echo)) {
+          yield* Effect.logInfo("Stopped for its own voice over its first seconds, so it picks up again")
+          return { itself: true, unsure: true }
         }
-        const how = told === "words" ? "as its words tell" : "as the model judged"
-        yield* Effect.logInfo(
-          outcome.capped === true
-            ? `Stopped for its own voice again over its first seconds, ${how}, though it took more speech to stop, so it picks up again`
-            : `Stopped for its own voice over its first seconds, ${how}, so it picks up again, and takes more speech to stop till they're over`,
-        )
-        outcome.ear.capped = true
-        return Math.max(from, outcome.at - before)
+        return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
       })
 
     /**
@@ -1103,7 +963,7 @@ export const make = (options: {
                     confirmed: path === update.audio ? Effect.void : persona.said(text),
                     through: path === update.audio ? through : Effect.void,
                   })
-                : yield* harken(text, ended, listening, linger, unlogged)
+                : yield* harken(text, ended, listening, linger)
             ended = undefined
             if (outcome._tag === "Finished") return true
             // Replying to something yapd had finished saying: there's nothing to go back to.
@@ -1114,8 +974,8 @@ export const make = (options: {
               from = Math.max(from, outcome.at - rewind)
             }
 
-            const first = outcome.heard ?? (yield* unlogged(outcome.audio))
-            const { itself, echo, unsure } = whose(outcome, first)
+            const first = yield* unlogged(outcome.audio)
+            const { itself, echo, unsure } = yield* whose(outcome, first)
             // Its own last words as it ended leave him the usual moment to reply, once.
             const listenOn = () => {
               if (lingered) return false
@@ -1129,7 +989,7 @@ export const make = (options: {
                 if (listenOn()) continue
                 return true
               }
-              from = yield* again(outcome, "words", from, unsure)
+              from = Math.max(from, outcome.at - before)
               continue
             }
             if (first === "") {
@@ -1190,7 +1050,7 @@ export const make = (options: {
               }
               // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
               if (echo === undefined) carryOn()
-              else from = yield* again(outcome, "model", from, unsure)
+              else from = Math.max(from, outcome.at - before)
               continue
             }
 
@@ -1207,8 +1067,6 @@ export const make = (options: {
             from = 0
             missed = 0
             lingered = false
-            // A new line, which its own voice hasn't stopped yet.
-            outcome.ear.capped = false
           }
         }).pipe(
           Effect.scoped,
@@ -1243,15 +1101,15 @@ export const make = (options: {
           const listening = missed < misses ? ear : Effect.succeed(undefined)
           const outcome: Outcome =
             ended === undefined
-              ? yield* speak(said.audio, said.spoken, from, listening, { wait, begun, confirmed, through: said.through ?? Effect.void, hear })
-              : yield* harken(said.spoken, ended, listening, wait, hear)
+              ? yield* speak(said.audio, said.spoken, from, listening, { wait, begun, confirmed, through: said.through ?? Effect.void })
+              : yield* harken(said.spoken, ended, listening, wait)
           ended = undefined
           begun = Effect.void
           confirmed = Effect.void
           if (outcome._tag === "Finished") return false
-          const first = outcome.heard ?? (yield* hear(outcome.audio))
+          const first = yield* hear(outcome.audio)
           // Its own voice, over its first seconds, is no answer, nor talk that wasn't meant for yapd.
-          const { itself, echo, unsure } = whose(outcome, first)
+          const { itself, echo, unsure } = yield* whose(outcome, first)
           const reply =
             itself || first === ""
               ? Option.none()
@@ -1271,7 +1129,7 @@ export const make = (options: {
           if (outcome.at >= outcome.duration) return false
           // Nor is what may have been its own voice, as `respond` was told, which is picked up just before.
           if (itself || echo !== undefined) {
-            from = yield* again(outcome, itself ? "words" : "model", from, unsure)
+            from = Math.max(from, outcome.at - before)
             continue
           }
           missed++
