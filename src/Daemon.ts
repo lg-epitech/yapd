@@ -566,15 +566,23 @@ export const make = (
           const now = yield* Clock.currentTimeMillis
           const said = Brain.muteLines(lines, "it", now)
           if (how === "clear") return said.cleared(yield* noted((yield* muted.clear).length > 0))
-          // By its thread when it's tied to one, else by its session.
-          const [key, ...also] = Mutes.keysOf(update, called)
+          // Said again for the menu's row, it's that row's, which is what he asked to hear. Otherwise by its thread when it's tied to one,
+          // else by its session.
+          const menu = latest?.update === update ? latest.menu : undefined
+          const row = menu === undefined ? Option.none<Mutes.About>() : Mutes.parse(menu)
+          const keys = Mutes.keysOf(update, called)
+          const [key, ...also] = menu !== undefined && Option.isSome(row) ? [menu, ...keys.filter((other) => other !== menu)] : keys
           if (key === undefined) return lines.cantTell
           // Muted by its session too, before it was found to be its thread's.
           if (how === "unmute") return (yield* noted(yield* muted.unmute(key, also))) ? said.unmuted : said.notMuted
           const ends = minutes === undefined ? undefined : now + minutes * 60_000
-          const session = update.about === undefined && update.owner === undefined
+          const session = Option.isSome(row) ? row.value._tag === "Session" : update.about === undefined && update.owner === undefined
           const agent = update.thread.agent === "codex" ? "Codex" : "Claude"
-          const where = update.thread.origin.host === undefined || called(update.thread.origin.host) === called(hostname()) ? "" : ` on ${called(update.thread.origin.host)}`
+          const machine = Option.match(row, {
+            onNone: () => (update.thread.origin.host === undefined ? undefined : called(update.thread.origin.host)),
+            onSome: (row) => (row._tag === "Session" ? row.machine : row.ref.machine),
+          })
+          const where = machine === undefined || machine === called(hostname()) ? "" : ` on ${machine}`
           const done = yield* muted.mute({ key, project: update.project, ...(session ? { called: `the ${agent} session in ${Threads.spoken(update.project)}${where}` } : {}) }, ends)
           return (yield* noted(done)) ? said.muted(ends) : said.already
         }),

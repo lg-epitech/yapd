@@ -372,9 +372,6 @@ export const notYet = (lines: Lines) => `I can't do that yet${addressed(lines)}.
 /** What's said of an approval or an answer for a thread no longer waiting on it, as when it was dealt with in T3 Code. */
 export const dealtWith = (lines: Lines) => `That's already been dealt with${addressed(lines)}.`
 
-/** What's said when he asks a session said again from the menu for what only a thread T3 Code runs can do, like stopping it or telling it something. */
-export const unreachable = (lines: Lines) => `That's a terminal session${addressed(lines)}; I can't reach it from here.`
-
 /** What's said instead of answering a thread that waits on a secret, which is only ever given in T3 Code. */
 export const secretly = (lines: Lines) => `That one needs T3 Code; I never take a secret by voice${addressed(lines)}.`
 
@@ -1233,21 +1230,6 @@ const stopping: ReadonlySet<string> = new Set([
   "stop working", "stop the run", "interrupt it", "cancel the run", "stop the work", "interrupt the run", "stop it working",
 ])
 
-/**
- * Asking "it" for what only a thread T3 Code runs can do, with no thread
- * named: stopping its run, telling or asking it something, or answering it.
- */
-const forThread = (said: string) =>
-  stopping.has(said) ||
-  /^(interrupt|halt) (it|that|this|this one|that one)( now)?$/.test(said) ||
-  /^(tell|ask|message) (it|that|this|this one|that one)( |$)/.test(said) ||
-  /^(reply|respond|answer|say|send|write) (back )?to (it|that|this|this one|that one)( |$)/.test(said) ||
-  /^answer (it|that|this one|that one)$/.test(said)
-
-/** Allowing or turning down what "it" waits on, with no thread named. */
-const decidingIt = (said: string) =>
-  allows.has(said) || /^(deny|decline|reject|don't allow|don't approve|do not allow|do not approve)( (it|that|this|this one|that one))?$/.test(said)
-
 /** Taking back what yapd just did. */
 const scratching: ReadonlySet<string> = new Set(["scratch that", "cancel that", "undo that", "take that back"])
 
@@ -1302,21 +1284,39 @@ export const takesBack = (heard: string) => scratching.has(gist(heard))
 /** Whether what he said is only a request to hear what he missed. */
 export const catchingUp = (heard: string) => missed.has(gist(heard))
 
-/** The menu's row an update was said again for, when it was: a thread, or a session T3 Code doesn't run. */
-export const saidAgain = (subject: Assistant.Subject): Option.Option<Mutes.About> =>
-  subject._tag === "Session" && subject.menu !== undefined ? Mutes.parse(subject.menu) : Option.none()
+/**
+ * What the menu said again that "it" means: an update, or what was kept of
+ * it, said for the menu's row, or one a question was asked over since.
+ */
+export const rowOf = (subject: Assistant.Subject): Extract<Assistant.Subject, { readonly _tag: "Session" | "Answer" }> | undefined => {
+  switch (subject._tag) {
+    case "Session":
+      return subject.menu === undefined ? undefined : subject
+    case "Answer":
+      return subject.row !== undefined ? rowOf(subject.row) : subject.menu !== undefined && subject.question === undefined ? subject : undefined
+    default:
+      return undefined
+  }
+}
+
+/** The menu's row said again that "it" means, when it was: a thread, or a session T3 Code doesn't run. */
+export const saidAgain = (subject: Assistant.Subject): Option.Option<Mutes.About> => {
+  const key = rowOf(subject)?.menu
+  return key === undefined ? Option.none() : Mutes.parse(key)
+}
 
 /**
  * The thread what he heard last is about, if it's one: an update's when its
  * hook was tied to the thread, or said again from the menu, that row's
- * thread, and none for a session's row, however the update was tied.
+ * thread, and none for a session's row, however the update was tied. A
+ * question asked over a menu's row yapd can't reach is about that row still.
  */
 export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> => {
   switch (subject._tag) {
     case "Thread":
       return Option.some(subject.ref)
     case "Answer":
-      return subject.about
+      return subject.row !== undefined ? about(subject.row) : subject.about
     case "Session":
       return Option.match(saidAgain(subject), {
         onNone: () => Option.fromNullable(subject.update.about),
@@ -1325,6 +1325,46 @@ export const about = (subject: Assistant.Subject): Option.Option<Threads.Ref> =>
     case "Nothing":
       return Option.none()
   }
+}
+
+/**
+ * The menu's row said again that "it" means, when yapd can't reach it from
+ * here, and what it is: a session T3 Code doesn't run, or a thread that
+ * isn't on the desk, as when it was archived or deleted, or its machine
+ * can't be seen right now. None for anything else, like a thread's row on
+ * the desk, which is that thread as ever.
+ */
+export const outOfReach = (situation: Pick<Situation, "subject" | "desk">): Option.Option<{ readonly what: string; readonly kind: "session" | "thread" }> =>
+  Option.flatMap(saidAgain(situation.subject), (row) => {
+    if (row._tag === "Session") {
+      const subject = rowOf(situation.subject)
+      const where = subject?._tag === "Session" && subject.update.thread.cwd !== "" ? ` in ${fenced(subject.update.thread.cwd, 120)}` : ""
+      return Option.some({ what: `a session${where} on ${row.machine} that T3 Code doesn't run, like one in a terminal`, kind: "session" as const })
+    }
+    const { desk } = situation
+    if (desk.threads.some((listed) => Threads.same(listed.ref, row.ref))) return Option.none()
+    const away = desk.away.find(({ machine }) => machine.toLowerCase() === row.ref.machine.toLowerCase())
+    return Option.some({
+      what: away === undefined ? "a thread no longer in THREADS, maybe archived or deleted" : `a thread on ${away.machine}, which can't be seen right now`,
+      kind: "thread" as const,
+    })
+  })
+
+/**
+ * What "it" means once yapd has said something back, when it meant a menu's
+ * row yapd can't reach: still that row, whatever was said about it, like
+ * that it can't be reached, so "mute it" and a second "interrupt it" are
+ * about the row too. A question asked over it is what "it" means while it's
+ * open, about the row still. Anything about another thread, like one he
+ * named, makes "it" that thread, as ever.
+ */
+export const held = (before: Assistant.Subject, after: Assistant.Subject, desk: Threads.Desk): Assistant.Subject => {
+  const row = rowOf(before)
+  if (row === undefined || after._tag !== "Answer" || Option.isNone(outOfReach({ subject: row, desk }))) return after
+  if (after.question !== undefined) return { ...after, row }
+  const told = after.about
+  if (Option.isSome(told) && !Option.exists(about(row), (ref) => Threads.same(ref, told.value))) return after
+  return { ...row, said: after.said }
 }
 
 /** The thread he's on about: what he heard about last, when it's on the desk. */
@@ -1466,12 +1506,6 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
     return decision({ act: "answer", spoken: used(situation.usage, said, lines, situation.now), pending: Option.isSome(open) ? "replaces" : "" })
   }
   const replacing = Option.isSome(open) ? "replaces" : ""
-  // A session's row said again from the menu is no thread T3 Code runs, so what only a thread can do, asked of "it", is said to be out of
-  // reach here: never the model's, which takes an update not tied to a thread for the one doing that work, maybe one he heard of before.
-  // Allowing or turning something down answers the question open instead, when there is one.
-  if (Option.exists(saidAgain(subject), ({ _tag }) => _tag === "Session") && (forThread(said) || (Option.isNone(open) && decidingIt(said)))) {
-    return decision({ act: "answer", spoken: unreachable(lines), pending: replacing })
-  }
   // Said of the work he's hearing about while it's at it, it can only mean stopping that.
   const on = focused(situation)
   // With nothing open, what's asked is what the thread he's on about asks him, when it asks him something: it's read to him again.
@@ -1709,12 +1743,30 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
   }
 }
 
+/** What a write does to a thread, as a yes or no question about it puts it: "send that to the Tezos migration". */
+const confirmed = (choice: Decision, thread: string) => {
+  switch (choice.act) {
+    case "send":
+      return `send that to ${thread}`
+    case "reply":
+      return `send that answer to ${thread}`
+    case "decide":
+      return choice.how === "decline" ? `turn down what ${thread} asks` : `allow what ${thread} asks`
+    case "undo":
+      return choice.how === "carry" ? `have ${thread} carry on` : `take back what I sent ${thread}`
+    default:
+      return `stop ${thread}`
+  }
+}
+
 /**
  * Whether a write goes ahead: on a thread he plainly meant, or fairly surely
  * the one he's on about, which the confirmation names when it isn't. A stop
  * that's only fairly sure is confirmed first, since it can't be taken back
- * mid-thought. Otherwise he's asked which, naming them, or told it couldn't
- * be told with nothing to choose between, as the confidence policy says.
+ * mid-thought. So is any write while "it" is a menu's row yapd can't reach,
+ * however sure: he may have meant that row. Otherwise he's asked which,
+ * naming them, or told it couldn't be told with nothing to choose between,
+ * as the confidence policy says.
  */
 const writing = (
   choice: Decision,
@@ -1734,7 +1786,7 @@ const writing = (
   if (choice.act === "stop" && !stoppable(listed)) return { _tag: "Say", spoken: `${capital(listed.called)} isn't doing anything right now${addressed(lines)}.` }
   const on = Option.exists(focused(situation), (focus) => focus.handle === listed.handle)
   const confirm = (): Checked => {
-    const doing = `stop ${named(listed, desk.threads)}`
+    const doing = confirmed(choice, named(listed, desk.threads))
     const asked = confirming(doing, lines, situation.asked)
     if (asked === undefined) return { _tag: "Say", spoken: lines.cantTell }
     return {
@@ -1753,6 +1805,9 @@ const writing = (
       },
     }
   }
+  // Said again from the menu, a row yapd can't reach is what "it" means, so what's aimed at a thread waits for his yes, naming it, unless this is it.
+  const yes = Option.exists(situation.open, (open) => open.kind === "confirm" && choice.pending === "answers" && agrees(open, choice, desk))
+  if (Option.isSome(outOfReach(situation)) && !yes) return confirm()
   if (choice.sure === "high") return { _tag: "Do", plan: { decision: choice, target } }
   if (choice.sure === "medium" && on) return choice.act === "stop" ? confirm() : { _tag: "Do", plan: { decision: choice, target } }
   return ask(candidates)
@@ -2053,8 +2108,12 @@ const entry = (desk: Threads.Desk, now: number) => (kept: Kept) => {
   return `- ${lasted(now - kept.at)} ago, ${what}`
 }
 
+/** What the model is told of a menu's row said again that yapd can't reach, which "it" means. */
+const beyond = ({ what, kind }: { readonly what: string; readonly kind: "session" | "thread" }) =>
+  `It's from ${what}. You can't reach it from here. "It" and "that" mean that ${kind}, never ${kind === "session" ? "a" : "another"} thread in THREADS. If he asks you to do something to it, like stopping it or telling it something, answer that you can't reach it from here.`
+
 /** What "it" means, as the model sees it. */
-const focus = (situation: Situation) => {
+const focus = (situation: Situation): string => {
   const { subject, desk, now } = situation
   switch (subject._tag) {
     case "Nothing":
@@ -2067,10 +2126,10 @@ const focus = (situation: Situation) => {
       const { update } = subject
       const ref = about(subject)
       const handle = Option.getOrUndefined(Option.flatMap(ref, (ref) => Option.fromNullable(handleOf(desk, ref.machine, ref.id))))
-      const unreached = Option.exists(saidAgain(subject), ({ _tag }) => _tag === "Session")
+      const unreached = outOfReach(situation)
       return [
-        unreached
-          ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, said again just now as he asked from the menu: from a session in ${fenced(update.thread.cwd, 120)} that T3 Code doesn't run, which you can't reach from here, so "it" is never a thread in THREADS: ${fenced(update.spoken, 400)}`
+        Option.isSome(unreached)
+          ? `Your update about ${update.project}, from ${lasted(now - update.at)} ago, which he just heard again from the menu: ${fenced(update.spoken, 400)}\n${beyond(unreached.value)}`
           : handle === undefined
             ? `Your update about ${update.project}, ${lasted(now - update.at)} ago, from work in ${fenced(update.thread.cwd, 120)} that yapd hasn't tied to a thread yet: ${fenced(update.spoken, 400)}`
             : `${handle}. Your update about it, ${lasted(now - update.at)} ago: ${fenced(update.spoken, 400)}`,
@@ -2081,6 +2140,10 @@ const focus = (situation: Situation) => {
       ].join("\n")
     }
     case "Answer": {
+      // Asked over a menu's row yapd can't reach, the question is about that row still.
+      if (subject.row !== undefined) return `What you just asked him: ${fenced(subject.said, 700)}, over this:\n${focus({ ...situation, subject: subject.row })}`
+      const unreached = outOfReach(situation)
+      if (Option.isSome(unreached)) return `What you just told him again from the menu, as he asked: ${fenced(subject.said, 700)}\n${beyond(unreached.value)}`
       const handle = Option.flatMap(subject.about, (ref) => Option.fromNullable(handleOf(desk, ref.machine, ref.id)))
       return `What you just told him${Option.match(handle, { onNone: () => "", onSome: (handle) => ` about ${handle}` })}: ${fenced(subject.said, 700)}`
     }

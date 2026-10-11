@@ -305,7 +305,7 @@ export const menu = (options: {
         const saying =
           row.thread === null
             ? Option.map(yield* latest.session(key), (update) => assistant.mentionSession(update, row.text, key))
-            : Option.some(assistant.mention({ machine: row.machine, id: row.thread }, row.text))
+            : Option.some(assistant.mention({ machine: row.machine, id: row.thread }, row.text, key))
         if (Option.isNone(saying)) return "unknown" as const
         const now = yield* Clock.currentTimeMillis
         yield* daemon.tell(

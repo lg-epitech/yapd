@@ -157,6 +157,13 @@ export type Subject =
       readonly question?: Open
       /** The question it was, in the words it was asked in, once it's closed: shown as it was, but told rather than asked again (I4). */
       readonly asked?: string
+      /** The menu's row it said again, by its key, which "it" means then: that row's thread. */
+      readonly menu?: string
+      /**
+       * The menu's row yapd can't reach that "it" meant when this question was
+       * asked over it, which "it" means still, and again once it's closed.
+       */
+      readonly row?: Subject
     }
 
 /** The one question yapd has open, and what it's about. */
@@ -286,8 +293,12 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly unconfirmed: (rows: ReadonlyArray<Ledger.Row>) => Effect.Effect<void>
     /** yapd was turned on: what a restart found while it was off is said, or offered, now. */
     readonly back: Effect.Effect<void>
-    /** yapd starts saying something of its own accord about a thread, like that it failed, which "it" then means. */
-    readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
+    /**
+     * yapd starts saying something of its own accord about a thread, like that
+     * it failed, which "it" then means, or what the menu's row `menu` kept of
+     * it, said again.
+     */
+    readonly mention: (ref: Threads.Ref, said: string, menu?: string) => Effect.Effect<void>
     /**
      * yapd starts saying again a session's update he asked to hear from the
      * menu, by its row's key, which "it" then means: that session, so muting
@@ -2896,7 +2907,13 @@ export const make = (options: {
           yield* deliver(regarding(Brain.dealtWith(yield* persona.lines), askedAbout(open)), utterance)
         })
         if (gone.has(open.id)) return Option.some(late)
-        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open }, [{ speaker: "yapd", text: open.asked }])
+        // Asked over a menu's row yapd can't reach, it's about that row still.
+        const row = answered?.subject._tag === "Answer" && answered.subject.question?.id === open.id ? answered.subject.row : undefined
+        const thought = yield* think(
+          utterance,
+          { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open, ...(row === undefined ? {} : { row }) },
+          [{ speaker: "yapd", text: open.asked }],
+        )
         // Taken by the model for yapd's own voice, over its first seconds, it's asked on from just before, as when only that was heard.
         if ((thought.source === "fast" || echo !== undefined) && thought.decision.act === "resume") return Option.none()
         // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.
@@ -3002,7 +3019,8 @@ export const make = (options: {
               })
         yield* Effect.logInfo(`Said: ${outcome.say}`)
         const { missed, card } = outcome
-        const subject = "utterance" in of ? along(of, outcome.subject) : outcome.subject
+        // A menu's row yapd can't reach stays what "it" means, whatever's said about it.
+        const subject = "utterance" in of ? along(of, Brain.held(of.subject, outcome.subject, of.situation.desk)) : outcome.subject
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
         let unsaid: Effect.Effect<void> = Effect.void
         // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
@@ -3557,10 +3575,10 @@ export const make = (options: {
         }),
       // In its turn, so turning yapd on never waits for it.
       back: Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)),
-      mention: (ref, said) =>
+      mention: (ref: Threads.Ref, said: string, menu?: string) =>
         Effect.flatMap(Effect.all([Clock.currentTimeMillis, options.power]), ([at, { turns }]) =>
           Effect.sync(() => {
-            answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at, turns }
+            answered = { subject: { _tag: "Answer", said, about: Option.some(ref), ...(menu === undefined ? {} : { menu }) }, at, turns }
           }),
         ),
       mentionSession: (update, said, key) =>
