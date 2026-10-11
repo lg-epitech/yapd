@@ -3152,6 +3152,48 @@ describe("Daemon with threads muted", () => {
     expect(result.followUps).toEqual(["claude:s-tezos let go"])
   })
 
+  test("a muted thread's turn under way when yapd queued his message behind it isn't his, but one it was steered into is", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const ledger: Array<{ readonly at: number; readonly digest: string | null; readonly how: Ledger.How }> = []
+        const { handle, wait, nextEvent, played } = yield* make(undefined, {
+          mutes,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          sent: (_, since) => Effect.succeed(ledger.filter(({ at }) => at >= since)),
+        })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-tezos" }), called: "the Tezos migration" })
+        const prompt = (text: string) => handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt: text }, { project: "yapd", host: hostname() }, false)
+        const stop = (message: string) => handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: message }, { project: "yapd", host: hostname() }, false)
+        yield* wait(600)
+        yield* prompt("Migrate the fee module.")
+        yield* wait(180)
+        // Three minutes in, he has yapd send it more, which T3 Code queues behind the turn.
+        const queued = "Then bump the fee table."
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest(queued), how: "queued" })
+        yield* wait(120)
+        yield* stop("The fee module is migrated.")
+        yield* nextEvent("Muted update for yapd")
+        // Its own turn, begun in its words, is his.
+        yield* prompt(queued)
+        yield* wait(60)
+        yield* stop("The fee table is bumped.")
+        yield* nextEvent("Ready: yapd. The fee table is bumped.")
+        yield* wait(11)
+        // Steered into the turn under way, that turn answers it.
+        yield* prompt("Run the integration tests.")
+        yield* wait(60)
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest("Skip the slow ones."), how: "steered" })
+        yield* wait(60)
+        yield* stop("The fast tests pass.")
+        yield* nextEvent("Ready: yapd. The fast tests pass.")
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The fee table is bumped.", "yapd. The fast tests pass."])
+  })
+
   test("a turn that couldn't be summed up is said on a muted thread, since it may be a question or a failure", async () => {
     const result = await run(
       Effect.gen(function* () {

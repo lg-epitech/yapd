@@ -79,7 +79,10 @@ export const make = (
     readonly mutes?: Mutes.Mutes
     readonly naming?: Naming
     /** What yapd sent a thread for him since then, like a message, an answer to its question or the work it started, by when and in what words. */
-    readonly sent?: (to: Threads.Ref, since: number) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null }>>
+    readonly sent?: (
+      to: Threads.Ref,
+      since: number,
+    ) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null; readonly how?: Ledger.How | null }>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -618,10 +621,13 @@ export const make = (
   const sending = 60_000
 
   /**
-   * Whether a hook's turn answers what yapd sent its thread for him: sent
-   * since its prompt came, or a little before, or sent in its prompt's words,
-   * as a message that waited in T3 Code's queue. Never for a turn whose
-   * prompt never came through the hooks, which can't be told.
+   * Whether a hook's turn answers what yapd sent its thread for him: sent a
+   * little before its prompt came, or steered into it since, or sent in its
+   * prompt's words, as a message that waited in T3 Code's queue. One that
+   * went into the queue once the turn was under way waits for a turn of its
+   * own, which it begins in its words: the turn it waited behind isn't his.
+   * Never for a turn whose prompt never came through the hooks, which can't
+   * be told.
    */
   const asked = (to: Threads.Ref, finished: Finished) =>
     Effect.gen(function* () {
@@ -630,7 +636,10 @@ export const make = (
       if (sent === undefined || prompted === undefined) return false
       const words = prompted.text === undefined ? "" : Ledger.digest(prompted.text)
       const rows = yield* sent(to, arrivedAt - forgotten)
-      return rows.some(({ at, digest }) => at <= arrivedAt && (at >= prompted.at - sending || (words !== "" && digest === words)))
+      return rows.some(
+        ({ at, digest, how }) =>
+          at <= arrivedAt && ((words !== "" && digest === words) || (at >= prompted.at - sending && (at <= prompted.at || how !== "queued"))),
+      )
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), false)))
 
   const prepare = (finished: Finished) => {
