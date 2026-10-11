@@ -2,5 +2,6 @@
   { "heard": "Mute the Tezos one.", "thread": "Tezos", "act": "mute", "how": "mute", "until": false },
   { "heard": "Silence the yapd thread for an hour.", "thread": "yapd", "act": "mute", "how": "mute", "until": true },
   { "heard": "Unmute the muted one.", "thread": "Tezos", "act": "mute", "how": "unmute", "muted": ["Tezos"] },
-  { "heard": "Mute the integration one.", "thread": "", "asks": true }
+  { "heard": "Mute the integration one.", "thread": "", "asks": true },
+  { "heard": "Unmute the Claude session in yapd.", "thread": "", "act": "mute", "how": "unmute", "muted": ["Tezos"], "sessions": ["the Claude session in yapd"], "target": "m2" }
 ]

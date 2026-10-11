@@ -41,8 +41,9 @@ import * as Threads from "../src/Threads.ts"
 //     from another file, like a few new ones, leaving phrases.json as it is,
 //     and `--view` the threads, which are then nobody's, so nothing is searched
 //     and no work yapd started is read; `--out` keeps the results elsewhere.
-//     A phrase can say a piece of the title of threads he muted, how it's
-//     decided and whether with when it ends, or that it asks which thread.
+//     A phrase can say a piece of the title of threads he muted, what the
+//     sessions he muted are called, how it's decided and whether with when it
+//     ends, the handle it names, or that it asks which thread.
 //     The cases for muting are in scripts/eval, with threads of their own:
 //       bun scripts/brain-eval.ts run --runs 1 --phrases scripts/eval/mutes.phrases.json --view scripts/eval/mutes.view.json --out /tmp/yapd-eval
 //   bun scripts/brain-eval.ts probe [--runs 20]
@@ -95,6 +96,10 @@ const Phrases = Schema.Array(
     said: Schema.optional(Schema.String),
     /** A piece of the title of each thread he muted. */
     muted: Schema.optional(Schema.Array(Schema.String)),
+    /** What each session he muted that's no thread, like one in a terminal, is called, listed after the threads. */
+    sessions: Schema.optional(Schema.Array(Schema.String)),
+    /** The handle it should name, like m2 for a session he muted, rather than a thread. */
+    target: Schema.optional(Schema.String),
     /** How it should be decided, like "unmute" for a mute. */
     how: Schema.optional(Schema.String),
     /** Whether it should say when it ends, like a mute for an hour. */
@@ -301,9 +306,12 @@ const run = Effect.gen(function* () {
               acted: Option.none(),
               quieted: [],
               // The threads he muted, by a piece of their titles.
-              mutes: desk.threads
-                .filter((listed) => (phrase.muted ?? []).some((piece) => fits(listed, piece)))
-                .map(({ ref }) => ({ key: Mutes.key.thread(ref), at: now - 60 * 60_000 })),
+              mutes: [
+                ...desk.threads
+                  .filter((listed) => (phrase.muted ?? []).some((piece) => fits(listed, piece)))
+                  .map(({ ref }) => ({ key: Mutes.key.thread(ref), at: now - 60 * 60_000 })),
+                ...(phrase.sessions ?? []).map((called, index) => ({ key: Mutes.key.session(hostname(), `claude:eval-${index}`), called, at: now - 30 * 60_000 })),
+              ],
               muteChange: Option.none(),
               now,
             }
@@ -335,7 +343,11 @@ const run = Effect.gen(function* () {
                 : answering &&
                   taken &&
                   (phrase.act === undefined || decision.act === phrase.act) &&
-                  (phrase.thread === "" ? phrase.act !== undefined || decision.target === "" || listed !== undefined : fits(listed, phrase.thread))
+                  (phrase.target !== undefined
+                    ? decision.target === phrase.target
+                    : phrase.thread === ""
+                      ? phrase.act !== undefined || decision.target === "" || listed !== undefined
+                      : fits(listed, phrase.thread))
             if (right) correct++
             // One that should ask is never held to asking rarely.
             if (asking && phrase.asks !== true) asked++
