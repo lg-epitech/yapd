@@ -1018,15 +1018,15 @@ const answered = "The one for the loader, sir."
 
 describe("Over its first seconds, while yapd's own voice can still get into the microphone", () => {
   test("ducks at his first sound and stops once it's clearly speech, as later in a line", async () => {
-    /** The commands sent from when he begins talking `at` seconds into the line. */
-    const over = (at: number) =>
+    /** The commands sent from when he begins talking `at` seconds into the line, `needed` frames of speech making it speech. */
+    const over = (at: number, needed: number) =>
       overHelperScoped(
         Effect.gen(function* () {
           const helper = yield* overHelper([[0.9, "Hold on."]], { live: true, reply: () => ({ intent: "dismiss", spoken: "", message: "" }) })
           yield* helper.wait(at)
           yield* helper.talk(0.9, 1)
           const ducked = [...helper.timeline]
-          yield* helper.talk(0.9, defaults.confirm - 1)
+          yield* helper.talk(0.9, needed - 1)
           const stopped = [...helper.timeline]
           yield* helper.talk(0.9, 6)
           yield* helper.quiet
@@ -1034,11 +1034,12 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
           return { ducked, stopped, responded: helper.responded.map(({ heard }) => heard) }
         }),
       )
-    for (const at of [0.3, 1, 4]) {
-      const result = await over(at)
-      // Turned down with the first frame of his voice, and stopped with the frame that makes it speech, three frames later.
+    // Two frames more over its first seconds, as its own voice ducked often stops being speech by then, and his never does.
+    for (const [at, needed] of [[0.3, defaults.wary], [1, defaults.wary], [4, defaults.confirm]] as const) {
+      const result = await over(at, needed)
+      // Turned down with the first frame of his voice, and stopped with the frame that makes it speech, a few frames later.
       expect([at, result.ducked]).toEqual([at, [{ type: "play", at: 0 }, { type: "volume", at: seconds(at + 0.032), value: 0.25 }]])
-      expect([at, result.stopped.slice(2)]).toEqual([at, [{ type: "stop", at: seconds(at + 0.032 * defaults.confirm) }]])
+      expect([at, result.stopped.slice(2)]).toEqual([at, [{ type: "stop", at: seconds(at + 0.032 * needed) }]])
       expect([at, result.responded]).toEqual([at, ["Hold on."]])
     }
   })
@@ -1477,7 +1478,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
 
   test("falls quiet, taking nothing, when only its own last words got into the microphone as a line ended within its first seconds", async () => {
     // No longer than its voice dying away after.
-    const result = await ending(1.95, 4, { spoken: "The PR is ready, sir. Merge it?", duration: 2, heard: "Merge it.", finished: true })
+    const result = await ending(1.95, defaults.wary, { spoken: "The PR is ready, sir. Merge it?", duration: 2, heard: "Merge it.", finished: true })
     expect(result).toEqual({ commands: ["play", "volume"], responded: [], sent: [], offered: [], done: true })
   })
 

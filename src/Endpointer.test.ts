@@ -23,6 +23,22 @@ describe("Endpointer", () => {
     ])
   })
 
+  test("waits a little longer to confirm what may be yapd's own voice, judged as it begins", () => {
+    const endpointer = new Endpointer()
+    const events: Array<readonly [number, string]> = []
+    const frames = [...quiet(3), ...voiced(defaults.wary), ...quiet(defaults.silence)]
+    frames.forEach((probability, at) => {
+      // Only its first frame tells.
+      const event = endpointer.push(new Float32Array(512), probability, at === 3)
+      if (event !== undefined) events.push([at, event._tag])
+    })
+    expect(defaults.wary).toBeGreaterThan(defaults.confirm)
+    expect(events.slice(0, 2)).toEqual([
+      [3, "Onset"],
+      [3 + defaults.wary - 1, "Speech"],
+    ])
+  })
+
   test("lets a short noise go", () => {
     const events = feed([...voiced(2), ...quiet(defaults.abandon)])
     expect(events.map(({ event }) => event._tag)).toEqual(["Onset", "Abandoned"])

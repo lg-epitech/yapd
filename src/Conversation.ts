@@ -542,7 +542,7 @@ export const make = (options: {
             Effect.gen(function* () {
               // As the frame came in, since by the time it's looked at, yapd may well have learnt its own voice.
               const echo = yield* audio.echo(frame)
-              const event = endpointer.push(frame, yield* detect.value(frame))
+              const event = endpointer.push(frame, yield* detect.value(frame), echo)
               return event?._tag === "Onset" ? ({ _tag: "Onset", echo } satisfies Signal) : event
             }),
           ),

@@ -6,6 +6,14 @@ export interface Options {
   readonly off: number
   /** Voiced frames before it's speech rather than a cough or a click. */
   readonly confirm: number
+  /**
+   * The same for what began while yapd's own voice could still get into the
+   * microphone, ducked at once: a little more, since its own voice, ducked,
+   * often stops being speech by then, and his never does. In a simulation
+   * with Silero, it stopped yapd for its own voice a quarter less often,
+   * and for him 64 ms later.
+   */
+  readonly wary: number
   /** Unvoiced frames in a row that end an onset that never became speech. */
   readonly abandon: number
   /** Frames of silence that end an utterance. Long enough to outlast a pause between words. */
@@ -22,6 +30,7 @@ export const defaults: Options = {
   on: 0.5,
   off: 0.35,
   confirm: 4,
+  wary: 6,
   abandon: 8,
   silence: 22,
   lead: 10,
@@ -49,10 +58,12 @@ export class Endpointer {
   private frames: Array<Float32Array> = []
   private voiced = 0
   private quiet = 0
+  private needed = 0
 
   constructor(private readonly options: Options = defaults) {}
 
-  push(frame: Float32Array, probability: number): Event | undefined {
+  /** Takes the next frame, `wary` when it may carry yapd's own voice. */
+  push(frame: Float32Array, probability: number, wary = false): Event | undefined {
     const { on, off, confirm, abandon, silence, lead, tail, longest } = this.options
     const isVoiced = probability >= on
     this.frames.push(frame)
@@ -65,6 +76,7 @@ export class Endpointer {
         }
         this.phase = "onset"
         this.voiced = 1
+        this.needed = wary ? this.options.wary : confirm
         return onset
 
       case "onset":
@@ -74,7 +86,7 @@ export class Endpointer {
         } else {
           this.quiet++
         }
-        if (this.voiced >= confirm) {
+        if (this.voiced >= this.needed) {
           this.phase = "speech"
           this.quiet = 0
           return speech
