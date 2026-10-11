@@ -4196,6 +4196,28 @@ describe("Assistant", () => {
     })
   })
 
+  test("said over the first seconds of its answer, only what he said first may be yapd's own voice: the rest of his request, worked out after, is never told so", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const told: Array<string> = []
+        const { dictate, followUp } = yield* assistant((situation) => {
+          told.push(`${situation.utterance.heard} over ${situation.utterance.echo ?? "nothing"}`)
+          if (situation.utterance.heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+          return situation.utterance.heard.startsWith("Tell the Mina")
+            ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "now", rest: "tell the Tezos one to wait" })
+            : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Wait.", how: "now" })
+        })
+        yield* dictate("Who needs me?")
+        yield* followUp("Tell the Mina one to add tests, then tell the Tezos one to wait.", 3, undefined, "Two threads need you, sir.")
+        return told
+      }),
+    )
+    expect(result).toEqual([
+      "Tell the Mina one to add tests, then tell the Tezos one to wait. over Two threads need you, sir.",
+      "tell the Tezos one to wait over nothing",
+    ])
+  })
+
   test("a second clarification closes the request instead of asking again", async () => {
     const result = await run(
       Effect.gen(function* () {
