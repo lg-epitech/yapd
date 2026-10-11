@@ -1651,6 +1651,25 @@ describe("Once its own voice has stopped a line over its first seconds, and it p
     expect(await over("Over in yapd, the tests pass.")).toEqual({ plays: [0, 0, 0], responded: [] })
   })
 
+  test("takes yapd's own words he says back as his once they go on past where it would have stopped without the cap", async () => {
+    const over = (more: number) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.8, "Over in yapd."], [0.9, "The tests pass."]], { live: true, reply: () => ({ intent: "dismiss", spoken: "", message: "" }) })
+          yield* stoppedOnItself(helper)
+          yield* helper.talk(0, defaults.lead)
+          yield* helper.talk(0.9, defaults.capped + more)
+          yield* helper.quiet
+          yield* helper.wait(1)
+          return helper.responded.map(({ heard }) => heard)
+        }),
+      )
+    // Going on as far past where a stop would have come without the cap as his words must, they're his.
+    expect(await over(11)).toEqual(["The tests pass."])
+    // No further than its own voice can go on, they may be its own.
+    expect(await over(7)).toEqual([])
+  })
+
   test("only ducks for more of its own voice over an answer's first seconds too", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

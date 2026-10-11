@@ -144,6 +144,9 @@ export const voiced = (audio: Float32Array) =>
 const rate = 16000
 const frame = 512
 
+/** How much later after he begins it stops once its own voice has stopped a line, for the frames more of speech that takes. */
+const later = ((Endpointer.defaults.capped - Endpointer.defaults.wary) * frame) / rate
+
 /** The part of `text` heard in `fraction` of its audio, marked when it's cut short. */
 export const cut = (text: string, fraction: number) => {
   if (fraction >= 1) return text
@@ -1036,7 +1039,9 @@ export const make = (options: {
     const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
       const { echo, onset = outcome.at } = outcome
       if (echo === undefined) return { itself: false, unsure: false }
-      const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
+      // Under the cap, from where it would have stopped otherwise, so as much of what he says counts as going on past it.
+      const stopped = outcome.capped === true ? outcome.at - later : outcome.at
+      const past = voiced(outcome.audio) - Math.max(0, stopped - onset) > overhang
       if (first === "" || (!past && (outcome.capped === true ? !own(first, "") && own(first, echo) : own(first, "") || own(first, echo)))) {
         return { itself: true, unsure: true }
       }
