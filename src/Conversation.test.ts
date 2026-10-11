@@ -1376,6 +1376,24 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     })
   })
 
+  test.each([
+    ["no longer than its own voice can go on after it stops, which it may all have been, at once", 12, [{ heard: "Cup day of", told: true }]],
+    ["going on past that, which is surely his trailing off, only after a moment more", 16, []],
+  ] as const)("works out what's said over its first seconds that ends on a word like \"of\" %s", async (_, frames, soon) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Cup day of"]], { reply: () => ({ intent: "resume", spoken: "", message: "" }) })
+        yield* helper.wait(0.5)
+        yield* helper.talk(0, defaults.lead)
+        yield* helper.talk(0.9, frames)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined }))
+      }),
+    )
+    expect(result).toEqual([...soon])
+  })
+
   test("after three times talk that wasn't meant for it past its first seconds, reads the rest without listening", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

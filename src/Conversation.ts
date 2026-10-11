@@ -747,13 +747,15 @@ export const make = (options: {
      * Works out a reply while still listening, so pausing mid-thought doesn't cut
      * the user off: if they carry on before it's ready, it starts again with all
      * they said, and how many seconds of all of it were speech. Nothing's done
-     * with a reply while they might still be talking.
+     * with a reply while they might still be talking. What `hesitates` seems
+     * to trail off is given a moment more first.
      */
     const settle = <R>(
       ear: Ear,
       first: string,
       audio: Float32Array,
       transcribe: (audio: Float32Array) => Effect.Effect<string>,
+      hesitates: boolean,
       respond: (heard: string, voiced: number) => Effect.Effect<R>,
     ) =>
       Effect.gen(function* () {
@@ -761,7 +763,9 @@ export const make = (options: {
         let heard = first
         let speech = voiced(audio)
         while (true) {
-          const replying = unfinished(heard) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech)) : respond(heard, speech)
+          // Not for what may all be yapd's own voice, cut off where it stopped, like "the PR is ready for": that's no sign he's trailing off.
+          const replying =
+            unfinished(heard) && (hesitates || heard !== first) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech)) : respond(heard, speech)
           if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, reply: yield* replying }
           const id = fresh()
           const fiber = yield* replying.pipe(
@@ -964,7 +968,7 @@ export const make = (options: {
             }
 
             const said = cut(text, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
-            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, (heard) =>
+            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard) =>
               responder
                 .respond({
                   project: update.project,
@@ -1071,7 +1075,7 @@ export const make = (options: {
           const reply =
             itself || first === ""
               ? Option.none()
-              : (yield* settle(outcome.ear, first, outcome.audio, hear, (heard, voiced) => respond(heard, voiced, echo))).reply
+              : (yield* settle(outcome.ear, first, outcome.audio, hear, !unsure, (heard, voiced) => respond(heard, voiced, echo))).reply
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(reply.value)
