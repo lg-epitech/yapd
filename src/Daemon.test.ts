@@ -3389,6 +3389,34 @@ describe("Daemon with threads muted", () => {
     expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in."])
   })
 
+  test("what he said by voice back through one session's hook doesn't make a muted thread's run of other sessions his", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, speak, wait, nextEvent, nextPlayback, played, followUps } = yield* make("Use the fee table.", { mutes, send: () => Effect.void })
+        yield* finish("tezos", "The migration compiles.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        // While that waits on its answer, the loader's own run, in a session of its own, finishes.
+        const startedAt = yield* Clock.currentTimeMillis
+        yield* wait(60)
+        yield* made.finished({
+          ...unhooked("The loader is refactored.", "run-1", (yield* made.power).turns),
+          at: yield* Clock.currentTimeMillis,
+          run: { status: "completed", final: "The loader is refactored.", others: [], natives: ["native-loader"], previous: Option.none(), startedAt },
+        })
+        yield* nextEvent("Muted update for yapd")
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { played: [...played], followUps: [...followUps] }
+      }),
+    )
+    expect(result.followUps).toEqual(["tezos sent: Use the fee table."])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on."])
+  })
 
   test("a turn that couldn't be summed up is said on a muted thread, since it may be a question or a failure", async () => {
     const result = await run(
