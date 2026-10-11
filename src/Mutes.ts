@@ -68,6 +68,18 @@ const lasting = (said: string) => {
   return asked[2]!.startsWith("hour") ? count * 60 : count
 }
 
+/**
+ * When a mute the model worked out ends: the time it gives, or, as it may
+ * give how long instead, like "for an hour", that long from `now`. None for
+ * a time that's gone or anything else, which mutes it until he unmutes it.
+ */
+export const ending = (when: string, now: number) => {
+  const at = Date.parse(when)
+  if (!Number.isNaN(at)) return at > now ? at : undefined
+  const minutes = lasting(gist(when).replace(/^for /, ""))
+  return minutes === undefined ? undefined : now + minutes * 60_000
+}
+
 /** What he's on about, said as a whole: never a thread by name, which is the model's to tell. */
 const it = "it|that|this|this thread|that thread|this one|that one"
 

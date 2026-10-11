@@ -10061,6 +10061,32 @@ describe("Assistant muting", () => {
     expect(result.asked).toBe(2)
   })
 
+  test("a mute the model says lasts a while ends then, whether it gives the time or only how long", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, mutes } = yield* assistant(
+          (situation) =>
+            Brain.decision({
+              act: "mute",
+              how: "mute",
+              target: handle(situation, situation.utterance.heard.includes("Tezos") ? tezos : mina),
+              when: situation.utterance.heard.includes("Tezos") ? "for an hour" : new Date(now + 30 * 60_000).toISOString(),
+            }),
+          undefined,
+          { muting: true },
+        )
+        yield* dictate("Silence the Tezos thread for an hour.")
+        yield* dictate("Mute the Mina tickets for half an hour.")
+        return { spoken: spoken(), ends: (yield* mutes!.list).map(({ ends }) => ends) }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      `Muted Migrate Tezos Integration until ${Brain.time(now + 60 * 60_000)}, sir. I'll still tell you if it needs you.`,
+      `Muted Open Mina SSV2 Bug Tickets until ${Brain.time(now + 30 * 60_000)}, sir. I'll still tell you if it needs you.`,
+    ])
+    expect(result.ends.toSorted()).toEqual([now + 30 * 60_000, now + 60 * 60_000])
+  })
+
   test("'mute it' over a session's update mutes the session, called as it's said, and 'unmute it' after takes it off", async () => {
     const result = await run(
       Effect.gen(function* () {

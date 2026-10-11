@@ -2515,9 +2515,8 @@ export const make = (options: {
         const about = Option.flatten(Option.map(Mutes.parse(key), (about) => (about._tag === "Thread" ? Option.some(about.ref) : Option.none<Threads.Ref>())))
         const answered = (line: string): Outcome => (it ? stays(line) : { say: line, subject: { _tag: "Answer", said: line, about }, kind: "done" })
         if (decision.how === "unmute") return answered((yield* controls.unmute(key)) ? told.unmuted : told.notMuted)
-        const ends = decision.when.trim() === "" ? undefined : Date.parse(decision.when)
-        // A time that's gone or can't be read leaves it muted until he unmutes it, which is the safer way to take it.
-        const lasts = ends === undefined || Number.isNaN(ends) || ends <= now ? undefined : ends
+        // A time that's gone or can't be read leaves it muted until he unmutes it, which is the safer way to take it, and said so.
+        const lasts = Mutes.ending(decision.when, now)
         const done = yield* controls.mute({ key, ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }) }, lasts)
         return answered(done ? told.muted(lasts) : told.already)
       })

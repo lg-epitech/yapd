@@ -204,4 +204,15 @@ describe("Mutes", () => {
       expect(heard(said)).toBeUndefined()
     }
   })
+
+  test("when a mute the model worked out ends: the time it gives, or how long it says from now, and never a time that's gone", () => {
+    const now = Date.parse("2026-10-09T10:00:00.000Z")
+    expect(Mutes.ending("2026-10-09T11:00:00.000+00:00", now)).toBe(now + 60 * 60_000)
+    // The model gave how long rather than when, as it did once in the eval.
+    expect(Mutes.ending("for an hour", now)).toBe(now + 60 * 60_000)
+    expect(Mutes.ending("30 minutes", now)).toBe(now + 30 * 60_000)
+    expect(Mutes.ending("2026-10-09T09:00:00.000Z", now)).toBeUndefined()
+    expect(Mutes.ending("", now)).toBeUndefined()
+    expect(Mutes.ending("until he's back", now)).toBeUndefined()
+  })
 })
