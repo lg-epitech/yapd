@@ -29,7 +29,8 @@ Live on `dev` now: everything below. Talking over yapd's first seconds stopping 
 ## Mutes (built, waiting on review and its live check)
 
 - "Mute it" over or after a noisy thread's update, or "mute the Tezos one", keeps its progress and finished work to yourself, for good or "for an hour"; its questions, failures, limits and the answers to what you sent it still come through, and "what did I miss?" sums it up in a line. "Unmute it", "what's muted?", "unmute everything" and "scratch that" work too, and rig's threads are muted by their thread there. Nothing about it reaches an agent.
-- The API's state lists the threads with the latest updates, each with its project's icon and whether it's muted, and threads can be muted, heard again and their icons fetched by key, ready for the menu bar app.
+- The API's state lists the threads with the latest updates, each with its project's icon and whether it's muted, and threads can be muted, heard again and their icons fetched by key.
+- The menu bar lists those threads with their project icons, how long ago each finished and whether it's muted: clicking one says its latest update again, and the Mute menu, or Option over a row on macOS 15 and later, mutes it or takes the mute off. An older yapd still gets the old Hear Again list.
 
 ## Show me
 
