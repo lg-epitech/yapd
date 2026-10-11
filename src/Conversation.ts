@@ -85,8 +85,13 @@ const patience = "40 seconds"
 const ducked = 0.25
 /** How far back to pick up after talk that wasn't meant for yapd. */
 const rewind = 1.5
-/** How far back to pick up after only its own voice stopped it, or what may have been: just before, so the same opening isn't heard again and again. */
-const before = 0.3
+/**
+ * How far back to pick up after only its own voice stopped it, or what may
+ * have been: just before, a word or two. Any nearer and it starts mid-word
+ * with nothing for the echo cancellation to learn from before it's stopped
+ * again, which doubled how often that happens over a line's first seconds.
+ */
+const before = 0.8
 /**
  * How long speech can go on past where yapd stopped and still be only its
  * own voice dying away, in the room and in the voice detector: more than

@@ -1210,7 +1210,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     // A moment before where it stopped, two and a half seconds in.
     expect(result).toEqual({
       commands: ["play", "volume", "stop", "play"],
-      plays: [0, 2.2],
+      plays: [0, 1.7],
       transcribed: [heard],
       responded: [],
       rendered: [],
@@ -1236,8 +1236,8 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
         return { plays: helper.plays.map(seconds), responded: helper.responded.map(({ heard, echo }) => ({ heard, echo })), commands: helper.commands.slice(-2) }
       }),
     )
-    // Each time from a moment before where it stopped, so it gets on with the line.
-    expect(result).toEqual({ plays: [0, 0.2, 0.4, 0.6, 0.8], responded: [{ heard: "Stop.", echo: undefined }], commands: ["volume", "stop"] })
+    // Each time from a moment before where it stopped, which is its start again this early.
+    expect(result).toEqual({ plays: [0, 0, 0, 0, 0], responded: [{ heard: "Stop.", echo: undefined }], commands: ["volume", "stop"] })
   })
 
   test("takes all he says over its first seconds whole, though he goes on for longer than the line it stopped would have lasted", async () => {
@@ -1305,7 +1305,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       }),
     )
     expect(result).toEqual({
-      picked: { commands: ["play", "volume", "stop", "play"], plays: [0, 1.7], followed: [] },
+      picked: { commands: ["play", "volume", "stop", "play"], plays: [0, 1.2], followed: [] },
       commands: ["play", "volume", "stop", "play", "volume", "stop"],
       followed: true,
       followUps: ["Tell it to open a PR."],
@@ -1337,15 +1337,15 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     )
     expect(result).toEqual({
       offered: [...Array.from({ length: 4 }, () => ({ heard: "Two fred.", told: true })), { heard: "Stop.", told: false }],
-      // Each time from a moment before where it stopped.
-      plays: [0, 0.2, 0.4, 0.6, 0.8],
+      // Each time from a moment before where it stopped, which is its start again this early.
+      plays: [0, 0, 0, 0, 0],
       commands: ["volume", "stop"],
       followed: true,
       followUps: ["Stop."],
     })
   })
 
-  test("keeps listening however often the model takes what stopped it over its first seconds for its own voice, picking up a moment before each time", async () => {
+  test("keeps listening however often the model takes what stopped it over its first seconds for its own voice, picking up just before each time", async () => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const helper = yield* overHelper([[0.8, "Two threads need you. The teaser is important."], [0.9, "Stop."]], {
@@ -1370,7 +1370,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     )
     expect(result).toEqual({
       responded: [...Array.from({ length: 4 }, () => ({ heard: "Two threads need you. The teaser is important.", told: true })), { heard: "Stop.", told: false }],
-      plays: [0, 0.2, 0.4, 0.6, 0.8],
+      plays: [0, 0, 0, 0, 0],
       commands: ["volume", "stop"],
       done: true,
     })
