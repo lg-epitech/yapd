@@ -731,6 +731,12 @@ export const reason = (error: Server.Trouble | Server.Refusal) =>
       ? "My T3 Code token isn't allowed to do that."
       : error.message
 
+/** Where T3 Code serves a file for a while, by a signed path. */
+const AssetUrl = Schema.Struct({ relativeUrl: Schema.String, expiresAt: Schema.Number })
+
+/** What T3 Code names a project's icon when it has none. */
+export const noIcon = "project-favicon-missing"
+
 export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => {
   /** The thread's last turns, as T3 Code bounds them. */
   const bounded = (threadId: string) =>
@@ -819,6 +825,20 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
         const { matches } = yield* call("orchestration.searchThreads", { query: trimmed, limit: 20 }, Search)
         return matches
       }),
+
+    /**
+     * Where T3 Code serves a project's icon for a while, by the project's own
+     * folder, which is how T3 Code finds it, never a worktree's: its own
+     * image, or none, named `noIcon`. A path that's a key to the file while
+     * it lasts, to keep to yapd.
+     */
+    favicon: (workspaceRoot: string) =>
+      Effect.flatMap(reach, ({ call }) =>
+        call("assets.createUrl", { resource: { _tag: "project-favicon", cwd: workspaceRoot } }, AssetUrl, "5 seconds"),
+      ),
+
+    /** The file at a path T3 Code gave, and its type. */
+    asset: (path: string) => Effect.flatMap(reach, ({ asset }) => asset(path)),
 
     usage: Effect.gen(function* () {
       const { call } = yield* reach

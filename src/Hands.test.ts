@@ -119,6 +119,7 @@ const hands = (given: { readonly thread?: T3Live.Thread; readonly runs?: Bounded
               return answer(payload, bounded)
             }).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(Effect.orDie)))
           : Effect.die(`not expected: ${method}`)) as Server.Transport["call"],
+      asset: () => Effect.die("not expected"),
     })
     const actions = T3Actions.make(reach)
     const threads: Parameters<typeof Hands.make>[0]["threads"] = {
@@ -268,6 +269,7 @@ const lookedLate = (
           })) as Server.Transport["api"],
         call: (<A, I>(_: string, payload: Record<string, unknown>, schema: Schema.Schema<A, I>) =>
           answer(payload, bounded).pipe(Effect.flatMap((value) => Schema.decodeUnknown(schema)(value).pipe(Effect.orDie)))) as Server.Transport["call"],
+        asset: () => Effect.die("not expected"),
       })
       const actions = T3Actions.make(reach)
       const back = Hands.make({ ledger, started: now + 1, threads: { find: () => Effect.succeed(Option.some(thread(tezos.id))), actions: () => Option.some(actions), unseen: () => Effect.succeed(Option.none()) } })
@@ -2895,6 +2897,7 @@ describe("Hands on another machine", () => {
           Effect.sync(() => void sent.push(`${name}: ${String(payload.commandId)}`)).pipe(
             Effect.zipRight(Schema.decodeUnknown(schema)({ sequence: 7 }).pipe(Effect.orDie)),
           )) as Server.Transport["call"],
+        asset: () => Effect.die("not expected"),
       }),
     )
 

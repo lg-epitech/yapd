@@ -171,4 +171,56 @@ describe("T3CodeServer WebSocket", () => {
       await server.stop(true)
     }
   })
+
+  test("a file at a signed path is fetched without the token, never following a redirect, and nothing that went wrong keeps the path", async () => {
+    const seen: Array<{ path: string; authorization: string | null }> = []
+    const big = new Uint8Array(Server.largest + 1)
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        const url = new URL(request.url)
+        seen.push({ path: url.pathname, authorization: request.headers.get("authorization") })
+        if (url.pathname.endsWith("/icon.svg")) return new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } })
+        if (url.pathname.endsWith("/away.png")) return Response.redirect("https://example.com/x.png", 302)
+        if (url.pathname.endsWith("/big.png")) return new Response(big, { headers: { "content-type": "image/png" } })
+        // Too large, with no length said up front.
+        if (url.pathname.endsWith("/stream.png")) return new Response(new ReadableStream({ start: (controller) => { controller.enqueue(big); controller.close() } }), { headers: { "content-type": "image/png" } })
+        return new Response("Not Found", { status: 404 })
+      },
+    })
+    const asset = Server.asset({ origin: `http://127.0.0.1:${server.port}` })
+    const secret = "/api/assets/eyJ2ZXJzaW9uIjoxfQ.c2lnbmF0dXJl"
+    try {
+      const icon = await Effect.runPromise(asset(`${secret}/icon.svg`))
+      expect({ type: icon.type, text: new TextDecoder().decode(icon.bytes) }).toEqual({ type: "image/svg+xml", text: "<svg/>" })
+      const failures = await Effect.runPromise(
+        Effect.forEach(["away.png", "big.png", "stream.png", "gone.png"], (file) => Effect.flip(asset(`${secret}/${file}`))),
+      )
+      expect(failures.map(({ reason }) => reason)).toEqual([
+        "T3 Code wouldn't send the file.",
+        "T3 Code sent a file too large to be an icon.",
+        "T3 Code sent a file too large to be an icon.",
+        "T3 Code no longer has that file.",
+      ])
+      for (const failure of failures) expect(Bun.inspect(failure)).not.toContain("eyJ2ZXJzaW9uIjoxfQ")
+      expect(seen.every(({ authorization }) => authorization === null)).toBe(true)
+      // Nothing that isn't T3 Code's own path is ever asked for.
+      expect((await Effect.runPromise(Effect.flip(asset("http://example.com/x.png")))).reason).toBe("T3 Code gave me a file I can't fetch.")
+    } finally {
+      await server.stop(true)
+    }
+  })
+
+  test("a file T3 Code can't be reached for says so, without what the connection said, which names where it was going", async () => {
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(
+      Object.assign(() => Promise.reject(new TypeError("Unable to connect to http://127.0.0.1:1/api/assets/secret-path/icon.png")), { preconnect: globalThis.fetch.preconnect }),
+    )
+    try {
+      const failed = await Effect.runPromise(Effect.flip(Server.asset({ origin: "http://127.0.0.1:1" })("/api/assets/secret-path/icon.png")))
+      expect(failed.reason).toBe("T3 Code isn't answering.")
+      expect(Bun.inspect(failed)).not.toContain("secret-path")
+    } finally {
+      fetch.mockRestore()
+    }
+  })
 })

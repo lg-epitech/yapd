@@ -41,6 +41,7 @@ const transport = (bounded: object, whole: object | "fails" = bounded) => {
       Effect.sync(() => sent.push({ method, payload: payload as Record<string, unknown> })).pipe(
         Effect.zipRight(Schema.decodeUnknown(schema)({ sequence: 1 }).pipe(Effect.orDie)),
       )) as Server.Transport["call"],
+    asset: () => Effect.die("not expected"),
   })
   return { actions: T3Actions.make(reach), sent, read }
 }
@@ -353,5 +354,25 @@ describe("T3Actions", () => {
       answers: { "Which database?": "SQLite" },
     })
     expect(T3Actions.command("t1", { _tag: "Rename", title: "Loader fix" }, undefined, "c")).toMatchObject({ type: "thread.metadata.update", title: "Loader fix" })
+  })
+
+  test("asks for a project's icon by the project's own folder, as the app does, and fetches what it names", async () => {
+    const sent: Array<{ method: string; payload: unknown }> = []
+    const fetched: Array<string> = []
+    const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
+      api: (() => Effect.die("not expected")) as Server.Transport["api"],
+      call: (<A, I>(method: string, payload: unknown, schema: Schema.Schema<A, I>) =>
+        Effect.sync(() => sent.push({ method, payload })).pipe(
+          Effect.zipRight(Schema.decodeUnknown(schema)({ relativeUrl: "/api/assets/t.s/v1-favicon.svg", expiresAt: 1, sourcePath: "favicon.svg" }).pipe(Effect.orDie)),
+        )) as Server.Transport["call"],
+      asset: (path) => Effect.sync(() => void fetched.push(path)).pipe(Effect.as({ bytes: new Uint8Array([1]), type: "image/svg+xml" })),
+    })
+    const actions = T3Actions.make(reach)
+    const url = await Effect.runPromise(actions.favicon("/code/integration"))
+    const file = await Effect.runPromise(actions.asset(url.relativeUrl))
+    expect(sent).toEqual([{ method: "assets.createUrl", payload: { resource: { _tag: "project-favicon", cwd: "/code/integration" } } }])
+    expect(url).toEqual({ relativeUrl: "/api/assets/t.s/v1-favicon.svg", expiresAt: 1 })
+    expect(fetched).toEqual(["/api/assets/t.s/v1-favicon.svg"])
+    expect(file.type).toBe("image/svg+xml")
   })
 })

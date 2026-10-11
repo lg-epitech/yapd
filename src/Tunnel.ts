@@ -64,9 +64,11 @@ export const transport = (locate: Effect.Effect<Located, Server.Trouble>, machin
         : new Server.Trouble({ ...error, cause: Server.harmless(error.cause, token) })
     const theirs = (error: Server.Trouble | Server.Refusal) =>
       error._tag === "Refusal" ? new Server.Refusal({ tag: error.tag, message: Server.withheld(error.message, token) }) : trouble(error)
+    const asset = Server.asset(server)
     return {
       api: (path, schema, init) => Effect.mapError(api(path, schema, init), trouble),
       call: (method, payload, schema, patience) => Effect.mapError(call(method, payload, schema, patience), theirs),
+      asset: (path) => Effect.mapError(asset(path), trouble),
     }
   })
 

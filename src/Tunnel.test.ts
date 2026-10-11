@@ -547,4 +547,35 @@ describe("Tunnel", () => {
       ["ssh", "-o", "BatchMode=yes"],
     ])
   })
+
+  test("a file from rig's T3 Code goes through its tunnel without the token, and what goes wrong is said as rig's", async () => {
+    const located = Effect.succeed<Tunnel.Located>({ server: { origin: "http://127.0.0.1:1" }, token: Redacted.make("token") })
+    const asked: Array<{ url: string; authorization: string | null }> = []
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(
+      Object.assign(
+        async (input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]) => {
+          asked.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization") })
+          return asked.length === 1 ? new Response("png", { headers: { "content-type": "image/png" } }) : new Response(null, { status: 500 })
+        },
+        { preconnect: globalThis.fetch.preconnect },
+      ),
+    )
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const { asset } = yield* Tunnel.transport(located, "rig")
+          const icon = yield* asset("/api/assets/signed/icon.png")
+          const failed = yield* Effect.flip(asset("/api/assets/signed/icon.png"))
+          return { type: icon.type, reason: failed.reason }
+        }),
+      )
+      expect(result).toEqual({ type: "image/png", reason: "rig's T3 Code wouldn't send the file." })
+      expect(asked).toEqual([
+        { url: "http://127.0.0.1:1/api/assets/signed/icon.png", authorization: null },
+        { url: "http://127.0.0.1:1/api/assets/signed/icon.png", authorization: null },
+      ])
+    } finally {
+      fetch.mockRestore()
+    }
+  })
 })

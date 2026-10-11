@@ -40,6 +40,7 @@ const makeRelay = (
       dispatched.push({ method, payload })
       return Effect.flatMap(dispatch, (value) => Effect.orDie(Schema.decodeUnknown(schema)(value)))
     },
+    asset: () => Effect.die("not expected"),
   }
   return Effect.runPromise(T3Code.make(() => Effect.succeed(transport)).pipe(
     Effect.withConfigProvider(ConfigProvider.fromMap(new Map([["YAPD_T3CODE_TOKEN", "test-token"]]))),

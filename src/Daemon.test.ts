@@ -427,6 +427,7 @@ const handing = Effect.gen(function* () {
             return yield* Schema.decodeUnknown(schema)({ sequence: 1 }).pipe(Effect.orDie)
           })
         : Effect.die(`not expected: ${method}`)) as T3CodeServer.Transport["call"],
+    asset: () => Effect.die("not expected"),
   })
   const actions = T3Actions.make(reach)
   const hands = Hands.make({

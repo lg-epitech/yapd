@@ -77,7 +77,15 @@ export const Thread = Schema.Struct({
 })
 export type Thread = typeof Thread.Type
 
-export const Project = Schema.Struct({ id: Schema.String, title: Schema.String, workspaceRoot: Schema.String })
+export const Project = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  workspaceRoot: Schema.String,
+  /** The image he chose for it, when he did: T3 Code finds one in its folder otherwise. */
+  faviconPath: Schema.optional(Schema.NullOr(Schema.String)),
+  /** The icon he chose for it, as T3 Code sends it, read only by what draws it, so a kind T3 Code adds never costs the project. */
+  projectIcon: Schema.optional(Schema.Unknown),
+})
 export type Project = typeof Project.Type
 
 const Item = Schema.Union(

@@ -236,6 +236,73 @@ const asked = <A, I>(
     Effect.flatMap((value) => Effect.mapError(Schema.decodeUnknown(schema)(value), misunderstood)),
   )
 
+/** The most a file T3 Code sends, like a project's icon, can be: anything larger isn't one. */
+export const largest = 256 * 1024
+
+/** Reads a body up to `most` bytes, and none past that. */
+const capped = async (response: Response, most: number) => {
+  const reader = response.body?.getReader()
+  if (reader === undefined) return new Uint8Array()
+  const chunks: Array<Uint8Array> = []
+  let size = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > most) {
+      await reader.cancel().catch(() => {})
+      throw new Trouble({ reason: "T3 Code sent a file too large to be an icon." })
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(size)
+  let at = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, at)
+    at += chunk.byteLength
+  }
+  return bytes
+}
+
+/**
+ * A file T3 Code serves at a signed path, like a project's icon, with its
+ * type. Never with the token, which a signed path doesn't need, nor
+ * following a redirect anywhere else. The path is a key to the file while
+ * it lasts, so nothing that went wrong keeps it, nor anything that could.
+ */
+export const asset =
+  (server: Server) =>
+  (path: string): Effect.Effect<{ readonly bytes: Uint8Array; readonly type: string }, Trouble> =>
+    patiently(
+      Effect.tryPromise({
+        try: async (signal) => {
+          if (!path.startsWith("/")) throw new Trouble({ reason: "T3 Code gave me a file I can't fetch." })
+          let response: Response
+          try {
+            // A redirect is answered as it is, and refused below like any answer that isn't the file.
+            response = await fetch(`${server.origin}${path}`, { redirect: "manual", signal })
+          } catch {
+            throw new Trouble({ reason: "T3 Code isn't answering." })
+          }
+          if (!response.ok) {
+            await response.body?.cancel().catch(() => {})
+            throw new Trouble({ reason: response.status === 404 ? "T3 Code no longer has that file." : "T3 Code wouldn't send the file.", cause: response.status })
+          }
+          if (Number(response.headers.get("content-length") ?? 0) > largest) {
+            await response.body?.cancel().catch(() => {})
+            throw new Trouble({ reason: "T3 Code sent a file too large to be an icon." })
+          }
+          const bytes = await capped(response, largest).catch((error) => {
+            throw error instanceof Trouble ? error : new Trouble({ reason: "T3 Code stopped sending the file." })
+          })
+          return { bytes, type: response.headers.get("content-type") ?? "" }
+        },
+        catch: (cause) => (cause instanceof Trouble ? cause : new Trouble({ reason: "T3 Code stopped sending the file." })),
+      }),
+      "5 seconds",
+      () => new Trouble({ reason: "T3 Code isn't answering." }),
+    )
+
 /** Where a machine's T3 Code answers from here, and the token for it. */
 export interface Located {
   readonly server: Server
@@ -246,7 +313,8 @@ export interface Located {
 export interface Transport {
   readonly api: ReturnType<typeof api>
   readonly call: ReturnType<typeof call>
+  readonly asset: ReturnType<typeof asset>
 }
 
 export const connect = (token: Redacted.Redacted) =>
-  Effect.map(locate, (server): Transport => ({ api: api(server, token), call: call(server, token) }))
+  Effect.map(locate, (server): Transport => ({ api: api(server, token), call: call(server, token), asset: asset(server) }))

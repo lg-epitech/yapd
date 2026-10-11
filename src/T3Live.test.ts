@@ -399,4 +399,18 @@ describe("T3Live.follow", () => {
         { url: `ws://127.0.0.1:50002/ws?orchestrationProtocol=2`, token: "second" },
       ]),
     ))
+
+  test("keeps a project with the icon he chose, with none, and with one of a kind T3 Code added since", () => {
+    const projects = [
+      project,
+      { ...project, id: "p2", faviconPath: "assets/logo.png", projectIcon: { kind: "emoji", emoji: "🦀" } },
+      { ...project, id: "p3", faviconPath: null, projectIcon: { kind: "sticker", pack: "new" } },
+    ]
+    const { view } = run([{ kind: "snapshot", snapshot: { snapshotSequence: 1, projects, threads: [], archivedThreads: [] } }, { kind: "synchronized" }])
+    expect([...view.projects.values()].map(({ id, faviconPath, projectIcon }) => ({ id, faviconPath, projectIcon }))).toEqual([
+      { id: "p1", faviconPath: undefined, projectIcon: undefined },
+      { id: "p2", faviconPath: "assets/logo.png", projectIcon: { kind: "emoji", emoji: "🦀" } },
+      { id: "p3", faviconPath: null, projectIcon: { kind: "sticker", pack: "new" } },
+    ])
+  })
 })

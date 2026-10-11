@@ -184,6 +184,7 @@ describe("T3CodeLauncher's start", () => {
         calls.push({ method, payload })
         return answer(answers[method], schema)
       },
+      asset: () => Effect.die("not expected"),
     }
     return T3CodeLauncher.launcher(Redacted.make("token"), Effect.succeed(transport), () => fresh)
   }

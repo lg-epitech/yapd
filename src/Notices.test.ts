@@ -113,6 +113,7 @@ const notices = (
           }).pipe(Effect.orDie)
         }) as Server.Transport["api"],
         call: (() => Effect.die("not expected")) as Server.Transport["call"],
+        asset: () => Effect.die("not expected"),
       })
     /** Whether rig's threads can be seen, and what its T3 Code tells of. */
     let rigUp = false

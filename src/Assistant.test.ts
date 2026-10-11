@@ -198,6 +198,7 @@ const transport = (
                   matches: search(params.query ?? "").map((threadId) => ({ threadId, projectId: "p", source: "message", snippet: params.query, messageCreatedAt: null })),
                 },
           ).pipe(Effect.orDie)) as T3CodeServer.Transport["call"],
+    asset: () => Effect.die("not expected"),
   })
 }
 

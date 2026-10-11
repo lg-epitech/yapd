@@ -56,6 +56,7 @@ const linking = (
           return Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie)
         }) as Server.Transport["api"],
         call: (() => Effect.die("not expected")) as Server.Transport["call"],
+        asset: () => Effect.die("not expected"),
       })
     const store = yield* Store.make(":memory:")
     const threads = yield* Threads.make({
