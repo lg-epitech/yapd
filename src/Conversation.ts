@@ -184,8 +184,10 @@ export interface Question {
    * wasn't an answer. With `echo`, what yapd was saying around when they
    * began, while its own voice could still get into the microphone: the
    * first words heard may be some of it, or their first word lost under it.
+   * With it, `afterPause` is what they said once they carried on after a
+   * pause, when they did, which is surely theirs, as yapd had stopped by then.
    */
-  readonly answer: (heard: string, voiced: number, echo?: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
+  readonly answer: (heard: string, voiced: number, echo?: string, afterPause?: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
 
 /** An answer to what the user asked yapd, rendered and ready to be said, which they can follow up as they can an update. */
@@ -468,9 +470,10 @@ export const make = (options: {
     /**
      * Works out a reply while still listening, so pausing mid-thought doesn't cut
      * the user off: if they carry on before it's ready, it starts again with all
-     * they said, and how many seconds of all of it were speech. Nothing's done
-     * with a reply while they might still be talking. What `hesitates` seems
-     * to trail off is given a moment more first.
+     * they said, how many seconds of all of it were speech, and what they said
+     * after `first`, once yapd had stopped. Nothing's done with a reply while
+     * they might still be talking. What `hesitates` seems to trail off is
+     * given a moment more first.
      */
     const settle = <R>(
       ear: Ear,
@@ -478,16 +481,20 @@ export const make = (options: {
       audio: Float32Array,
       transcribe: (audio: Float32Array) => Effect.Effect<string>,
       hesitates: boolean,
-      respond: (heard: string, voiced: number) => Effect.Effect<R>,
+      respond: (heard: string, voiced: number, afterPause: string) => Effect.Effect<R>,
     ) =>
       Effect.gen(function* () {
         const until = (yield* Clock.currentTimeMillis) + rambling
         let heard = first
         let speech = voiced(audio)
+        /** All he said once he carried on after `first`, kept apart so it can be told it's surely his. */
+        let afterPause = ""
         while (true) {
           // Not for what may all be yapd's own voice, cut off where it stopped, like "the PR is ready for": that's no sign he's trailing off.
           const replying =
-            unfinished(heard) && (hesitates || heard !== first) ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech)) : respond(heard, speech)
+            unfinished(heard) && (hesitates || heard !== first)
+              ? Effect.zipRight(Effect.sleep(hesitation), respond(heard, speech, afterPause))
+              : respond(heard, speech, afterPause)
           if (ear.deaf || (yield* Clock.currentTimeMillis) > until) return { heard, reply: yield* replying }
           const id = fresh()
           const fiber = yield* replying.pipe(
@@ -544,6 +551,7 @@ export const make = (options: {
           if (more === undefined) continue
           const after = yield* transcribe(more)
           heard = together(heard, after)
+          afterPause = afterPause === "" ? after : together(afterPause, after)
           // Only what added words, since speech Whisper made nothing of isn't in what was heard.
           if (after !== "") speech += voiced(more)
         }
@@ -717,7 +725,7 @@ export const make = (options: {
             const said = cut(text, fraction)
             // What it hadn't said yet, so the model knows whether he could have heard what he answers, like the agent's question.
             const rest = unsaid(text, fraction)
-            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard) =>
+            const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard, _, afterPause) =>
               responder
                 .respond({
                   project: update.project,
@@ -725,7 +733,7 @@ export const make = (options: {
                   needsYou: update.needsYou,
                   lines: [...lines, { speaker: "yapd", text: said }],
                   heard,
-                  ...(echo === undefined ? {} : { echo }),
+                  ...(echo === undefined ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }),
                   ...(rest === "" ? {} : { unsaid: rest }),
                 })
                 .pipe(
@@ -834,7 +842,9 @@ export const make = (options: {
           const reply =
             itself || first === ""
               ? Option.none()
-              : (yield* settle(outcome.ear, first, outcome.audio, hear, !unsure, (heard, voiced) => respond(heard, voiced, echo))).reply
+              : (yield* settle(outcome.ear, first, outcome.audio, hear, !unsure, (heard, voiced, afterPause) =>
+                  echo === undefined || afterPause === "" ? respond(heard, voiced, echo) : respond(heard, voiced, echo, afterPause),
+                )).reply
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(reply.value)

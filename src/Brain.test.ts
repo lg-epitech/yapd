@@ -403,6 +403,16 @@ describe("Brain", () => {
     expect(told).toContain(`with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again.`)
     expect(told.endsWith(`A question or a dismissal of his goes as usual.\n\nWHAT HE SAID, answering your question:\nStop it.`)).toBe(true)
     expect(Brain.prompt(over("Stop it.", { subject: busy, open: Option.some(confirming) }, false), Option.none())).not.toContain("your own voice")
+    // What he said after a pause is his, even naming one of its options, only with the note and a pause.
+    const paused = (heard: string, echoed: boolean, afterPause?: string) => {
+      const given = over(heard, { subject: busy, open: Option.some(confirming) }, echoed)
+      return Brain.prompt({ ...given, utterance: { ...given.utterance, ...(afterPause === undefined ? {} : { afterPause }) } }, Option.none())
+    }
+    const sentence = `What he said after a pause, «Stop it.», is surely his, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
+    expect(paused("Sir? Stop it.", true, "Stop it.").endsWith(`A question or a dismissal of his goes as usual. ${sentence}\n\nWHAT HE SAID, answering your question:\nSir? Stop it.`)).toBe(true)
+    expect(paused("Sir? Stop it.", true)).not.toContain("after a pause")
+    expect(paused("Sir? Stop it.", true, "")).not.toContain("after a pause")
+    expect(paused("Sir? Stop it.", false, "Stop it.")).toBe(paused("Sir? Stop it.", false))
   })
 
   test("a write only fairly sure of its thread is confirmed on the focus thread when it's a stop, and asked about or left elsewhere", () => {

@@ -576,9 +576,9 @@ const assistant = (
           yield* flush
         }),
       /** Said over or right after the question, as the conversation takes it: worked out, then acted on. */
-      answer: (heard: string, to = questions().at(-1), echo?: string) =>
+      answer: (heard: string, to = questions().at(-1), echo?: string, afterPause?: string) =>
         Effect.gen(function* () {
-          const taken = yield* to!.question!.answer(heard, 1, echo)
+          const taken = yield* to!.question!.answer(heard, 1, echo, afterPause)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)
@@ -586,9 +586,9 @@ const assistant = (
       /** Nothing was said in the time the question leaves for an answer. */
       unanswered: (to = questions().at(-1)) => to!.question!.unanswered.pipe(Effect.zipRight(flush)),
       /** Said over or right after the answer, with so many seconds of speech, as the conversation takes it: worked out, then acted on, unless it isn't taken. */
-      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer"), echo?: string) =>
+      followUp: (heard: string, voiced = 2, to = said.findLast(({ kind }) => kind === "answer"), echo?: string, afterPause?: string) =>
         Effect.gen(function* () {
-          const taken = yield* to!.followUp!(heard, voiced, echo)
+          const taken = yield* to!.followUp!(heard, voiced, echo, afterPause)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)
@@ -4215,6 +4215,40 @@ describe("Assistant", () => {
     expect(result).toEqual([
       "Tell the Mina one to add tests, then tell the Tezos one to wait. over Two threads need you, sir.",
       "tell the Tezos one to wait over nothing",
+    ])
+  })
+
+  test("said over the first seconds of its question or answer, what he said after a pause reaches the model as surely his, only with what yapd was saying, and never for the rest of his request", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const told: Array<string> = []
+        const { dictate, answer, followUp, spoken } = yield* assistant((situation) => {
+          const { heard, echo, afterPause } = situation.utterance
+          told.push(`${heard} over ${echo ?? "nothing"}${afterPause === undefined ? "" : `, then ${afterPause}`}`)
+          if (heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+          if (heard.startsWith("tell")) return Brain.decision({ act: "send", target: handle(situation, tezos), text: "Wait.", how: "now" })
+          if (heard.startsWith("Sir")) return Brain.decision({ act: "send", target: handle(situation, mina), text: "Add tests.", how: "now", rest: "tell the Tezos one to wait" })
+          if (heard.startsWith("Can")) return Brain.decision({ act: "answer", target: handle(situation, mina), sure: "low", others: handle(situation, tezos), spoken: "Filed." })
+          return Brain.decision({ act: "resume", pending: Option.isNone(situation.open) ? "" : "answers" })
+        })
+        yield* dictate("Who needs me?")
+        // Its own "sir" heard first, then his request, after a pause, which carries on.
+        yield* followUp("Sir. Tell the Mina one to add tests, then tell the Tezos one to wait.", 3, undefined, "Two threads need you, sir.", "Tell the Mina one to add tests, then tell the Tezos one to wait.")
+        yield* dictate("Can you please tell me what's the status on MiNAS SV2?")
+        const asked = spoken().at(-1)!
+        yield* answer("Tezos. Mina.", undefined, asked, "Mina.")
+        // Without the note on its own voice, nothing is set apart, as ever.
+        yield* answer("Tezos. Mina.", undefined, undefined, "Mina.")
+        return told
+      }),
+    )
+    expect(result).toEqual([
+      // "Who needs me?" needs no model.
+      "Sir. Tell the Mina one to add tests, then tell the Tezos one to wait. over Two threads need you, sir., then Tell the Mina one to add tests, then tell the Tezos one to wait.",
+      "tell the Tezos one to wait over nothing",
+      "Can you please tell me what's the status on MiNAS SV2? over nothing",
+      "Tezos. Mina. over Open Mina SSV2 Bug Tickets or Migrate Tezos Integration, sir?, then Mina.",
+      "Tezos. Mina. over nothing",
     ])
   })
 

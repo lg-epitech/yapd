@@ -39,7 +39,13 @@ export interface Utterance {
    * some of it, or his first word lost under it.
    */
   readonly echo?: string
+  /** With `echo`, what he said once he carried on after a pause, which is surely his, as yapd had stopped by then. */
+  readonly afterPause?: string
 }
+
+/** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
+const overItself = (echo?: string, afterPause?: string): Pick<Utterance, "echo" | "afterPause"> =>
+  echo === undefined ? {} : { echo, ...(afterPause === undefined || afterPause === "" ? {} : { afterPause }) }
 
 /** What a thread asks of the user, which a short answer can settle. */
 export type Asks =
@@ -1808,7 +1814,7 @@ export const make = (options: {
     const rest = (thought: Thought, first: Outcome, on: Option.Option<Threads.Ref>, step: number, said: Lines): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         // What he went on to say after, which yapd's own voice was never in.
-        const { echo: _, ...before } = thought.utterance
+        const { echo: _, afterPause: __, ...before } = thought.utterance
         const utterance: Utterance = { ...before, heard: thought.decision.rest }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
@@ -2683,11 +2689,11 @@ export const make = (options: {
      */
     const listen =
       (open: Open) =>
-      (heard: string, voiced: number, echo?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (heard: string, voiced: number, echo?: string, afterPause?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
-        const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...(echo === undefined ? {} : { echo }) }
+        const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...overItself(echo, afterPause) }
         /**
          * What it asked was dealt with in T3 Code meanwhile, so a late answer to
          * it does nothing, and he's told so: it's noted, but not in his words
@@ -2728,11 +2734,11 @@ export const make = (options: {
      */
     const followUp =
       (about: Subject, line: Effect.Effect<string>) =>
-      (heard: string, voiced: number, echo?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (heard: string, voiced: number, echo?: string, afterPause?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
         Effect.gen(function* () {
           const at = yield* Clock.currentTimeMillis
           const { turns } = yield* options.power
-          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...(echo === undefined ? {} : { echo }) }
+          const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...overItself(echo, afterPause) }
           const thought = yield* think(utterance, about, [{ speaker: "yapd", text: yield* line }])
           if (thought.decision.act === "resume") return Option.none()
           if (Brain.murmured(thought.decision, utterance)) {

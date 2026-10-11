@@ -2495,6 +2495,46 @@ describe("Daemon", () => {
     expect(result).toEqual(["Stop it now. over Stop the yapd"])
   })
 
+  test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s told over its first seconds gives its handler what he said after a pause apart, as surely his", async (_, kind) => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Its own voice gets in, as before the echo cancellation has learnt it, and Whisper hears its last word, then his reply.
+        const { made, wait, flush, speak } = yield* make(undefined, { microphone: true, echoing: 40, transcripts: ["Site.", "Yapd."] })
+        const told: Array<string> = []
+        const noting = (what: string) => Effect.sync(() => void told.push(what))
+        // As the model would, taking a while: its own word alone is that, but what he said after the pause is his.
+        const taken = (heard: string, _voiced: number, echo?: string, afterPause?: string) =>
+          noting(`${heard} over ${echo ?? "nothing"}${afterPause === undefined ? "" : `, then ${afterPause}`}`).pipe(
+            Effect.zipRight(Effect.sleep("2 seconds")),
+            Effect.as(afterPause === undefined ? Option.none() : Option.some(noting(`took: ${afterPause}`))),
+          )
+        yield* Effect.forkScoped(
+          made.tell({
+            id: "a",
+            kind,
+            ...(kind === "question" ? { open: "open-a" } : {}),
+            priority: "needs-you",
+            spoken: "Which one, sir: yapd or the docs site?",
+            at: 0,
+            stale: Effect.succeed(false),
+            ...(kind === "answer"
+              ? { followUp: taken }
+              : { question: { answer: taken, unanswered: Effect.void, unsaid: Effect.void } }),
+          }),
+        )
+        yield* flush
+        yield* wait(1)
+        yield* speak
+        // His reply, a second on, while what to make of the first is still being worked out.
+        yield* wait(1)
+        yield* speak
+        yield* wait(20)
+        return told
+      }),
+    )
+    expect(result).toEqual(["Site. over Which one, sir: yapd or", "Site. Yapd. over Which one, sir: yapd or, then Yapd.", "took: Yapd."])
+  })
+
   test("a notice that goes stale while the words said in its place are rendered is never played, nor told it was said in them", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -35,6 +35,8 @@ export interface Interruption {
    * some of it, or their first word lost under it.
    */
   readonly echo?: string
+  /** With `echo`, what they said once they carried on after a pause, which is surely theirs, as yapd had stopped by then. */
+  readonly afterPause?: string
   /** When yapd was cut off, the words of its line they spoke over that it hadn't said yet. */
   readonly unsaid?: string
 }
@@ -66,7 +68,7 @@ ${aloud}
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Write "message" in the language they spoke.`
 
-export const prompt = ({ project, turn, needsYou, lines, heard, echo, unsaid }: Interruption, style: Option.Option<string>) =>
+export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
@@ -88,7 +90,11 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo, unsaid }: 
     ...(echo === undefined
       ? []
       : [
-          `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "${echo}", misheard or not, and their first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "Code up." for "Claude on": take them all out, and never put them in the message or turn them into words of theirs. If nothing surely theirs is left, it's "resume", never "dismiss". If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.`,
+          `They began while your own voice could still get into their microphone, so what was heard may start with your own words, from around "${echo}", misheard or not, and their first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "Code up." for "Claude on": take them all out, and never put them in the message or turn them into words of theirs. If nothing surely theirs is left, it's "resume", never "dismiss". If a message for the agent sounds cut off, or hangs on a word that may be yours, don't send it: make it "answer", asking them in a few words to say it again. A question or a dismissal goes as usual.${
+            afterPause === undefined || afterPause.trim() === ""
+              ? ""
+              : ` What they said after a pause, "${afterPause}", is surely theirs, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
+          }`,
         ]),
     `What the user just said:\n${heard}`,
   ].join("\n\n")

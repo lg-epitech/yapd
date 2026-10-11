@@ -762,13 +762,13 @@ const overHelper = (
     readonly reply?: (interruption: Responder.Interruption) => Responder.Reply
     /** Whether the clock moves on as frames come in, as it does live, rather than only when told to. */
     readonly live?: boolean
-    /** How long working out what to do about what's said takes, in seconds, as a model call does: at once unless said. */
+    /** How long working out what to do about what's said takes, in seconds, as a model call does, for an update, an answer or a question alike: at once unless said. */
     readonly responding?: number
     readonly answer?: boolean
     /** With `ask`, it asks a question in the same words instead, like an agent's or its own, which takes what's said as `follow` says. */
     readonly ask?: boolean
     /** Whether the answer, or the question, takes what's said for a follow-up, or an answer, as the model would. */
-    readonly follow?: (heard: string, echo?: string) => boolean
+    readonly follow?: (heard: string, echo?: string, afterPause?: string) => boolean
     /** Whether Whisper fails on all it's given. */
     readonly failing?: boolean
   } = {},
@@ -788,7 +788,7 @@ const overHelper = (
     /** What yapd says back, in order. */
     const rendered: Array<string> = []
     const followed: Array<string> = []
-    const offered: Array<{ readonly heard: string; readonly echo?: string }> = []
+    const offered: Array<{ readonly heard: string; readonly echo?: string; readonly afterPause?: string }> = []
     let first: number | undefined
     let connection: Socket<Helper.Decoder> | undefined
     let running = false
@@ -925,11 +925,11 @@ const overHelper = (
           )
         : frames(value, count)
     const spoken = options.spoken ?? long.spoken
-    const respond = (heard: string, _: number, echo?: string) =>
-      Effect.sync(() => {
-        offered.push({ heard, ...(echo === undefined ? {} : { echo }) })
-        return (options.follow?.(heard, echo) ?? true) ? Option.some(Effect.sync(() => void followed.push(heard))) : Option.none()
-      })
+    const respond = (heard: string, _: number, echo?: string, afterPause?: string) =>
+      Effect.sync(() => void offered.push({ heard, ...(echo === undefined ? {} : { echo }), ...(afterPause === undefined ? {} : { afterPause }) })).pipe(
+        Effect.zipRight(Effect.sleep(`${options.responding ?? 0} seconds`)),
+        Effect.as((options.follow?.(heard, echo, afterPause) ?? true) ? Option.some(Effect.sync(() => void followed.push(heard))) : Option.none()),
+      )
     const fiber = yield* Effect.fork(
       options.ask === true
         ? made.ask({ audio: "/tmp/question.wav", spoken, answer: respond })
@@ -1540,6 +1540,85 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(await after(false, false)).toEqual({ commands: ["play", "volume"], responded: [own], sent: [], offered: [], before: false, done: true })
   })
 
+  test.each([
+    ["an update", { spoken: "The PR is ready.", words: ["Ready.", "Merge it."] }],
+    ["an answer", { spoken: "The PR is ready.", words: ["Ready.", "Merge it."], answer: true }],
+    ["an agent's question", { spoken: "The PR is ready, sir. Shall I merge it?", words: ["Merge it?", "Merge it."], ask: true }],
+    ["yapd's own question", { spoken: "Which one, sir: yapd or the docs site?", words: ["Site.", "Yapd."], ask: true }],
+  ] as const)(
+    "gives what he says a second after %s ends within its first seconds, over its own last word that the model is still working out, as surely his",
+    async (_, given) => {
+      const [own, his] = given.words
+      const result = await overHelperScoped(
+        Effect.gen(function* () {
+          // As the model would: its own last word alone is that, but what he said after the pause is his, even in yapd's words.
+          const helper = yield* overHelper([[0.8, own], [0.9, his]], {
+            spoken: given.spoken,
+            duration: 2,
+            responding: 2.6,
+            answer: "answer" in given,
+            ask: "ask" in given,
+            reply: ({ echo, heard, afterPause }) =>
+              echo !== undefined && afterPause === undefined ? { intent: "resume", spoken: "", message: "" } : { intent: "send", spoken: "Okay.", message: afterPause ?? heard },
+            follow: (_, echo, afterPause) => echo === undefined || afterPause !== undefined,
+          })
+          yield* helper.wait(1.95)
+          yield* helper.talk(0, defaults.lead)
+          // Its own last word, which plays to its end before it's clearly speech.
+          yield* helper.talk(0.8, 1)
+          yield* helper.finish
+          yield* helper.talk(0.8, defaults.wary - 1)
+          yield* helper.quiet
+          // His reply, a second on, while what to make of its own word is still being worked out.
+          yield* helper.wait(1)
+          yield* helper.talk(0.9, 16)
+          yield* helper.quiet
+          yield* helper.wait(3)
+          return {
+            given: [...helper.responded, ...helper.offered].map(({ heard, echo, afterPause }) => ({ heard, told: echo !== undefined, afterPause })),
+            taken: [...helper.sent, ...helper.followed],
+          }
+        }),
+      )
+      expect(result).toEqual({
+        given: [
+          { heard: own, told: true, afterPause: undefined },
+          { heard: `${own} ${his}`, told: true, afterPause: his },
+        ],
+        taken: ["answer" in given || "ask" in given ? `${own} ${his}` : his],
+      })
+    },
+  )
+
+  test("gives what he said after a pause apart only when yapd's own voice may be in what came before", async () => {
+    const after = (at: number) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, "Hmm, hold on."], [0.91, "Merge it."]], { responding: 2 })
+          yield* helper.wait(at)
+          yield* helper.talk(0, defaults.lead)
+          yield* helper.talk(0.9, 20)
+          yield* helper.quiet
+          // He goes on before the reply to it is ready.
+          yield* helper.wait(0.5)
+          yield* helper.talk(0.91, 20)
+          yield* helper.quiet
+          yield* helper.wait(3)
+          return helper.responded.map(({ heard, echo, afterPause }) => ({ heard, told: echo !== undefined, afterPause }))
+        }),
+      )
+    // Begun over its first seconds.
+    expect(await after(1)).toEqual([
+      { heard: "Hmm, hold on.", told: true, afterPause: undefined },
+      { heard: "Hmm, hold on. Merge it.", told: true, afterPause: "Merge it." },
+    ])
+    // Begun once its own voice was learnt, all of it is his, so nothing is set apart.
+    expect(await after(4)).toEqual([
+      { heard: "Hmm, hold on.", told: false, afterPause: undefined },
+      { heard: "Hmm, hold on. Merge it.", told: false, afterPause: undefined },
+    ])
+  })
+
   test.each(["Stop.", "Thank you.", "Of course.", "That's it.", "I don't know.", "Thank you so much."])("takes \"%s\" over its first seconds for his to judge, however short, though yapd was saying \"stopped\" and Whisper makes up \"Thank you.\"", async (heard) => {
     const over = (frames: number, live = false) =>
       overHelperScoped(
@@ -1978,6 +2057,25 @@ describe("Responder", () => {
     expect(told.endsWith(`say it again. A question or a dismissal goes as usual.\n\nWhat the user just said:\nrevert it.`)).toBe(true)
     // Begun once its own voice could no longer get in, nothing's said of it.
     expect(Responder.prompt(interruption, Option.none())).not.toContain("your own voice")
+  })
+
+  test("tells the model what he said after a pause is surely his, even in its own words, only with what it was saying around when he began", () => {
+    const interruption: Responder.Interruption = {
+      project: "yapd",
+      turn: { prompt: Option.none(), message: "The PR is ready." },
+      needsYou: true,
+      lines: [{ speaker: "yapd", text: "The PR is ready." }],
+      heard: "Ready. Merge it.",
+    }
+    const sentence = `What they said after a pause, "Merge it.", is surely theirs, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
+    const told = Responder.prompt({ ...interruption, echo: "The PR is ready.", afterPause: "Merge it." }, Option.none())
+    expect(told).toContain(sentence)
+    // In the note on its own voice, just before what he said, which still ends it, all of it.
+    expect(told.endsWith(`A question or a dismissal goes as usual. ${sentence}\n\nWhat the user just said:\nReady. Merge it.`)).toBe(true)
+    // Without a pause, or without the note, nothing's said of it.
+    expect(Responder.prompt({ ...interruption, echo: "The PR is ready." }, Option.none())).not.toContain("after a pause")
+    expect(Responder.prompt({ ...interruption, echo: "The PR is ready.", afterPause: "" }, Option.none())).not.toContain("after a pause")
+    expect(Responder.prompt({ ...interruption, afterPause: "Merge it." }, Option.none())).toBe(Responder.prompt(interruption, Option.none()))
   })
 
   test("doesn't send a reply that tells the agent to do nothing", () => {

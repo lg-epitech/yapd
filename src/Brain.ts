@@ -2066,7 +2066,11 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
     ...(situation.utterance.echo === undefined
       ? []
       : [
-          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${fenced(situation.utterance.echo, 400)}, misheard or not, and his first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "The teaser is important." for "the Tezos importer", or "Stop it." for "Stop the…": take them all out, and never act on them or turn them into words of his. If nothing surely his is left, it's "resume", never "dismiss" or a yes. If what's left for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal of his goes as usual.`,
+          `He began while your own voice could still get into his microphone, so what was heard may start with your own words, from around ${fenced(situation.utterance.echo, 400)}, misheard or not, and his first word may be lost under yours. Words that sound like yours there are yours, however they came out, like "The teaser is important." for "the Tezos importer", or "Stop it." for "Stop the…": take them all out, and never act on them or turn them into words of his. If nothing surely his is left, it's "resume", never "dismiss" or a yes. If what's left for a thread sounds cut off, or hangs on a word that may be yours, don't act on it: with OPEN, "again" with "pending" "answers"; otherwise "answer", asking him in a few words to say it again. A question or a dismissal of his goes as usual.${
+            situation.utterance.afterPause === undefined || situation.utterance.afterPause.trim() === ""
+              ? ""
+              : ` What he said after a pause, ${fenced(situation.utterance.afterPause, 400)}, is surely his, even where it repeats your words, like naming one of your options; only what came before it may be yours.`
+          }`,
         ]),
     `WHAT HE SAID, ${how(situation)}:\n${situation.utterance.heard}`,
   ].join("\n\n")
