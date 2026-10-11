@@ -2,7 +2,7 @@
 
 I'm tired of reading my agent outputs. So I have another agent yap instead!
 
-When a Claude Code or Codex session finishes, yapd sums up the reply in a sentence or two and says it. If several finish together you hear them one at a time, and whatever needs you goes first. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting), or press a shortcut and [tell yapd what to start next](#starting-new-work).
+When a Claude Code or Codex session finishes, yapd sums up the reply in a headline and says it, keeping the rest for when you say "more". If several finish together you hear them one at a time, and whatever needs you goes first, in full. Talk over it to [cut it short, ask about it, or tell the agent what to do next](#interrupting), or press a shortcut and [tell yapd what to start next](#starting-new-work).
 
 Needs a Mac with Apple silicon, [Bun](https://bun.sh), Xcode's command line tools (`xcode-select --install`) and any of the [available providers](#providers). The agents can also run [on other machines](#agents-on-another-machine), Linux included.
 
@@ -64,6 +64,8 @@ Say anything while yapd is talking and it stops. The model that writes the summa
 
 - "Got it", "sounds good" or "quiet" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
 - "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and "what did I miss?" sums up what it said. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
+- "More" over a headline, or just after it, says the rest at once.
+- "Focus", "goodnight", "I'm back", "talk shorter" and "give me everything" change how yapd talks, as in [Focus and quiet](#focus-and-quiet). Nothing about them reaches the agent.
 - Ask something the update answers, like "which PR was that?", and it answers.
 - Tell the agent something, like "merge it" or "look again", and it goes to the session as your message. You hear the reply like any other update, even a quick one, unless the agent only says it understood.
 - If you were talking to someone else, it picks up where it left off. If that keeps happening, say with a TV on, it reads the rest without stopping.
@@ -95,6 +97,12 @@ yapd hands a follow-up to the session the update came from, through whatever tha
   Put it in `~/.yapd/.env` as `YAPD_T3CODE_TOKEN=...` and run `yapd install` again. If yapd says T3 Code turned down its token, issue a new one. `yapd doctor` says whether it takes the one you have.
 
 A session another app drives, like T3 Code, only gets follow-ups through that app, so its own view stays in step. Queued follow-ups use the session's latest reply to find its thread. yapd won't send anything from an old update after you've started unrelated work, and says so when it can't reach a session.
+
+## Focus and quiet
+
+Updates that only say how running work is going, like another review round, are held for a digest: a short catch-up once nothing has been said for a minute, at most every twenty minutes. "Give me everything" has yapd say each update in full and hold none, and "talk shorter" goes back to headlines.
+
+"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. "I'm back" ends either and tells you what was held; one that ends on its own offers you the rundown once. What finished while yapd was down is held the same way, and a failure from then is said. Turning yapd off is still the way to hear nothing at all. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
 
 ## Dictating
 
