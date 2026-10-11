@@ -417,6 +417,8 @@ export interface Finished {
   readonly turns: number
   readonly run: Pick<T3Actions.Ran, "status" | "final" | "others" | "natives" | "previous"> & { readonly startedAt: number }
   readonly current: Effect.Effect<boolean>
+  /** Whether a message yapd sent the thread started it, so it answers what he asked: said however he muted the thread. */
+  readonly answering?: boolean
 }
 
 /**
@@ -588,6 +590,7 @@ export const make = (options: {
           turns,
           run: { status, final: run.value.final, others: run.value.others, natives, previous: run.value.previous, startedAt },
           current,
+          answering: Option.exists(run.value.userMessageId, (id) => id.startsWith("yapd:")),
         })
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
 

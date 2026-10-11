@@ -10,8 +10,9 @@ import * as Conversation from "./Conversation.ts"
 import * as Floor from "./Floor.ts"
 import * as Inbox from "./Inbox.ts"
 import * as Hands from "./Hands.ts"
-import { type Entry, Journal } from "./Journal.ts"
+import { type Entry, Journal, type Naming } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import type { Origin } from "./Origin.ts"
 import { type Agent, key, type Payload } from "./Payload.ts"
@@ -64,11 +65,17 @@ const lookup = "3 seconds"
  * a hook on this machine came from, if any, so what's said of it is kept
  * with the thread, and `hands` send what the user says over it to that
  * thread, as T3 Code takes it: into the turn under way, or in its queue.
+ * `owner` finds the thread a hook on another machine came from, in that
+ * machine's T3 Code, for what's kept, shown and muted of it only. What's
+ * `mutes` is kept quiet, by the keys `naming` gives an update.
  */
 export const make = (
   options: {
     readonly link?: (session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
+    readonly owner?: (host: string, session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
     readonly hands?: Hands.Hands["Type"]
+    readonly mutes?: Mutes.Mutes
+    readonly naming?: Naming
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -81,6 +88,9 @@ export const make = (
   const floor = yield* Floor.Floor
   const journal = yield* Journal
   const minMillis = (yield* Config.minSeconds) * 1000
+  const called: Naming = options.naming ?? ((host) => host.split(".")[0] ?? host)
+  /** The mute an update's keys are under, if any. */
+  const muting = (keys: ReadonlyArray<string>) => (options.mutes === undefined ? Effect.succeedNone : options.mutes.muted(keys))
 
   const dir = yield* Effect.acquireRelease(
     Effect.promise(() => mkdtemp(join(tmpdir(), "yapd-"))),
@@ -151,6 +161,8 @@ export const make = (
   const fallbacks = new Map<string, Fallback>()
   /** The turn said in its hook's place that each update is. */
   const standing = new WeakMap<Conversation.Update, Fallback>()
+  /** Updates said however he muted their thread, since they answer what he asked of it himself, like a follow-up. */
+  const own = new WeakSet<Conversation.Update>()
   const events = yield* Effect.makeSemaphore(1)
   const workers = yield* Effect.makeSemaphore(3)
   /**
@@ -485,22 +497,66 @@ export const make = (
     readonly turns: number
     /** The T3 Code thread it's from, worked out alongside the summary, when there's one. */
     readonly about: Effect.Effect<Option.Option<Threads.Ref>>
+    /** The T3 Code thread on another machine it's known to be from, worked out alongside too, for what's kept, shown and muted of it only. */
+    readonly owner: Effect.Effect<Option.Option<Threads.Ref>>
     /** For a turn no hook told of, said in its hook's place, which is said once, ever, under its key. */
     readonly fallback?: Fallback
+    /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
+    readonly answering: boolean
   }
+
+  /**
+   * Keeps quiet an update whose thread he muted: its Stop hook is let go of
+   * at once, and it's kept, marked as kept quiet, for what he missed, but
+   * never said; a turn said in a hook's place, kept so under its key, is the
+   * turn's, so its own Stop coming late isn't said either. Nothing of it is
+   * kept once yapd was turned off since. Muted by its session, the mute
+   * becomes its thread's. `claimed` is its entry under its key, when it was
+   * kept already, as when the mute came while it was being rendered.
+   */
+  const hush = (finished: Finished, entry: Entry, detail: Readonly<Record<string, unknown>>, keys: ReadonlyArray<string>, mute: Mutes.Mute, claimed?: Option.Option<number>) =>
+    Effect.gen(function* () {
+      const { fallback, hook, turns, project } = finished
+      yield* release(hook)
+      const power = yield* switched
+      if (!power.on || power.turns !== turns) {
+        // Never kept, it's T3 Code's to tell of again.
+        if (fallback !== undefined && claimed === undefined && fallbacks.get(fallback.key) === fallback) fallbacks.delete(fallback.key)
+        return yield* Effect.logInfo("Skipped update, since yapd is off")
+      }
+      const quiet = { ...detail, muted: true }
+      if (fallback === undefined) yield* journal.write({ ...entry, detail: quiet })
+      else if (claimed !== undefined) yield* journal.mute(Option.toArray(claimed))
+      else {
+        // Given way since to a Stop of its own, or its thread started again or went, it's left to that.
+        if (fallbacks.get(fallback.key) !== fallback || !(yield* fallback.current)) {
+          return yield* Effect.logInfo("Skipped a turn no hook told of, since its hook came or its thread started again")
+        }
+        const kept = yield* Effect.uninterruptible(journal.claim({ ...entry, detail: quiet, key: fallback.key }))
+        if (Option.isNone(kept)) return yield* Effect.logInfo("Skipped update, kept already")
+        const row = Option.flatten(kept)
+        if (Option.isSome(row)) fallback.row = row.value
+      }
+      // Kept quiet in its hook's place, it's the turn's, as one he told to stop is.
+      if (fallback !== undefined) fallback.heard = true
+      const thread = keys.find((key) => key.startsWith("t3:"))
+      if (thread !== undefined && mute.key !== thread && options.mutes !== undefined) yield* options.mutes.rekey(mute.key, thread)
+      yield* Effect.logInfo(`Muted update for ${project}`)
+    })
 
   const prepare = (finished: Finished) => {
     const { session, project, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     return Effect.gen(function* () {
-      const [summary, about] = yield* Effect.all(
+      const [summary, about, owner] = yield* Effect.all(
         [
           condenser.condense(project, turn).pipe(
             Effect.retry({ times: 1 }),
             Effect.catchAll((error) => Effect.logWarning("Could not condense", error).pipe(Effect.as(unsummarized(project)))),
           ),
           finished.about,
+          finished.owner,
         ],
-        { concurrency: 2 },
+        { concurrency: 3 },
       )
       // Whoever sent it knows it needs the user, whatever the summary makes of it.
       const priority = needsYou ? "needs-you" : summary.priority
@@ -511,6 +567,35 @@ export const make = (
       }
 
       const spoken = introduce(project, summary.spoken)
+      /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
+      const tied = Option.orElse(about, () => owner)
+      // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread.
+      const detail = {
+        priority,
+        ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }),
+        ...(Option.isSome(tied) ? { session } : {}),
+      }
+      const entry: Entry = {
+        at: arrivedAt,
+        kind: "update",
+        host: thread.origin.host,
+        project,
+        ...Option.match(tied, { onNone: () => ({ thread: session }), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
+        directory: thread.cwd,
+        said: spoken,
+        text: turn.message,
+        detail,
+      }
+      const ties = {
+        ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
+        ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
+      }
+      const keys = Mutes.keysOf({ session, thread, ...ties }, called)
+      // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself.
+      const mutable = priority !== "needs-you" && !finished.answering
+      const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
+      if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, muted.value)
+
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       // Rendering takes about as long as the speaker takes to get ready.
       yield* soon
@@ -524,26 +609,11 @@ export const make = (
         audio,
         thread,
         at: arrivedAt,
-        ...Option.match(about, { onNone: () => ({}), onSome: (about) => ({ about }) }),
+        ...ties,
       }
       generations.set(update, generation)
       if (finished.hooked) hooked.add(update)
-      // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread.
-      const entry: Entry = {
-        at: arrivedAt,
-        kind: "update",
-        host: thread.origin.host,
-        project,
-        ...Option.match(about, { onNone: () => ({ thread: session }), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-        directory: thread.cwd,
-        said: spoken,
-        text: turn.message,
-        detail: {
-          priority,
-          ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }),
-          ...(Option.isSome(about) ? { session } : {}),
-        },
-      }
+      if (priority !== "needs-you" && finished.answering) own.add(update)
       // Said once ever: one already kept under its key was said, or held, before. Never kept for one yapd won't say, as it's off.
       const { fallback } = finished
       const power = yield* switched
@@ -573,6 +643,12 @@ export const make = (
       if (claimed !== undefined && Option.isNone(claimed)) {
         yield* removeFile(audio)
         return yield* Effect.logInfo(`Skipped update, said already: ${spoken}`)
+      }
+      // Muted while it was rendered, it's kept quiet all the same.
+      const late = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
+      if (Option.isSome(late)) {
+        yield* removeFile(audio)
+        return yield* hush(finished, entry, detail, keys, late.value, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       if (fallback !== undefined) standing.set(update, fallback)
       if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns))) {
@@ -612,6 +688,9 @@ export const make = (
       yield* waiting.drop(session)
     })
 
+  /** Whether a hook came from this machine. Read each time, since a Mac's hostname changes with the network. */
+  const fromHere = (origin: Origin) => origin.host !== undefined && origin.host.toLowerCase() === hostname().toLowerCase()
+
   /**
    * The T3 Code thread a hook came from, when it ran on this machine and the
    * thread is found in time. Anything else keeps its update on the old path.
@@ -619,14 +698,29 @@ export const make = (
   const linking = (session: string, cwd: string, origin: Origin): Effect.Effect<Option.Option<Threads.Ref>> => {
     const { link } = options
     if (link === undefined) return Effect.succeedNone
-    // Read each time, since a Mac's hostname changes with the network.
-    if (origin.host === undefined || origin.host.toLowerCase() !== hostname().toLowerCase()) {
+    if (!fromHere(origin)) {
       return Effect.as(Effect.logInfo(`Not linked: it came from ${origin.host ?? "a machine that didn't say"}`), Option.none())
     }
     return link(session, cwd).pipe(
       Effect.timeout(lookup),
       Effect.catchTag("TimeoutException", () =>
         Effect.as(Effect.logInfo("Not linked: T3 Code took too long to say which thread it is"), Option.none<Threads.Ref>()),
+      ),
+    )
+  }
+
+  /**
+   * The T3 Code thread a hook from another machine came from, found in that
+   * machine's T3 Code in time, for what's kept, shown and muted of it: what
+   * he says over it still goes back the way hooks always have.
+   */
+  const owning = (session: string, cwd: string, origin: Origin): Effect.Effect<Option.Option<Threads.Ref>> => {
+    const { owner } = options
+    if (owner === undefined || origin.host === undefined || fromHere(origin)) return Effect.succeedNone
+    return owner(origin.host, session, cwd).pipe(
+      Effect.timeout(lookup),
+      Effect.catchTag("TimeoutException", () =>
+        Effect.as(Effect.logInfo(`Not tied: ${origin.host}'s T3 Code took too long to say which thread it is`), Option.none<Threads.Ref>()),
       ),
     )
   }
@@ -777,7 +871,9 @@ export const make = (
           needsYou: false,
           turns: input.turns,
           about: Effect.succeedSome(input.about),
+          owner: Effect.succeedNone,
           fallback,
+          answering: input.answering === true,
         }),
       )
     }).pipe(events.withPermits(1))
@@ -893,6 +989,8 @@ export const make = (
               needsYou,
               turns,
               about: linking(payload.session_id, payload.cwd, origin),
+              owner: owning(payload.session_id, payload.cwd, origin),
+              answering: followedUp,
             }),
           )
           return hook
@@ -942,6 +1040,12 @@ export const make = (
    */
   const keep = (ready: Inbox.Entry, done: boolean, turns: number) =>
     Effect.gen(function* () {
+      // Muted since it began, even while what cut it off was being said, it's kept quiet from then on, rather than read again.
+      if (!done && "update" in ready && (yield* quieted(ready))) {
+        const row = rows.get(ready.update)
+        if (row !== undefined) yield* journal.mute([row])
+        return false
+      }
       // An update's own session, since one heard again waits under another key.
       const over =
         done ||
@@ -1076,6 +1180,51 @@ export const make = (
   const replayed = (replay: Inbox.Replay) =>
     Effect.sync(() => {
       if (replays.get(replay.id) === replay) replays.delete(replay.id)
+    })
+
+  /**
+   * Whether an update waiting to be read is one his muting its thread keeps
+   * quiet: never what needs him, one he asked to hear again, nor one that
+   * answers what he asked of the thread himself.
+   */
+  const quiet = (ready: Inbox.Ready) => ready.priority !== "needs-you" && ready.replay === undefined && !own.has(ready.update)
+
+  /** Whether an update waiting to be read is muted now. */
+  const quieted = (ready: Inbox.Ready) => (quiet(ready) ? Effect.map(muting(Mutes.keysOf(ready.update, called)), Option.isSome) : Effect.succeed(false))
+
+  /**
+   * A thread was just muted under these keys: its updates waiting to be read
+   * are dropped, and kept as kept quiet, but never what needs him, one he
+   * asked to hear again, the line being said, or what yapd has to say for
+   * itself. A hook he heard waits on, as when he tells an update to stop, and
+   * any other is let go of. One said in a hook's place is the turn's, so its
+   * own Stop coming late isn't said either. What's still being prepared looks
+   * for itself.
+   */
+  const silence = (keys: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      const muted = new Set(keys)
+      const dropped = yield* STM.commit(
+        TRef.modify(inbox, (current) => {
+          const quietened = [...current.values()].filter(
+            (entry): entry is Inbox.Ready => "update" in entry && quiet(entry) && Mutes.keysOf(entry.update, called).some((key) => muted.has(key)),
+          )
+          return [quietened, quietened.reduce((left, entry) => Inbox.remove(left, entry.session), current)] as const
+        }),
+      )
+      if (dropped.length === 0) return
+      const { heard } = yield* SubscriptionRef.get(state)
+      const kept: Array<number> = []
+      for (const entry of dropped) {
+        yield* removeFile(Inbox.audio(entry))
+        if (!heardAlready(heard, entry.update)) yield* release(entry.hook)
+        const fallback = standing.get(entry.update)
+        if (fallback !== undefined) fallback.heard = true
+        const row = rows.get(entry.update)
+        if (row !== undefined) kept.push(row)
+      }
+      yield* journal.mute(kept)
+      yield* Effect.logInfo(`Muted ${dropped.length === 1 ? "an update" : `${dropped.length} updates`} waiting to be said`)
     })
 
   /**
@@ -1304,10 +1453,24 @@ export const make = (
     turn,
     replay,
     tell,
-    /** What the user was told lately, newest first. */
+    /** What the user was told lately, newest first: never what was kept quiet, since he never heard it. */
     recent: Effect.flatMap(Clock.currentTimeMillis, (now) =>
-      journal.since(now - Recent.lifetime, { most: Recent.most, kinds: ["update", "started"] }),
-    ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
+      journal.since(now - Recent.lifetime, { most: 4 * Recent.most, kinds: ["update", "started"] }),
+    ).pipe(
+      Effect.map((entries) =>
+        entries
+          .filter(({ detail }) => !(typeof detail === "object" && detail !== null && (detail as { readonly muted?: unknown }).muted === true))
+          .slice(-Recent.most)
+          .toReversed()
+          .map(Recent.fromJournal),
+      ),
+    ),
+    silence,
+    /** The newest update he heard that's muted, or shown, under this key, by its id among those heard, to hear again. */
+    latestHeard: (key: string) =>
+      Effect.map(SubscriptionRef.get(state), ({ heard }) =>
+        Option.fromNullable(heard.find(({ update }) => Mutes.keysOf(update, called).includes(key))?.id),
+      ),
     /** Whether yapd is on, and how many times it was turned on or off, so what was heard before can tell. */
     power: switched,
     /** The update being read, or the last one the user heard, what of it was said last, and when, with how many times yapd had been turned on or off then. */

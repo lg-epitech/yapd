@@ -20,6 +20,7 @@ import { Vad, VadError } from "./Vad.ts"
 import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
@@ -70,6 +71,12 @@ const make = (says?: string, options: {
   readonly hands?: Hands.Hands["Type"]
   /** How long working out what to do with what the user says takes, in seconds, so they can carry on meanwhile. */
   readonly thinking?: number
+  /** What's muted. Nothing is without it. */
+  readonly mutes?: Mutes.Mutes
+  /** Finds the T3 Code thread a hook on another machine came from. */
+  readonly owner?: (host: string, session: string, cwd: string) => Effect.Effect<Option.Option<Threads.Ref>>
+  /** Messages the summary reads as needing the user, like a failure. */
+  readonly urgentMessages?: ReadonlyArray<string>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -113,7 +120,10 @@ const make = (says?: string, options: {
     Layer.succeed(Condenser, {
       condense: (_, turn) => Effect.sync(() => {
         condensed.push(turn)
-        return { priority: options.trivialMessages?.includes(turn.message) ? "trivial" as const : "done" as const, spoken: turn.message }
+        return {
+          priority: options.trivialMessages?.includes(turn.message) ? "trivial" as const : options.urgentMessages?.includes(turn.message) ? "needs-you" as const : "done" as const,
+          spoken: turn.message,
+        }
       }),
       ask: (request) => Effect.succeed({ spoken: `wants to ${request.what}`, risk: "low" as const }),
       question: () => Effect.succeed({ spoken: "Which one should it use?" }),
@@ -210,6 +220,10 @@ const make = (says?: string, options: {
   const made = yield* Daemon.make({
     ...(options.link === undefined ? {} : { link: options.link }),
     ...(options.hands === undefined ? {} : { hands: options.hands }),
+    ...(options.mutes === undefined ? {} : { mutes: options.mutes }),
+    ...(options.owner === undefined ? {} : { owner: options.owner }),
+    // This machine is Rosie, as yapd serves it.
+    naming,
   }).pipe(Effect.provide(context))
   handle = made.handle
   const { speak: read, tell } = made
@@ -326,6 +340,18 @@ const make = (says?: string, options: {
 })
 
 const daemon = make()
+
+/** What the user calls each machine, here as yapd serves on Rosie. */
+const naming = (host: string) => (host.toLowerCase() === hostname().toLowerCase() ? "Rosie" : (host.split(".")[0] ?? host))
+
+/** Nothing muted yet, kept in a database of its own. */
+const muting = Effect.flatMap(Store.make(":memory:"), Mutes.make)
+
+/** A session here, by its key. */
+const sessionKey = (session: string) => Mutes.key.session("Rosie", `claude:${session}`)
+
+/** Whether a journal entry was kept quiet. */
+const quieted = (kept: Journal.Kept) => (kept.detail as { readonly muted?: boolean } | undefined)?.muted === true
 
 /**
  * The loader's turn T3 Code said finished, with no hook to tell of it, as of
@@ -3010,3 +3036,331 @@ describe("Daemon", () => {
     expect(result).toEqual([over])
   })
 })
+
+describe("Daemon with threads muted", () => {
+  test("a muted thread's progress is kept quiet: kept for what he missed, its hook let go at once, and never rendered or said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, nextEvent, wait, played, renders, followUps, journal } = yield* make(undefined, { mutes })
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* finish("noisy", "Still going.", true)
+        yield* nextEvent("Muted update for yapd")
+        yield* finish("quiet", "The fix is in.")
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], renders: renders(), followUps: [...followUps], kept: updates.map((kept) => [kept.said, quieted(kept)]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The fix is in."])
+    expect(result.renders).toBe(1)
+    expect(result.followUps).toEqual(["claude:noisy let go"])
+    expect(result.kept).toEqual([
+      ["yapd. Still going.", true],
+      ["yapd. The fix is in.", false],
+    ])
+  })
+
+  test("what needs him is said whatever he muted: what the summary finds does, and what its hook says does", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, turn, wait, played, journal } = yield* make(undefined, { mutes, urgentMessages: ["The tests failed."] })
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* finish("noisy", "The tests failed.")
+        yield* wait(11)
+        yield* turn("noisy", "Which network first?", 120, { needsYou: true })
+        yield* wait(11)
+        yield* finish("noisy", "Still going.")
+        yield* wait(11)
+        return { played: [...played], quiet: (yield* journal.since(0, { kinds: ["update"] })).filter(quieted).map(({ said }) => said) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The tests failed.", "yapd. Which network first?"])
+    expect(result.quiet).toEqual(["yapd. Still going."])
+  })
+
+  test("the answer to a follow-up he sent the thread is said, though he muted it since", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, speak, wait, nextEvent, nextPlayback, played, followUps } = yield* make("Use the fee table.", { mutes, send: () => Effect.void })
+        yield* finish("tezos", "The migration compiles.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        // Muted once he'd asked it, its answer is still his to hear, though what comes after it isn't.
+        yield* mutes.mute({ key: sessionKey("tezos") })
+        yield* finish("tezos", "The fee table is in.")
+        yield* wait(11)
+        yield* finish("tezos", "Still going.")
+        yield* wait(11)
+        return { played: [...played], followUps: [...followUps] }
+      }),
+    )
+    expect(result.followUps).toEqual(["tezos sent: Use the fee table."])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in."])
+  })
+
+  test("while yapd is off, a muted update isn't kept at all, as one it would have said isn't", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, toggle, wait, journal, followUps } = yield* make(undefined, { mutes })
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* toggle(false)
+        yield* finish("noisy", "Still going.", true)
+        yield* wait(11)
+        return { kept: yield* journal.since(0, { kinds: ["update"] }), followUps: [...followUps] }
+      }),
+    )
+    expect(result.kept).toEqual([])
+    expect(result.followUps).toEqual([])
+  })
+
+  test("a muted turn no hook told of is kept quiet once, under its key, as heard, so its own Stop coming late isn't said, nor the turn once he unmutes it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, handle, wait, played, journal, nextEvent } = yield* make(undefined, { mutes, link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }) })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Muted update for yapd")
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: "The loader is fixed." }, { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        yield* mutes.unmute(Mutes.key.thread({ machine: "Rosie", id: "t-loader" }))
+        // T3 Code tells of it again, as after a reconnect.
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        const kept = yield* journal.since(0, { kinds: ["update", "action"] })
+        return { played: [...played], kept: kept.map((entry) => [entry.kind, entry.key ?? (entry.detail as { through?: string }).through, quieted(entry)]) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([
+      ["update", "done:Rosie:run-1", true],
+      ["action", "done:Rosie:run-1", false],
+    ])
+  })
+
+  test("a turn no hook told of that a message of yapd's started is said, though he muted its thread", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, wait, played } = yield* make(undefined, { mutes })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        const turns = (yield* made.power).turns
+        yield* made.finished({ ...unhooked("The loader is fixed.", "run-1", turns), answering: true })
+        yield* wait(11)
+        yield* made.finished({ ...unhooked("Still going.", "run-2", turns), about: { machine: "Rosie", id: "t-loader" } })
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The loader is fixed."])
+  })
+
+  test("a session's mute, once its update is tied to a thread, mutes it and becomes the thread's", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { handle, nextEvent, played, journal } = yield* make(undefined, { mutes, link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }) })
+        yield* mutes.mute({ key: sessionKey("s-tezos"), called: "the Claude session in yapd" })
+        yield* stopHere(handle, "s-tezos", "The migration compiles.")
+        yield* nextEvent("Muted update for yapd")
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], mutes: yield* mutes.list, kept: kept.map(({ machine, thread, detail }) => ({ machine, thread, detail })) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.mutes).toEqual([{ key: "t3:Rosie:t-tezos", called: "the Claude session in yapd", at: 0 }])
+    expect(result.kept).toEqual([{ machine: "Rosie", thread: "t-tezos", detail: { priority: "done", session: "claude:s-tezos", muted: true, host: hostname() } }])
+  })
+
+  test("rig's hook, found in rig's T3 Code, is kept under its thread there and muted by it, while what he says over it still goes the hook's way", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const asked: Array<string> = []
+        const { handle, speak, wait, nextEvent, nextPlayback, played, followUps, journal } = yield* make("Use the fee table.", {
+          mutes,
+          send: () => Effect.void,
+          // Nothing here has it, and rig's T3 Code knows it as the Mina thread.
+          link: () => Effect.die("not asked for rig's hooks"),
+          owner: (host, session) => Effect.sync(() => void asked.push(`${host} ${session}`)).pipe(Effect.as(Option.some({ machine: "rig", id: "t-mina" }))),
+        })
+        const stop = (message: string) =>
+          handle("claude", { hook_event_name: "Stop", session_id: "s-mina", cwd: "/home/laurent/code/integration", last_assistant_message: message }, { project: "integration", host: "rig.local" }, false)
+        yield* stop("The SSV2 tickets are open.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        // Muted by the menu, by its thread on rig: the answer to what he said over it is still said, but not what comes after.
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "rig", id: "t-mina" }) })
+        yield* stop("The fee table is in.")
+        yield* nextEvent("Ready: integration. The fee table")
+        yield* wait(11)
+        yield* stop("Still going.")
+        yield* nextEvent("Muted update for integration")
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return {
+          asked,
+          played: [...played],
+          followUps: [...followUps],
+          kept: kept.map((entry) => [entry.machine, entry.thread, (entry.detail as { session?: string }).session, quieted(entry)]),
+        }
+      }),
+    )
+    expect(result.asked).toEqual(["rig.local s-mina", "rig.local s-mina", "rig.local s-mina"])
+    expect(result.played).toEqual(["integration. The SSV2 tickets are open.", "Okay, passed on.", "integration. The fee table is in."])
+    // The hook's way, never through T3 Code.
+    expect(result.followUps).toEqual(["s-mina sent: Use the fee table."])
+    expect(result.kept).toEqual([
+      ["rig", "t-mina", "claude:s-mina", false],
+      ["rig", "t-mina", "claude:s-mina", false],
+      ["rig", "t-mina", "claude:s-mina", true],
+    ])
+  })
+
+  test("a mute that lands while an update is being rendered still keeps it quiet", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, wait, played, followUps, journal } = yield* make(undefined, { mutes, renderSeconds: 2 })
+        yield* finish("noisy", "Still going.", true)
+        yield* wait(1)
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* wait(1)
+        yield* wait(11)
+        return { played: [...played], followUps: [...followUps], kept: (yield* journal.since(0, { kinds: ["update"] })).map(quieted) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.followUps).toEqual(["claude:noisy let go"])
+    expect(result.kept).toEqual([true])
+  })
+
+  test("muting drops the thread's updates waiting to be said and lets their hooks go, but never what needs him, what he asked to hear again, a notice, or the line being said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, notice, wait, played, followUps, journal, heard, replay } = yield* make(undefined, { mutes, urgentMessages: ["The tests failed."] })
+        // Heard once, to hear again later.
+        yield* finish("noisy", "Earlier news.", true)
+        yield* wait(11)
+        const [earlier] = yield* heard
+        // The line being said, then what waits behind it.
+        yield* finish("playing", "Something long.")
+        yield* finish("noisy", "Still going.", true)
+        yield* finish("other", "The Mina tickets are open.")
+        yield* finish("urgent", "The tests failed.")
+        yield* notice("t3:Rosie:t-noisy", "The noisy thread wants your go-ahead.")
+        yield* replay(earlier!)
+        yield* wait(0)
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* mutes.mute({ key: sessionKey("urgent") })
+        yield* made.silence([sessionKey("noisy"), sessionKey("urgent")])
+        for (let i = 0; i < 6; i++) yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], followUps: [...followUps], kept: updates.map((kept) => [kept.said, quieted(kept)]) }
+      }),
+    )
+    expect(result.played).toEqual([
+      "yapd. Earlier news.",
+      "yapd. Something long.",
+      "yapd. The tests failed.",
+      "yapd. Earlier news.",
+      "The noisy thread wants your go-ahead.",
+      "yapd. The Mina tickets are open.",
+    ])
+    // The hook of the one he heard waits on, for a reply to it heard again; the one dropped is let go.
+    expect(result.followUps).toEqual(["claude:noisy let go"])
+    expect(result.kept).toEqual([
+      ["yapd. Earlier news.", false],
+      ["yapd. Something long.", false],
+      ["yapd. Still going.", true],
+      ["yapd. The Mina tickets are open.", false],
+      ["yapd. The tests failed.", false],
+    ])
+  })
+
+  test("an update a dictation cut off isn't read again once its thread is muted, before or while he dictates", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, wait, dictate, played, journal } = yield* make(undefined, { mutes })
+        // Muted as it's said, by the menu, before he starts to dictate.
+        yield* finish("before", "First update.")
+        yield* wait(1)
+        yield* mutes.mute({ key: sessionKey("before") })
+        const first = yield* dictate
+        yield* wait(2)
+        yield* Scope.close(first, Exit.void)
+        yield* wait(11)
+        // Muted while he dictates, once it was put back to be read again.
+        yield* finish("during", "Second update.")
+        yield* wait(1)
+        const second = yield* dictate
+        yield* mutes.mute({ key: sessionKey("during") })
+        yield* made.silence([sessionKey("during")])
+        yield* wait(2)
+        yield* Scope.close(second, Exit.void)
+        yield* wait(11)
+        return { played: [...played], kept: (yield* journal.since(0, { kinds: ["update"] })).map((kept) => [kept.said, quieted(kept)]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. First update.", "yapd. Second update."])
+    expect(result.kept).toEqual([
+      ["yapd. First update.", true],
+      ["yapd. Second update.", true],
+    ])
+  })
+
+  test("what the writer is told he heard lately leaves out what was kept quiet", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, wait, nextEvent } = yield* make(undefined, { mutes })
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* finish("noisy", "Still going.")
+        yield* nextEvent("Muted update for yapd")
+        yield* finish("quiet", "The fix is in.")
+        yield* wait(11)
+        return (yield* made.recent).map(({ spoken }) => spoken)
+      }),
+    )
+    expect(result).toEqual(["yapd. The fix is in."])
+  })
+
+  test("the newest update he heard of a thread is found by its key, to hear again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, finish, wait, heard } = yield* make(undefined, { link: (session) => (session === "s-tezos" ? Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }) : Effect.succeedNone) })
+        yield* stopHere(handle, "s-tezos", "The migration compiles.")
+        yield* wait(11)
+        yield* finish("terminal", "The fee table is in.")
+        yield* wait(11)
+        const ids = yield* heard
+        return {
+          ids,
+          tezos: yield* made.latestHeard("t3:Rosie:t-tezos"),
+          terminal: yield* made.latestHeard(sessionKey("terminal")),
+          none: yield* made.latestHeard("t3:Rosie:t-gone"),
+        }
+      }),
+    )
+    expect(result.tezos).toEqual(Option.some(result.ids[1]!))
+    expect(result.terminal).toEqual(Option.some(result.ids[0]!))
+    expect(result.none).toEqual(Option.none())
+  })
+})
+
+/** A Stop from this machine's hook of `session`, which says where it came from, as a hook that can be tied to its thread does. */
+const stopHere = (handle: Handle, session: string, message: string) =>
+  handle("claude", { hook_event_name: "Stop", session_id: session, cwd: "/code/yapd", last_assistant_message: message }, { project: "yapd", host: hostname() }, false).pipe(
+    Effect.zipRight(Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))),
+  )

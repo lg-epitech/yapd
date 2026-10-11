@@ -140,7 +140,7 @@ const notices = (
     const settled: Array<string> = []
     /** The machines whose T3 Code caught up again, in turn. */
     const returned: Array<string> = []
-    const finished: Array<{ readonly key: string; readonly message: string }> = []
+    const finished: Array<{ readonly key: string; readonly message: string; readonly answering?: true }> = []
     /** The threads whose turn no hook told of was overtaken, by starting again or going. */
     const overtaken: Array<string> = []
     const tell = (notice: Notice) =>
@@ -156,7 +156,7 @@ const notices = (
       tell,
       power: Effect.succeed({ on: true, turns: 1 }),
       stopped: (sessions) => Effect.sync(() => sessions.flatMap((session) => given.stops?.get(session) ?? []).toSorted((a, b) => a.at - b.at)),
-      finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message })),
+      finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message, ...(input.answering === true ? { answering: true as const } : {}) })),
       overtaken: (ref) => Effect.sync(() => void overtaken.push(ref.id)),
       mention: () => Effect.void,
       ask: (asking) =>
@@ -289,6 +289,34 @@ describe("Notices", () => {
     expect(result.finished).toEqual([{ key: "done:Rosie:run-2", message: "The loader is fixed." }])
     // The failure its hook told of isn't said again.
     expect(result.told).toEqual([])
+  })
+
+  test("a turn no hook told of that a message of yapd's started answers what he asked, so it's said however he muted its thread; one he typed in T3 Code doesn't", async () => {
+    const loader = thread("loader", "Fix the loader", { latestRunId: "run-2", modelSelection: { instanceId: "opencode", model: "kimi-k3" } })
+    const cache = thread("cache", "Fix the cache", { latestRunId: "run-4", modelSelection: { instanceId: "opencode", model: "kimi-k3" } })
+    const ran = (runId: string, userMessageId: string, said: string) => ({
+      runs: [{ id: runId, status: "completed", ordinal: 1, startedAt: minutes(4), userMessageId }],
+      messages: [
+        { id: userMessageId, runId, role: "user", text: "Go on.", createdAt: minutes(4) },
+        { id: `a-${runId}`, runId, role: "assistant", text: said, createdAt: minutes(0) },
+      ],
+      sessions: [`oc-${runId}`],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, finished } = yield* notices({
+          view: [loader, cache],
+          bounded: { loader: ran("run-2", "yapd:u1:0:m", "The loader is fixed."), cache: ran("run-4", "m-typed", "The cache is fixed.") },
+        })
+        yield* hear(ended(loader, "run-2"), ended(cache, "run-4"))
+        yield* wait(20)
+        return finished.toSorted((one, other) => one.key.localeCompare(other.key))
+      }),
+    )
+    expect(result).toEqual([
+      { key: "done:Rosie:run-2", message: "The loader is fixed.", answering: true },
+      { key: "done:Rosie:run-4", message: "The cache is fixed." },
+    ])
   })
 
   test("a run that fails right after the one before it went well is said, though that one's Stop hook came after it started", async () => {
