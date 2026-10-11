@@ -203,7 +203,19 @@ export const make = (store: Store.Store["Type"]) =>
       .transaction((database: Database) => database.query<Row, []>("select key, called, project, at, ends_at from mutes order by at, key").all())
       .pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read what's muted", error), [] as ReadonlyArray<Row>)))
     const mutes = new Map(kept.map((row) => [row.key, fromRow(row)]))
-    let last: Change | undefined
+    /**
+     * A session's mute moved to its thread since the last change: what it
+     * was, and whether the thread had a mute of its own already, which it
+     * kept.
+     */
+    interface Move {
+      readonly from: string
+      readonly to: string
+      readonly before: Mute
+      readonly merged: boolean
+    }
+    /** The last change, as it was made, and the mutes moved since, which taking it back goes by. */
+    let last: (Change & { readonly moves: ReadonlyArray<Move> }) | undefined
     const changed = yield* PubSub.unbounded<void>()
 
     /** Writes what's added and taken off as one, in memory whatever the database makes of it. */
@@ -229,9 +241,40 @@ export const make = (store: Store.Store["Type"]) =>
     const change = (how: Change["how"], added: ReadonlyArray<Mute>, removed: ReadonlyArray<Mute>) =>
       Effect.gen(function* () {
         yield* save(added, removed)
-        last = { how, at: yield* Clock.currentTimeMillis, added, removed }
-        return last
+        last = { how, at: yield* Clock.currentTimeMillis, added, removed, moves: [] }
+        return shown(last)
       })
+
+    /** A change as he'd know it: what it did to a session that's since been found to be a thread's, it did to the thread. */
+    const shown = ({ how, at, added, removed, moves }: NonNullable<typeof last>): Change => {
+      const follow = (all: ReadonlyArray<Mute>) =>
+        all.map((mute) => moves.reduce((mute, { from, to }) => (mute.key === from ? { ...mute, key: to } : mute), mute))
+      return { how, at, added: follow(added), removed: follow(removed) }
+    }
+
+    /**
+     * What's muted once a change is taken back: as it would be had he never
+     * made it, with the sessions' mutes moved to their threads since moved
+     * all the same, so a thread muted before the session was found to be
+     * its own stays muted.
+     */
+    const without = ({ added, removed, moves }: NonNullable<typeof last>) => {
+      const after = new Map(mutes)
+      // As it was before the moves.
+      for (const { from, to, before, merged } of moves.toReversed()) {
+        if (!merged) after.delete(to)
+        after.set(from, before)
+      }
+      for (const { key } of added) after.delete(key)
+      for (const mute of removed) after.set(mute.key, mute)
+      for (const { from, to } of moves) {
+        const mute = after.get(from)
+        if (mute === undefined) continue
+        after.delete(from)
+        if (!after.has(to)) after.set(to, { ...mute, key: to })
+      }
+      return after
+    }
 
     /** Mutes that ended on their own are let go of as they're next looked at. */
     const lapsed = Effect.gen(function* () {
@@ -281,27 +324,28 @@ export const make = (store: Store.Store["Type"]) =>
       undo: Effect.gen(function* () {
         const undone = yield* lately
         if (Option.isNone(undone)) return Option.none()
+        const after = without(undone.value)
+        const added = [...after.values()].filter((mute) => mutes.get(mute.key) !== mute)
+        const removed = [...mutes.values()].filter((mute) => after.get(mute.key) !== mute)
+        // Nothing to take back, as when the thread was muted before the session he muted was found to be its own.
+        if (added.length === 0 && removed.length === 0) return Option.none()
         // Taken back, it's a change of its own, so taking that back too puts things as they were before.
-        return Option.some(yield* change("undo", undone.value.removed, undone.value.added))
+        return Option.some(yield* change("undo", added, removed))
       }),
       rekey: (from, to) =>
         Effect.gen(function* () {
           const before = mutes.get(from)
           if (before === undefined) return
           const kept = mutes.get(to)
-          const moved = kept ?? { ...before, key: to }
-          yield* save(kept === undefined ? [moved] : [], [before])
-          // What's taken back is the thread's mute from now on.
-          if (last !== undefined) {
-            const follow = (all: ReadonlyArray<Mute>) => all.map((mute) => (mute.key === from ? { ...mute, key: to } : mute))
-            last = { ...last, added: follow(last.added), removed: follow(last.removed) }
-          }
+          yield* save(kept === undefined ? [{ ...before, key: to }] : [], [before])
+          // Taking back the last change goes by it from now on.
+          if (last !== undefined) last = { ...last, moves: [...last.moves, { from, to, before, merged: kept !== undefined }] }
         }),
       list: Effect.zipRight(
         lapsed,
         Effect.sync(() => [...mutes.values()].toSorted((one, other) => one.at - other.at || (one.key < other.key ? -1 : one.key > other.key ? 1 : 0))),
       ),
-      last: lately,
+      last: Effect.map(lately, Option.map(shown)),
       changes: Stream.fromPubSub(changed),
     } satisfies Mutes
   })
