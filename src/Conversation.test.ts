@@ -722,13 +722,18 @@ describe("Answers", () => {
 describe("Telling yapd's own voice from the user's", () => {
   const saying = "Over in yapd, the tests pass now"
 
-  test("takes nothing, or only what Whisper makes up of a voice it can't make out, for its own voice", () => {
-    for (const heard of [
-      "", "Thank you.", "- Verse.", "End of song.", "Thank you. Thank you.", "you you you", "Bye bye.", "Please subscribe.",
-      "Thank you so much for watching.", "I'll see you next time.", "Subtitles by the Amara.org community", "Of course.", "Excuse me.",
-      "Good morning.", "What the hell?", "That's it.", "I don't know.", "Take care.", "Let's go.",
-    ]) {
+  test("takes nothing, or only what gives itself away as made up from Whisper's videos, for its own voice", () => {
+    for (const heard of ["", "- Verse.", "Please subscribe.", "Thank you so much for watching.", "Subtitles by the Amara.org community"]) {
       expect([heard, own(heard, saying)]).toEqual([heard, true])
+    }
+  })
+
+  test("never takes what Whisper also makes up of a voice it can't make out for its own voice when he may have said it, as the model judges that", () => {
+    for (const heard of [
+      "Thank you.", "Thank you. Thank you.", "you you you", "Bye bye.", "I'll see you next time.", "Of course.", "Excuse me.", "Good morning.",
+      "What the hell?", "That's it.", "I don't know.", "Take care.", "Let's go.", "Thank you so much.", "That's all.", "Come on.", "End of song.", "You.",
+    ]) {
+      expect([heard, own(heard, saying)]).toEqual([heard, false])
     }
   })
 
@@ -1198,7 +1203,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
 
   test.each([
     ["nothing Whisper can make out", ""],
-    ["what Whisper makes up", "You."],
+    ["what gives itself away as made up", "Thanks for watching!"],
     ["yapd's own words around then", "Over in yapd, the tests pass."],
     ["yapd's own words with its name misheard", "Of Erin yapped. The tests pass now."],
   ])("picks up again from just before where it stopped, saying nothing and asking nobody, when what stopped it is heard as %s", async (_, heard) => {
@@ -1568,7 +1573,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(await after(false, false)).toEqual({ commands: ["play", "volume"], responded: [], sent: [], offered: [], before: false, done: true })
   })
 
-  test.each(["Stop.", "Thank you.", "Of course."])("takes \"%s\" over its first seconds for his to judge, however short, though yapd was saying \"stopped\" and Whisper makes up \"Thank you.\"", async (heard) => {
+  test.each(["Stop.", "Thank you.", "Of course.", "That's it.", "I don't know.", "Thank you so much."])("takes \"%s\" over its first seconds for his to judge, however short, though yapd was saying \"stopped\" and Whisper makes up \"Thank you.\"", async (heard) => {
     const over = (frames: number, live = false) =>
       overHelperScoped(
         Effect.gen(function* () {
@@ -1598,7 +1603,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(await over(12)).toEqual({ commands: ["play", "volume", "stop"], plays: [0], responded: [{ heard, told: true }], done: true })
   })
 
-  test.each(["You.", "The agent stopped."])("takes \"%s\" over its first seconds, no longer than its own voice can go on after, for its own voice, as what Whisper makes up or yapd's own words", async (heard) => {
+  test.each(["Thanks for watching!", "The agent stopped."])("takes \"%s\" over its first seconds, no longer than its own voice can go on after, for its own voice, as what gives itself away as made up or yapd's own words", async (heard) => {
     const result = await overHelperScoped(
       Effect.gen(function* () {
         const helper = yield* overHelper([[0.9, heard]], {

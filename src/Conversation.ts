@@ -7,7 +7,7 @@ import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
-import { agreed, enough, gist, hallucinated, type Line, noted, type Reply, Responder } from "./Responder.ts"
+import { agreed, enough, gist, type Line, noted, type Reply, Responder } from "./Responder.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -412,29 +412,14 @@ const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
   return its
 }
 
-/** What Whisper makes up of near-silence, or of a voice it can't make out, which nobody said, each as a sentence of its own, as it's compared. */
-const inventions = [
-  ...hallucinated, "the end", "end of song", "thank you very much", "thank you so much", "thanks for listening", "thank you for listening",
-  "thank you for your attention", "see you next time", "i'll see you next time", "see you later", "see you soon", "see you in the next one",
-  "i'll see you in the next one", "see you guys", "see you guys next time", "bye bye", "goodbye", "good night", "i'll be right back",
-  "have a nice day", "have a good day", "take care", "good luck", "welcome back", "let's get started", "i'm sorry", "oh my god",
-  "you know what i mean", "bon appétit", "peace out", "of course", "excuse me", "good morning", "good afternoon", "good evening",
-  "what the hell", "jesus christ", "let's go", "here we go", "that's it", "that's all", "i'm going to go", "come on", "i don't know",
-].map((phrase) => vocabulary(phrase).filter((word) => word.length > 1))
-
-/** The same, without the fillers. */
-const madeUp: ReadonlySet<string> = new Set(inventions.map((words) => words.filter((word) => !fillers.has(word)).join(" ")))
-
-/** Those of nothing but fillers, like "Thank you." or "Bye bye.", which only these are of all such sentences. */
-const filled: ReadonlySet<string> = new Set(inventions.filter((words) => words.every((word) => fillers.has(word))).map((words) => words.join(" ")))
-
 /** Sentences, but not the dot in "Amara.org". */
 const sentences = (heard: string) => heard.split(/[.!?]+(?=\s|$)/)
 
 /**
- * The words of what was heard as they're compared, less what Whisper makes
- * up, single letters, and the words that only fill a pause. A sentence of
- * what it makes up is let go only whole, so none of his goes with it.
+ * The words of what was heard as they're compared, less single letters, the
+ * words that only fill a pause, and the sentences that give themselves away
+ * as what Whisper makes up from the videos it learnt on, like "Please
+ * subscribe.", which are let go only whole, so none of his goes with them.
  */
 const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
   const said = sentences(heard)
@@ -446,38 +431,40 @@ const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
         !sentence.every((word) => tells.has(word) || fillers.has(word) || common.has(word) || word.length === 1 || yapd.includes(word)),
     )
     .map((sentence) => sentence.filter((word) => word.length > 1 && !fillers.has(word)))
-    .filter((sentence) => !madeUp.has(sentence.join(" ")))
     .flat()
   // Whisper repeats itself on noise, so a word said again straight after counts once.
   return said.filter((word, index) => word !== said[index - 1])
 }
 
-/**
- * Whether all that was heard over a line yapd was `saying`, begun while its
- * own voice could still get into the microphone, may be only that voice,
- * going by Whisper's words, which this only ever tells by, never changes:
- * nothing, what Whisper makes up of a voice it can't make out, like "Thank
- * you." or "Thanks for watching.", or words of what it was saying, misheard
- * or not, like "Over in Japan" for "Over in yapd". Never with a word it
- * wasn't saying, nor with a sentence of only words that fill a pause Whisper
- * doesn't make up whole, like "Okay, thanks.", which may be him taking it in.
- */
 /** Whether what was heard is what he'd say back to a line himself, short as it is: hearing enough, taking it in, or going ahead. */
 const likeReply = (heard: string) => {
   const said = gist(heard)
   return enough.has(said) || noted.has(said) || agreed.has(said)
 }
 
+/**
+ * Whether all that was heard over a line yapd was `saying`, begun while its
+ * own voice could still get into the microphone, may be only that voice,
+ * going by Whisper's words, which this only ever tells by, never changes:
+ * nothing, what gives itself away as made up from Whisper's videos, like
+ * "Thanks for watching.", or words of what it was saying, misheard or not,
+ * like "Over in Japan" for "Over in yapd". Never with a word it wasn't
+ * saying, nor with what Whisper also makes up of a voice it can't make out
+ * but he may say, like "Thank you.", "Of course." or "I don't know.", nor
+ * with a sentence of only words that fill a pause, like "Okay, thanks.",
+ * which may be him taking it in: the model judges those.
+ */
 export const own = (heard: string, saying: string) => {
   const yapd = vocabulary(saying)
   const its = (word: string) => yapd.some((spoken) => alike(word, spoken))
   const fill = sentences(heard)
     .map((sentence) => vocabulary(sentence).filter((word, index, words) => word.length > 1 && word !== words[index - 1]))
     .filter((sentence) => sentence.length > 0 && sentence.every((word) => fillers.has(word)))
-  if (fill.some((sentence) => !filled.has(sentence.join(" ")) && !sentence.every(its))) return false
+  if (fill.some((sentence) => !sentence.every(its))) return false
   const words = wordsOf(heard, yapd)
   const matched = ours(words, yapd)
-  return words.every((word, index) => matched.has(index) || its(word))
+  // Words in nearly anything either says are no sign of its own voice on their own, like "That's it.": one of its own must be there.
+  return words.length === 0 || (words.some((word) => !common.has(word)) && words.every((word, index) => matched.has(index) || its(word)))
 }
 
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
@@ -939,19 +926,18 @@ export const make = (options: {
      * some of what was heard may be. Neither for what he began once its own
      * voice was learnt. Speech that went on past where it stopped is someone
      * else's, which its own voice dying away can't be, so only nothing is
-     * taken for its own then, never even what Whisper makes up, like "Thank
-     * you.", which he says too; and when it had said all of it by then, its
+     * taken for its own then; and when it had said all of it by then, its
      * own voice can only be its last word or so before him, as after any
      * line, so the model isn't told. Otherwise all of it may yet have been its
-     * own voice, `unsure`, though what he'd say back himself, like "Stop.",
-     * "Thank you." or "Of course.", is never taken for it by its words alone,
-     * however short: the model judges that, told it may be its own voice.
+     * own voice, `unsure`, though what he'd say back himself is never taken
+     * for it by its words alone, however short, even a "Stop." over its
+     * "stopped": the model judges that, told it may be its own voice.
      */
     const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
       const { echo, onset = outcome.at } = outcome
       if (echo === undefined) return { itself: false, unsure: false }
       const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
-      if (past ? first === "" : !likeReply(first) && (own(first, "") || own(first, echo))) return { itself: true, unsure: true }
+      if (past ? first === "" : !likeReply(first) && own(first, echo)) return { itself: true, unsure: true }
       return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
     }
 
