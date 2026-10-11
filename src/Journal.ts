@@ -76,8 +76,12 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly markUnheard: (ids: ReadonlyArray<number>) => Effect.Effect<void>
     /** Notes that what was said for an entry was these words in the end, like a line played without "it's on your screen". */
     readonly reword: (id: number, said: string) => Effect.Effect<void>
-    /** Entries since `at`, oldest first, the latest `most` of them when there are more. */
-    readonly since: (at: number, options?: { readonly most?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
+    /**
+     * Entries since `at`, oldest first, the latest `most` of them when there
+     * are more: with `muted`, only those kept quiet because he muted their
+     * thread, or only the others.
+     */
+    readonly since: (at: number, options?: { readonly most?: number; readonly kinds?: ReadonlyArray<Kind>; readonly muted?: boolean }) => Effect.Effect<ReadonlyArray<Kept>>
     /** A page of entries, newest written first: `most` of them, only older than the entry `before` and of `kinds` when given. */
     readonly page: (options: { readonly most: number; readonly before?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
     /** The latest entries about a thread, newest first. */
@@ -268,10 +272,11 @@ export const fromStore = (
       reading(
         store.transaction((database: Database) => {
           const kinds = options.kinds ?? []
-          const filter = kinds.length === 0 ? "" : ` and kind in (${kinds.map(() => "?").join(", ")})`
+          const { muted } = options
+          const filter = `${kinds.length === 0 ? "" : ` and kind in (${kinds.map(() => "?").join(", ")})`}${muted === undefined ? "" : ` and ${quiet} = ?`}`
           const rows = database
             .query<Row, Array<string | number>>(`select * from journal where at >= ?${filter} order by at desc, id desc limit ?`)
-            .all(at, ...kinds, options.most ?? 200)
+            .all(at, ...kinds, ...(muted === undefined ? [] : [muted ? 1 : 0]), options.most ?? 200)
           return rows.reverse().map(kept)
         }),
       ),

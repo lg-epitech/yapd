@@ -1560,16 +1560,8 @@ export const make = (
     tell,
     /** What the user was told lately, newest first: never what was kept quiet, since he never heard it. */
     recent: Effect.flatMap(Clock.currentTimeMillis, (now) =>
-      journal.since(now - Recent.lifetime, { most: 4 * Recent.most, kinds: ["update", "started"] }),
-    ).pipe(
-      Effect.map((entries) =>
-        entries
-          .filter(({ detail }) => !(typeof detail === "object" && detail !== null && (detail as { readonly muted?: unknown }).muted === true))
-          .slice(-Recent.most)
-          .toReversed()
-          .map(Recent.fromJournal),
-      ),
-    ),
+      journal.since(now - Recent.lifetime, { most: Recent.most, kinds: ["update", "started"], muted: false }),
+    ).pipe(Effect.map((entries) => entries.toReversed().map(Recent.fromJournal))),
     silence,
     /** Muting from the menu or by voice, which drops what of a thread waits to be said: none without mutes. */
     controls: Option.fromNullable(controls),

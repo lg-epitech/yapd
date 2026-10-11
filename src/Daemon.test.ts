@@ -3462,6 +3462,20 @@ describe("Daemon with threads muted", () => {
     expect(result).toEqual(["yapd. The fix is in."])
   })
 
+  test("a noisy muted thread never crowds what he heard out of what the writer is told", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, journal, wait } = yield* make(undefined)
+        yield* wait(60)
+        for (let index = 0; index < 6; index++) yield* journal.write({ at: 1000 + index, kind: "update", project: "yapd", said: `Heard ${index}.` })
+        // Twenty-five turns of a muted thread since.
+        for (let index = 0; index < 25; index++) yield* journal.write({ at: 2000 + index, kind: "update", project: "yapd", said: "Still going.", detail: { muted: true } })
+        return (yield* made.recent).map(({ spoken }) => spoken)
+      }),
+    )
+    expect(result).toEqual(["Heard 5.", "Heard 4.", "Heard 3.", "Heard 2.", "Heard 1.", "Heard 0."])
+  })
+
   test("the newest update he heard of a thread is found by its key, to hear again", async () => {
     const result = await run(
       Effect.gen(function* () {
