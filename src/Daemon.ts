@@ -182,6 +182,17 @@ export const make = (
    * like a follow-up.
    */
   const audible = new WeakSet<Conversation.Update>()
+  /** Stops whose update was kept quiet, since he muted its thread, so he never heard what they told of. */
+  const hushed = new WeakSet<Notices.Stop>()
+  /** The Stop each hook's update is of. */
+  const stopOf = new WeakMap<Conversation.Update, Notices.Stop>()
+  /** A failure left to the Stops that told of it, said after all once what all of them told of is kept quiet. */
+  interface Owed {
+    readonly stops: ReadonlyArray<Notices.Stop>
+    readonly failure: Effect.Effect<void>
+    told: boolean
+  }
+  const owed = new WeakMap<Notices.Stop, Owed>()
   /** The change to what's muted he just made over an update, by when it was made, which "scratch that" said next takes back. */
   const changedOver = new WeakMap<Conversation.Update, number>()
   const events = yield* Effect.makeSemaphore(1)
@@ -592,7 +603,35 @@ export const make = (
      * as otherwise the turn was kept quiet already.
      */
     readonly over?: Fallback
+    /** The Stop it's of, for a hook's. */
+    readonly stop?: Notices.Stop
   }
+
+  /** A failure is owed once what all the Stops it was left to told of is kept quiet. */
+  const due = (owing: Owed) => !owing.told && owing.stops.every((stop) => hushed.has(stop))
+
+  /** What a Stop told of was kept quiet: a failure left to it, and to no Stop he heard, is said after all. */
+  const quieten = (stop: Notices.Stop | undefined) =>
+    Effect.suspend(() => {
+      if (stop === undefined) return Effect.void
+      hushed.add(stop)
+      const owing = owed.get(stop)
+      if (owing === undefined || !due(owing)) return Effect.void
+      owing.told = true
+      return Effect.asVoid(Effect.forkIn(owing.failure, lifetime))
+    })
+
+  /** A failure left to these Stops: said at once if what they told of was kept quiet already, or else once it is, if it ever is. */
+  const unheardFailure = (stops: ReadonlyArray<Notices.Stop>, failure: Effect.Effect<void>) =>
+    Effect.suspend(() => {
+      const owing: Owed = { stops, failure, told: false }
+      if (stops.length > 0 && due(owing)) {
+        owing.told = true
+        return failure
+      }
+      for (const stop of stops) owed.set(stop, owing)
+      return Effect.void
+    })
 
   /** A Stop whose turn was said, or kept quiet, in its hook's place from T3 Code's word, kept as such, so the journal still has what its hook told of. */
   const passedThrough = (at: number, thread: Thread, project: string, over: Fallback, session: string) =>
@@ -645,6 +684,7 @@ export const make = (
         fallback.heard = true
         fallback.quiet = true
       }
+      yield* quieten(finished.stop)
       const thread = keys.find((key) => key.startsWith("t3:"))
       if (thread !== undefined && mute.key !== thread && options.mutes !== undefined) yield* options.mutes.rekey(mute.key, thread)
       yield* Effect.logInfo(`Muted update for ${project}`)
@@ -696,6 +736,7 @@ export const make = (
       if (finished.over !== undefined && priority !== "needs-you" && summarized && !finished.answering) {
         yield* release(hook)
         yield* passedThrough(arrivedAt, thread, project, finished.over, session)
+        yield* quieten(finished.stop)
         return yield* Effect.logInfo("Skipped update, kept quiet already from T3 Code's word that it finished")
       }
       // Even a reply to a follow-up, since yapd already said it passed that on.
@@ -754,6 +795,7 @@ export const make = (
       }
       generations.set(update, generation)
       if (finished.hooked) hooked.add(update)
+      if (finished.stop !== undefined) stopOf.set(update, finished.stop)
       if (!mutable) audible.add(update)
       // Said once ever: one already kept under its key was said, or held, before. Never kept for one yapd won't say, as it's off.
       const { fallback } = finished
@@ -1126,6 +1168,7 @@ export const make = (
               answering: followedUp,
               ...(prompt === undefined ? {} : { prompted: prompt }),
               ...(through === undefined ? {} : { over: through }),
+              stop,
             }),
           )
           return hook
@@ -1179,6 +1222,7 @@ export const make = (
       if (!done && "update" in ready && (yield* quieted(ready))) {
         const row = rows.get(ready.update)
         if (row !== undefined) yield* journal.mute([row])
+        yield* quieten(stopOf.get(ready.update))
         return false
       }
       // An update's own session, since one heard again waits under another key.
@@ -1361,6 +1405,7 @@ export const make = (
         }
         const row = rows.get(entry.update)
         if (row !== undefined) kept.push(row)
+        yield* quieten(stopOf.get(entry.update))
       }
       yield* journal.mute(kept)
       yield* Effect.logInfo(`Muted ${dropped.length === 1 ? "an update" : `${dropped.length} updates`} waiting to be said`)
@@ -1640,6 +1685,8 @@ export const make = (
     replies: Stream.fromPubSub(replied),
     /** The Stop hooks of these sessions in the last hour, when they came and what they said last, oldest first, by the agent's own ids for them, whether their updates were said or not. */
     stopped: (sessions: ReadonlyArray<string>) => Effect.sync((): ReadonlyArray<Notices.Stop> => stopsOf(sessions)),
+    /** A failure left to these Stops, said after all should what they told of be kept quiet, as his muting the thread does. */
+    unheard: unheardFailure,
     finished,
     overtaken,
   }

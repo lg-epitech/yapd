@@ -3240,6 +3240,38 @@ describe("Daemon with threads muted", () => {
     expect(result.quiet).toBe(0)
   })
 
+  test("a failure left to the Stop that told of it is said after all once what that Stop told of is kept quiet, but not once he heard it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, wait, nextEvent, played } = yield* make(undefined, { mutes })
+        const told: Array<string> = []
+        const failed = (session: string) =>
+          Effect.flatMap(made.stopped([session]), (stops) => made.unheard(stops, Effect.sync(() => void told.push(session))))
+        // Kept quiet already, as its thread was muted.
+        yield* mutes.mute({ key: sessionKey("muted") })
+        yield* finish("muted", "The provider had an error, so I stopped.")
+        yield* nextEvent("Muted update for yapd")
+        yield* failed("muted")
+        // Waiting to be said behind another line, then dropped as he mutes its thread.
+        yield* finish("playing", "Something long.")
+        yield* finish("waiting", "The provider failed, so I stopped.")
+        yield* failed("waiting")
+        const before = [...told]
+        yield* Option.getOrThrow(made.controls).mute({ key: sessionKey("waiting") })
+        yield* wait(11)
+        // Said, so he heard what it told of.
+        yield* finish("heard", "The model is down, so I stopped.")
+        yield* failed("heard")
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { before, told, played: [...played] }
+      }),
+    )
+    expect(result.before).toEqual(["muted"])
+    expect(result.told).toEqual(["muted", "waiting"])
+    expect(result.played).toEqual(["yapd. Something long.", "yapd. The model is down, so I stopped."])
+  })
+
   test("while yapd is off, a muted update isn't kept at all, as one it would have said isn't", async () => {
     const result = await run(
       Effect.gen(function* () {

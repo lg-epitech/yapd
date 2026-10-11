@@ -81,6 +81,8 @@ const notices = (
     readonly slow?: { readonly reading: Deferred.Deferred<void>; readonly resume: Deferred.Deferred<void> }
     /** Rig, followed too, through a T3 Code of its own with these threads and reads, which can be seen once it's `up`. */
     readonly rig?: { readonly view: ReadonlyArray<T3Live.Thread>; readonly bounded: Readonly<Record<string, Bounded>> }
+    /** Failures left to the Stops that told of them, with what says them, should what those told of be kept quiet. */
+    readonly left?: Array<{ readonly stops: ReadonlyArray<Notices.Stop>; readonly failure: Effect.Effect<void> }>
   },
 ) =>
   Effect.gen(function* () {
@@ -157,6 +159,7 @@ const notices = (
       tell,
       power: Effect.succeed({ on: true, turns: 1 }),
       stopped: (sessions) => Effect.sync(() => sessions.flatMap((session) => given.stops?.get(session) ?? []).toSorted((a, b) => a.at - b.at)),
+      ...(given.left === undefined ? {} : { unheard: (stops, failure) => Effect.sync(() => void given.left?.push({ stops, failure })) }),
       finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message, ...(input.answering === true ? { answering: true as const } : {}) })),
       overtaken: (ref) => Effect.sync(() => void overtaken.push(ref.id)),
       mention: () => Effect.void,
@@ -290,6 +293,37 @@ describe("Notices", () => {
     expect(result.finished).toEqual([{ key: "done:Rosie:run-2", message: "The loader is fixed." }])
     // The failure its hook told of isn't said again.
     expect(result.told).toEqual([])
+  })
+
+  test("a failed run left to the Stop that told of it is said after all should what that Stop told of be kept quiet, as his muting the thread does", async () => {
+    const mina = thread("mina", "Open Mina SSV2 Bug Tickets", { status: "failed", latestRunId: "run-3", lastErrorClass: "provider_error" })
+    const stop: Notices.Stop = { at: now - 1_000, message: "The provider had an error, so I stopped." }
+    const result = await run(
+      Effect.gen(function* () {
+        const left: Array<{ readonly stops: ReadonlyArray<Notices.Stop>; readonly failure: Effect.Effect<void> }> = []
+        const { hear, wait, told } = yield* notices({
+          view: [mina],
+          bounded: {
+            mina: {
+              runs: [{ id: "run-3", status: "failed", ordinal: 1, startedAt: minutes(5) }],
+              turnItems: [failure("run-3", "provider_error", "API Error: 500 Internal server error")],
+              sessions: ["s-mina"],
+            },
+          },
+          stops: new Map([["s-mina", [stop]]]),
+          left,
+        })
+        yield* hear(ended(mina, "run-3"))
+        yield* wait(10)
+        const before = [...told]
+        // What the Stop told of was kept quiet.
+        for (const { failure } of left) yield* failure
+        return { before, left: left.map(({ stops }) => stops), told }
+      }),
+    )
+    expect(result.before).toEqual([])
+    expect(result.left).toEqual([[stop]])
+    expect(result.told).toEqual(["Open Mina SSV2 Bug Tickets failed, sir: the model provider had an error."])
   })
 
   test("a turn no hook told of that a message of yapd's started answers what he asked, so it's said however he muted its thread; one he typed in T3 Code doesn't", async () => {

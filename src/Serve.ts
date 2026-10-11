@@ -179,6 +179,7 @@ export const serve = Effect.gen(function* () {
     tell: daemon.tell,
     power: daemon.power,
     stopped: daemon.stopped,
+    unheard: daemon.unheard,
     finished: daemon.finished,
     overtaken: daemon.overtaken,
     mention: assistant.mention,

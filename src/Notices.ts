@@ -177,7 +177,11 @@ export const whose = (stop: Stop, run: Pick<T3Actions.Ran, "final" | "others">) 
  * one started, the first since, while it could still be that one's, is taken
  * for it. Any other is still left to as if it were this one's.
  */
-export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous">, startedAt: number) => {
+export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous">, startedAt: number) =>
+  hooking(stops, run, startedAt).length > 0
+
+/** The Stops a run is left to, as `hooked` tells them, oldest first. */
+export const hooking = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous">, startedAt: number) => {
   const since = startedAt - leeway
   const theirs =
     run.status !== "failed" && run.final !== ""
@@ -185,7 +189,7 @@ export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "sta
       : Option.flatMap(run.previous, (previous) =>
           Option.filter(Option.fromNullable(stops.find((stop) => stop.at >= previous.startedAt - leeway)), (first) => first.at >= since && first.at <= previous.endedAt + late),
         )
-  return stops.some((stop) => {
+  return stops.filter((stop) => {
     if (stop.message.trim() === "" || stop.at < since) return false
     const owner = whose(stop, run)
     return owner === "own" || (owner === "unknown" && !Option.exists(theirs, (taken) => taken === stop))
@@ -435,6 +439,12 @@ export const make = (options: {
   readonly tell: (notice: Notice, since?: number) => Effect.Effect<void>
   readonly power: Effect.Effect<{ readonly on: boolean; readonly turns: number }>
   readonly stopped: (sessions: ReadonlyArray<string>) => Effect.Effect<ReadonlyArray<Stop>>
+  /**
+   * A failed run is left to the Stops that told of it, but what they told of
+   * may be kept quiet, as his muting the thread does: then `failure` says it
+   * after all, since a failure needs him. Without it, it's left to them.
+   */
+  readonly unheard?: (stops: ReadonlyArray<Stop>, failure: Effect.Effect<void>) => Effect.Effect<void>
   readonly finished: (input: Finished) => Effect.Effect<void>
   /** A thread started again, or went: what it said last that no hook told of, if that's still to be said, isn't. */
   readonly overtaken: (ref: Threads.Ref) => Effect.Effect<void>
@@ -566,14 +576,27 @@ export const make = (options: {
         const startedAt = Option.getOrElse(run.value.startedAt, () => at)
         if (!["failed", "completed", "waiting"].includes(status)) return
         if (status !== "failed") yield* Effect.sleep(finishing)
-        // A Stop hook of its own, said or skipped: what it said, or why it wasn't, stands.
-        if (hooked(yield* options.stopped(natives), run.value, startedAt)) return yield* Effect.logInfo("Left to its hook")
+        /** That it failed, said of the thread as it's shown now. */
+        const failure = Effect.gen(function* () {
+          const thread = yield* threads.find(ref)
+          const shown = yield* listed(ref)
+          if (Option.isNone(thread) || Option.isNone(shown)) return
+          yield* failed(ref, run.value, thread.value, named(shown.value), shown.value.project, turns, at)
+        })
+        // A Stop hook of its own, said or skipped: what it said, or why it wasn't, stands. But what it told of a failure, kept quiet as he
+        // muted the thread, he never hears, so the failure is said after all.
+        const hooks = hooking(yield* options.stopped(natives), run.value, startedAt)
+        if (hooks.length > 0) {
+          if (status === "failed" && options.unheard !== undefined) {
+            yield* options.unheard(hooks, failure.pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error))))
+          }
+          return yield* Effect.logInfo("Left to its hook")
+        }
+        if (status === "failed") return yield* failure
         const thread = yield* threads.find(ref)
         const shown = yield* listed(ref)
         if (Option.isNone(thread) || Option.isNone(shown)) return
         const { project } = shown.value
-        const called = named(shown.value)
-        if (status === "failed") return yield* failed(ref, run.value, thread.value, called, project, turns, at)
         // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes, even when
         // that was while what's read of it here was on its way.
         const latest = thread.value.latestRunId === null || thread.value.latestRunId === runId
