@@ -170,8 +170,12 @@ export const make = (
   const fallbacks = new Map<string, Fallback>()
   /** The turn said in its hook's place that each update is. */
   const standing = new WeakMap<Conversation.Update, Fallback>()
-  /** Updates said however he muted their thread, since they answer what he asked of it himself, like a follow-up. */
-  const own = new WeakSet<Conversation.Update>()
+  /**
+   * Updates said however he muted their thread: what needs him, what couldn't
+   * be summed up, which may, and what answers what he asked of it himself,
+   * like a follow-up.
+   */
+  const audible = new WeakSet<Conversation.Update>()
   /** The change to what's muted he just made over an update, by when it was made, which "scratch that" said next takes back. */
   const changedOver = new WeakMap<Conversation.Update, number>()
   const events = yield* Effect.makeSemaphore(1)
@@ -715,7 +719,7 @@ export const make = (
       }
       generations.set(update, generation)
       if (finished.hooked) hooked.add(update)
-      if (priority !== "needs-you" && answering) own.add(update)
+      if (!mutable) audible.add(update)
       // Said once ever: one already kept under its key was said, or held, before. Never kept for one yapd won't say, as it's off.
       const { fallback } = finished
       const power = yield* switched
@@ -1287,10 +1291,11 @@ export const make = (
 
   /**
    * Whether an update waiting to be read is one his muting its thread keeps
-   * quiet: never what needs him, one he asked to hear again, nor one that
-   * answers what he asked of the thread himself.
+   * quiet: never what needs him, what couldn't be summed up, which may, one he
+   * asked to hear again, nor one that answers what he asked of the thread
+   * himself.
    */
-  const quiet = (ready: Inbox.Ready) => ready.priority !== "needs-you" && ready.replay === undefined && !own.has(ready.update)
+  const quiet = (ready: Inbox.Ready) => ready.priority !== "needs-you" && ready.replay === undefined && !audible.has(ready.update)
 
   /** Whether an update waiting to be read is muted now. */
   const quieted = (ready: Inbox.Ready) => (quiet(ready) ? Effect.map(muting(Mutes.keysOf(ready.update, called)), Option.isSome) : Effect.succeed(false))

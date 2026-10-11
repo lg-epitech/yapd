@@ -3211,6 +3211,35 @@ describe("Daemon with threads muted", () => {
     expect(result.quiet).toEqual(["yapd. Still going."])
   })
 
+  test("a turn that couldn't be summed up, waiting to be said as its thread is muted, is still said, and so is the one a dictation cut off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const unsure = ["Should I drop the old table?", "Should I drop the new table?"]
+        const { made, finish, wait, dictate, played, followUps, journal } = yield* make(undefined, { mutes, unsummarizable: unsure })
+        // Waiting behind the line being said as he mutes its thread.
+        yield* finish("playing", "Something long.")
+        yield* finish("waiting", unsure[0]!, true)
+        yield* Option.getOrThrow(made.controls).mute({ key: sessionKey("waiting") })
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        // Cut off by a dictation, muted meanwhile, then put back.
+        yield* finish("cut", unsure[1]!)
+        yield* wait(1)
+        const dictation = yield* dictate
+        yield* Option.getOrThrow(made.controls).mute({ key: sessionKey("cut") })
+        yield* wait(2)
+        yield* Scope.close(dictation, Exit.void)
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { played: [...played], followUps: [...followUps], quiet: (yield* journal.since(0, { kinds: ["update"] })).filter(quieted).length }
+      }),
+    )
+    const unsure = "yapd finished a turn, but I couldn't summarize it."
+    expect(result.played).toEqual(["yapd. Something long.", unsure, unsure, unsure])
+    // Its hook waits on for what he says to it, as for any update.
+    expect(result.followUps).toEqual([])
+    expect(result.quiet).toBe(0)
+  })
+
   test("while yapd is off, a muted update isn't kept at all, as one it would have said isn't", async () => {
     const result = await run(
       Effect.gen(function* () {
