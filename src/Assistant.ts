@@ -278,6 +278,13 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     /** yapd starts saying something of its own accord about a thread, like that it failed, which "it" then means. */
     readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
     /**
+     * yapd starts saying again a session's update he asked to hear from the
+     * menu, which "it" then means: the session, as when he first heard it,
+     * so muting it mutes the session, and nothing meant for a thread goes to
+     * one he heard of before.
+     */
+    readonly mentionSession: (update: Conversation.Update, said: string) => Effect.Effect<void>
+    /**
      * What a thread waits on him for, to ask once nothing else is asked and
      * he isn't dictating, while it still waits on it: once, ever, and once
      * more after something new cut it off before he heard all of it.
@@ -3531,6 +3538,12 @@ export const make = (options: {
         Effect.flatMap(Effect.all([Clock.currentTimeMillis, options.power]), ([at, { turns }]) =>
           Effect.sync(() => {
             answered = { subject: { _tag: "Answer", said, about: Option.some(ref) }, at, turns }
+          }),
+        ),
+      mentionSession: (update, said) =>
+        Effect.flatMap(Effect.all([Clock.currentTimeMillis, options.power]), ([at, { turns }]) =>
+          Effect.sync(() => {
+            answered = { subject: { _tag: "Session", update, said }, at, turns }
           }),
         ),
       ask: (waiting) =>

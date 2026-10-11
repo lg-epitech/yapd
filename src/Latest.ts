@@ -1,4 +1,5 @@
 import { Clock, Effect, Option, Schedule, Stream, SubscriptionRef } from "effect"
+import type * as Conversation from "./Conversation.ts"
 import type * as Daemon from "./Daemon.ts"
 import type * as Icons from "./Icons.ts"
 import type { Journal, Kept } from "./Journal.ts"
@@ -50,6 +51,44 @@ export interface Latest {
    * to be the thread's. Unmuting the thread takes those off too.
    */
   readonly under: (key: string) => Effect.Effect<ReadonlyArray<string>>
+  /**
+   * A session's row listed now, as the update it shows, so that once it's
+   * said again "it" is that session, never a thread: none for a thread's row.
+   */
+  readonly session: (key: string) => Effect.Effect<Option.Option<Conversation.Update>>
+}
+
+/**
+ * A session's latest update as the journal kept it, for "it" to mean the
+ * session once it's said again: muted by its own key, and named by its agent,
+ * project and machine, as when he first heard it. Nothing of it waits on him
+ * any more, since its hook was let go of long ago.
+ */
+const updateOf = (kept: Kept, here: string): Conversation.Update => {
+  const session = kept.thread ?? ""
+  const agent = session.startsWith("codex:") ? "codex" : "claude"
+  const machine = kept.machine ?? here
+  // The hostname its hook reported, which names the machine as the journal did, or the machine itself.
+  const host = (kept.detail as { readonly host?: unknown } | undefined)?.host
+  const prompt = (kept.detail as { readonly prompt?: unknown } | undefined)?.prompt
+  const said = kept.said ?? ""
+  const message = kept.text ?? said
+  return {
+    session,
+    project: kept.project ?? "",
+    turn: { prompt: typeof prompt === "string" ? Option.some(prompt) : Option.none(), message },
+    needsYou: false,
+    spoken: said,
+    audio: "",
+    thread: {
+      agent,
+      session: session.slice(agent.length + 1),
+      cwd: kept.directory ?? "",
+      message,
+      origin: typeof host === "string" ? { host } : machine === here ? {} : { host: machine },
+    },
+    at: kept.at,
+  }
 }
 
 /** How long until the list is built again while a machine's threads can't be seen yet, as just after a start or while its T3 Code reconnects. */
@@ -71,8 +110,13 @@ export const make = (options: {
   Effect.gen(function* () {
     const { here, journal, mutes, icons, threads } = options
 
-    /** Nothing listed yet, and the keys nothing is muted under. */
-    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), blind: false }
+    /** Nothing listed yet, the keys nothing is muted under, and no session's update. */
+    const none = {
+      rows: [] as ReadonlyArray<Server.Recent>,
+      under: new Map<string, ReadonlyArray<string>>(),
+      updates: new Map<string, Conversation.Update>(),
+      blind: false,
+    }
 
     const compute = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
@@ -110,6 +154,7 @@ export const make = (options: {
         .toSorted((one, other) => other.last.at - one.last.at || other.last.id - one.last.id)
         .slice(0, shown)
       const under = new Map<string, ReadonlyArray<string>>()
+      const updates = new Map<string, Conversation.Update>()
       let blind = false
       const listed = yield* Effect.forEach(rows, ({ kept, last }) =>
         Effect.gen(function* () {
@@ -121,6 +166,7 @@ export const make = (options: {
           const own = last === kept ? found.get(kept)?.own : last.thread
           const by = [...new Set([found.get(kept)?.own, own])].flatMap((own) => (own === undefined || own.startsWith("finished:") ? [] : [Mutes.key.session(machine, own)]))
           under.set(key, by)
+          if (session) updates.set(key, updateOf(last, here))
           const mute = [key, ...by].map((key) => muted.get(key)).find((mute) => mute !== undefined)
           const thread = session ? Option.none() : yield* threads.find({ machine, id })
           // Its machine's threads not in yet, what it's called and its project are looked for again soon. Never for a session's own
@@ -151,17 +197,18 @@ export const make = (options: {
           } satisfies Server.Recent
         }),
       )
-      return { rows: listed, under, blind }
+      return { rows: listed, under, updates, blind }
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not list the latest threads", cause), none)))
 
     const first = yield* compute
     const ref = yield* SubscriptionRef.make(first.rows)
-    let { under, blind } = first
+    let { under, updates, blind } = first
     /** Built again, and kept only when it changed, so nothing that follows the state hears of what didn't. */
     const refresh = Effect.flatMap(compute, (built) =>
       Effect.zipRight(
         Effect.sync(() => {
           under = built.under
+          updates = built.updates
           blind = built.blind
         }),
         SubscriptionRef.update(ref, (before) => (JSON.stringify(before) === JSON.stringify(built.rows) ? before : built.rows)),
@@ -187,6 +234,7 @@ export const make = (options: {
       rows: Stream.changesWith(ref.changes, (one, other) => one === other),
       current: SubscriptionRef.get(ref),
       under: (key) => Effect.sync(() => under.get(key) ?? []),
+      session: (key) => Effect.sync(() => Option.fromNullable(updates.get(key))),
     } satisfies Latest
   })
 
@@ -205,8 +253,10 @@ export const menu = (options: {
   readonly daemon: Speaker
   /** Makes "it" the thread what's said is about, as an answer about it does. */
   readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
+  /** Makes "it" the session whose update is said, never a thread, as hearing it the first time did. */
+  readonly mentionSession: (update: Conversation.Update, said: string) => Effect.Effect<void>
 }) => {
-  const { latest, threads, mutes, controls, daemon, mention } = options
+  const { latest, threads, mutes, controls, daemon, mention, mentionSession } = options
   return {
     /**
      * Mutes a thread from the menu, by its key: one it lists, one /threads
@@ -227,7 +277,9 @@ export const menu = (options: {
     /**
      * Says a thread's latest update again, by its key: as it was said, when
      * it's one he heard, so a reply to it still gets there, otherwise what was
-     * kept of it, as an answer that makes "it" the thread.
+     * kept of it, as an answer that makes "it" the thread, or for a session's
+     * row, the session, so nothing he says next goes to a thread he heard of
+     * before.
      */
     replayThread: (key: string) =>
       Effect.gen(function* () {
@@ -244,8 +296,14 @@ export const menu = (options: {
         if (row.text.trim() === "") return "unknown" as const
         const { on, turns } = yield* daemon.power
         if (!on) return "off" as const
+        // What "it" is once it's said: the thread, or the session, never what he heard of before. A session's row gone from the
+        // list since it was looked up, as when it was built again, is gone.
+        const saying =
+          row.thread === null
+            ? Option.map(yield* latest.session(key), (update) => mentionSession(update, row.text))
+            : Option.some(mention({ machine: row.machine, id: row.thread }, row.text))
+        if (Option.isNone(saying)) return "unknown" as const
         const now = yield* Clock.currentTimeMillis
-        const ref = row.thread === null ? undefined : { machine: row.machine, id: row.thread }
         yield* daemon.tell(
           {
             id: `again:${key}:${now}`,
@@ -254,7 +312,7 @@ export const menu = (options: {
             spoken: row.text,
             at: now,
             stale: Effect.succeed(false),
-            ...(ref === undefined ? {} : { saying: mention(ref, row.text) }),
+            saying: saying.value,
           },
           turns,
         )

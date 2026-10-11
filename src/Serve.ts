@@ -260,7 +260,15 @@ export const serve = Effect.gen(function* () {
   )
 
   // What the menu does to a thread it lists: mute it, or hear it again.
-  const { mute, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention })
+  const { mute, replayThread } = Latest.menu({
+    latest,
+    threads,
+    mutes,
+    controls,
+    daemon,
+    mention: assistant.mention,
+    mentionSession: assistant.mentionSession,
+  })
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
