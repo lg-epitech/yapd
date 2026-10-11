@@ -36,7 +36,8 @@ There's no authentication: anything that can reach the port can use it, as hooks
       "text": "integration. The migration is done and the tests pass.",
       "at": "2026-10-02T14:01:40.000Z",
       "muted": false,
-      "waiting": false
+      "waiting": false,
+      "replayable": true
     }
   ],
   "showing": {
@@ -200,6 +201,7 @@ Each row of `recent` in the [state](#state) is a thread, by its newest update or
 - `text`: what yapd said of its latest update, or would have, had it not been muted. `at`: when the agent's turn ended.
 - `muted`: whether it's muted, and `until`, when the mute ends on its own, only then.
 - `waiting`: whether the thread waits on you, for an approval or an answer.
+- `replayable`: whether it can be [heard again](#hearing-a-thread-again). It's `true` while its latest update is one of the `updates` you heard, and otherwise only for a thread yapd can reach: one T3 Code has, not archived, on a machine whose threads yapd can see now. A session's row, or an archived or deleted thread, or one on a machine that's away, is `false` once its update is no longer among the `updates`. It can lag a minute behind, as when a thread is archived; hearing it again checks then. A yapd from before it doesn't send it: take that as `true`.
 
 `icon` is how T3 Code draws the project, as one of these `kind`s:
 
@@ -231,13 +233,13 @@ You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "wha
 
 ## Hearing a thread again
 
-`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When that latest update is one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there; otherwise yapd says what it kept of it.
+`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When that latest update is one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there. Otherwise, for a thread yapd can reach, it says what it kept of it, and "it" then means that thread. Anything else, a session's row or a thread yapd can't reach (archived, deleted, or on a machine that's away), isn't said again: it's `replayable: false` in `recent`, and this answers `409` and plays nothing.
 
 | Status | |
 | --- | --- |
 | `202` | It's been queued. |
 | `404` | Nothing to say of it. |
-| `409` | yapd is off. |
+| `409` | yapd is off, or it can't be heard again: a session's row, or a thread yapd can't reach, whose update is no longer among the `updates`. The body says which. |
 
 ## Journal
 

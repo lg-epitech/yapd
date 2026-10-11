@@ -31,6 +31,7 @@ Live on `dev` now: everything below. Talking over yapd's first seconds stopping 
 - "Mute it" over or after a noisy thread's update, or "mute the Tezos one", keeps its progress and finished work to yourself, for good or "for an hour"; its questions, failures, limits and the answers to what you sent it still come through, and "what did I miss?" sums it up in a line. "Unmute it", "what's muted?", "unmute everything" and "scratch that" work too, and rig's threads are muted by their thread there. A muted terminal session is unmuted by what "what's muted?" calls it. Over an update, only "mute it", "unmute it" and the like, and "scratch that" right after, are taken there; anything else about mutes, like "mute the Tezos one", gets "Ask me that with the shortcut." Nothing about it reaches an agent.
 - The API's state lists the threads with the latest updates, each with its project's icon and whether it's muted, and threads can be muted, heard again and their icons fetched by key.
 - The menu bar lists those threads with their project icons, how long ago each finished and whether it's muted: clicking one says its latest update again, and the Mute menu, or Option over a row on macOS 15 and later, mutes it or takes the mute off. An older yapd still gets the old Hear Again list.
+- A terminal session's or an archived thread's older update can't be heard again from the menu: its row is greyed out, and can still be muted.
 
 ## Show me
 
@@ -73,6 +74,7 @@ Live on `dev` now: everything below. Talking over yapd's first seconds stopping 
 - A thread muted by its session, before yapd found the session was the thread's, shows muted in the menu and is unmuted with it, but the brain doesn't see it as muted: "unmute the Tezos one" still works, while "what's muted?" names the session.
 - The answer to a message you sent a muted thread is said when yapd can tell which turn took it: by the turn's prompt through the hooks, or, when T3 Code tells of the turn first or the agent has no hooks, by when T3 Code says it began. After a restart in the middle of a turn with hooks, it's kept quiet like the rest.
 - On a muted thread, a turn that begins within a minute of a message you sent its last turn may be read out, as if it answered you.
+- Heard again from the menu, a thread's update that was first heard under its session, before yapd tied it to the thread, is muted and unmuted by the thread's row while it plays, but by its session once it has finished, so "unmute it" then finds nothing to unmute.
 - A question you put off with "later", or that made way for another, isn't brought back if yapd restarts before it comes round again. It still waits in T3 Code, and "who needs me?" lists it.
 - "Thanks" or "skip" said back to an answer, while yapd's own "which one?" for the next step of what you asked waits behind it, lets that step go; yapd says so.
 - Showing or hiding a card while an agent's question waits on you asks it again straight away, and the third time in a row lets it go: ask for it when you're ready.
