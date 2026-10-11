@@ -1461,11 +1461,11 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(result).toEqual({ commands: ["play", "volume"], responded: [], sent: [], offered: [], done: true })
   })
 
-  test("takes \"Stop.\" over its first seconds for his once it goes on past where yapd stopped, though yapd was saying \"stopped\", and for its own voice when it doesn't", async () => {
+  test.each(["Stop.", "Thank you."])("takes \"%s\" over its first seconds for his once it goes on past where yapd stopped, though yapd was saying \"stopped\" and Whisper makes up \"Thank you.\", and for its own voice when it doesn't", async (heard) => {
     const over = (frames: number) =>
       overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, "Stop."]], {
+          const helper = yield* overHelper([[0.9, heard]], {
             spoken: "Over in yapd, the agent stopped at the next step and is waiting on you, sir.",
             duration: 5,
             reply: () => ({ intent: "dismiss", spoken: "", message: "" }),
@@ -1483,10 +1483,10 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
           }
         }),
       )
-    // Twelve frames of speech, a third of a second past where it stopped.
-    expect(await over(12)).toEqual({ commands: ["play", "volume", "stop"], plays: [0], responded: [{ heard: "Stop.", told: true }], done: true })
-    // Four, no longer than its own voice dying away.
-    expect(await over(defaults.confirm)).toEqual({ commands: ["play", "volume", "stop", "play"], plays: [0, 0], responded: [], done: false })
+    // Sixteen frames of speech, half a second past where it stopped.
+    expect(await over(16)).toEqual({ commands: ["play", "volume", "stop"], plays: [0], responded: [{ heard, told: true }], done: true })
+    // Twelve, no longer than its own voice can go on after.
+    expect(await over(12)).toEqual({ commands: ["play", "volume", "stop", "play"], plays: [0, 0], responded: [], done: false })
   })
 })
 

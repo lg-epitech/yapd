@@ -95,9 +95,10 @@ const before = 0.8
 /**
  * How long speech can go on past where yapd stopped and still be only its
  * own voice dying away, in the room and in the voice detector: more than
- * that, someone else was talking.
+ * that, someone else was talking. Its own voice was measured going on up to
+ * 0.38 s past with Silero, his "Thank you." 0.5 s or more.
  */
-const overhang = 0.25
+const overhang = 0.45
 /** How near its end a line can be stopped and still count as said, with nothing of it left to go back to. */
 const ending = 0.3
 /** Talk that wasn't meant for yapd, after which the rest of an update plays without listening, say for a TV. */
@@ -896,21 +897,23 @@ export const make = (options: {
      * does no harm; or else what it was saying around when he began, which
      * some of what was heard may be. Neither for what he began once its own
      * voice was learnt. Speech that went on past where it stopped is someone
-     * else's, which its own voice dying away can't be, so only nothing, or
-     * what Whisper makes up, is taken for its own then; and when it had said
-     * all of it by then, its own voice can only be its last word or so
-     * before him, as after any line, so the model isn't told.
+     * else's, which its own voice dying away can't be, so only nothing is
+     * taken for its own then, never even what Whisper makes up, like "Thank
+     * you.", which he says too; and when it had said all of it by then, its
+     * own voice can only be its last word or so before him, as after any
+     * line, so the model isn't told. Otherwise all of it may yet have been its
+     * own voice, `unsure`.
      */
     const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) =>
       Effect.gen(function* () {
         const { echo, onset = outcome.at } = outcome
-        if (echo === undefined) return { itself: false }
+        if (echo === undefined) return { itself: false, unsure: false }
         const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
-        if (own(first, "") || (!past && own(first, echo))) {
+        if (past ? first === "" : own(first, "") || own(first, echo)) {
           yield* Effect.logInfo("Stopped for its own voice over its first seconds, so it picks up again")
-          return { itself: true }
+          return { itself: true, unsure: true }
         }
-        return { itself: false, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
+        return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
       })
 
     /**
