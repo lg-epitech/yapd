@@ -15,10 +15,11 @@ var failed: [String] = []
 }
 
 let named = Set(CommandLine.arguments.dropFirst())
-for unknown in named.subtracting(["cards", "following", "fading"]) { check(false, "there are checks called \(unknown)") }
+for unknown in named.subtracting(["cards", "following", "fading", "recent"]) { check(false, "there are checks called \(unknown)") }
 if named.isEmpty || named.contains("cards") { checkCards() }
 if named.isEmpty || named.contains("following") { await checkFollowing() }
 if named.isEmpty || named.contains("fading") { await checkFading() }
+if named.isEmpty || named.contains("recent") { checkRecent() }
 
 if failed.isEmpty {
   print("The app's checks pass.")

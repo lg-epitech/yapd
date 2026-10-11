@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import * as Icons from "./Icons.ts"
 
 // The menu bar app has no test target, so its checks in app/checks are built
 // with swiftc, together with the files of the app they check, and run. They
@@ -17,7 +18,7 @@ const swiftc = (() => {
 })()
 
 /** The app's files the checks check, which need neither AppKit nor SwiftUI. */
-const checked = ["Cards.swift", "Fading.swift", "State.swift"]
+const checked = ["Cards.swift", "Fading.swift", "Recent.swift", "State.swift"]
 
 /** Where the checks are built, once, and removed after. */
 const dir = mkdtemp(join(tmpdir(), "yapd-app-"))
@@ -32,12 +33,12 @@ const build = async () => {
   return (await swift.exited) === 0 ? { path } : { error: await new Response(swift.stderr).text() }
 }
 
-/** Runs the checks of one name, and gives back what they printed and how they ended. */
-const run = async (checks: string) => {
+/** Runs the checks of one name, with `env` beside the environment, and gives back what they printed and how they ended. */
+const run = async (checks: string, env: Record<string, string> = {}) => {
   built ??= build()
   const { path, error } = await built
   if (path === undefined) return { code: -1, out: error }
-  const ran = Bun.spawn([path, checks], { stdout: "pipe", stderr: "pipe" })
+  const ran = Bun.spawn([path, checks], { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } })
   const out = await new Response(ran.stdout).text()
   return { code: await ran.exited, out }
 }
@@ -109,6 +110,31 @@ describe.skipIf(swiftc === undefined)("App", () => {
       // Gone, the panel is told it's away, not that yapd stopped speaking, so a card still being talked about once it's back stays up.
       expect(yapd.match(/panel\.heard\([^)]*\)/g)).toEqual(['panel.heard(speaking: status.activity == "speaking")'])
       expect(yapd).toMatch(/panel\.away\(\)\s*following\.away\(\)/)
+    },
+    120_000,
+  )
+
+  test(
+    "the menu lists the threads with the latest updates from a yapd that sends them, and the updates it said from one that doesn't, draws each icon or the monogram yapd makes in T3 Code's colours, tells how long ago each ended, and mutes and replays a thread only by its key, on yapd's API",
+    async () => {
+      // The monograms yapd makes, of names the checks don't have, so the app draws a project with no icon as yapd and T3 Code do.
+      const names = ["yapd", "Tezos 2", "integration-connectors", "  spaced out  ", "ﬁle", "日本語", "Straße", "İstanbul", "x1y2", "ⅫRoman", "²squared", "Émile Zola", "🦀 crab", "a-b-c"]
+      const monograms = names.map((name) => [name, Icons.monogram(name).text, Icons.monogram(name).color])
+      expect(await run("recent", { YAPD_COLORS: Icons.colors.join(","), YAPD_MONOGRAMS: JSON.stringify(monograms) })).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
+      // A thread is muted, unmuted and heard again only through Muting and Replaying, which encode its key whole, and nothing else is sent of it.
+      expect(yapd.match(/(Muting|Replaying)\([^)]*\)/g)).toEqual(["Replaying(row)", "Muting(row, on: on)"])
+      expect(yapd).not.toMatch(/threads\//)
+      expect(yapd).toMatch(/private func ask\(_ asking: some Asking\) \{\s*guard let url = asking\.url\(at: api\) else \{ return \}/)
+      // Rows are replayed and muted from the menu by the row, never by its text, and listed only while yapd sends them, else the updates it said.
+      expect(yapd).toMatch(/Button \{ replay\(row\) \} label:/)
+      expect(yapd).toMatch(/Toggle\(row\.label, isOn: Binding\(get: \{ row\.muted \}, set: \{ mute\(row, \$0\) \}\)\)/)
+      expect(yapd).toMatch(/if let recent = state\.recent \{[\s\S]*\} else if !state\.updates\.isEmpty \{\s*\/\/[^\n]*\n\s*Divider\(\)\s*Section\("Hear Again"\)/)
+      // An image is fetched only from yapd's own API, and anything it can't draw is drawn as the icon's monogram.
+      const icons = await Bun.file(join(app, "yapd", "Icons.swift")).text()
+      expect(icons.match(/URLRequest\(url: [^)]*\)/g)).toEqual(["URLRequest(url: address)"])
+      expect(icons).toMatch(/guard let address = imageAddress\(url, at: api\) else/)
+      expect(icons).toMatch(/guard let monogram = row\.monogram else/)
     },
     120_000,
   )
