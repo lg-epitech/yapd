@@ -316,10 +316,12 @@ export const fromStore = (
       reading(
         store.transaction((database: Database) =>
           database
+            // By when each happened, not when it was kept: an update summed up slowly can be kept after a newer notice.
             .query<Row, [number, number]>(
-              `select * from journal where id in (
-                 select max(id) from journal where kind in ('update', 'notice') and thread is not null and at >= ? group by machine, thread
-               ) order by at desc, id desc limit ?`,
+              `select * from (
+                 select *, row_number() over (partition by machine, thread order by at desc, id desc) as rank
+                 from journal where kind in ('update', 'notice') and thread is not null and at >= ?
+               ) where rank = 1 order by at desc, id desc limit ?`,
             )
             .all(at, most)
             .map(kept),

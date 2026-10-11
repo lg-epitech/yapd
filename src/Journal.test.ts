@@ -154,15 +154,19 @@ describe("Journal", () => {
         yield* journal.write({ at: 40, kind: "answer", machine: "Rosie", thread: "t-mina", said: "Not an update." })
         yield* journal.write({ at: 50, kind: "update", machine: "Rosie", thread: "claude:s1", said: "A session." })
         yield* journal.write({ at: 60, kind: "update", said: "No thread at all." })
+        // A failure told at 70, then an update of the turn before it, kept only now since summing it up took a while: the failure is newer.
+        yield* journal.write({ at: 70, kind: "notice", machine: "Rosie", thread: "t-mina", said: "The Mina thread failed." })
+        yield* journal.write({ at: 65, kind: "update", machine: "Rosie", thread: "t-mina", said: "integration. Halfway." })
         return { all: yield* journal.latest(5, 10), two: yield* journal.latest(5, 2) }
       }).pipe(Effect.provide(Journal.memory)),
     )
     expect(latest.all.map(({ machine, thread, said }) => `${machine} ${thread}: ${said}`)).toEqual([
+      "Rosie t-mina: The Mina thread failed.",
       "Rosie claude:s1: A session.",
       "Rosie t-tezos: It asks something.",
       "rig t-tezos: Rig's, the same id.",
     ])
-    expect(latest.two.map(({ at }) => at)).toEqual([50, 30])
+    expect(latest.two.map(({ at }) => at)).toEqual([70, 50])
   })
 
   test("what was kept quiet, as his muting a thread does, is noted on its entry and told apart from the rest he hasn't heard", async () => {
