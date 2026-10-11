@@ -1847,12 +1847,24 @@ describe("quick replies", () => {
     expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's done. Shall I merge it?")?.intent).toBe("send")
   })
 
-  test("leaves a nod to an update cut off before the agent's question to the model, which is told it answers only a question heard in full", () => {
+  test("leaves a nod to an update cut off before the agent's question to the model, which is told only then that it answers nothing yet", () => {
     const message = "The PR is ready. Should I merge it?"
     expect(reply("Okay.", message, true, "The PR is…")).toBeUndefined()
-    expect(Responder.prompt({ project: "yapd", turn: { prompt: Option.none(), message }, needsYou: true, lines: [], heard: "Okay." }, Option.none())).toContain(
-      'cut off ("…") before you got to what the agent asked, acknowledging is "resume", so they hear it',
-    )
+    const told = (needsYou: boolean, lines: ReadonlyArray<Responder.Line>) =>
+      Responder.prompt({ project: "yapd", turn: { prompt: Option.none(), message }, needsYou, lines, heard: "Okay." }, Option.none())
+    const note = 'a bare "okay" or "thanks" said before it answers nothing, so it\'s "resume"'
+    expect(told(true, [{ speaker: "yapd", text: "The PR is…" }])).toContain(note)
+    expect(told(true, [{ speaker: "yapd", text: "The PR is…" }])).toContain('When it asked nothing, like when something failed, acknowledging is "dismiss" as usual')
+    // Not when the question was read out in full, nor to an answer of yapd's he's cut off, nor when the agent isn't waiting on him.
+    expect(told(true, [{ speaker: "yapd", text: message }])).not.toContain(note)
+    expect(
+      told(true, [
+        { speaker: "yapd", text: message },
+        { speaker: "user", text: "What changed in the tests?" },
+        { speaker: "yapd", text: "Mostly the login tests…" },
+      ]),
+    ).not.toContain(note)
+    expect(told(false, [{ speaker: "yapd", text: "The PR is…" }])).not.toContain(note)
   })
 
   test("leaves a yes begun while yapd's own voice could still get into the microphone to the model, which may be its own \"sir?\", but still ends it at a stop", () => {

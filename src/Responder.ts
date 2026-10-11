@@ -49,7 +49,7 @@ const instructions = `You're yapd, the voice that tells a developer how the work
 Reply with only a JSON object with the keys "intent", "spoken" and "message".
 
 "intent":
-- "dismiss" if they've heard enough or want you to be quiet, however they put it. That includes acknowledging, like "sounds good", "okay" or "thanks", unless the agent is waiting on them and those words answer what it asked. They only answer a question you've said: cut off ("…") before you got to what the agent asked, acknowledging is "resume", so they hear it; when it asked nothing, like when something failed, it's "dismiss" wherever you were cut off.
+- "dismiss" if they've heard enough or want you to be quiet, however they put it. That includes acknowledging, like "sounds good", "okay" or "thanks", unless the agent is waiting on them and those words answer what it asked.
 - "answer" if they asked something the agent's message or the conversation answers, including asking you to repeat.
 - "send" if it's meant for the agent and would change what it does: an instruction, a correction, a decision it asked for, or a question its message doesn't answer. Agreeing with what the agent already said it would do changes nothing, so that's "dismiss". So is telling it to do nothing, leave something as it is, or not go ahead, like "keep the ticket as it is" or "no, leave it", even when the agent asked: it has already stopped, and sending that only wakes it to say it understood.
 - "resume" if it wasn't meant for you, like talking to someone else or background noise.
@@ -64,6 +64,12 @@ ${aloud}
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Write "message" in the language they spoke.`
 
+/** Whether yapd was cut off in its first line about an update the agent is waiting on, maybe before the agent's question. */
+const unheard = ({ needsYou, lines }: Pick<Interruption, "needsYou" | "lines">) =>
+  needsYou &&
+  !lines.some(({ speaker }) => speaker === "user") &&
+  (lines.findLast(({ speaker }) => speaker === "yapd")?.text.trim().endsWith("…") ?? false)
+
 export const prompt = ({ project, turn, needsYou, lines, heard, echo }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
@@ -77,6 +83,11 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo }: Interrup
     `Conversation so far, where "…" marks where you were cut off:\n${lines
       .map(({ speaker, text }) => `${speaker === "yapd" ? "You" : "User"}: ${text}`)
       .join("\n")}`,
+    ...(unheard({ needsYou, lines })
+      ? [
+          `You were cut off ("…") in your first line. If the agent asked something you hadn't got to yet, a bare "okay" or "thanks" said before it answers nothing, so it's "resume", so they hear it. When it asked nothing, like when something failed, acknowledging is "dismiss" as usual, and so is anything saying they've heard enough or will look at it later, like "I'll look at it later".`,
+        ]
+      : []),
     ...(echo === undefined
       ? []
       : [
