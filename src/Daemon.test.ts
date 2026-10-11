@@ -3388,6 +3388,32 @@ describe("Daemon with threads muted", () => {
     expect(result).toEqual(["yapd. Something long.", "yapd. Which network first?"])
   })
 
+  test("a turn no hook told of, cut off by a dictation once its thread was muted, still lets its own Stop through when its hook says it needs him", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, handle, wait, dictate, played, nextEvent } = yield* make(undefined, { mutes })
+        yield* made.finished(unhooked("The loader is halfway.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Ready: yapd. The loader")
+        yield* wait(1)
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        const dictation = yield* dictate
+        yield* wait(2)
+        yield* Scope.close(dictation, Exit.void)
+        yield* wait(11)
+        yield* handle(
+          "claude",
+          { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: "Which network first?", needs_you: true },
+          { project: "yapd", host: hostname() },
+          false,
+        )
+        for (let index = 0; index < 2; index++) yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The loader is halfway.", "yapd. Which network first?"])
+  })
+
   test("a turn no hook told of that a message of yapd's started is said, though he muted its thread", async () => {
     const result = await run(
       Effect.gen(function* () {
