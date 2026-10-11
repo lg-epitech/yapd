@@ -29,25 +29,185 @@ struct Status: Decodable {
     }
   }
 
+  /// A thread by its newest update or notice, as `recent` lists it.
+  struct Recent: Decodable, Identifiable, Equatable {
+    /// The project it's in, when yapd knows it.
+    struct Project: Decodable, Equatable {
+      let name: String
+      /// Only for a project T3 Code has.
+      let id: String?
+      /// None for a project T3 Code doesn't have, and for an icon that can't be read at all.
+      let icon: Icon?
+
+      private enum CodingKeys: String, CodingKey { case name, id, icon }
+
+      init(name: String, id: String? = nil, icon: Icon? = nil) {
+        self.name = name
+        self.id = id
+        self.icon = icon
+      }
+
+      init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        id = try? container.decodeIfPresent(String.self, forKey: .id)
+        // An icon the app can't read leaves the row as it is, drawn by the project's name.
+        icon = try? container.decodeIfPresent(Icon.self, forKey: .icon)
+      }
+    }
+
+    /// What it's muted and heard again by, as a name, never taken apart.
+    let key: String
+    let machine: String
+    /// T3 Code's id for it, or none for a session yapd can't tie to a thread.
+    let thread: String?
+    let title: String
+    let project: Project?
+    /// What yapd said of its latest update, or would have, had it not been muted.
+    let text: String
+    /// ISO 8601, when the agent's turn ended.
+    let at: String
+    let muted: Bool
+    /// ISO 8601, when the mute ends on its own, if it does.
+    let until: String?
+    /// Whether it waits on him, for an approval or an answer.
+    let waiting: Bool
+
+    var id: String { key }
+
+    /// When the agent's turn ended, unless yapd sent a time the app can't read.
+    var ended: Date? { Status.date(at) }
+
+    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting }
+
+    init(
+      key: String, machine: String, thread: String? = nil, title: String, project: Project? = nil, text: String, at: String,
+      muted: Bool = false, until: String? = nil, waiting: Bool = false
+    ) {
+      self.key = key
+      self.machine = machine
+      self.thread = thread
+      self.title = title
+      self.project = project
+      self.text = text
+      self.at = at
+      self.muted = muted
+      self.until = until
+      self.waiting = waiting
+    }
+
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      key = try container.decode(String.self, forKey: .key)
+      machine = try container.decode(String.self, forKey: .machine)
+      thread = try container.decodeIfPresent(String.self, forKey: .thread)
+      title = try container.decode(String.self, forKey: .title)
+      project = try? container.decodeIfPresent(Project.self, forKey: .project)
+      text = try container.decode(String.self, forKey: .text)
+      at = try container.decode(String.self, forKey: .at)
+      muted = try container.decodeIfPresent(Bool.self, forKey: .muted) ?? false
+      until = try? container.decodeIfPresent(String.self, forKey: .until)
+      waiting = (try? container.decodeIfPresent(Bool.self, forKey: .waiting)) ?? false
+    }
+  }
+
+  /// Two letters in one of T3 Code's colours, as T3 Code draws a project with no image, and any icon the app can't draw.
+  struct Monogram: Decodable, Equatable {
+    let text: String
+    /// One of T3 Code's colour names, which `Tint` has.
+    let color: String
+  }
+
+  /// How T3 Code draws a project: its own image, fetched from yapd, an emoji he chose, or a monogram. Each but a monogram
+  /// carries the monogram to draw instead, for an image that won't load or decode.
+  enum Icon: Decodable, Equatable {
+    /// `url` is a path on yapd's API, and `revision` changes only with the image.
+    case image(url: String, revision: String, instead: Monogram?)
+    case emoji(String, instead: Monogram?)
+    case monogram(Monogram)
+
+    private enum CodingKeys: String, CodingKey { case kind, url, revision, emoji, text, color }
+
+    /// The monogram to draw for it when what it is can't be drawn.
+    var instead: Monogram? {
+      switch self {
+      case .image(_, _, let instead), .emoji(_, let instead): instead
+      case .monogram(let monogram): monogram
+      }
+    }
+
+    /// A kind the app doesn't know, or one missing what it needs, is the monogram it carries; with none, it can't be read.
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      let text = try? container.decodeIfPresent(String.self, forKey: .text)
+      let color = try? container.decodeIfPresent(String.self, forKey: .color)
+      let instead = text.flatMap { text in color.map { Monogram(text: text, color: $0) } }.flatMap { $0.text.isEmpty ? nil : $0 }
+      let kind = try? container.decodeIfPresent(String.self, forKey: .kind)
+      switch kind {
+      case "image":
+        if let url = try? container.decodeIfPresent(String.self, forKey: .url),
+          let revision = try? container.decodeIfPresent(String.self, forKey: .revision)
+        {
+          self = .image(url: url, revision: revision, instead: instead)
+          return
+        }
+      case "emoji":
+        if let emoji = try? container.decodeIfPresent(String.self, forKey: .emoji), !emoji.isEmpty {
+          self = .emoji(emoji, instead: instead)
+          return
+        }
+      default: break
+      }
+      guard let instead else {
+        throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "An icon with nothing the app can draw")
+      }
+      self = .monogram(instead)
+    }
+  }
+
+  /// A time as yapd sends it, ISO 8601, with or without fractions of a second.
+  static func date(_ text: String) -> Date? {
+    let format = ISO8601DateFormatter()
+    format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = format.date(from: text) { return date }
+    format.formatOptions = [.withInternetDateTime]
+    return format.date(from: text)
+  }
+
   let on: Bool
   let activity: String
+  /// The last updates yapd said, to hear again. None from a yapd that stopped sending them.
   let updates: [Update]
+  /// The threads with the latest updates, newest first. None from a yapd too old to send them, which the menu shows the
+  /// updates it said for instead.
+  let recent: [Recent]?
   /// None when no card is up, and from a yapd too old to show cards.
   let showing: Showing?
   /// How many times yapd put a card up or took one down, or was asked to take one down, which a card asked to go back up is
   /// sent with, so it goes back up only if nothing came since. None from a yapd too old to count them.
   let revision: Int?
 
-  private enum CodingKeys: String, CodingKey { case on, activity, updates, showing, revision }
+  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, showing, revision }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     on = try container.decode(Bool.self, forKey: .on)
     activity = try container.decode(String.self, forKey: .activity)
-    updates = try container.decode([Update].self, forKey: .updates)
+    updates = try container.decodeIfPresent([Update].self, forKey: .updates) ?? []
+    // A row the app can't read is left out, rather than the whole state.
+    recent = try container.decodeIfPresent([Lenient<Recent>].self, forKey: .recent).map { $0.compactMap(\.value) }
     // An older yapd doesn't send them at all.
     showing = try container.decodeIfPresent(Showing.self, forKey: .showing)
     revision = try container.decodeIfPresent(Int.self, forKey: .revision)
+  }
+}
+
+/// One of a list, or none when it can't be read, so the rest of the list still is.
+struct Lenient<Value: Decodable>: Decodable {
+  let value: Value?
+
+  init(from decoder: Decoder) throws {
+    value = try? Value(from: decoder)
   }
 }
 
