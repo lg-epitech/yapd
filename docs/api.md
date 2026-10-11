@@ -231,7 +231,7 @@ You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "wha
 
 ## Hearing a thread again
 
-`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When it's one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there; otherwise yapd says what it kept of it.
+`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When that latest update is one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there; otherwise yapd says what it kept of it.
 
 | Status | |
 | --- | --- |

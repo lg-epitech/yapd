@@ -279,10 +279,12 @@ export const serve = Effect.gen(function* () {
    */
   const replayThread = (key: string) =>
     Effect.gen(function* () {
-      const heard = yield* daemon.latestHeard(key)
-      if (Option.isSome(heard)) return yield* daemon.replay(heard.value)
       const row = (yield* latest.current).find((row) => row.key === key)
-      if (row === undefined || row.text.trim() === "") return "unknown" as const
+      if (row === undefined) return "unknown" as const
+      // Only the one the menu shows: not an older one he heard before what was kept quiet of it, or before a question it asked since.
+      const heard = yield* daemon.latestHeard(key, Date.parse(row.at))
+      if (Option.isSome(heard)) return yield* daemon.replay(heard.value)
+      if (row.text.trim() === "") return "unknown" as const
       const { on, turns } = yield* daemon.power
       if (!on) return "off" as const
       const at = yield* Clock.currentTimeMillis

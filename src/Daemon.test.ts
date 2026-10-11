@@ -3412,15 +3412,37 @@ describe("Daemon with threads muted", () => {
         const ids = yield* heard
         return {
           ids,
-          tezos: yield* made.latestHeard("t3:Rosie:t-tezos"),
-          terminal: yield* made.latestHeard(sessionKey("terminal")),
-          none: yield* made.latestHeard("t3:Rosie:t-gone"),
+          tezos: yield* made.latestHeard("t3:Rosie:t-tezos", 0),
+          terminal: yield* made.latestHeard(sessionKey("terminal"), 0),
+          none: yield* made.latestHeard("t3:Rosie:t-gone", 0),
         }
       }),
     )
     expect(result.tezos).toEqual(Option.some(result.ids[1]!))
     expect(result.terminal).toEqual(Option.some(result.ids[0]!))
     expect(result.none).toEqual(Option.none())
+  })
+
+  test("a thread's update he heard isn't what's heard again once something newer of it was kept quiet", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, wait, nextEvent, journal } = yield* make(undefined, { mutes })
+        yield* finish("noisy", "First, heard.")
+        yield* wait(11)
+        yield* mutes.mute({ key: sessionKey("noisy") })
+        yield* wait(60)
+        yield* finish("noisy", "Second, kept quiet.")
+        yield* nextEvent("Muted update for yapd")
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return {
+          first: yield* made.latestHeard(sessionKey("noisy"), kept[0]!.at),
+          second: yield* made.latestHeard(sessionKey("noisy"), kept[1]!.at),
+        }
+      }),
+    )
+    expect(Option.isSome(result.first)).toBe(true)
+    expect(result.second).toEqual(Option.none())
   })
 })
 

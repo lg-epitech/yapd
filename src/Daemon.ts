@@ -1527,10 +1527,15 @@ export const make = (
     silence,
     /** Muting from the menu or by voice, which drops what of a thread waits to be said: none without mutes. */
     controls: Option.fromNullable(controls),
-    /** The newest update he heard that's muted, or shown, under this key, by its id among those heard, to hear again. */
-    latestHeard: (key: string) =>
+    /**
+     * The newest update he heard that's muted, or shown, under this key, by
+     * its id among those heard, to hear again: only when it's the thread's
+     * latest, kept at `at` or since, not one before what was kept quiet of it
+     * or a notice that came after.
+     */
+    latestHeard: (key: string, at: number) =>
       Effect.map(SubscriptionRef.get(state), ({ heard }) =>
-        Option.fromNullable(heard.find(({ update }) => Mutes.keysOf(update, called).includes(key))?.id),
+        Option.fromNullable(heard.find(({ update }) => update.at >= at && Mutes.keysOf(update, called).includes(key))?.id),
       ),
     /** Whether yapd is on, and how many times it was turned on or off, so what was heard before can tell. */
     power: switched,
