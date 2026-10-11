@@ -2401,14 +2401,18 @@ describe("Daemon", () => {
     expect(result).toMatchObject({ followUps: [], replies: [] })
   })
 
-  test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s said in other words in its place tells its own voice getting into the microphone by those, so it's never what he said", async (_, kind) => {
+  test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s said in other words in its place gives the model those words for its own voice getting into the microphone, so it's never what he said", async (_, kind) => {
     const result = await run(
       Effect.gen(function* () {
         // Its own voice gets in, as before the echo cancellation has learnt it, which Whisper hears as the words said in its place.
         const { made, wait, flush, speak, played } = yield* make(undefined, { microphone: true, echoing: 40, transcripts: ["The Tezos one are both running."] })
         const told: Array<string> = []
         const noting = (what: string) => Effect.sync(() => void told.push(what))
-        const taken = (heard: string) => Effect.succeed(Option.some(noting(`took: ${heard}`)))
+        // As the model would, told what yapd was saying around then, which it takes what was heard for.
+        const taken = (heard: string, _voiced: number, echo?: string) =>
+          noting(`${heard} over ${echo?.includes("the Tezos one are both running") === true ? "its words in its place" : (echo ?? "nothing")}`).pipe(
+            Effect.as(echo === undefined ? Option.some(noting(`took: ${heard}`)) : Option.none()),
+          )
         yield* Effect.forkScoped(
           made.tell({
             id: "a",
@@ -2433,9 +2437,10 @@ describe("Daemon", () => {
         return { played: [...played], told }
       }),
     )
-    // Stopped for its own voice, it picked up again, saying nothing.
+    // Stopped for its own voice, as the model took it, it picked up again, saying nothing.
     const line = "Codex on yapd and the Tezos one are both running their tests now. Which one?"
-    expect(result).toEqual({ played: [line, line], told: kind === "answer" ? ["heard"] : ["heard", "unanswered"] })
+    const over = "The Tezos one are both running. over its words in its place"
+    expect(result).toEqual({ played: [line, line], told: kind === "answer" ? [over, "heard"] : [over, "heard", "unanswered"] })
   })
 
   test.each([

@@ -7,7 +7,7 @@ import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
-import { agreed, enough, gist, type Line, noted, type Reply, Responder } from "./Responder.ts"
+import { agreed, gist, type Line, noted, type Reply, Responder } from "./Responder.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -154,317 +154,14 @@ export const unsaid = (text: string, fraction: number) => {
   return words.slice(saidOf(words, fraction)).join(" ")
 }
 
-/** Seconds either side of the user talking that yapd's words are looked for in what he said, since where each falls in a line is only guessed. */
+/** Seconds either side of when the user began that what yapd was saying is given with what he said, since where each word falls in a line is only guessed. */
 const reach = 4
-
-/** Words only what Whisper makes up has, from the videos it learnt on, which give away the whole sentence they're in. */
-const giveaways: ReadonlySet<string> = new Set(["subscribe", "subscribed", "amara", "applause", "laughter", "verse", "chorus"])
-
-/** Words what Whisper makes up has, from the videos it learnt on, but that he may say too, like "Pause the video.": they give a sentence away only when it has nothing else of his. */
-const tells: ReadonlySet<string> = new Set(["watching", "video", "videos", "channel", "music", "song", "subtitles", "captions", "transcription"])
-
-/** Words Whisper makes up on their own, or that only fill a pause, so they say nothing of who said them. Not "yes", which answers yapd. */
-const fillers: ReadonlySet<string> = new Set([
-  "you", "thank", "thanks", "bye", "okay", "ok", "so", "mm", "mhm", "huh", "hello", "hi", "hey", "wow", "right", "alright", "kid",
-])
-
-/** Words in nearly anything either says, so yapd saying them too is no sign it's its own voice, nor Whisper hearing them a sign it's his. */
-const common: ReadonlySet<string> = new Set([
-  "a", "an", "the", "it", "it's", "its", "is", "are", "was", "were", "be", "been", "am", "do", "did", "does", "don't", "to", "on", "in",
-  "of", "for", "at", "by", "with", "from", "as", "and", "or", "but", "if", "not", "now", "then", "that", "that's", "this", "there",
-  "here", "what", "what's", "which", "who", "how", "why", "when", "where", "i", "i'm", "i'll", "i've", "me", "my", "we", "us", "our",
-  "your", "he", "she", "they", "them", "can", "could", "would", "should", "will", "just", "up", "out", "off", "over", "all", "any",
-  "some", "about", "into", "than", "too", "also", "go", "let", "let's", "get", "got", "one", "have", "has", "had", "going", "gonna",
-  "know", "see", "come", "like", "want", "think", "say", "said", "make", "take", "look", "good", "well", "very", "much", "more",
-  "really", "way", "there's", "you're", "we're", "didn't", "doesn't", "isn't", "can't", "won't",
-])
-
-/** Words that turn what's said around, so one is never taken for a word of yapd's it isn't, like "not" for "now". */
-const negations: ReadonlySet<string> = new Set([
-  "no", "not", "don't", "didn't", "doesn't", "isn't", "aren't", "wasn't", "weren't", "can't", "cannot", "won't", "wouldn't", "shouldn't",
-  "couldn't", "haven't", "hasn't", "hadn't", "never", "nothing", "none", "neither", "nor",
-])
 
 /** The words of `text` said between `start` and `end` seconds into its `duration`, as far as that can be told from where they fall in it. */
 export const between = (text: string, duration: number, start: number, end: number) => {
   if (duration <= 0) return text
   const words = text.split(/\s+/).filter((word) => word !== "")
   return words.slice(Math.max(0, Math.floor((words.length * start) / duration)), Math.max(0, Math.ceil((words.length * end) / duration))).join(" ")
-}
-
-/** A word as it's matched, so "tests" is "test" and "it's" is "it", but "is" is still "is". */
-const stem = (word: string) => {
-  const stemmed = word.replace(/'s$/, "")
-  return stemmed.length > 3 ? stemmed.replace(/s$/, "") : stemmed
-}
-
-/** How many letters one word is from the other: put in, taken out or changed. */
-const apart = (one: string, other: string) => {
-  let above = Array.from({ length: other.length + 1 }, (_, index) => index)
-  for (let row = 1; row <= one.length; row++) {
-    const here = [row]
-    for (let column = 1; column <= other.length; column++) {
-      here[column] = Math.min(above[column]! + 1, here[column - 1]! + 1, above[column - 1]! + (one[row - 1] === other[column - 1] ? 0 : 1))
-    }
-    above = here
-  }
-  return above[other.length]!
-}
-
-/** Voiced consonants as their unvoiced likes, which Whisper swaps hearing a name it doesn't know. */
-const unvoiced: Readonly<Record<string, string>> = { b: "p", d: "t", g: "k", v: "f", z: "s" }
-
-/** A word by its sound, near enough: its first letter, then its consonants, unvoiced, each once in a row, so "yapped" and "yapti" sound like "yapd". */
-const sound = (word: string) =>
-  word.charAt(0) +
-  word
-    .slice(1)
-    .replace(/[aeiouyhw']/g, "")
-    .replace(/[bdgvz]/g, (letter) => unvoiced[letter]!)
-    .replace(/(.)\1+/g, "$1")
-
-/**
- * Whether Whisper may have heard a word yapd said as `heard`: a letter or so
- * apart, like "codecs" for "Codex" or "yap" for "yapd", the start of it, like
- * "stop" for "stopped" cut off partway, or a word that sounds like it, as
- * Whisper writes a name it doesn't know, like "yapped" for "yapd", but never
- * "on" for "in", "not" for "now", or a word nearly anything has for another,
- * like "was" for "pass" or "them" for "the migration", which would make a
- * word of his look like its.
- */
-const alike = (heard: string, spoken: string) => {
-  if (heard !== spoken && (negations.has(heard) || negations.has(spoken))) return false
-  const [first, second] = [stem(heard), stem(spoken)]
-  const shorter = Math.min(first.length, second.length)
-  if (first === second) return true
-  if (common.has(heard)) return false
-  if (first.length >= 4 && second.startsWith(first)) return true
-  if (shorter < 3) return false
-  const distance = apart(first, second)
-  if (distance <= (shorter >= 6 ? 2 : 1)) return true
-  return shorter >= 4 && distance * 2 <= Math.max(first.length, second.length) && sound(first).length >= 3 && sound(first) === sound(second)
-}
-
-/** Letters as they sound, loosely, for telling a name: "c", "q" and "g" as "k", "j" as "y", and the voiced as the unvoiced. */
-const loose: Readonly<Record<string, string>> = { ...unvoiced, c: "k", q: "k", j: "y" }
-
-/** A word's consonants, as they sound, loosely, each once in a row, after its first letter, any vowel as "a": "Japan" is "ypn", like "yapd"'s "ypt". */
-const skeleton = (word: string) => {
-  const spelt = stem(word).replace(/ck/g, "k").replace(/ph/g, "f").replace(/x/g, "ks").replace(/'/g, "")
-  return `${spelt.charAt(0).replace(/[aeiou]/, "a")}${spelt.slice(1).replace(/[aeiouyhw]/g, "")}`
-    .replace(/[bdgvzcqj]/g, (letter) => loose[letter]!)
-    .replace(/(.)\1+/g, "$1")
-}
-
-/** How many letters the two have in common, in order. */
-const shared = (one: string, other: string) => {
-  let above = Array.from({ length: other.length + 1 }, () => 0)
-  for (const letter of one) {
-    const here = [0]
-    for (let column = 1; column <= other.length; column++) {
-      here[column] = letter === other[column - 1] ? above[column - 1]! + 1 : Math.max(above[column]!, here[column - 1]!)
-    }
-    above = here
-  }
-  return above[other.length]!
-}
-
-/**
- * Whether `heard`, one word or a few run together, may be how Whisper wrote a
- * name of yapd's it doesn't know: like it, or starting the same, with all but
- * one of its consonants, like "Japan" or "your app" for "yapd", "Rick" for
- * "rig", but never "fix" for "green".
- */
-const near = (heard: string, spoken: string) => {
-  if (alike(heard, spoken)) return true
-  if (common.has(heard) || negations.has(heard)) return false
-  const [one, other] = [skeleton(heard), skeleton(spoken)]
-  const same = shared(one, other)
-  return one.charAt(0) === other.charAt(0) && same >= 2 && same >= Math.max(one.length, other.length) - 1
-}
-
-/** Words as they're matched: with names, which Whisper hears wrong more than anything, but not the "sir" or the "um" around them. */
-const vocabulary = (text: string) =>
-  text.toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").split(/\s+/).filter((word) => gist(word) !== "")
-
-/** Whether Whisper may have written a word of yapd's, `spoken`, as `heard`: like it, or "and" for its "in", as it hears "Over in" as "Over and". */
-const heardAs = (heard: string, spoken: string) => alike(heard, spoken) || (heard === "and" && spoken === "in")
-
-/** Words heard, from `first` to `last`, taken for yapd's, from `start` to `end`. */
-interface Match {
-  readonly first: number
-  readonly last: number
-  readonly start: number
-  readonly end: number
-}
-
-/**
- * How `words` line up, in order, with what yapd says, as near as Whisper
- * hears it, as many of them as can: each a word of its, two of its run
- * together, like "overin" for "over in", or split in two, like "of her" for
- * "over", skipping up to two of its words between, which Whisper drops, and
- * three of those heard, which it makes up, like "stop rage" for "storage", or
- * writes for one of its, like "tea three code" for "t3code".
- */
-const lined = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
-  // The most that line up with a match ending at each word heard and at each of yapd's, and the match that got there.
-  const most = words.map(() => yapd.map(() => 0))
-  const how = words.map(() => yapd.map((): { readonly match: Match; readonly from?: readonly [number, number] } | undefined => undefined))
-  let best: readonly [number, number] | undefined
-  words.forEach((_, last) => {
-    yapd.forEach((_, end) => {
-      for (const first of [last, last - 1]) {
-        for (const start of [end, end - 1]) {
-          if (first < 0 || start < 0 || !heardAs(words.slice(first, last + 1).join(""), yapd.slice(start, end + 1).join(""))) continue
-          // Two heard for its only when it takes both, as for a name Whisper writes in two, like "home lab" for "homelab": not when
-          // each is one of its already, nor one is its very word, so a word run on from one of its, like "yes" in "again, yes", isn't.
-          if (first < last) {
-            const spoken = yapd.slice(start, end + 1)
-            const alone = [first, last].map((at) => spoken.some((word) => alike(words[at]!, word)))
-            if (alone.every(Boolean) || [first, last].some((at) => spoken.some((word) => stem(word) === stem(words[at]!)))) continue
-          }
-          let before = 0
-          let from: readonly [number, number] | undefined
-          for (let earlier = Math.max(0, first - 4); earlier < first; earlier++) {
-            for (let previous = Math.max(0, start - 3); previous < start; previous++) {
-              if (most[earlier]![previous]! > before) [before, from] = [most[earlier]![previous]!, [earlier, previous]]
-            }
-          }
-          // A word heard as its very word lines up a little better than one only like it, so "code codex" for "t3code Codex" is "codex" for "Codex".
-          const exact = first === last && start === end && stem(words[first]!) === stem(yapd[start]!)
-          const count = before + last - first + 1 - (exact ? 0 : 0.001)
-          if (count <= most[last]![end]!) continue
-          most[last]![end] = count
-          how[last]![end] = { match: { first, last, start, end }, ...(from === undefined ? {} : { from }) }
-          if (best === undefined || count > most[best[0]]![best[1]]!) best = [last, end]
-        }
-      }
-    })
-  })
-  const matches: Array<Match> = []
-  for (let at = best; at !== undefined; at = how[at[0]]![at[1]]!.from) matches.unshift(how[at[0]]![at[1]]!.match)
-  return matches
-}
-
-/**
- * Which of `words` are yapd's: those in line with what it was saying, and
- * those in place of its words between two that are, which are those
- * misheard, like "Japan" for "yapd" in "Over in Japan, the tests", or, for
- * one of its words not just anything has, one more, as Whisper writes a name
- * in two, like "your app". A word or two just before them or just after, in
- * place of its word there, are that misheard when they sound like it, like
- * "Rick" for "rig" or "pool" for "pull". In line with only common words of
- * its, the same goes for its name beside them: a word or two after them when
- * what was heard starts with them, like "In Japan." or "Over in your app.",
- * and the word before when it ends with them, like "Japan, the.".
- */
-const ours = (words: ReadonlyArray<string>, yapd: ReadonlyArray<string>) => {
-  const matches = lined(words, yapd)
-  const its = new Set<number>()
-  /** Its words they're in line with, or in place of. */
-  const said = new Set<number>()
-  const named = (word: string | undefined): word is string => word !== undefined && !common.has(word)
-  const anchored = matches.some((match) => yapd.slice(match.start, match.end + 1).some(named))
-  matches.forEach((match, index) => {
-    for (let at = match.first; at <= match.last; at++) its.add(at)
-    for (let at = match.start; at <= match.end; at++) said.add(at)
-    const next = matches[index + 1]
-    if (next === undefined) return
-    // Heard in place of some of its words between, no more of them than it said, they're those misheard, rather than put in among
-    // them. For a word of its that not just anything has, its name, one more among words of its that tell its voice, and two when
-    // they sound like it, like "your app" for "yapd" or "tea three code" for "t3code". Never a "not".
-    const [between, skipped] = [words.slice(match.last + 1, next.first), yapd.slice(match.end + 1, next.start)]
-    const name = skipped.some(named)
-    const room = skipped.length + (name && near(between.join(""), skipped.join("")) ? 2 : name && anchored ? 1 : 0)
-    if (between.length === 0 || between.length > room || between.some((word) => negations.has(word))) return
-    for (let at = match.last + 1; at < next.first; at++) its.add(at)
-    for (let at = match.end + 1; at < next.start; at++) said.add(at)
-  })
-  const [first, last] = [matches[0], matches.at(-1)]
-  if (first === undefined || last === undefined) return its
-  // In line with, or in place of, a word of its that not just anything has, which tells its voice.
-  const telling = [...said].some((at) => !common.has(yapd[at]!))
-  // Among words that tell its voice, a common one more, like the "is" of "the test is passed", is Whisper's way with it, but never a "not".
-  if (telling) {
-    for (let at = first.last + 1; at < last.first; at++) if (common.has(words[at]!) && !negations.has(words[at]!)) its.add(at)
-  }
-  const [previous, next] = [yapd[first.start - 1], yapd[last.end + 1]]
-  const after = words.length - 1 - last.last
-  // All that's heard before its words, a word or two, sounding like its word before them.
-  const leading = first.first > 0 && first.first <= 2 && named(previous) && near(words.slice(0, first.first).join(""), previous)
-  // How many heard after its words, two or one, sound like its next word.
-  const trailing =
-    next === undefined
-      ? undefined
-      : [Math.min(after, 2), 1].find((count) => count > 0 && count <= after && near(words.slice(last.last + 1, last.last + 1 + count).join(""), next))
-  if (telling) {
-    if (leading) for (let at = 0; at < first.first; at++) its.add(at)
-    if (trailing !== undefined) for (let at = last.last + 1; at <= last.last + trailing; at++) its.add(at)
-    return its
-  }
-  // All that's left, or, after two or more of its, the word or two in place of its next: more than that may be his own.
-  const matched = matches.reduce((count, match) => count + match.last - match.first + 1, 0)
-  if (named(next) && first.first === 0 && trailing !== undefined && (after <= 2 || matched >= 2)) {
-    for (let at = last.last + 1; at <= last.last + trailing; at++) its.add(at)
-    return its
-  }
-  if (first.first === 1 && after === 0 && leading) its.add(0)
-  return its
-}
-
-/** Sentences, but not the dot in "Amara.org". */
-const sentences = (heard: string) => heard.split(/[.!?]+(?=\s|$)/)
-
-/**
- * The words of what was heard as they're compared, less single letters, the
- * words that only fill a pause, and the sentences that give themselves away
- * as what Whisper makes up from the videos it learnt on, like "Please
- * subscribe.", which are let go only whole, so none of his goes with them.
- */
-const wordsOf = (heard: string, yapd: ReadonlyArray<string>) => {
-  const said = sentences(heard)
-    .map(vocabulary)
-    .filter((sentence) => !sentence.some((word) => giveaways.has(word)))
-    .filter(
-      (sentence) =>
-        !sentence.some((word) => tells.has(word)) ||
-        !sentence.every((word) => tells.has(word) || fillers.has(word) || common.has(word) || word.length === 1 || yapd.includes(word)),
-    )
-    .map((sentence) => sentence.filter((word) => word.length > 1 && !fillers.has(word)))
-    .flat()
-  // Whisper repeats itself on noise, so a word said again straight after counts once.
-  return said.filter((word, index) => word !== said[index - 1])
-}
-
-/** Whether what was heard is what he'd say back to a line himself, short as it is: hearing enough, taking it in, or going ahead. */
-const likeReply = (heard: string) => {
-  const said = gist(heard)
-  return enough.has(said) || noted.has(said) || agreed.has(said)
-}
-
-/**
- * Whether all that was heard over a line yapd was `saying`, begun while its
- * own voice could still get into the microphone, may be only that voice,
- * going by Whisper's words, which this only ever tells by, never changes:
- * nothing, what gives itself away as made up from Whisper's videos, like
- * "Thanks for watching.", or words of what it was saying, misheard or not,
- * like "Over in Japan" for "Over in yapd". Never with a word it wasn't
- * saying, nor with what Whisper also makes up of a voice it can't make out
- * but he may say, like "Thank you.", "Of course." or "I don't know.", nor
- * with a sentence of only words that fill a pause, like "Okay, thanks.",
- * which may be him taking it in: the model judges those.
- */
-export const own = (heard: string, saying: string) => {
-  const yapd = vocabulary(saying)
-  const its = (word: string) => yapd.some((spoken) => alike(word, spoken))
-  const fill = sentences(heard)
-    .map((sentence) => vocabulary(sentence).filter((word, index, words) => word.length > 1 && word !== words[index - 1]))
-    .filter((sentence) => sentence.length > 0 && sentence.every((word) => fillers.has(word)))
-  if (fill.some((sentence) => !sentence.every(its))) return false
-  const words = wordsOf(heard, yapd)
-  const matched = ours(words, yapd)
-  // Words in nearly anything either says are no sign of its own voice on their own, like "That's it.": one of its own must be there.
-  return words.length === 0 || (words.some((word) => !common.has(word)) && words.every((word, index) => matched.has(index) || its(word)))
 }
 
 /** Something yapd asks the user for itself, like which project new work is for, rendered and ready to be asked. */
@@ -503,9 +200,10 @@ export interface Answer extends Omit<Question, "answer"> {
  * Reads updates out while listening. Talking over yapd ducks it at once and
  * stops it once it's clearly speech; what the user said then decides whether it
  * stops there, answers, sends the agent a follow-up, or carries on. Begun
- * while its own voice could still get into the microphone, what he said may
- * be only that, which it picks up again from; otherwise it's taken whole as
- * ever, with what yapd was saying around then, which some of it may be.
+ * while its own voice could still get into the microphone, all that's heard
+ * is taken whole as ever, with what yapd was saying around then, which some
+ * of it may be, and it picks up again when the model takes it for that, or
+ * when Whisper heard nothing at all.
  */
 export const make = (options: {
   readonly dir: string
@@ -920,34 +618,32 @@ export const make = (options: {
 
     /**
      * What's known of yapd's own voice in what he said over a line, heard as
-     * `first`: whether it was only that, as `own` tells, so yapd stopped for
-     * itself and picks up again, saying nothing and asking nobody, as that
-     * does no harm; or else what it was saying around when he began, which
-     * some of what was heard may be. Neither for what he began once its own
-     * voice was learnt. Speech that went on past where it stopped is someone
-     * else's, which its own voice dying away can't be, so only nothing is
-     * taken for its own then; and when it had said all of it by then, its
-     * own voice can only be its last word or so before him, as after any
-     * line, so the model isn't told. Otherwise all of it may yet have been its
-     * own voice, `unsure`, though what he'd say back himself is never taken
-     * for it by its words alone, however short, even a "Stop." over its
-     * "stopped": the model judges that, told it may be its own voice.
+     * `first`: whether it was only that, which code takes it for only when
+     * Whisper heard nothing at all, so yapd stopped for itself and picks up
+     * again, saying nothing and asking nobody; or else what it was saying
+     * around when he began, which some of what was heard may be, for the
+     * model to judge however short it is. Neither for what he began once its
+     * own voice was learnt. Speech that went on past where it stopped is
+     * someone else's, which its own voice dying away can't be; and when it
+     * had said all of it by then, its own voice can only be its last word or
+     * so before him, as after any line, so the model isn't told. Otherwise
+     * all of it may yet have been its own voice, `unsure`.
      */
     const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
       const { echo, onset = outcome.at } = outcome
       if (echo === undefined) return { itself: false, unsure: false }
+      if (first === "") return { itself: true, unsure: true }
       const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
-      if (past ? first === "" : !likeReply(first) && own(first, echo)) return { itself: true, unsure: true }
       return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
     }
 
     /**
      * Picks up again just before where it stopped over its first seconds, for
-     * its own voice, as its words tell or the model took it, `unsure` whether
-     * there was more; or else for his talk that went on past where it stopped
-     * but wasn't meant for it. Each is logged in one plain line, with none of
-     * his words, so how often its own voice stops a line on his speakers can
-     * be counted.
+     * its own voice, when Whisper heard nothing or the model took it for that,
+     * `unsure` whether there was more; or else for his talk that went on past
+     * where it stopped but wasn't meant for it. Each is logged in one plain
+     * line, with none of his words, so how often its own voice stops a line
+     * on his speakers can be counted.
      */
     const again = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, unsure: boolean, from: number) =>
       Effect.logInfo(unsure ? ownVoice : notMeant).pipe(Effect.as(Math.max(from, outcome.at - before)))
@@ -1071,7 +767,7 @@ export const make = (options: {
                 if (echo !== undefined && listenOn()) continue
                 return true
               }
-              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so. Nor is
+              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when Whisper heard nothing. Nor is
               // a nod it carries on after, like an "Okay." or a "Yeah." said before the agent's question, so he hears it: that was meant for it.
               if (echo !== undefined) from = yield* again(outcome, unsure, from)
               else if (noted.has(gist(heard)) || agreed.has(gist(heard))) from = Math.max(from, outcome.at - rewind)
@@ -1133,7 +829,7 @@ export const make = (options: {
           confirmed = Effect.void
           if (outcome._tag === "Finished") return false
           const first = yield* hear(outcome.audio)
-          // Its own voice, over its first seconds, is no answer, nor talk that wasn't meant for yapd.
+          // Nothing heard over its first seconds is its own voice, no answer, nor talk that wasn't meant for yapd.
           const { itself, echo, unsure } = whose(outcome, first)
           const reply =
             itself || first === ""
