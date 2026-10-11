@@ -133,6 +133,8 @@ export const make = (
   }
   interface Replies {
     current?: FollowUp
+    /** When the follow-up waiting on its answer was sent, which tells the run that answers it from a later one. */
+    sentAt?: number
     thread: Thread
     readonly queued: Array<FollowUp>
     hook?: Ticket
@@ -323,6 +325,7 @@ export const make = (
     const previousPrompt = prompts.get(session)
     const prompt = { text: followUp.message, at: yield* Clock.currentTimeMillis }
     channel.current = followUp
+    channel.sentAt = prompt.at
     prompts.set(session, prompt)
     return { followUp, thread: channel.thread, previousPrompt, prompt, generation: activity.get(session) }
   })
@@ -1030,8 +1033,16 @@ export const make = (
         heard: false,
         quiet: false,
       }
-      // What he said by voice back through the hook of one of its run's sessions, still waiting on its answer, is answered by it, as its Stop would be.
-      const followedUp = [...followed.values()].some(({ current }) => current !== undefined && input.run.natives.includes(current.update.thread.session))
+      // What he said by voice back through the hook of one of its run's sessions, still waiting on its answer, is answered by it, as its Stop would be,
+      // but only when it was sent a little before the run began or while it ran: one sent for an earlier run, whose Stop never came, isn't this one's.
+      const followedUp = [...followed.values()].some(
+        ({ current, sentAt }) =>
+          current !== undefined &&
+          sentAt !== undefined &&
+          sentAt >= input.run.startedAt - sending &&
+          sentAt <= input.at &&
+          input.run.natives.includes(current.update.thread.session),
+      )
       forsake(session)
       fallbacks.set(input.key, fallback)
       // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.

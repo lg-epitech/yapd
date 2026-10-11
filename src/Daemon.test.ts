@@ -3348,6 +3348,48 @@ describe("Daemon with threads muted", () => {
     expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in."])
   })
 
+  test("what he said by voice back through a session's hook, answered by T3 Code's word with no Stop, doesn't make a later run of the muted thread his", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, speak, wait, nextEvent, nextPlayback, played, followUps } = yield* make("Use the fee table.", { mutes, send: () => Effect.void })
+        yield* finish("tezos", "The migration compiles.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        const { turns } = yield* made.power
+        // T3 Code's word of the turn that answers it, as its Stop never came.
+        const first = yield* Clock.currentTimeMillis
+        yield* wait(60)
+        yield* made.finished({
+          ...unhooked("The fee table is in.", "run-1", turns),
+          at: yield* Clock.currentTimeMillis,
+          run: { status: "completed", final: "The fee table is in.", others: [], natives: ["tezos"], previous: Option.none(), startedAt: first },
+        })
+        yield* nextEvent("Ready: yapd. The fee table is in.")
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        // Ten minutes on, a run he typed in T3 Code himself, again with no Stop.
+        yield* wait(600)
+        const second = yield* Clock.currentTimeMillis
+        yield* wait(60)
+        yield* made.finished({
+          ...unhooked("The loader is refactored.", "run-2", turns),
+          at: yield* Clock.currentTimeMillis,
+          run: { status: "completed", final: "The loader is refactored.", others: [], natives: ["tezos"], previous: Option.none(), startedAt: second },
+        })
+        yield* nextEvent("Muted update for yapd")
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { played: [...played], followUps: [...followUps] }
+      }),
+    )
+    expect(result.followUps).toEqual(["tezos sent: Use the fee table."])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in."])
+  })
+
+
   test("a turn that couldn't be summed up is said on a muted thread, since it may be a question or a failure", async () => {
     const result = await run(
       Effect.gen(function* () {
