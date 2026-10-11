@@ -17,11 +17,22 @@ import type * as Threads from "./Threads.ts"
  * What a mute is kept under: `t3:<machine>:<thread>` for a thread T3 Code
  * runs, and `session:<machine>:<agent>:<session>` for a session yapd can't tie
  * to one, like one run in a terminal. Clients take it as a name, nothing more.
+ * The machine is written as in a URL, so any name he gives it, like "My Mac",
+ * reads back the same.
  */
 export const key = {
-  thread: (ref: Threads.Ref) => `t3:${ref.machine}:${ref.id}`,
+  thread: (ref: Threads.Ref) => `t3:${encodeURIComponent(ref.machine)}:${ref.id}`,
   /** `session` is the agent and its own id for the session, as `Payload.key` puts them. */
-  session: (machine: string, session: string) => `session:${machine}:${session}`,
+  session: (machine: string, session: string) => `session:${encodeURIComponent(machine)}:${session}`,
+}
+
+/** A machine as a key has it, or none when no key yapd made could. */
+const machineOf = (written: string) => {
+  try {
+    return Option.some(decodeURIComponent(written))
+  } catch {
+    return Option.none()
+  }
 }
 
 /** What a key is about. */
@@ -32,9 +43,11 @@ export type About =
 /** What a key is about, or none for one yapd never made, like a mangled one. */
 export const parse = (text: string): Option.Option<About> => {
   const thread = /^t3:([^:\s]+):(\S+)$/.exec(text)
-  if (thread !== null) return Option.some({ _tag: "Thread", ref: { machine: thread[1]!, id: thread[2]! } })
+  if (thread !== null) return Option.map(machineOf(thread[1]!), (machine): About => ({ _tag: "Thread", ref: { machine, id: thread[2]! } }))
   const session = /^session:([^:\s]+):(claude|codex):(\S+)$/.exec(text)
-  if (session !== null) return Option.some({ _tag: "Session", machine: session[1]!, agent: session[2]!, session: session[3]! })
+  if (session !== null) {
+    return Option.map(machineOf(session[1]!), (machine): About => ({ _tag: "Session", machine, agent: session[2]!, session: session[3]! }))
+  }
   return Option.none()
 }
 

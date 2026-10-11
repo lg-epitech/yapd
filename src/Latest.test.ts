@@ -369,11 +369,15 @@ describe("Latest", () => {
     test("mutes a thread it lists or T3 Code has, by its title and project, but no key yapd never made or thread it doesn't know", async () => {
       const result = await run(
         Effect.gen(function* () {
-          const { journal, menu, mutes, settle } = yield* menuOf([])
+          const { journal, latest, menu, mutes, settle } = yield* menuOf([])
           yield* journal.write({ at: 1, kind: "update", host: "Rosie", thread: "claude:s-term", directory: "/code/integration", project: "integration", said: "integration. Done." })
+          // A machine he named with a space in it, as YAPD_NAME="My Mac" does.
+          yield* journal.write({ at: 2, kind: "update", host: "My Mac", thread: "claude:s-mine", directory: "/code/integration", project: "integration", said: "integration. Done." })
           yield* settle
+          const mine = (yield* latest.current).find(({ machine }) => machine === "My Mac")?.key ?? ""
           const outcomes = [
             yield* menu.mute("session:Rosie:claude:s-term"),
+            yield* menu.mute(decodeURIComponent(encodeURIComponent(mine))),
             yield* menu.mute("t3:Rosie:t-tezos", 10 * 60_000),
             yield* menu.mute("t3:Rosie:t-nope"),
             yield* menu.mute("whatever"),
@@ -381,8 +385,9 @@ describe("Latest", () => {
           return { outcomes, mutes: (yield* mutes.list).map(({ key, called, project, ends }) => ({ key, called, project, ends })) }
         }),
       )
-      expect(result.outcomes).toEqual(["muted", "muted", "unknown", "invalid"])
+      expect(result.outcomes).toEqual(["muted", "muted", "muted", "unknown", "invalid"])
       expect(result.mutes).toEqual([
+        { key: "session:My%20Mac:claude:s-mine", called: "Claude session on My Mac", project: "integration", ends: undefined },
         { key: "session:Rosie:claude:s-term", called: "Claude session", project: "integration", ends: undefined },
         { key: "t3:Rosie:t-tezos", called: "Migrate the Tezos integration", project: undefined, ends: 10 * 60_000 },
       ])

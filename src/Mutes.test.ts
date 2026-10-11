@@ -40,8 +40,15 @@ describe("Mutes", () => {
     }
     expect(Mutes.parse(tezos)).toEqual(Option.some({ _tag: "Thread", ref: { machine: "Rosie", id: "t-tezos" } }))
     expect(Mutes.parse(terminal)).toEqual(Option.some({ _tag: "Session", machine: "Rosie", agent: "claude", session: "s-terminal" }))
+    // Any name he gives a machine, like YAPD_NAME="My Mac", even one with a colon in it.
+    for (const machine of ["My Mac", "Rosie: home", "Mac 100%"]) {
+      const thread = Mutes.key.thread({ machine, id: "t1" })
+      const session = Mutes.key.session(machine, "codex:019a-77")
+      expect(Mutes.parse(decodeURIComponent(encodeURIComponent(thread)))).toEqual(Option.some({ _tag: "Thread", ref: { machine, id: "t1" } }))
+      expect(Mutes.parse(decodeURIComponent(encodeURIComponent(session)))).toEqual(Option.some({ _tag: "Session", machine, agent: "codex", session: "019a-77" }))
+    }
     // Nothing yapd made: a mangled key, another agent, or none at all.
-    for (const key of ["", "t3:Rosie", "t3::x", "session:Rosie:cursor:s", "thread:Rosie:t-tezos", "t3:Ro sie:x"]) expect(Mutes.parse(key)).toEqual(Option.none())
+    for (const key of ["", "t3:Rosie", "t3::x", "session:Rosie:cursor:s", "thread:Rosie:t-tezos", "t3:Ro sie:x", "t3:Ro%ie:x"]) expect(Mutes.parse(key)).toEqual(Option.none())
   })
 
   test("an update is muted by its thread, here or on another machine, and by its session unless T3 Code told of it", () => {
