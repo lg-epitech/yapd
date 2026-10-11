@@ -22,6 +22,23 @@ There's no authentication: anything that can reach the port can use it, as hooks
       "at": "2026-10-02T14:03:11.000Z"
     }
   ],
+  "recent": [
+    {
+      "key": "t3:Rosie:850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+      "machine": "Rosie",
+      "thread": "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+      "title": "Migrate the Tezos integration",
+      "project": {
+        "name": "integration",
+        "id": "5c1e9a40-2d7b-4e3f-8a61-9b0c7d2e4f13",
+        "icon": { "kind": "image", "url": "/projects/Rosie/5c1e9a40-2d7b-4e3f-8a61-9b0c7d2e4f13/icon", "revision": "9f2c4e1a7b3d", "text": "IN", "color": "indigo" }
+      },
+      "text": "integration. The migration is done and the tests pass.",
+      "at": "2026-10-02T14:01:40.000Z",
+      "muted": false,
+      "waiting": false
+    }
+  ],
   "showing": {
     "id": "cmgi3k2xa4f1",
     "kind": "pr",
@@ -36,6 +53,7 @@ There's no authentication: anything that can reach the port can use it, as hooks
 - `on`: whether yapd is on. While it's off, it says nothing, never opens the microphone and lets go of the dictation shortcut. Updates that finish meanwhile are never said, not even later.
 - `activity`: `speaking` while yapd plays something, `listening` while the microphone is open without it, for a reply after an update or while you dictate, and `idle` otherwise.
 - `updates`: the last five updates yapd said, newest first, to [hear again](#hearing-an-update-again). `text` is what it said and `at` when the agent's turn ended. They're forgotten when yapd restarts.
+- `recent`: the threads with the latest updates, one row each, newest first: up to eight, from the last seven days, whether or not yapd said them, so muted threads are there too. It's kept through a restart. A yapd from before it doesn't send it. See [Recent threads](#recent-threads).
 - `showing`: the [card](#cards) yapd is showing, or `null`. `kind` and `title` are the card's, and `at` is when yapd put it up. Fetch the card itself from `/cards/{id}`. A yapd from before cards doesn't send it at all.
 - `revision` in `showing`: the `revision` the card went up at, this time. It stays the same while the card stays up, even as the state's own moves on, and a card put back up is up anew, at a later one. Send it to [take the card down](#cards) only as it went up then. A yapd from before it doesn't send it.
 - `revision`: goes up by one each time yapd puts a card up or takes one down, or is asked to take one down and doesn't, like one that's down already. It starts from `0` when yapd starts. Send it to [put a card back up](#cards) only if nothing came since. A yapd from before it doesn't send it.
@@ -150,10 +168,12 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1", "revi
     "threads": [
       {
         "id": "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+        "key": "t3:Rosie:850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
         "project": "integration",
         "title": "Migrate the Tezos integration",
         "state": "running",
         "since": "2026-10-02T13:40:00.000Z",
+        "muted": false,
         "pr": { "number": 412, "url": "https://github.com/lg-epitech/integration/pull/412", "state": "open", "checks": "passing" }
       }
     ]
@@ -163,10 +183,61 @@ curl -X PUT -H 'Content-Type: application/json' -d '{"id": "cmgi3k2xa4f1", "revi
 ```
 
 - `reason`: why a machine's threads can't be seen right now, like T3 Code not running. Its `threads` are empty then.
+- `key`: the thread's key, to [mute](#muting-a-thread) it by, and `muted` whether it is. A yapd from before mutes sends neither.
 - `state`: `approval` or `question` when the thread waits on you, `running`, `finishing`, `queued`, `failed`, `limited` when it hit a usage limit, or `idle`. `since` is when it got there.
 - `pr`: its latest pull request, when it has one. `url` is only ever `https`, and missing when the address T3 Code has for it isn't. `state`, `checks`, `review` and `mergeability` are there when T3 Code knows them.
 
-Archived threads and the ones a thread runs for itself aren't listed. Nothing here changes a thread: ask yapd through [`/utterances`](#asking-yapd-something), so the same rules apply as when you speak.
+Archived threads and the ones a thread runs for itself aren't listed. Nothing here changes a thread: ask yapd through [`/utterances`](#asking-yapd-something), so the same rules apply as when you speak. Muting one only changes what yapd says.
+
+## Recent threads
+
+Each row of `recent` in the [state](#state) is a thread, by its newest update or notice, which is how a menu lists what's been going on:
+
+- `key`: the thread's key, the same as in [`/threads`](#threads), to [mute](#muting-a-thread) it or [hear it again](#hearing-a-thread-again) by. Treat it as a name, not something to take apart. A session yapd can't tie to a T3 Code thread, like one run in a terminal, has a key of its own.
+- `machine`: where it runs. `thread`: its id in T3 Code, as [`/threads`](#threads) has it, or `null` for a session yapd can't tie to one.
+- `title`: the thread's title in T3 Code, or for a session, "Claude session" or "Codex session", with "on rig" after it when it's not this machine.
+- `project`: there when yapd knows the project. `name` is how it's called, and `id` and `icon` are there only for a project T3 Code has.
+- `text`: what yapd said of its latest update, or would have, had it not been muted. `at`: when the agent's turn ended.
+- `muted`: whether it's muted, and `until`, when the mute ends on its own, only then.
+- `waiting`: whether the thread waits on you, for an approval or an answer.
+
+`icon` is how T3 Code draws the project, as one of these `kind`s:
+
+- `image`: the project's own icon. Fetch it from `url`, a path on this API, and keep it by `revision`, which only changes with the image.
+- `emoji`: the `emoji` to draw.
+- `monogram`: the two letters in `text`, in `color`.
+
+Every icon carries `text` and `color` too, the monogram to draw for a kind you don't know, or an image you can't read. `color` is one of `gray`, `red`, `orange`, `amber`, `yellow`, `lime`, `green`, `emerald`, `teal`, `cyan`, `sky`, `blue`, `indigo`, `violet`, `purple`, `fuchsia`, `pink` and `rose`, as T3 Code has them.
+
+`GET /projects/{machine}/{project}/icon` returns the image itself, by the machine and the project's `id`, with T3 Code's `Content-Type` and an `ETag` of its `revision`. It answers `304` when you send that back in `If-None-Match`, and `404` when the project has no image, or none yapd has fetched yet. yapd fetches it from T3 Code itself, so you never need T3 Code's address or a link that would expire.
+
+## Muting a thread
+
+Some threads are noisy. Muting one stops yapd saying its progress and what it finished, but anything that needs you still comes through: a question it asks, an approval it waits on, a run that failed or hit a limit, and the answer to a message you sent it yourself. What's muted is still kept, so "what did I miss?" tells you of it, a thread at a time, and `recent` still shows it.
+
+`PUT /threads/{key}/mute` mutes the thread by its `key`, percent-encoded, and drops what of it was waiting to be said, but never what's being said. With `{"until": "2026-10-02T15:00:00.000Z"}` as JSON, the mute ends on its own then. Without a body, it lasts until you take it off. `DELETE /threads/{key}/mute` takes it off, whether it was muted or not.
+
+```sh
+curl -X PUT 'http://127.0.0.1:4747/threads/t3%3ARosie%3A850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f/mute'
+```
+
+| Status | |
+| --- | --- |
+| `204` | It's muted, or no longer muted. |
+| `400` | The body couldn't be read, or `until` isn't a time to come. |
+| `404` | No such thread: its key is in neither `recent` nor [`/threads`](#threads), and isn't muted. |
+
+You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "what's muted?" and "unmute everything". "Scratch that" takes back a mute you just made. Muting never sends anything to the thread.
+
+## Hearing a thread again
+
+`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When it's one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there; otherwise yapd says what it kept of it.
+
+| Status | |
+| --- | --- |
+| `202` | It's been queued. |
+| `404` | Nothing to say of it. |
+| `409` | yapd is off. |
 
 ## Journal
 
@@ -186,7 +257,7 @@ Archived threads and the ones a thread runs for itself aren't listed. Nothing he
 ]
 ```
 
-- `kind`: `update` for an agent's turn yapd summed up, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, and `action` for anything else it did, like turning off.
+- `kind`: `update` for an agent's turn yapd summed up, whether it said it or the thread was muted, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, and `action` for anything else it did, like turning off or muting a thread.
 - `said` is what yapd said, `text` the words it was about, like what you said or an agent's message, and `heard` when you heard it through.
 - `machine` and `project` are where it happened, `thread` the id of the T3 Code thread it's about, as [`/threads`](#threads) has it, and `utterance` the id of the request it came from, as [`/utterances`](#asking-yapd-something) gives it.
 - Each is there only when there's one.
