@@ -46,6 +46,14 @@ export interface Utterance {
 /** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
 const overItself = (echo?: string, afterPause?: string): Pick<Utterance, "echo" | "afterPause"> => Brain.overheard({ echo, afterPause })
 
+/**
+ * His words as he said them, for a message or an answer whose words the
+ * model left out: none when he began them while yapd's own voice could
+ * still get into the microphone, since some of them may be yapd's, which
+ * never go to a thread as his.
+ */
+const ownWords = (said: { readonly heard: string; readonly echo?: string }) => (said.echo === undefined ? said.heard : "")
+
 /** What a thread asks of the user, which a short answer can settle. */
 export type Asks =
   | {
@@ -471,13 +479,15 @@ const resumed = (from: Queued, open: Pick<Open, "asks">, changes: Omit<Queued, "
  * An answer to a question, with what it left out taken from what was asked
  * about: the rest of the request, and a message's words, or failing those the
  * request's own, never the answer's, like "The first." or "Yes.", which
- * aren't for the thread.
+ * aren't for the thread. None when a message's words are left out and the
+ * request's may have been yapd's own voice, so there are none to send.
  */
-const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard">): Brain.Decision => ({
-  ...decision,
-  text: decision.act === "send" && decision.text.trim() === "" && open.decision.act === "send" ? open.decision.text.trim() || open.heard : decision.text,
-  rest: decision.rest.trim() || open.decision.rest,
-})
+const filled = (decision: Brain.Decision, open: Pick<Open, "decision" | "heard" | "echo">): Brain.Decision | undefined => {
+  const rest = decision.rest.trim() || open.decision.rest
+  if (decision.act !== "send" || decision.text.trim() !== "" || open.decision.act !== "send") return { ...decision, rest }
+  const text = open.decision.text.trim() || ownWords(open)
+  return text === "" ? undefined : { ...decision, text, rest }
+}
 
 /** When a message goes in, as the brain's `how` says it: an empty one is at once. */
 const when = (how: string): T3Actions.When => (how === "after" || how === "restart" ? how : "now")
@@ -1573,11 +1583,15 @@ export const make = (options: {
       return { ...retold(outcome, (say) => joined(`I left the rest${addressed(said)}: ${left}.`, say, said)), kind: outcome.kind === "none" ? "answer" : outcome.kind }
     }
 
-    /** What a decision to change a thread asks of the hands, if it says enough to do it. `last` is the last thing done, which taking back means. */
+    /**
+     * What a decision to change a thread asks of the hands, if it says enough
+     * to do it, from what he said, `utterance`. `last` is the last thing done,
+     * which taking back means.
+     */
     const acted = (
       decision: Brain.Decision,
       target: Option.Option<Threads.Listed>,
-      heard: string,
+      utterance: Pick<Utterance, "heard" | "echo">,
       last: Option.Option<Ledger.Row>,
       step: number,
       asks?: Asks,
@@ -1594,13 +1608,14 @@ export const make = (options: {
       switch (decision.act) {
         case "send": {
           if (Option.isNone(to)) return undefined
-          const text = decision.text.trim() || heard
           // To a thread waiting on a question he's heard, it goes as the answer to the part he'd got to, as `answerFor` filled it in.
           if (asks?._tag === "Question") {
             const replied = replying(asks)
             return replied === undefined ? undefined : { _tag: "Reply", to: to.value, requestId: asks.requestId, answers: replied.answers, said: Option.none(), as: "message" }
           }
-          return { _tag: "Message", to: to.value, text, how: when(decision.how) }
+          // With its words left out, it's his as he said them, unless some of them may have been yapd's own voice: then there's nothing to send.
+          const text = decision.text.trim() || ownWords(utterance)
+          return text === "" ? undefined : { _tag: "Message", to: to.value, text, how: when(decision.how) }
         }
         case "stop":
           return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
@@ -1612,9 +1627,9 @@ export const make = (options: {
           // request, whose words are the model's; for the rest of the thread's work only when he said so, whatever the model took it for;
           // never for always.
           const allowing = decision.how === "accept" || decision.how === "session"
-          if (allowing && (step > 0 || decision.rest.trim() !== "" || !Brain.approving(heard))) return undefined
+          if (allowing && (step > 0 || decision.rest.trim() !== "" || !Brain.approving(utterance.heard))) return undefined
           const allowed: Hands.Decision | undefined =
-            decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(heard) ? "acceptForSession" : allowing ? "accept" : undefined
+            decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(utterance.heard) ? "acceptForSession" : allowing ? "accept" : undefined
           return allowed === undefined ? undefined : { _tag: "Decide", to: to.value, requestId: asks.requestId, decision: allowed }
         }
         case "reply": {
@@ -1940,8 +1955,9 @@ export const make = (options: {
           yield* Effect.logInfo("Not doing it, since yapd was turned off after it was said")
           return quiet(thought.subject)
         }
-        const act = acted(plan.decision, plan.target, utterance.heard, thought.situation.acted, at.step, asks)
-        if (act === undefined) return reply(said.cantTell, thought.subject)
+        const act = acted(plan.decision, plan.target, utterance, thought.situation.acted, at.step, asks)
+        // A message with no words of its own to send, as when he began it over yapd's own voice, has him asked to say it again.
+        if (act === undefined) return reply(plan.decision.act === "send" && Option.isSome(plan.target) && asks?._tag !== "Question" ? said.misheard : said.cantTell, thought.subject)
         // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
         // by while its machine's threads couldn't be seen, which its T3 Code may not show as answered just yet.
         const queued = asks !== undefined && asks._tag !== "Agent" && (act._tag === "Decide" || act._tag === "Reply") ? dequeue(asks.requestId) : []
@@ -1987,6 +2003,17 @@ export const make = (options: {
       })
 
     /**
+     * What's said when his answer settles a message whose words he left out,
+     * and his request's may have been yapd's own voice: none of it is sent,
+     * and he's asked to say it again, told what was left of it after.
+     */
+    const unworded = (open: Open, thought: Thought, said: Lines) =>
+      Effect.as(
+        Effect.logInfo("Not sending it, since its words may have been my own voice"),
+        unfinished(reply(said.misheard, thought.subject), thought.decision.rest.trim() || open.decision.rest, said),
+      )
+
+    /**
      * A yes to doing what was asked about: the same thing on the same thread,
      * as it's known now, checked as anything done is, and never asked about a
      * second time, with anything he added done after it. To sending again,
@@ -2006,6 +2033,10 @@ export const make = (options: {
         const handle = Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle })
         // What he left out is what was asked about: its words, as for "no, the Mina one", and its thread, as for "no, stop it instead".
         const answered = filled(thought.decision, open)
+        if (answered === undefined) {
+          yield* forgo(open, "Its words may have been my own voice.")
+          return yield* unworded(open, thought, said)
+        }
         const instead =
           answered.target === "" && handle !== "" && (answered.act === "send" || answered.act === "stop")
             ? { ...answered, target: handle, sure: "high" as const, others: "" }
@@ -2033,6 +2064,10 @@ export const make = (options: {
               Brain.decision({ ...open.decision, target: handle, sure: "high", others: "", pending: "answers", rest: thought.decision.rest }),
               open,
             )
+        if (decision === undefined) {
+          yield* forgo(open, "Its words may have been my own voice.")
+          return yield* unworded(open, thought, said)
+        }
         const checked = Brain.check(decision, situation, said)
         const resend = Option.filter(open.resend, () => checked._tag === "Do" && checked.plan.decision.act === "send" && Option.isSome(target))
         if (Option.isNone(resend)) yield* forgo(open, "His yes didn't stand.")
@@ -2389,14 +2424,16 @@ export const make = (options: {
      * that takes only its options, which can't take it: it goes as the
      * message it is.
      */
-    const answerFor = (plan: Brain.Plan, utterance: Pick<Utterance, "at" | "heard">) =>
+    const answerFor = (plan: Brain.Plan, utterance: Pick<Utterance, "at" | "heard" | "echo">) =>
       Effect.gen(function* () {
         const { decision, target } = plan
         if (Option.isNone(target) || when(decision.how) !== "now") return undefined
         const pending = target.value.thread.pendingRuntimeRequest
         const heard = pending === null ? undefined : known.get(pending.id)
         if (heard?.asks._tag !== "Question" || heard.asks.mode !== "live" || !Threads.same(heard.ref, target.value.ref) || !heardBy(utterance, heard.through)) return undefined
-        const answered = fill(heard.asks, decision.text.trim() || utterance.heard)
+        // Its words left out, it's his as he said them, unless some of them may have been yapd's own voice: then it's no answer.
+        const text = decision.text.trim() || ownWords(utterance)
+        const answered = text === "" ? undefined : fill(heard.asks, text)
         if (answered === undefined) return undefined
         return (yield* still(heard.ref, heard.asks.requestId)) ? answered.asks : undefined
       })
@@ -2409,7 +2446,7 @@ export const make = (options: {
           return Effect.flatMap(answerFor(plan, thought.utterance), (asks) =>
             // Never sent with parts he's yet to hear left out, as if skipped: he's asked the next, as when he dictates an answer.
             asks !== undefined && asks.part < asks.questions.length && Option.isSome(target)
-              ? unprompted({ ...plan, decision: { ...decision, act: "reply", text: decision.text.trim() || thought.utterance.heard } }, target.value, thought, said, at, true)
+              ? unprompted({ ...plan, decision: { ...decision, act: "reply", text: decision.text.trim() || ownWords(thought.utterance) } }, target.value, thought, said, at, true)
               : write(plan, thought, said, at, asks),
           )
         case "stop":
@@ -2687,6 +2724,7 @@ export const make = (options: {
         // Said again, rather than heard as an answer, like "yes, but once it's done", it's a plain yes.
         if (open.kind !== "which") return yield* agreeing(open, decision.pending === "answers" ? decided : { ...decided, decision: same }, said)
         const picked = filled(decision, open)
+        if (picked === undefined) return yield* unworded(open, decided, said)
         const checked = Brain.check(picked, decided.situation, said)
         // At most one question: one the answer doesn't settle is let go.
         if (checked._tag === "Ask") {

@@ -2093,6 +2093,42 @@ describe("Assistant", () => {
     ])
   })
 
+  test("a message for now whose words the model left out, begun over yapd's own voice, never goes as the answer to a question its thread waits on", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
+    const heard = "Mainnet. Tell the cloud one to start with mainnet."
+    const told = (echo?: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard === heard ? Brain.decision({ act: "send", target: handle(situation, cloud), how: "now" }) : Brain.decision({ act: "dismiss", pending: "answers" }),
+            undefined,
+            { others: [cloud], items: card("q1", [network]) },
+          )
+          // Heard, and let be for now.
+          yield* asked(made, cloud)
+          yield* made.answer("Never mind.")
+          yield* made.heard({
+            heard,
+            via: "shortcut",
+            at: yield* TestClock.currentTimeMillis,
+            voiced: 3,
+            turns: 1,
+            ...(echo === undefined ? {} : { echo, afterPause: "Tell the cloud one to start with mainnet." }),
+          })
+          yield* made.flush
+          return {
+            spoken: made.spoken().slice(2),
+            sent: made.dispatched.map(({ type, requestId, answers, text }) => (type === "runtime-request.respond" ? { requestId, answers } : { text })),
+          }
+        }),
+      )
+    expect(await told("Cloud deployment discovery asks which network first, mainnet or ghostnet, sir.")).toEqual({ spoken: ["Sorry, I didn't catch that."], sent: [] })
+    // Begun once its own voice could no longer get in, his words go as its answer, as ever.
+    expect(await told()).toEqual({ spoken: ["On it, sir. It was waiting on a question, so that's its answer."], sent: [{ requestId: "q1", answers: { network: heard } }] })
+  })
+
   test("an answer in his own words, or a message that went as one, takes turns with his own going-ahead lines, while a picked option is said back", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const network = { id: "network", question: "Which network first?", options: [{ label: "Mainnet" }, { label: "Ghostnet" }] }
@@ -5933,6 +5969,34 @@ describe("Assistant", () => {
       }),
     )
     expect(twice).toEqual(["Tell the Tesla's migration to rebase on master.", "Tell the Tesla's migration to rebase on master."])
+  })
+
+  test("a message whose words the model left out, begun over yapd's own voice, sends none of what he said, at once or once he says which, and he's asked to say it again", async () => {
+    const line = "Use staging, the Tezos thread says, sir."
+    const heard = "Use staging. Tell the migration one to add tests."
+    const unworded = (sure: Brain.Sure, echo?: string) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, followUp, answer, dispatched, spoken } = yield* assistant((situation) =>
+            situation.utterance.heard.startsWith("What")
+              ? Brain.decision({ act: "answer", target: handle(situation, tezos), spoken: line })
+              : situation.utterance.heard === heard
+                ? Brain.decision({ act: "send", target: handle(situation, tezos), sure, others: sure === "high" ? "" : handle(situation, mina), how: "now" })
+                : undefined,
+          )
+          yield* dictate("What does the Tezos one say?")
+          // He speaks over it, its own words heard first.
+          yield* followUp(heard, 3, undefined, echo, echo === undefined ? undefined : "Tell the migration one to add tests.")
+          // By position, which needs no model.
+          if (sure !== "high") yield* answer("The first one.")
+          return { sent: dispatched.map(({ threadId, text }) => [threadId, text]), spoken: spoken().slice(1) }
+        }),
+      )
+    expect(await unworded("high", line)).toEqual({ sent: [], spoken: ["Sorry, I didn't catch that."] })
+    expect(await unworded("low", line)).toEqual({ sent: [], spoken: ["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?", "Sorry, I didn't catch that."] })
+    // Begun once its own voice could no longer get in, his words go as he said them, as ever.
+    expect(await unworded("high")).toEqual({ sent: [[tezos.id, heard]], spoken: ["On it, sir."] })
+    expect(await unworded("low")).toEqual({ sent: [[tezos.id, heard]], spoken: ["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?", "On it, sir: Migrate Tezos Integration."] })
   })
 
   test("nothing is dispatched for a dictation heard before yapd was turned off and on", async () => {
