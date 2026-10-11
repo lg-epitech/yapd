@@ -3300,6 +3300,59 @@ describe("Daemon with threads muted", () => {
     expect(result).toEqual(["yapd. Something long."])
   })
 
+  test.each([
+    ["its hook says it needs him", "Which network first?", { needs_you: true }],
+    ["the summary finds it needs him", "The tests failed.", {}],
+    ["it couldn't be summed up", "Should I drop the old table?", {}],
+  ])("a turn no hook told of, kept quiet as its thread is muted, still lets its own Stop through when %s", async (_, message, extra) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, handle, wait, played, nextEvent, journal } = yield* make(undefined, {
+          mutes,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }),
+          urgentMessages: ["The tests failed."],
+          unsummarizable: ["Should I drop the old table?"],
+        })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        yield* made.finished(unhooked(message === "Which network first?" ? message : "The loader is halfway.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Muted update for yapd")
+        // Its own Stop, late, with what T3 Code didn't know.
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: message, ...extra }, { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        yield* wait(11)
+        return { played: [...played], kept: (yield* journal.since(0, { kinds: ["update", "action"] })).map((entry) => [entry.kind, quieted(entry)]) }
+      }),
+    )
+    expect(result.played).toEqual([message === "Should I drop the old table?" ? "yapd finished a turn, but I couldn't summarize it." : `yapd. ${message}`])
+    expect(result.kept).toEqual([
+      ["update", true],
+      ["update", false],
+    ])
+  })
+
+  test("a turn no hook told of, dropped as it waited once its thread was muted, still lets its own Stop through when its hook says it needs him", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, handle, wait, played, nextEvent } = yield* make(undefined, { mutes })
+        yield* finish("playing", "Something long.")
+        yield* made.finished(unhooked("Which network first?", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Ready: yapd. Which network")
+        yield* Option.getOrThrow(made.controls).mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        yield* handle(
+          "claude",
+          { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: "Which network first?", needs_you: true },
+          { project: "yapd", host: hostname() },
+          false,
+        )
+        for (let index = 0; index < 3; index++) yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Something long.", "yapd. Which network first?"])
+  })
+
   test("a turn no hook told of that a message of yapd's started is said, though he muted its thread", async () => {
     const result = await run(
       Effect.gen(function* () {

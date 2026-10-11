@@ -163,6 +163,12 @@ export const make = (
      * back by a dictation to be read again, it isn't, until it's said again.
      */
     heard: boolean
+    /**
+     * Whether it was kept quiet rather than said, since he muted its thread:
+     * it's the turn's all the same, but a Stop of its own coming late is
+     * still said when it needs him.
+     */
+    quiet: boolean
     /** Its entry in the journal, once it's kept, to note as dealt with if a Stop of its own takes its place. */
     row?: number
   }
@@ -580,7 +586,27 @@ export const make = (
     readonly answering: boolean
     /** The prompt its turn began with, through the hooks, and when, to tell whether it's one yapd sent its thread. */
     readonly prompted?: { readonly text: string | undefined; readonly at: number }
+    /**
+     * For a Stop whose turn was said in its hook's place, but kept quiet as
+     * he muted its thread, that turn: the Stop is said only if it needs him,
+     * as otherwise the turn was kept quiet already.
+     */
+    readonly over?: Fallback
   }
+
+  /** A Stop whose turn was said, or kept quiet, in its hook's place from T3 Code's word, kept as such, so the journal still has what its hook told of. */
+  const passedThrough = (at: number, thread: Thread, project: string, over: Fallback, session: string) =>
+    journal.write({
+      at,
+      kind: "action",
+      host: thread.origin.host,
+      project,
+      machine: over.about.machine,
+      thread: over.about.id,
+      directory: thread.cwd,
+      text: thread.message,
+      detail: { through: over.key, session },
+    })
 
   /**
    * Keeps quiet an update whose thread he muted: its Stop hook is let go of
@@ -614,8 +640,11 @@ export const make = (
         const row = Option.flatten(kept)
         if (Option.isSome(row)) fallback.row = row.value
       }
-      // Kept quiet in its hook's place, it's the turn's, as one he told to stop is.
-      if (fallback !== undefined) fallback.heard = true
+      // Kept quiet in its hook's place, it's the turn's, as one he told to stop is, but what of it needs him is still said.
+      if (fallback !== undefined) {
+        fallback.heard = true
+        fallback.quiet = true
+      }
       const thread = keys.find((key) => key.startsWith("t3:"))
       if (thread !== undefined && mute.key !== thread && options.mutes !== undefined) yield* options.mutes.rekey(mute.key, thread)
       yield* Effect.logInfo(`Muted update for ${project}`)
@@ -663,6 +692,12 @@ export const make = (
       )
       // Whoever sent it knows it needs the user, whatever the summary makes of it.
       const priority = needsYou ? "needs-you" : summary.priority
+      // Its turn was kept quiet in its hook's place: only what needs him of it, or may, or answers what he asked, is said now.
+      if (finished.over !== undefined && priority !== "needs-you" && summarized && !finished.answering) {
+        yield* release(hook)
+        yield* passedThrough(arrivedAt, thread, project, finished.over, session)
+        return yield* Effect.logInfo("Skipped update, kept quiet already from T3 Code's word that it finished")
+      }
       // Even a reply to a follow-up, since yapd already said it passed that on.
       if (priority === "trivial") {
         yield* release(hook)
@@ -904,6 +939,7 @@ export const make = (
         return false
       }
       fallback.heard = true
+      fallback.quiet = false
       return true
     }).pipe(events.withPermits(1))
 
@@ -947,6 +983,7 @@ export const make = (
         current: input.current,
         at,
         heard: false,
+        quiet: false,
       }
       forsake(session)
       fallbacks.set(input.key, fallback)
@@ -1063,21 +1100,11 @@ export const make = (
           const queued = channel !== undefined && channel.queued.length > 0
           if (queued && hook !== undefined) channel.hook = hook
           const summaryHook = queued ? undefined : hook
-          if (through !== undefined) {
+          // Kept quiet in its place, since he muted its thread, it's summed up all the same, and said if it needs him.
+          if (through !== undefined && !through.quiet) {
             yield* release(summaryHook)
             yield* Effect.logInfo("Skipped update, said already from T3 Code's word that it finished").pipe(Effect.annotateLogs({ project }))
-            // Kept as said through T3 Code's word, so the journal still has what its hook told of.
-            yield* journal.write({
-              at: arrivedAt,
-              kind: "action",
-              host: origin.host,
-              project,
-              machine: through.about.machine,
-              thread: through.about.id,
-              directory: payload.cwd,
-              text: message,
-              detail: { through: through.key, session },
-            })
+            yield* passedThrough(arrivedAt, thread, project, through, session)
             return hook
           }
           yield* FiberMap.run(
@@ -1098,6 +1125,7 @@ export const make = (
               owner: owning(payload.session_id, payload.cwd, origin),
               answering: followedUp,
               ...(prompt === undefined ? {} : { prompted: prompt }),
+              ...(through === undefined ? {} : { over: through }),
             }),
           )
           return hook
@@ -1327,7 +1355,10 @@ export const make = (
         yield* removeFile(Inbox.audio(entry))
         if (!heardAlready(heard, entry.update)) yield* release(entry.hook)
         const fallback = standing.get(entry.update)
-        if (fallback !== undefined) fallback.heard = true
+        if (fallback !== undefined) {
+          fallback.heard = true
+          fallback.quiet = true
+        }
         const row = rows.get(entry.update)
         if (row !== undefined) kept.push(row)
       }
