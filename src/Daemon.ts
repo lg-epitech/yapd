@@ -595,7 +595,7 @@ export const make = (
     readonly fallback?: Fallback
     /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
     readonly answering: boolean
-    /** The prompt its turn began with, through the hooks, and when, to tell whether it's one yapd sent its thread. */
+    /** The prompt its turn began with, through the hooks or as T3 Code has its run, and when, to tell whether it's one yapd sent its thread. */
     readonly prompted?: { readonly text: string | undefined; readonly at: number }
     /**
      * For a Stop whose turn was said in its hook's place, but kept quiet as
@@ -699,8 +699,9 @@ export const make = (
    * prompt's words, as a message that waited in T3 Code's queue. One that
    * went into the queue once the turn was under way waits for a turn of its
    * own, which it begins in its words: the turn it waited behind isn't his.
-   * Never for a turn whose prompt never came through the hooks, which can't
-   * be told.
+   * For a turn said in its hook's place, its run's prompt and start, as T3
+   * Code has them. Never for a hook's turn whose prompt never came through
+   * the hooks, which can't be told.
    */
   const asked = (to: Threads.Ref, finished: Finished) =>
     Effect.gen(function* () {
@@ -732,8 +733,15 @@ export const make = (
       )
       // Whoever sent it knows it needs the user, whatever the summary makes of it.
       const priority = needsYou ? "needs-you" : summary.priority
+      /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
+      const tied = Option.orElse(about, () => owner)
+      // What answers what yapd sent its thread for him, as a message by the shortcut, is his own ask too.
+      const answering = finished.answering || (priority !== "needs-you" && Option.isSome(tied) && (yield* asked(tied.value, finished)))
+      // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
+      // summed up may be either, as far as yapd can tell, so it's said.
+      const mutable = priority !== "needs-you" && !answering && summarized
       // Its turn was kept quiet in its hook's place: only what needs him of it, or may, or answers what he asked, is said now.
-      if (finished.over !== undefined && priority !== "needs-you" && summarized && !finished.answering) {
+      if (finished.over !== undefined && mutable) {
         yield* release(hook)
         yield* passedThrough(arrivedAt, thread, project, finished.over, session)
         yield* quieten(finished.stop)
@@ -746,8 +754,6 @@ export const make = (
       }
 
       const spoken = introduce(project, summary.spoken)
-      /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
-      const tied = Option.orElse(about, () => owner)
       // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread.
       const detail = {
         priority,
@@ -770,11 +776,6 @@ export const make = (
         ...(Option.isSome(about) ? {} : Option.match(owner, { onNone: () => ({}), onSome: (owner) => ({ owner }) })),
       }
       const keys = Mutes.keysOf({ session, thread, ...ties }, called)
-      // What answers what yapd sent its thread for him, as a message by the shortcut, is his own ask too.
-      const answering = finished.answering || (priority !== "needs-you" && Option.isSome(tied) && (yield* asked(tied.value, finished)))
-      // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
-      // summed up may be either, as far as yapd can tell, so it's said.
-      const mutable = priority !== "needs-you" && !answering && summarized
       const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, muted.value)
 
@@ -1029,6 +1030,8 @@ export const make = (
         heard: false,
         quiet: false,
       }
+      // What he said by voice back through the hook of one of its run's sessions, still waiting on its answer, is answered by it, as its Stop would be.
+      const followedUp = [...followed.values()].some(({ current }) => current !== undefined && input.run.natives.includes(current.update.thread.session))
       forsake(session)
       fallbacks.set(input.key, fallback)
       // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.
@@ -1060,7 +1063,9 @@ export const make = (
           about: Effect.succeedSome(input.about),
           owner: Effect.succeedNone,
           fallback,
-          answering: input.answering === true,
+          answering: input.answering === true || followedUp,
+          // Its run's prompt and start, so a message yapd sent the thread for him, steered into it or begun in its words, is told as a hook's is.
+          prompted: { text: Option.getOrUndefined(input.turn.prompt), at: input.run.startedAt },
         }),
       )
     }).pipe(events.withPermits(1))

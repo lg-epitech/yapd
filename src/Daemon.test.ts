@@ -3194,6 +3194,160 @@ describe("Daemon with threads muted", () => {
     expect(result).toEqual(["yapd. The fee table is bumped.", "yapd. The fast tests pass."])
   })
 
+  test("a muted thread's turn he steered a message into is said from T3 Code's word, so its Stop coming late isn't dropped, nor said twice", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const ledger: Array<{ readonly at: number; readonly digest: string | null; readonly how: Ledger.How }> = []
+        const { made, handle, wait, nextEvent, played } = yield* make(undefined, {
+          mutes,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          sent: (_, since) => Effect.succeed(ledger.filter(({ at }) => at >= since)),
+        })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-tezos" }), called: "the Tezos migration" })
+        yield* wait(600)
+        const started = yield* Clock.currentTimeMillis
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt: "Run the integration tests." }, { project: "yapd", host: hostname() }, false)
+        yield* wait(60)
+        // A minute in, yapd steers what he said into the turn under way.
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest("Skip the slow ones."), how: "steered" })
+        yield* wait(60)
+        // T3 Code's word that it finished comes first, then its Stop half a minute late.
+        const ended = yield* Clock.currentTimeMillis
+        yield* made.finished({
+          ...unhooked("The fast tests pass.", "run-1", (yield* made.power).turns),
+          about: { machine: "Rosie", id: "t-tezos" },
+          turn: { prompt: Option.some("Run the integration tests."), message: "The fast tests pass." },
+          at: ended,
+          run: { status: "completed", final: "The fast tests pass.", others: [], natives: ["s-tezos"], previous: Option.none(), startedAt: started },
+        })
+        yield* nextEvent("Ready: yapd. The fast tests pass.")
+        yield* wait(30)
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The fast tests pass." }, { project: "yapd", host: hostname() }, false)
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The fast tests pass."])
+  })
+
+  test("a muted thread's Stop coming late answers a message he steered into its turn, though T3 Code's word, which couldn't tell, was kept quiet", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const ledger: Array<{ readonly at: number; readonly digest: string | null; readonly how: Ledger.How }> = []
+        const { made, handle, wait, nextEvent, played, journal } = yield* make(undefined, {
+          mutes,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          sent: (_, since) => Effect.succeed(ledger.filter(({ at }) => at >= since)),
+        })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-tezos" }), called: "the Tezos migration" })
+        yield* wait(600)
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt: "Run the integration tests." }, { project: "yapd", host: hostname() }, false)
+        yield* wait(30)
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest("Skip the slow ones."), how: "steered" })
+        yield* wait(90)
+        // T3 Code didn't say when the run started, so its word is taken as starting as it ended, after what he steered into it.
+        const ended = yield* Clock.currentTimeMillis
+        yield* made.finished({
+          ...unhooked("The fast tests pass.", "run-1", (yield* made.power).turns),
+          about: { machine: "Rosie", id: "t-tezos" },
+          turn: { prompt: Option.some("Run the integration tests."), message: "The fast tests pass." },
+          at: ended,
+          run: { status: "completed", final: "The fast tests pass.", others: [], natives: ["s-tezos"], previous: Option.none(), startedAt: ended },
+        })
+        yield* nextEvent("Muted update for yapd")
+        yield* wait(30)
+        // Its Stop has the prompt it began with, which tells.
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The fast tests pass." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready: yapd. The fast tests pass.")
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { played: [...played], missed: (yield* journal.unheard(0, 10)).length }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The fast tests pass."])
+    // Told of now, the turn kept quiet isn't what he missed too.
+    expect(result.missed).toBe(0)
+  })
+
+  test("a muted thread with no hooks says the turn he steered a message into, and the one his queued message began, but not the turn it waited behind", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const ledger: Array<{ readonly at: number; readonly digest: string | null; readonly how: Ledger.How }> = []
+        const { made, wait, nextEvent, played } = yield* make(undefined, {
+          mutes,
+          sent: (_, since) => Effect.succeed(ledger.filter(({ at }) => at >= since)),
+        })
+        const about = { machine: "Rosie", id: "t-loader" }
+        yield* mutes.mute({ key: Mutes.key.thread(about) })
+        const { turns } = yield* made.power
+        /** A run of an agent yapd has no hooks for, which T3 Code tells of as it ends. */
+        const ran = (runId: string, prompt: string, message: string, startedAt: number) =>
+          Effect.gen(function* () {
+            const at = yield* Clock.currentTimeMillis
+            yield* made.finished({
+              ...unhooked(message, runId, turns),
+              turn: { prompt: Option.some(prompt), message },
+              at,
+              run: { status: "completed", final: message, others: [], natives: [], previous: Option.none(), startedAt },
+            })
+          })
+        yield* wait(600)
+        // Steered into the turn under way.
+        const first = yield* Clock.currentTimeMillis
+        yield* wait(60)
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest("Skip the slow ones."), how: "steered" })
+        yield* wait(60)
+        yield* ran("run-1", "Run the integration tests.", "The fast tests pass.", first)
+        yield* nextEvent("Ready: yapd. The fast tests pass.")
+        yield* wait(11)
+        // Queued behind the next turn, which isn't his, and then the turn it began.
+        const second = yield* Clock.currentTimeMillis
+        yield* wait(60)
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest("Then bump the fee table."), how: "queued" })
+        yield* wait(60)
+        yield* ran("run-2", "Migrate the fee module.", "The fee module is migrated.", second)
+        yield* nextEvent("Muted update for yapd")
+        const third = yield* Clock.currentTimeMillis
+        yield* wait(60)
+        yield* ran("run-3", "Then bump the fee table.", "The fee table is bumped.", third)
+        yield* nextEvent("Ready: yapd. The fee table is bumped.")
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The fast tests pass.", "yapd. The fee table is bumped."])
+  })
+
+  test("a muted thread's turn no hook told of that answers what he said by voice back through one of its sessions' hooks is said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, speak, wait, nextEvent, nextPlayback, played, followUps } = yield* make("Use the fee table.", { mutes, send: () => Effect.void })
+        yield* finish("tezos", "The migration compiles.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        // T3 Code's word of the turn that answers it, as its Stop never came.
+        const startedAt = yield* Clock.currentTimeMillis
+        yield* wait(60)
+        yield* made.finished({
+          ...unhooked("The fee table is in.", "run-1", (yield* made.power).turns),
+          at: yield* Clock.currentTimeMillis,
+          run: { status: "completed", final: "The fee table is in.", others: [], natives: ["tezos"], previous: Option.none(), startedAt },
+        })
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { played: [...played], followUps: [...followUps] }
+      }),
+    )
+    expect(result.followUps).toEqual(["tezos sent: Use the fee table."])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in."])
+  })
+
   test("a turn that couldn't be summed up is said on a muted thread, since it may be a question or a failure", async () => {
     const result = await run(
       Effect.gen(function* () {
