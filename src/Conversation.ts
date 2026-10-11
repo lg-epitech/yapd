@@ -744,6 +744,19 @@ export const make = (options: {
       })
 
     /**
+     * Listens on, `wait` longer, after a line of `duration` that was said to
+     * the end, as for a reply to it: for when only its own voice, or what may
+     * have been, got into the microphone as it ended.
+     */
+    const harken = (text: string, duration: number, ear: Effect.Effect<Ear | undefined>, wait: Duration.DurationInput) =>
+      Effect.gen(function* () {
+        const listening = yield* ear
+        if (listening === undefined || listening.deaf) return { _tag: "Finished" } satisfies Outcome
+        const ended: Playback = { duration, confirmed: true, finished: Effect.void, stop: Effect.succeed(duration), volume: () => Effect.void }
+        return yield* listen(ended, listening, text, duration, wait, Effect.void)
+      }).pipe(Effect.scoped)
+
+    /**
      * Works out a reply while still listening, so pausing mid-thought doesn't cut
      * the user off: if they carry on before it's ready, it starts again with all
      * they said, and how many seconds of all of it were speech. Nothing's done
@@ -937,13 +950,21 @@ export const make = (options: {
           let path = update.audio
           let from = 0
           let missed = 0
+          /** Said to the end, the line's length, when only its own voice, or what may have been, stopped it as it ended: it listens on once for his reply. */
+          let ended: number | undefined
+          let lingered = false
 
           while (true) {
-            const outcome: Outcome = yield* speak(path, text, from, missed < misses ? ear : Effect.succeed(undefined), {
-              // Noted only once it's known to play, so a line for going ahead that fails to render or play, or that a dictation cuts in before, never counts as the last one he heard.
-              confirmed: path === update.audio ? Effect.void : persona.said(text),
-              through: path === update.audio ? through : Effect.void,
-            })
+            const listening = missed < misses ? ear : Effect.succeed(undefined)
+            const outcome: Outcome =
+              ended === undefined
+                ? yield* speak(path, text, from, listening, {
+                    // Noted only once it's known to play, so a line for going ahead that fails to render or play, or that a dictation cuts in before, never counts as the last one he heard.
+                    confirmed: path === update.audio ? Effect.void : persona.said(text),
+                    through: path === update.audio ? through : Effect.void,
+                  })
+                : yield* harken(text, ended, listening, linger)
+            ended = undefined
             if (outcome._tag === "Finished") return true
             // Replying to something yapd had finished saying: there's nothing to go back to.
             const after = outcome.at >= outcome.duration
@@ -955,9 +976,19 @@ export const make = (options: {
 
             const first = yield* unlogged(outcome.audio)
             const { itself, echo, unsure } = yield* whose(outcome, first)
+            // Its own last words as it ended leave him the usual moment to reply, once.
+            const listenOn = () => {
+              if (lingered) return false
+              lingered = true
+              ended = outcome.duration
+              return true
+            }
             // Not talk that wasn't meant for yapd, which it stops listening after so much of: only over its first seconds.
             if (itself) {
-              if (after) return true
+              if (after) {
+                if (listenOn()) continue
+                return true
+              }
               from = Math.max(from, outcome.at - before)
               continue
             }
@@ -1013,7 +1044,10 @@ export const make = (options: {
 
             if (reply.intent === "dismiss") return !doubted
             if (reply.intent === "resume") {
-              if (after) return true
+              if (after) {
+                if (echo !== undefined && listenOn()) continue
+                return true
+              }
               // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
               if (echo === undefined) carryOn()
               else from = Math.max(from, outcome.at - before)
@@ -1032,6 +1066,7 @@ export const make = (options: {
             yield* options.saying(update, text)
             from = 0
             missed = 0
+            lingered = false
           }
         }).pipe(
           Effect.scoped,
@@ -1059,13 +1094,16 @@ export const make = (options: {
         let missed = 0
         let begun = said.saying ?? Effect.void
         let confirmed = said.confirmed ?? Effect.void
+        /** As for an update, the line's length when it listens on once after its own voice as it ended. */
+        let ended: number | undefined
+        let lingered = false
         while (true) {
-          const outcome: Outcome = yield* speak(said.audio, said.spoken, from, missed < misses ? ear : Effect.succeed(undefined), {
-            wait,
-            begun,
-            confirmed,
-            through: said.through ?? Effect.void,
-          })
+          const listening = missed < misses ? ear : Effect.succeed(undefined)
+          const outcome: Outcome =
+            ended === undefined
+              ? yield* speak(said.audio, said.spoken, from, listening, { wait, begun, confirmed, through: said.through ?? Effect.void })
+              : yield* harken(said.spoken, ended, listening, wait)
+          ended = undefined
           begun = Effect.void
           confirmed = Effect.void
           if (outcome._tag === "Finished") return false
@@ -1080,6 +1118,12 @@ export const make = (options: {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(reply.value)
             return true
+          }
+          // Its own last words as it ended, or what may have been, leave him the usual moment to answer, once.
+          if (outcome.at >= outcome.duration && (itself || echo !== undefined) && !lingered) {
+            lingered = true
+            ended = outcome.duration
+            continue
           }
           // Talk that wasn't meant for yapd, once all of it was said, ends it: a question is left unanswered.
           if (outcome.at >= outcome.duration) return false

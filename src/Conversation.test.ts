@@ -1476,10 +1476,41 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     ).toEqual({ commands: ["play", "volume"], responded: [], sent: [], offered: [{ heard: "The menu bar app.", told: false }], done: true })
   })
 
-  test("falls quiet, taking nothing, when only its own last words got into the microphone as a line ended within its first seconds", async () => {
-    // No longer than its voice dying away after.
-    const result = await ending(1.95, defaults.wary, { spoken: "The PR is ready, sir. Merge it?", duration: 2, heard: "Merge it.", finished: true })
-    expect(result).toEqual({ commands: ["play", "volume"], responded: [], sent: [], offered: [], done: true })
+  test("listens on for his reply, taking nothing of its own, when only its own last words got into the microphone as a line ended within its first seconds", async () => {
+    const after = (reply: boolean, answer: boolean) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.8, "Ready."], [0.9, "Merge it."]], { spoken: "The PR is ready.", duration: 2, answer })
+          yield* helper.wait(1.95)
+          yield* helper.talk(0, defaults.lead)
+          // Its own "ready", no longer than its voice dying away after, which plays to its end before it's clearly speech.
+          yield* helper.talk(0.8, 1)
+          yield* helper.finish
+          yield* helper.talk(0.8, defaults.wary - 1)
+          yield* helper.quiet
+          // His reply, a second on.
+          yield* helper.wait(1)
+          if (reply) {
+            yield* helper.talk(0.9, 16)
+            yield* helper.quiet
+          }
+          yield* helper.wait(1)
+          const before = Option.isSome(yield* Fiber.poll(helper.fiber))
+          yield* helper.wait(10)
+          return {
+            commands: helper.commands,
+            responded: helper.responded.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
+            sent: helper.sent,
+            offered: helper.offered.map(({ heard, echo }) => ({ heard, told: echo !== undefined })),
+            before,
+            done: Option.isSome(yield* Fiber.poll(helper.fiber)),
+          }
+        }),
+      )
+    expect(await after(true, false)).toMatchObject({ commands: ["play", "volume", "play"], responded: [{ heard: "Merge it.", told: false }], sent: ["Merge it."] })
+    expect(await after(true, true)).toMatchObject({ commands: ["play", "volume"], offered: [{ heard: "Merge it.", told: false }], done: true })
+    // With none, it falls quiet once the usual moment for a reply is up.
+    expect(await after(false, false)).toEqual({ commands: ["play", "volume"], responded: [], sent: [], offered: [], before: false, done: true })
   })
 
   test.each(["Stop.", "Thank you."])("takes \"%s\" over its first seconds for his once it goes on past where yapd stopped, though yapd was saying \"stopped\" and Whisper makes up \"Thank you.\", and for its own voice when it doesn't", async (heard) => {
