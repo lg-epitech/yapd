@@ -14,9 +14,12 @@ There's no authentication: anything that can reach the port can use it, as hooks
 {
   "on": true,
   "activity": "speaking",
+  "mode": "focus",
+  "until": "2026-10-02T15:00:00.000Z",
+  "waiting": 1,
   "updates": [
     {
-      "id": "4b9f2c1e-7d3a-4f0b-9a51-0c2e8d6f1a77",
+      "id": "1872",
       "project": "yapd",
       "text": "yapd. The tests pass and the PR is up.",
       "at": "2026-10-02T14:03:11.000Z"
@@ -53,7 +56,10 @@ There's no authentication: anything that can reach the port can use it, as hooks
 
 - `on`: whether yapd is on. While it's off, it says nothing, never opens the microphone and lets go of the dictation shortcut. Updates that finish meanwhile are never said, not even later.
 - `activity`: `speaking` while yapd plays something, `listening` while the microphone is open without it, for a reply after an update or while you dictate, and `idle` otherwise.
-- `updates`: the last five updates yapd said, newest first, to [hear again](#hearing-an-update-again). `text` is what it said and `at` when the agent's turn ended. They're forgotten when yapd restarts.
+- `mode`: how yapd talks of its own accord. `normal` says what finished and what needs you; `focus` and `quiet` say only what needs you, and hold the rest for later. See [Modes](#modes). A yapd from before modes doesn't send it: take that as `normal`.
+- `until`: when `focus` or `quiet` ends on its own, only while one is on.
+- `waiting`: how many threads wait on you for an approval or an answer, on every machine whose threads yapd can see. A yapd from before it doesn't send it: take that as `0`.
+- `updates`: the last five updates you heard, newest first, to [hear again](#hearing-an-update-again). `text` is what yapd said and `at` when the agent's turn ended. They're kept through a restart, under the same `id`s. Treat an `id` as a name. A yapd from before that forgets them when it restarts, and its ids change then.
 - `recent`: the threads with the latest updates, one row each, newest first: up to eight, from the last seven days, whether or not yapd said them, so muted threads are there too. It's kept through a restart. A yapd from before it doesn't send it. See [Recent threads](#recent-threads).
 - `showing`: the [card](#cards) yapd is showing, or `null`. `kind` and `title` are the card's, and `at` is when yapd put it up. Fetch the card itself from `/cards/{id}`. A yapd from before cards doesn't send it at all.
 - `revision` in `showing`: the `revision` the card went up at, this time. It stays the same while the card stays up, even as the state's own moves on, and a card put back up is up anew, at a later one. Send it to [take the card down](#cards) only as it went up then. A yapd from before it doesn't send it.
@@ -73,19 +79,38 @@ curl -sN http://127.0.0.1:4747/state/stream | sed -un 's/^data: //p' | jq --unbu
 
 A UI that shows yapd's [cards](#cards), like the menu bar app, follows `/state/stream?cards` instead. While one does, yapd takes what it puts up to be on your screen, and says so.
 
-## Turning yapd on and off
+## Turning yapd on and off, and changing its mode
 
-`PUT /state` with `{"on": false}` or `{"on": true}` as JSON returns the new state. It stays that way when yapd restarts.
+`PUT /state` with JSON changes only what it names, and returns the new state:
+
+- `{"on": false}` or `{"on": true}` turns yapd off or on.
+- `{"mode": "focus"}`, `{"mode": "quiet"}` or `{"mode": "normal"}` changes its [mode](#modes). With `"until"`, a time to come within a day, like `{"mode": "focus", "until": "2026-10-02T15:00:00.000Z"}`, focus or quiet ends then. Without it, focus lasts an hour and quiet lasts until 8:00 in the morning, yapd's time.
+
+Both can go together, `on` first. Each stays that way when yapd restarts, and a mode whose time ran out while yapd was down is back to `normal` when it starts.
 
 ```sh
 curl -X PUT -H 'Content-Type: application/json' -d '{"on": false}' http://127.0.0.1:4747/state
+curl -X PUT -H 'Content-Type: application/json' -d '{"mode": "focus"}' http://127.0.0.1:4747/state
 ```
 
-Turning it off stops whatever yapd is saying at once, and drops whatever hasn't started yet: what was waiting to be said, a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it. The [card](#cards) yapd is showing comes down too, so `showing` is `null`.
+| Status | |
+| --- | --- |
+| `200` | The new state. |
+| `400` | The body names neither `on` nor `mode`, or couldn't be read: `on` isn't true or false, `mode` isn't one of the three, or `until` comes without `focus` or `quiet`, isn't a time, has gone, or is more than a day off. Nothing changes then. |
+
+Turning it off stops whatever yapd is saying at once, and drops whatever hasn't started yet: what was waiting to be said, a dictation being recorded or transcribed, and new work still being written up or waiting on an answer. A session already being started still starts, but nothing is said about it. The [card](#cards) yapd is showing comes down too, so `showing` is `null`. While it's off, its mode stays as it was, and a mode that ends meanwhile ends without a word.
+
+## Modes
+
+yapd starts each update with its headline, about fifteen words, and keeps the rest for when you say "more". What it says only to tell you how something's going, like another review round, it holds for a digest, a short catch-up said once things have been quiet for a minute, at most every twenty minutes, when three such updates are waiting or one has waited twenty minutes. "Give me everything" has yapd say every update in full and hold none of them, until "talk shorter".
+
+Focus and quiet hold everything that doesn't need you, the same way a [muted thread](#muting-a-thread) is held: a question a thread asks, a run that failed or hit a limit, and the answer to a message you sent a thread yourself still come through. Quiet is focus until the morning, with "goodnight" for its words. Set either from here or by voice: "focus", "focus for two hours", "quiet for an hour", "goodnight", and "I'm back" to end it, which gives you the rundown of what was held. A mode that ends on its own, or from here, offers the rundown once instead. Turning yapd off is still the way to hear nothing at all.
+
+What was held is kept like any update, unheard, so "what did I miss?" and `recent` still have it. Nothing about modes or the digest ever reaches an agent.
 
 ## Hearing an update again
 
-`POST /updates/{id}/replay` says an update again, as it was said, without summing it up again. It goes ahead of updates that don't need you. You can reply to it like to any update, and a reply only goes to the agent if its session hasn't moved on since.
+`POST /updates/{id}/replay` says an update again, as it was said, without summing it up again. It goes ahead of updates that don't need you. You can reply to it like to any update, and a reply only goes to the agent if its session hasn't moved on since. One heard before yapd restarted is said again too, and a reply to it goes to its thread through T3 Code, or the way its hook was answered when it isn't tied to a thread here, which may no longer reach it: yapd says so then.
 
 | Status | |
 | --- | --- |
@@ -233,7 +258,7 @@ You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "wha
 
 ## Hearing a thread again
 
-`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When that latest update is one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there. Otherwise, for a thread yapd can reach, it says what it kept of it, and "it" then means that thread. Anything else, a session's row or a thread yapd can't reach (archived, deleted, or on a machine that's away), isn't said again: it's `replayable: false` in `recent`, and this answers `409` and plays nothing.
+`POST /threads/{key}/replay` says the thread's latest update again, by its `key` from `recent`, even a muted one. When that latest update is one of the `updates` you heard, it's said as [hearing an update again](#hearing-an-update-again) says it, so a reply to it still gets there. Otherwise, for a thread yapd can reach, it says what it kept of it, and "it" then means that thread, and counts it as heard, so a digest or "what did I miss?" doesn't tell you of it again. Anything else, a session's row or a thread yapd can't reach (archived, deleted, or on a machine that's away), isn't said again: it's `replayable: false` in `recent`, and this answers `409` and plays nothing.
 
 | Status | |
 | --- | --- |
@@ -259,7 +284,7 @@ You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "wha
 ]
 ```
 
-- `kind`: `update` for an agent's turn yapd summed up, whether it said it or the thread was muted, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, and `action` for anything else it did, like turning off or muting a thread.
+- `kind`: `update` for an agent's turn yapd summed up, whether it said it, the thread was muted, or yapd held it for later, `reply` for what you said back to one, `dictation` for what you dictated or typed, `answer` for what yapd answered, `started` for work it started, `sent` for a message it passed on, `notice` for something it brought up itself, `brief` for a digest or a rundown of what it held, and `action` for anything else it did, like turning off, muting a thread or changing its mode.
 - `said` is what yapd said, `text` the words it was about, like what you said or an agent's message, and `heard` when you heard it through.
 - `machine` and `project` are where it happened, `thread` the id of the T3 Code thread it's about, as [`/threads`](#threads) has it, and `utterance` the id of the request it came from, as [`/utterances`](#asking-yapd-something) gives it.
 - Each is there only when there's one.
