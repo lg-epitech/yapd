@@ -78,42 +78,53 @@ export const make = (options: {
       const latest = yield* journal.latest(now - week, read)
       const muted = new Map((yield* mutes.list).map((mute) => [mute.key, mute]))
       const sessions = latest.some(sessionRow)
-      // The session of each thread's latest update, even when what came since, like a question it asked, has none.
-      const owned = new Map(
-        yield* Effect.forEach(latest, (kept) =>
+      // The session of each thread's latest update, even when what came since, like a question it asked, has none, and, beside a
+      // session's own row, every session its recent updates came from, as a resumed one, or one whose link timed out before.
+      const found = new Map<Kept, { readonly own: string | undefined; readonly all: ReadonlyArray<string> }>()
+      yield* Effect.forEach(
+        latest,
+        (kept) =>
           Effect.gen(function* () {
-            if (sessionRow(kept)) return [kept, undefined] as const
+            if (sessionRow(kept)) return
             const own = sessionOf(kept)
-            if (own !== undefined || kept.thread === undefined) return [kept, own] as const
-            const before = yield* journal.byThread(kept.machine ?? here, kept.thread, read)
-            return [kept, before.filter(({ kind }) => kind === "update").map(sessionOf).find((session) => session !== undefined)] as const
+            if ((own !== undefined && !sessions) || kept.thread === undefined) return void found.set(kept, { own, all: own === undefined ? [] : [own] })
+            const before = (yield* journal.byThread(kept.machine ?? here, kept.thread, read)).filter(({ kind }) => kind === "update").map(sessionOf)
+            const all = [...new Set([own, ...before].filter((session) => session !== undefined))]
+            found.set(kept, { own: own ?? before.find((session) => session !== undefined), all })
           }),
-        ),
+        { discard: true },
       )
-      // A session's own row, once a thread shown has its update under it, as when its link timed out once, is that thread's.
-      const tied = new Set(
-        latest.flatMap((kept) => {
-          const session = owned.get(kept)
-          return session === undefined || !sessions ? [] : [`${kept.machine ?? here}\n${session}`]
-        }),
-      )
-      const rows = latest.filter((kept) => !(sessionRow(kept) && tied.has(`${kept.machine ?? here}\n${kept.thread}`))).slice(0, shown)
+      // A session's own row, once a thread shown has an update of it, as when its link timed out once, is that thread's: shown
+      // under the thread, as whichever of the two is newer.
+      const tied = new Map<string, Kept>()
+      if (sessions) for (const kept of latest) for (const session of found.get(kept)?.all ?? []) tied.set(`${kept.machine ?? here}\n${session}`, kept)
+      const newest = new Map<Kept, Kept>()
+      for (const kept of latest) {
+        const thread = sessionRow(kept) ? tied.get(`${kept.machine ?? here}\n${kept.thread}`) : undefined
+        if (thread !== undefined && kept.at > (newest.get(thread) ?? thread).at) newest.set(thread, kept)
+      }
+      const rows = latest
+        .filter((kept) => !(sessionRow(kept) && tied.has(`${kept.machine ?? here}\n${kept.thread}`)))
+        .map((kept) => ({ kept, last: newest.get(kept) ?? kept }))
+        .toSorted((one, other) => other.last.at - one.last.at || other.last.id - one.last.id)
+        .slice(0, shown)
       const under = new Map<string, ReadonlyArray<string>>()
       let blind = false
-      const listed = yield* Effect.forEach(rows, (kept) =>
+      const listed = yield* Effect.forEach(rows, ({ kept, last }) =>
         Effect.gen(function* () {
           const machine = kept.machine ?? here
           const id = kept.thread ?? ""
           const session = sessionRow(kept)
           const key = session ? Mutes.key.session(machine, id) : Mutes.key.thread({ machine, id })
-          // Muted by its session, before that session was found to be the thread's.
-          const own = owned.get(kept)
-          const by = own === undefined || own.startsWith("finished:") ? [] : [Mutes.key.session(machine, own)]
+          // Muted by its session, before that session was found to be the thread's: its latest update's, or the newer session row's it shows.
+          const own = last === kept ? found.get(kept)?.own : last.thread
+          const by = [...new Set([found.get(kept)?.own, own])].flatMap((own) => (own === undefined || own.startsWith("finished:") ? [] : [Mutes.key.session(machine, own)]))
           under.set(key, by)
           const mute = [key, ...by].map((key) => muted.get(key)).find((mute) => mute !== undefined)
           const thread = session ? Option.none() : yield* threads.find({ machine, id })
-          // Its machine's threads not in yet, what it's called and its project are looked for again soon.
-          if (Option.isNone(thread) && Option.isSome(yield* threads.unseen(machine))) blind = true
+          // Its machine's threads not in yet, what it's called and its project are looked for again soon. Never for a session's own
+          // row, which T3 Code never names, as for one from a machine yapd doesn't follow, which it never sees.
+          if (!session && Option.isNone(thread) && Option.isSome(yield* threads.unseen(machine))) blind = true
           const project = yield* threads.project(machine, session ? (kept.directory === undefined ? {} : { directory: kept.directory }) : { thread: id })
           const icon = Option.isSome(project) ? Option.some(yield* icons.icon(machine, project.value)) : Option.none<Icons.Icon>()
           const name = Option.match(project, { onNone: () => kept.project, onSome: ({ title }) => title })
@@ -131,8 +142,8 @@ export const make = (options: {
                     ...Option.match(icon, { onNone: () => ({}), onSome: (icon) => ({ icon }) }),
                   },
                 }),
-            text: kept.said ?? "",
-            at: new Date(kept.at).toISOString(),
+            text: last.said ?? "",
+            at: new Date(last.at).toISOString(),
             muted: mute !== undefined,
             ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
             waiting: Option.exists(thread, ({ pendingRuntimeRequest }) => pendingRuntimeRequest !== null),

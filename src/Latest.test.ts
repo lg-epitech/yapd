@@ -48,14 +48,16 @@ const listing = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, 
     const icons = yield* Icons.make({ actions: () => Option.none() })
     const changes = yield* Queue.unbounded<{ readonly machine: string; readonly change: T3Live.Change }>()
     const views: Record<string, ReadonlyArray<T3Live.Thread> | undefined> = { ...shown }
+    let looked = 0
     const threads: Pick<Threads.Threads["Type"], "find" | "project" | "changes" | "unseen"> = {
       // A machine's threads are seen once T3 Code there has caught up.
       unseen: (machine) => Effect.sync(() => (views[machine] === undefined ? Option.some(`I can't see ${machine}'s threads yet.`) : Option.none())),
       find: (ref) => Effect.sync(() => Option.fromNullable(views[ref.machine]?.find(({ id }) => id === ref.id))),
       project: (_, where) =>
-        Effect.succeed(
+        Effect.sync(() => void looked++).pipe(Effect.as(
+          
           where.thread !== undefined ? (Object.values(views).flatMap((all) => all ?? []).some(({ id }) => id === where.thread) ? Option.some(integration) : Option.none()) : where.directory?.startsWith("/code/integration") === true ? Option.some(integration) : Option.none(),
-        ),
+        )),
       changes: Stream.fromQueue(changes),
     }
     const latest = yield* Latest.make({ here: "Rosie", journal, mutes, icons, threads })
@@ -65,6 +67,8 @@ const listing = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, 
       latest,
       journal,
       mutes,
+      /** How many times a row's project was looked for, which each time the list is built does. */
+      looked: () => looked,
       /** T3 Code on a machine catches up, telling of no change as it does. */
       caughtUp: (machine: string, all: ReadonlyArray<T3Live.Thread>) => Effect.sync(() => void (views[machine] = all)),
       /** T3 Code shows a thread as it is now, and tells of what changed. */
@@ -180,6 +184,45 @@ describe("Latest", () => {
     )
     expect(result.rows).toEqual(["t3:rig:t-tezos · Migrate the Tezos integration · The Tezos migration asks which network first. · muted"])
     expect(result.under).toEqual(["session:rig:claude:s-tezos"])
+  })
+
+  test("a thread's row shows a newer update kept under its session, as when its link timed out, and hides its other sessions' rows", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { latest, journal } = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] })
+        yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Started, in the session before.", detail: { session: "claude:s-old" } })
+        // The session before, resumed, its link timing out.
+        yield* journal.write({ at: 2, kind: "update", host: "Rosie", thread: "claude:s-old", said: "Older, under the session before." })
+        yield* journal.write({ at: 3, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Older, linked.", detail: { session: "claude:s1" } })
+        // T3 Code was restarting, so the newest is kept under its session.
+        yield* journal.write({ at: 4, kind: "update", host: "Rosie", thread: "claude:s1", said: "Newer, under the session." })
+        yield* journal.write({ at: 0, kind: "update", machine: "Rosie", thread: "t-mina", said: "Mina, first.", detail: { session: "claude:s-mina" } })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { rows: (yield* latest.current).map(({ key, text, at }) => `${key} · ${text} · ${at}`), under: yield* latest.under("t3:Rosie:t-tezos") }
+      }),
+    )
+    expect(result.rows).toEqual([`t3:Rosie:t-tezos · Newer, under the session. · ${new Date(4).toISOString()}`, `t3:Rosie:t-mina · Mina, first. · ${new Date(0).toISOString()}`])
+    expect(result.under).toEqual(["session:Rosie:claude:s1"])
+  })
+
+  test("a session's row from a machine yapd doesn't follow never has it built again every few seconds", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { latest, journal, looked } = yield* listing({ Rosie: [] })
+        yield* journal.write({ at: 1, kind: "update", host: "other-mac.local", thread: "claude:s-away", said: "Done over there." })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const built = looked()
+        for (let index = 0; index < 6; index++) {
+          yield* TestClock.adjust("5 seconds")
+          yield* flush
+        }
+        return { rows: brief(yield* latest.current), again: looked() - built }
+      }),
+    )
+    expect(result.rows).toEqual(["session:other-mac:claude:s-away · Claude session on other-mac · Done over there."])
+    expect(result.again).toBe(0)
   })
 
   test("is built again a few seconds after a machine's threads come in, which T3 Code tells of no change for", async () => {
