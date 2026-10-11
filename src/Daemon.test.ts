@@ -4216,6 +4216,34 @@ describe("Daemon muting over an update", () => {
     expect(result.mutes).toEqual([])
   })
 
+  test("'unmute it' or 'mute it' over an update said again for the menu's row is about that row, by its key, however the update was tied", async () => {
+    const over = (said: "Unmute it." | "Mute it.") =>
+      run(
+        Effect.gen(function* () {
+          const mutes = yield* muting
+          const { finish, talk, wait, played, responded, heard, replay } = yield* make(said, { mutes })
+          // Its link to the thread timed out, so it was heard under its session, which the thread's row shows.
+          yield* finish("fees", "Comparing fee tables.")
+          yield* wait(11)
+          // Long past listening for a reply to it.
+          yield* wait(60)
+          const [id] = yield* heard
+          if (said === "Unmute it.") yield* mutes.mute({ key: "t3:Rosie:t-fees", called: "the fee tables" })
+          yield* replay(id!, "t3:Rosie:t-fees")
+          yield* wait(1)
+          yield* talk
+          yield* wait(11)
+          return { played: [...played].slice(1), responded: [...responded], mutes: (yield* mutes.list).map(({ key }) => key) }
+        }),
+      )
+    expect(await over("Unmute it.")).toEqual({ played: ["yapd. Comparing fee tables.", "Unmuted it."], responded: [], mutes: [] })
+    expect(await over("Mute it.")).toEqual({
+      played: ["yapd. Comparing fee tables.", "Muted it. I'll still tell you if it needs you."],
+      responded: [],
+      mutes: ["t3:Rosie:t-fees"],
+    })
+  })
+
   test("'undo that' over an update with no mute made over it just before is the model's, as ever", async () => {
     const result = await run(
       Effect.gen(function* () {

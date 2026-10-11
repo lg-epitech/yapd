@@ -200,7 +200,7 @@ describe("Brain", () => {
     expect(shown).toContain(`yet: «${update.spoken}»\nWhat you said last, over it: «${answered}»`)
   })
 
-  test("a session's row said again from the menu is out of reach for what only a thread can do, and a thread's row is that thread, however the update was tied", () => {
+  test("a menu's row yapd can't reach is what 'it' means: the model is told what it is and that it can't reach it, and what it aims at a thread is asked about first", () => {
     const update: Conversation.Update = {
       session: "claude:s-term",
       project: "integration",
@@ -211,28 +211,66 @@ describe("Brain", () => {
       thread: { agent: "claude", session: "s-term", cwd: "/code/integration", message: "The loader fix is ready.", origin: {} },
       at: now - 20_000,
     }
-    const session: Assistant.Subject = { _tag: "Session", update, said: update.spoken, menu: "session:Rosie:claude:s-term" }
-    const fast = (heard: string, subject: Assistant.Subject, open = Option.none<Assistant.Open>()) =>
-      Brain.fast(situation(heard, { subject, open, desk: desk([ref(tezos)]) }), lines)
-    const outOfReach = { act: "answer", spoken: "That's a terminal session, sir; I can't reach it from here." }
-    for (const heard of ["Interrupt it.", "Stop the run.", "Tell it to use the fee table.", "Ask it whether the tests pass.", "Reply to it saying yes.", "Approve it.", "Decline it."]) {
-      expect(fast(heard, session)).toMatchObject(outOfReach)
+    const heard: Assistant.Subject = { _tag: "Session", update, said: update.spoken }
+    const session: Assistant.Subject = { ...heard, menu: "session:Rosie:claude:s-term" }
+    const gone: Assistant.Subject = { ...heard, menu: "t3:Rosie:0ff0ff00-1a2b-4c3d-8e4f-5a6b7c8d9e0f" }
+    const away: Assistant.Subject = { ...heard, menu: "t3:rig:0ff0ff00-1a2b-4c3d-8e4f-5a6b7c8d9e0f" }
+    const kept: Assistant.Subject = { _tag: "Answer", said: update.spoken, about: Option.some({ machine: "Rosie", id: "0ff0ff00-1a2b-4c3d-8e4f-5a6b7c8d9e0f" }), menu: "t3:Rosie:0ff0ff00-1a2b-4c3d-8e4f-5a6b7c8d9e0f" }
+    const focus = (subject: Assistant.Subject) => {
+      const shown = Brain.prompt(situation("Interrupt it.", { subject }), Option.none())
+      return shown.slice(shown.indexOf('FOCUS, what "it" means:')).split("\n\n")[0]!
     }
-    // Named, or not for a thread, it's as ever: the model's, or yapd's own.
-    expect(fast("Tell the Tezos migration to use the fee table.", session)).toBeUndefined()
-    expect(fast("Mute it.", session)).toMatchObject({ act: "mute", how: "mute" })
-    // With a question open, allowing or turning something down answers it.
-    expect(fast("Approve it.", session, Option.some(which([ref(tezos)])))?.spoken).not.toBe(outOfReach.spoken)
-    // The same update heard the normal way, or said again for a thread's row, is as it was, and the thread's row is that thread.
-    expect(fast("Interrupt it.", { _tag: "Session", update, said: update.spoken })).toBeUndefined()
-    const row: Assistant.Subject = { _tag: "Session", update: { ...update, owner: ref(mina) }, said: update.spoken, menu: `t3:Rosie:${tezos.id}` }
-    expect(Brain.about(row)).toEqual(Option.some(ref(tezos)))
-    expect(Brain.about(session)).toEqual(Option.none())
-    expect(fast("Interrupt it.", row)).toMatchObject({ act: "stop" })
-    // The model is told it can't reach the session, and never that it may be a thread doing that work.
-    const shown = Brain.prompt(situation("Stop it.", { subject: session }), Option.none())
-    expect(shown).toContain("that T3 Code doesn't run, which you can't reach from here")
-    expect(shown).not.toContain("that yapd hasn't tied to a thread yet")
+    const never = 'answer that you can\'t reach it from here'
+    expect(focus(session)).toContain("which he just heard again from the menu: «integration. The loader fix is ready.»")
+    expect(focus(session)).toContain(`a session in «/code/integration» on Rosie that T3 Code doesn't run`)
+    expect(focus(session)).toContain('"It" and "that" mean that session, never a thread in THREADS')
+    expect(focus(gone)).toContain("a thread no longer in THREADS, maybe archived or deleted")
+    expect(focus(away)).toContain('a thread on rig, which can\'t be seen right now. You can\'t reach it from here. "It" and "that" mean that thread, never another thread in THREADS')
+    expect(focus(kept)).toContain("What you just told him again from the menu, as he asked: «integration. The loader fix is ready.»")
+    for (const subject of [session, gone, away, kept]) {
+      expect(focus(subject)).toContain(never)
+      expect(focus(subject)).not.toContain("hasn't tied to a thread yet")
+    }
+    // The same update heard as it came, or a thread's row on the desk, is as it was.
+    expect(focus(heard)).toContain("that yapd hasn't tied to a thread yet")
+    expect(focus(heard)).not.toContain(never)
+    const onDesk: Assistant.Subject = { ...heard, update: { ...update, owner: ref(mina) }, menu: `t3:Rosie:${tezos.id}` }
+    expect(focus(onDesk)).not.toContain(never)
+    expect(Brain.about(onDesk)).toEqual(Option.some(ref(tezos)))
+    expect(Brain.fast(situation("Interrupt it.", { subject: onDesk }), lines)).toMatchObject({ act: "stop" })
+    // Nothing he says of "it" is turned down in code: it's the model's, or yapd's own, like "mute it".
+    for (const heard of ["Interrupt it.", "Tell it to use the fee table.", "Tell that to the Tezos migration.", "Approve it."]) {
+      expect(Brain.fast(situation(heard, { subject: session }), lines)).toBeUndefined()
+    }
+    expect(Brain.fast(situation("Mute it.", { subject: session }), lines)).toMatchObject({ act: "mute", how: "mute" })
+    // Whatever the model aims at a thread, however sure, he's asked first, naming the thread, and a yes to that goes.
+    const tezosHandle = desk().threads.find((listed) => listed.ref.id === tezos.id)!.handle
+    const send = Brain.decision({ act: "send", target: tezosHandle, text: "Open a pull request.", how: "now", sure: "high" })
+    const stop = Brain.decision({ act: "stop", target: tezosHandle, sure: "high" })
+    for (const subject of [session, gone, away, kept]) {
+      const asked = Brain.check(send, situation("Tell it to open a pull request.", { subject }), lines)
+      expect(asked).toMatchObject({ _tag: "Ask", open: { kind: "confirm", asked: "Send that to Migrate Tezos Integration, sir?", candidates: [ref(tezos)] } })
+      expect(Brain.check(stop, situation("Interrupt it.", { subject }), lines)).toMatchObject({ _tag: "Ask", open: { asked: "Stop Migrate Tezos Integration, sir?" } })
+      const open = Option.some({ ...(asked as Extract<Brain.Checked, { _tag: "Ask" }>).open, id: "o1", version: 1, at: now - 1_000 })
+      expect(Brain.check({ ...send, pending: "answers" }, situation("Yes.", { subject, open }), lines)._tag).toBe("Do")
+      // Something else he names instead is asked about again.
+      const mina2 = desk().threads.find((listed) => listed.ref.id === mina.id)!.handle
+      expect(Brain.check({ ...send, target: mina2, pending: "answers" }, situation("No, the Mina one.", { subject, open }), lines)._tag).toBe("Ask")
+    }
+    for (const subject of [heard, onDesk]) expect(Brain.check(send, situation("Tell it to open a pull request.", { subject }), lines)._tag).toBe("Do")
+    // Answered about, it stays what "it" means; a question asked over it is about it until it's closed; another thread named is "it" then.
+    const told: Assistant.Subject = { _tag: "Answer", said: "I can't reach that from here, sir.", about: Option.none() }
+    for (const subject of [session, gone, kept]) expect(Brain.held(subject, told, desk())).toEqual({ ...subject, said: told.said })
+    expect(Brain.held(heard, told, desk())).toBe(told)
+    expect(Brain.held(onDesk, told, desk())).toBe(told)
+    const named: Assistant.Subject = { _tag: "Answer", said: "On it, sir.", about: Option.some(ref(tezos)) }
+    expect(Brain.held(session, named, desk())).toBe(named)
+    const question: Assistant.Subject = { _tag: "Answer", said: "Send that to Migrate Tezos Integration, sir?", about: Option.some(ref(tezos)), question: which([ref(tezos)]) }
+    const over = Brain.held(session, question, desk())
+    expect(over).toEqual({ ...question, row: session })
+    expect(Brain.about(over)).toEqual(Option.none())
+    expect(Brain.saidAgain(over)).toEqual(Brain.saidAgain(session))
+    expect(Brain.held(over, told, desk())).toEqual({ ...session, said: told.said })
   })
 
   test("the OPEN section shows the part being asked, its options with what they mean, whether several can be picked, yapd's pick and what's answered already", () => {
