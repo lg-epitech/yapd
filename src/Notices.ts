@@ -5,6 +5,7 @@ import { Condenser, english } from "./Condenser.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal } from "./Journal.ts"
+import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import type * as T3Actions from "./T3Actions.ts"
@@ -79,6 +80,8 @@ const leeway = 1000
 const late = 5000
 /** How much of two last words, case and punctuation aside, one ending the other needs to be the same words, as T3 Code may keep only the end of them. */
 const ending = 24
+/** What finished while yapd was down is held for later only this long ago at most, and for this many threads at most. */
+const away = { within: 12 * 60 * 60_000, most: 10 }
 /** How long a limit whose reset nobody said is taken to hold: the shortest window a provider has. */
 const lasting = 5 * 60 * 60_000
 /** How far back a limit said before is looked for: the longest a provider's holds. */
@@ -216,6 +219,7 @@ export const lines = {
   secret: (called: string, label: string, said: Lines) =>
     `${capital(called)} needs ${secretName(label)} from you${addressed(said)}, which I never take by voice: it's waiting for you in T3 Code.`,
   waiting: (called: string, what: string, said: Lines) => `${capital(called)} ${what}${addressed(said)}: it's waiting for you in T3 Code.`,
+  offline: (called: string, said: Lines) => `${capital(called)} finished while I was offline${addressed(said)}.`,
 }
 
 /** A thread as what's said of it names it: with its machine, as "who needs me" has it, when it isn't on this one. */
@@ -457,6 +461,12 @@ export const make = (options: {
   readonly returned: (machine: string) => Effect.Effect<void>
   /** Turns shorter than this are taken as watched, as hooks' are. */
   readonly shortest: number
+  /** When yapd was last known to be up before it started, from its heartbeat: none the first time, when nothing is looked for. */
+  readonly alive?: Option.Option<number>
+  /** When yapd started: runs that ended since are the live path's to tell of. */
+  readonly started?: number
+  /** The mute a thread is under, if any, so what finished on a muted thread is kept quiet rather than held. */
+  readonly muted?: (keys: ReadonlyArray<string>) => Effect.Effect<Option.Option<Mutes.Mute>>
 }) =>
   Effect.gen(function* () {
     const { threads, journal } = options
@@ -726,6 +736,69 @@ export const make = (options: {
         }
       })
 
+    /** The machines what finished while yapd was down was looked for on, once each. */
+    const caughtUp = new Set<string>()
+
+    /**
+     * What finished on `machine` while yapd was down, looked for once, the
+     * first time its T3 Code has caught up, while yapd is on: runs that ended
+     * between its last heartbeat and its start, in the last twelve hours, on
+     * threads at rest that nothing was kept of since. One that went well is
+     * kept, with no model, as held for later ("…finished while I was
+     * offline"), or kept quiet on a muted thread, under the key T3 Code's
+     * word would say it under, so neither ever says it twice; one that
+     * failed is said, since it needs him.
+     */
+    const offline = (machine: string) =>
+      Effect.gen(function* () {
+        if (caughtUp.has(machine)) return
+        caughtUp.add(machine)
+        const alive = Option.getOrUndefined(options.alive ?? Option.none())
+        const { started } = options
+        if (alive === undefined || started === undefined) return
+        const { on, turns } = yield* options.power
+        if (!on) return
+        const now = yield* Clock.currentTimeMillis
+        const said = yield* persona.lines
+        const desk = yield* threads.desk(Option.none(), [], 1000)
+        const ended = (thread: T3Live.Thread) => Date.parse(thread.latestRunCompletedAt ?? "")
+        const done = desk.threads
+          .filter(({ ref, state, thread }) => {
+            const at = ended(thread)
+            return ref.machine === machine && ["idle", "failed", "limited"].includes(state) && thread.latestRunId !== null && at > alive && at <= started && now - at <= away.within
+          })
+          .toSorted((one, other) => ended(other.thread) - ended(one.thread))
+          .slice(0, away.most)
+        for (const listed of done) {
+          const { ref, thread, project } = listed
+          const runId = thread.latestRunId!
+          const at = ended(thread)
+          // Anything kept of it since yapd was last up, like what its hook said, or T3 Code's word as yapd started, is all there is to say.
+          const since = yield* journal.byThread(ref.machine, ref.id, 1)
+          if (since.some((kept) => kept.at > alive)) continue
+          if (listed.state !== "idle") {
+            const actions = threads.actions(ref.machine)
+            if (Option.isNone(actions)) continue
+            const run = yield* actions.value.ran(ref.id, runId).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), Option.none())))
+            if (Option.isSome(run) && run.value.status === "failed") yield* failed(ref, run.value, thread, named(listed), project, turns, at)
+            continue
+          }
+          const muted = Option.isSome(yield* options.muted?.([Mutes.key.thread(ref)]) ?? Effect.succeedNone)
+          const kept = yield* journal.claim({
+            at,
+            kind: "update",
+            machine: ref.machine,
+            thread: ref.id,
+            project,
+            ...Option.match(listed.directory, { onNone: () => ({}), onSome: (directory) => ({ directory }) }),
+            said: lines.offline(named(listed), said),
+            key: key.done(ref.machine, runId),
+            detail: muted ? { muted: true } : { held: "offline" },
+          })
+          if (Option.isSome(kept)) yield* Effect.logInfo(`${muted ? "Kept quiet" : "Held for later"}: ${thread.title} finished while I was offline`)
+        }
+      }).pipe(Effect.catchAllCause((cause) => (Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logWarning("Could not look for what finished while I was offline", cause))))
+
     return {
       /** Follows what happens to the threads on every machine yapd follows, for as long as yapd runs. */
       follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
@@ -736,7 +809,8 @@ export const make = (options: {
        * as `lookBack` has it: what was put by while it couldn't be seen, then
        * what he never heard.
        */
-      reconcileOn: (machine: string) => Effect.zipRight(options.returned(machine), reconciling((on) => on === machine)),
+      reconcileOn: (machine: string) =>
+        Effect.zipRight(options.returned(machine), reconciling((on) => on === machine)).pipe(Effect.zipRight(offline(machine))),
     }
   })
 

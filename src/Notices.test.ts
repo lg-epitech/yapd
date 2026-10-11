@@ -83,6 +83,12 @@ const notices = (
     readonly rig?: { readonly view: ReadonlyArray<T3Live.Thread>; readonly bounded: Readonly<Record<string, Bounded>> }
     /** Failures left to the Stops that told of them, with what says them, should what those told of be kept quiet. */
     readonly left?: Array<{ readonly stops: ReadonlyArray<Notices.Stop>; readonly failure: Effect.Effect<void> }>
+    /** When yapd was last up before it started, and when it started, for what finished meanwhile. */
+    readonly offline?: { readonly alive: Option.Option<number>; readonly started: number }
+    /** Whether yapd is on, as it is unless said. */
+    readonly on?: boolean
+    /** The threads he muted, by key. */
+    readonly muted?: ReadonlyArray<string>
   },
 ) =>
   Effect.gen(function* () {
@@ -157,7 +163,7 @@ const notices = (
       threads,
       journal,
       tell,
-      power: Effect.succeed({ on: true, turns: 1 }),
+      power: Effect.succeed({ on: given.on ?? true, turns: 1 }),
       stopped: (sessions) => Effect.sync(() => sessions.flatMap((session) => given.stops?.get(session) ?? []).toSorted((a, b) => a.at - b.at)),
       ...(given.left === undefined ? {} : { unheard: (stops, failure) => Effect.sync(() => void given.left?.push({ stops, failure })) }),
       finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message, ...(input.answering === true ? { answering: true as const } : {}) })),
@@ -174,6 +180,8 @@ const notices = (
       settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
       returned: (machine) => Effect.sync(() => void returned.push(machine)),
       shortest: 60_000,
+      ...(given.offline === undefined ? {} : given.offline),
+      muted: (keys) => Effect.succeed(Option.fromNullable(keys.find((key) => given.muted?.includes(key))).pipe(Option.map((key) => ({ key, at: 0 })))),
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -1039,5 +1047,70 @@ describe("Notices", () => {
       ["ask:Rosie:r1", true],
       ["ask:rig:q9", true],
     ])
+  })
+
+  describe("while yapd was offline", () => {
+    const alive = now - 60 * 60_000
+    const started = now - 60_000
+    const done = (id: string, title: string, at: number, overrides: Record<string, unknown> = {}) =>
+      thread(id, title, { latestRunId: `run-${id}`, latestRunCompletedAt: new Date(at).toISOString(), ...overrides })
+    const view = [
+      done("tezos", "Migrate Tezos Integration", now - 30 * 60_000),
+      done("mina", "Open Mina SSV2 Bug Tickets", now - 20 * 60_000, { status: "failed", lastErrorClass: "provider_error" }),
+      done("noisy", "Watch the linter", now - 25 * 60_000),
+      // Before it went down, after it started, still running, or kept since it was last up: none of these.
+      done("old", "Old work", now - 90 * 60_000),
+      done("live", "Live work", now - 30_000),
+      done("busy", "Busy work", now - 40 * 60_000, { activeRunId: "run-2", activityRunStatus: "running" }),
+      done("told", "Told work", now - 45 * 60_000),
+    ]
+    const bounded = {
+      mina: {
+        runs: [{ id: "run-mina", status: "failed", ordinal: 1, startedAt: minutes(25) }],
+        turnItems: [failure("run-mina", "provider_error", "API Error: 500 Internal server error")],
+      },
+    }
+    const held = (detail: unknown) => (detail as { held?: string; muted?: boolean } | undefined) ?? {}
+
+    test("runs that finished while yapd was down are held for later, not said, under the key T3 Code's word would say them under, while failures are said", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* notices({ view, bounded, offline: { alive: Option.some(alive), started }, muted: ["t3:Rosie:noisy"] })
+          yield* made.journal.write({ at: now - 10 * 60_000, kind: "update", machine: "Rosie", thread: "told", said: "Told work is done." })
+          yield* made.reconcileOn("Rosie")
+          yield* made.flush
+          // Its T3 Code catching up again says nothing more.
+          yield* made.reconcileOn("Rosie")
+          yield* made.flush
+          const kept = yield* made.journal.since(0, { kinds: ["update"] })
+          const again = yield* made.journal.claim({ at: now, kind: "update", key: "done:Rosie:run-tezos" })
+          return { told: [...made.told], kept: kept.map(({ thread, said, key, detail }) => [thread, said, key, held(detail)]), again: Option.isSome(again) }
+        }),
+      )
+      expect(result.told).toEqual(["Open Mina SSV2 Bug Tickets failed, sir: the model provider had an error."])
+      expect(result.kept).toEqual([
+        ["tezos", "Migrate Tezos Integration finished while I was offline, sir.", "done:Rosie:run-tezos", { held: "offline" }],
+        ["noisy", "Watch the linter finished while I was offline, sir.", "done:Rosie:run-noisy", { muted: true }],
+        ["told", "Told work is done.", undefined, {}],
+      ])
+      expect(result.again).toBe(false)
+    })
+
+    test("nothing is looked for without a heartbeat, as the first time, or while yapd is off", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const first = yield* notices({ view, bounded, offline: { alive: Option.none(), started } })
+          yield* first.reconcileOn("Rosie")
+          const off = yield* notices({ view, bounded, offline: { alive: Option.some(alive), started }, on: false })
+          yield* off.reconcileOn("Rosie")
+          yield* off.flush
+          return {
+            first: [...first.told, ...(yield* first.journal.since(0, { kinds: ["update"] }))],
+            off: [...off.told, ...(yield* off.journal.since(0, { kinds: ["update"] }))],
+          }
+        }),
+      )
+      expect(result).toEqual({ first: [], off: [] })
+    })
   })
 })

@@ -234,6 +234,10 @@ export const serve = Effect.gen(function* () {
     settled: assistant.settled,
     returned: assistant.returned,
     shortest: (yield* Config.minSeconds) * 1000,
+    // What finished while yapd was down is held for later, between its last heartbeat and now it's started.
+    alive: modes.alive,
+    started,
+    muted: mutes.muted,
   })
   yield* Effect.forkScoped(notices.follow)
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
