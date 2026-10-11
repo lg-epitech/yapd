@@ -2139,6 +2139,29 @@ describe("quick replies", () => {
     expect(reply("Yes.", "The PR is up. Should I merge it?", true, "The PR…")).toBeUndefined()
   })
 
+  test("carries on rather than take a nod for an answer to a question it was cut off before, so he hears it", () => {
+    const message = "The PR is ready. Should I merge it?"
+    const resume: Responder.Reply = { intent: "resume", spoken: "", message: "" }
+    expect(reply("Okay.", message, true, "The PR is…")).toEqual(resume)
+    expect(reply("Thanks.", message, true, "Over in yapd, the PR is ready…")).toEqual(resume)
+    expect(
+      Effect.runSync(
+        Responder.quick(
+          { project: "yapd", turn: { prompt: Option.none(), message }, needsYou: true, lines: [{ speaker: "yapd", text: "The PR is…" }], heard: "Okay.", echo: "The PR is ready" },
+          Effect.succeed("On it, sir."),
+        ),
+      ),
+    ).toEqual(resume)
+    // Once he's heard it asked, a nod may be his answer, which the model weighs.
+    expect(reply("Okay.", message, true, "The PR is ready. Should I merge it?…")).toBeUndefined()
+    expect(reply("Okay.", message, true, message)).toBeUndefined()
+    // More than a nod says what he wants.
+    expect(reply("Okay, merge it.", message, true, "The PR is…")).toBeUndefined()
+    expect(Responder.prompt({ project: "yapd", turn: { prompt: Option.none(), message }, needsYou: true, lines: [], heard: "Okay." }, Option.none())).toContain(
+      'cut off before that, acknowledging is "resume"',
+    )
+  })
+
   test("takes a nod as enough when nothing was asked", () => {
     expect(reply("Thank you, sir.", "The PR is up.", false)).toEqual({ intent: "dismiss", spoken: "", message: "" })
     expect(reply("Okay, cool.", "The PR is up.", false)?.intent).toBe("dismiss")
