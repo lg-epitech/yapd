@@ -1161,7 +1161,7 @@ export const make = (
       }).pipe(Effect.uninterruptible)
     const reading =
       "update" in ready
-        ? conversation.converse(ready.update, heard(ready.update)).pipe(Effect.zipRight(heard(ready.update)))
+        ? conversation.converse(ready.update, heard(ready.update)).pipe(Effect.flatMap((heardIt) => (heardIt ? heard(ready.update) : Effect.void)))
         : say(
             ready,
             Effect.sync(() => {

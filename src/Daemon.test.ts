@@ -41,6 +41,8 @@ const make = (says?: string, options: {
   readonly renderSeconds?: number
   /** What yapd answers to what the user says over an update, instead of passing it on. */
   readonly answer?: string
+  /** Whether what the user says over an update ends it, instead of being passed on. */
+  readonly dismiss?: boolean
   readonly transcripts?: ReadonlyArray<string>
   readonly waitingHooks?: boolean
   readonly onHookOpen?: () => Effect.Effect<void>
@@ -178,9 +180,11 @@ const make = (says?: string, options: {
           : Effect.sync(() => void responded.push(heard)).pipe(
               Effect.zipRight(Effect.sleep(`${options.thinking ?? 0} seconds`)),
               Effect.as(
-                options.answer === undefined
-                  ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
-                  : { intent: "answer" as const, spoken: options.answer, message: "" },
+                options.dismiss === true
+                  ? { intent: "dismiss" as const, spoken: "", message: "" }
+                  : options.answer === undefined
+                    ? { intent: "send" as const, spoken: "Okay, passed on.", message: heard }
+                    : { intent: "answer" as const, spoken: options.answer, message: "" },
               ),
             ),
     }),
@@ -2432,6 +2436,25 @@ describe("Daemon", () => {
     // Stopped for its own voice, it picked up again, saying nothing.
     const line = "Codex on yapd and the Tezos one are both running their tests now. Which one?"
     expect(result).toEqual({ played: [line, line], told: kind === "answer" ? ["heard"] : ["heard", "unanswered"] })
+  })
+
+  test.each([
+    ["no longer than its own voice can go on after it stops, which it may all have been", false],
+    ["going on past that, which is surely his", true],
+  ] as const)("an update ended over its first seconds by what's said %s is heard and noted only then", async (_, long) => {
+    const result = await run(
+      Effect.gen(function* () {
+        // Its own voice gets in for as long as he talks, as before the echo cancellation has learnt it, and is heard as "Okay.".
+        const { finish, speak, talk, wait, journal } = yield* make("Okay.", { echoing: 60, dismiss: true, stopping: Effect.succeed(0) })
+        yield* finish("a", "The PR is ready.")
+        yield* long ? talk : speak
+        yield* wait(5)
+        const replies = yield* journal.since(0, { kinds: ["reply"] })
+        return { unheard: (yield* journal.unheard(0, 12)).length, replies: replies.map(({ text }) => text) }
+      }),
+    )
+    // Left unheard, it's what he missed; heard, his reply is noted.
+    expect(result).toEqual(long ? { unheard: 0, replies: ["Okay."] } : { unheard: 1, replies: [] })
   })
 
   test.each([["an answer", "answer"], ["a question", "question"]] as const)("%s told over its first seconds tells what he said back that it may be its own voice", async (_, kind) => {

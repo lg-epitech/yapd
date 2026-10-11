@@ -919,7 +919,9 @@ export const make = (options: {
     /**
      * Reads an update out and talks it over. `through` runs as soon as the
      * update itself has been read to the end, even with the microphone still
-     * open for a reply, since the user has heard it by then.
+     * open for a reply, since the user has heard it by then. Returns whether
+     * he heard it, which he didn't when it ended partway on what may have
+     * been only its own voice.
      */
     const converse = (update: Update, through: Effect.Effect<void> = Effect.void) =>
       Effect.suspend(() => {
@@ -938,7 +940,7 @@ export const make = (options: {
               confirmed: path === update.audio ? Effect.void : persona.said(text),
               through: path === update.audio ? through : Effect.void,
             })
-            if (outcome._tag === "Finished") return
+            if (outcome._tag === "Finished") return true
             // Replying to something yapd had finished saying: there's nothing to go back to.
             const after = outcome.at >= outcome.duration
             // Always forward, so talk that keeps coming can't hold an update back forever.
@@ -948,15 +950,15 @@ export const make = (options: {
             }
 
             const first = yield* unlogged(outcome.audio)
-            const { itself, echo } = yield* whose(outcome, first)
+            const { itself, echo, unsure } = yield* whose(outcome, first)
             // Not talk that wasn't meant for yapd, which it stops listening after so much of: only over its first seconds.
             if (itself) {
-              if (after) return
+              if (after) return true
               from = Math.max(from, outcome.at - before)
               continue
             }
             if (first === "") {
-              if (after) return
+              if (after) return true
               carryOn()
               continue
             }
@@ -985,7 +987,11 @@ export const make = (options: {
             const withheld = reply.intent === "send" && (yield* options.withholds(update, plain(reply.message)))
             yield* Effect.logInfo(withheld ? "Heard something to send that could give a secret away, so it's held back" : `Heard: ${heard}`)
             yield* Effect.logInfo(`Reply: ${reply.intent}${reply.spoken === "" ? "" : `, saying: ${reply.spoken}`}`)
-            if (reply.intent !== "resume") {
+            // Ended partway on no more than what may all have been its own voice, like its "Over—" heard as "Okay.", it's left
+            // unheard, so "what did I miss?" brings it back, and nothing of it is noted as his.
+            const doubted = reply.intent === "dismiss" && unsure && !after && heard === first
+            if (doubted) yield* Effect.logInfo("Ended on what may have been its own voice, so it's left unheard")
+            if (reply.intent !== "resume" && !doubted) {
               yield* journal.write({
                 at: yield* Clock.currentTimeMillis,
                 kind: "reply",
@@ -1001,9 +1007,9 @@ export const make = (options: {
               yield* options.replied
             }
 
-            if (reply.intent === "dismiss") return
+            if (reply.intent === "dismiss") return !doubted
             if (reply.intent === "resume") {
-              if (after) return
+              if (after) return true
               // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
               if (echo === undefined) carryOn()
               else from = Math.max(from, outcome.at - before)
@@ -1015,7 +1021,7 @@ export const make = (options: {
               reply.intent === "send"
                 ? yield* pass(update, reply)
                 : reply.spoken
-            if (text === "") return
+            if (text === "") return true
             path = join(options.dir, `${crypto.randomUUID()}${extension}`)
             rendered.push(path)
             yield* voice.render(text, path)
@@ -1061,7 +1067,7 @@ export const make = (options: {
           if (outcome._tag === "Finished") return false
           const first = yield* hear(outcome.audio)
           // Its own voice, over its first seconds, is no answer, nor talk that wasn't meant for yapd.
-          const { itself, echo } = yield* whose(outcome, first)
+          const { itself, echo, unsure } = yield* whose(outcome, first)
           const reply =
             itself || first === ""
               ? Option.none()
