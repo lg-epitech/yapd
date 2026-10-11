@@ -3426,6 +3426,123 @@ describe("Daemon with threads muted", () => {
     expect(result.played).toEqual(["yapd. Something long.", "yapd. The model is down, so I stopped."])
   })
 
+  test("a muted thread's Stop coming late with the answer to what he said over its update is said, though its turn was kept quiet in its hook's place", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, handle, speak, wait, nextEvent, nextPlayback, played, followUps } = yield* make("Use the fee table.", { mutes, send: () => Effect.void })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        yield* finish("tezos", "The migration compiles.")
+        yield* nextEvent("Ready:")
+        yield* nextPlayback
+        yield* wait(2)
+        // T3 Code's word of a turn of the same session, kept quiet before he says anything.
+        const startedAt = yield* Clock.currentTimeMillis
+        const message = "The fee table is in, with its tests."
+        yield* made.finished({
+          ...unhooked(message, "run-1", (yield* made.power).turns),
+          at: startedAt,
+          run: { status: "completed", final: message, others: [], natives: ["tezos"], previous: Option.none(), startedAt },
+        })
+        yield* nextEvent("Muted update for yapd")
+        yield* speak
+        yield* nextPlayback
+        yield* wait(14)
+        // Its Stop, late, comes with the answer to what he said over the update.
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "tezos", cwd: "/tmp", last_assistant_message: message }, { project: "yapd" }, false)
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { played: [...played], followUps: [...followUps] }
+      }),
+    )
+    expect(result.followUps).toEqual(["tezos sent: Use the fee table."])
+    expect(result.played).toEqual(["yapd. The migration compiles.", "Okay, passed on.", "yapd. The fee table is in, with its tests."])
+  })
+
+  test("the answer to what he sent a muted thread, waiting behind another line, isn't dropped as he mutes it from the menu, nor once a dictation cuts it off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const ledger: Array<{ readonly at: number; readonly digest: string | null; readonly how: Ledger.How }> = []
+        const { made, handle, finish, wait, dictate, nextEvent, played } = yield* make(undefined, {
+          mutes,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }),
+          sent: (_, since) => Effect.succeed(ledger.filter(({ at }) => at >= since)),
+        })
+        yield* wait(600)
+        // Sent by the shortcut a moment before its prompt came.
+        ledger.push({ at: yield* Clock.currentTimeMillis, digest: Ledger.digest("Run the integration tests."), how: "now" })
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt: "Run the integration tests." }, { project: "yapd", host: hostname() }, false)
+        yield* wait(120)
+        yield* finish("playing", "Something long.")
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The fast tests pass." }, { project: "yapd", host: hostname() }, false)
+        yield* nextEvent("Ready: yapd. The fast tests pass.")
+        yield* Option.getOrThrow(made.controls).mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-tezos" }) })
+        yield* wait(11)
+        // Cut off as it's said, it's put back and read again.
+        const dictation = yield* dictate
+        yield* wait(2)
+        yield* Scope.close(dictation, Exit.void)
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Something long.", "yapd. The fast tests pass.", "yapd. The fast tests pass."])
+  })
+
+  test("a failure left to a muted thread's Stop is said once a dictation cuts off what that Stop told of, muted from the menu as it was said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, wait, dictate, nextEvent, played, journal } = yield* make(undefined, { mutes })
+        const told: Array<string> = []
+        yield* finish("x", "The provider failed, so I stopped.")
+        yield* nextEvent("Ready:")
+        yield* wait(1)
+        yield* made.unheard(yield* made.stopped(["x"]), Effect.sync(() => void told.push("x")))
+        // The line being said isn't dropped as he mutes its thread.
+        yield* Option.getOrThrow(made.controls).mute({ key: sessionKey("x") })
+        const before = [...told]
+        const dictation = yield* dictate
+        yield* wait(2)
+        yield* Scope.close(dictation, Exit.void)
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        return { before, told, played: [...played], quiet: (yield* journal.since(0, { kinds: ["update"] })).filter(quieted).length }
+      }),
+    )
+    expect(result.before).toEqual([])
+    expect(result.told).toEqual(["x"])
+    expect(result.played).toEqual(["yapd. The provider failed, so I stopped."])
+    expect(result.quiet).toBe(1)
+  })
+
+  test("a failure left to two Stops waits until what both told of is kept quiet", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, wait, nextEvent } = yield* make(undefined, { mutes })
+        const told: Array<string> = []
+        // The first kept quiet as its thread was muted then.
+        yield* mutes.mute({ key: sessionKey("x") })
+        yield* finish("x", "Step one is done.")
+        yield* nextEvent("Muted update for yapd")
+        yield* mutes.unmute(sessionKey("x"))
+        // The second waits behind the line being said.
+        yield* finish("playing", "Something long.")
+        yield* finish("x", "The provider failed, so I stopped.")
+        yield* nextEvent("Ready: yapd. The provider")
+        const stops = yield* made.stopped(["x"])
+        yield* made.unheard(stops, Effect.sync(() => void told.push("x")))
+        const before = [...told]
+        yield* Option.getOrThrow(made.controls).mute({ key: sessionKey("x") })
+        yield* wait(11)
+        return { stops: stops.length, before, told }
+      }),
+    )
+    expect(result.stops).toBe(2)
+    expect(result.before).toEqual([])
+    expect(result.told).toEqual(["x"])
+  })
+
   test("while yapd is off, a muted update isn't kept at all, as one it would have said isn't", async () => {
     const result = await run(
       Effect.gen(function* () {
