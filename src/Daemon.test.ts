@@ -3353,7 +3353,8 @@ describe("Daemon with threads muted", () => {
         yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: message, ...extra }, { project: "yapd", host: hostname() }, false)
         yield* wait(11)
         yield* wait(11)
-        return { played: [...played], kept: (yield* journal.since(0, { kinds: ["update", "action"] })).map((entry) => [entry.kind, quieted(entry)]) }
+        const kept = yield* journal.since(0, { kinds: ["update", "action"] })
+        return { played: [...played], kept: kept.map((entry) => [entry.kind, quieted(entry)]), missed: (yield* journal.unheard(0, 10)).length }
       }),
     )
     expect(result.played).toEqual([message === "Should I drop the old table?" ? "yapd finished a turn, but I couldn't summarize it." : `yapd. ${message}`])
@@ -3361,6 +3362,8 @@ describe("Daemon with threads muted", () => {
       ["update", true],
       ["update", false],
     ])
+    // Told of now, the turn kept quiet isn't what he missed too.
+    expect(result.missed).toBe(0)
   })
 
   test("a turn no hook told of, dropped as it waited once its thread was muted, still lets its own Stop through when its hook says it needs him", async () => {
@@ -3482,6 +3485,31 @@ describe("Daemon with threads muted", () => {
     expect(result.played).toEqual([])
     expect(result.followUps).toEqual(["claude:noisy let go"])
     expect(result.kept).toEqual([true])
+  })
+
+  test("a mute that lands while what needs him is being rendered never keeps it quiet: what its hook or its summary says needs him, nor what couldn't be summed up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { handle, finish, wait, played, followUps, journal } = yield* make(undefined, {
+          mutes,
+          renderSeconds: 2,
+          urgentMessages: ["The tests failed."],
+          unsummarizable: ["Should I drop the old table?"],
+        })
+        yield* finish("urgent", "The tests failed.", true)
+        yield* finish("unsure", "Should I drop the old table?", true)
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "asks", cwd: "/tmp", last_assistant_message: "Which network first?", needs_you: true }, { project: "yapd" }, true)
+        yield* wait(1)
+        for (const session of ["urgent", "unsure", "asks"]) yield* mutes.mute({ key: sessionKey(session) })
+        yield* wait(1)
+        for (let i = 0; i < 4; i++) yield* wait(11)
+        return { played: [...played].toSorted(), followUps: [...followUps], quiet: (yield* journal.since(0, { kinds: ["update"] })).filter(quieted).length }
+      }),
+    )
+    expect(result.played).toEqual(["yapd finished a turn, but I couldn't summarize it.", "yapd. The tests failed.", "yapd. Which network first?"])
+    expect(result.followUps).toEqual([])
+    expect(result.quiet).toBe(0)
   })
 
   test("muting drops the thread's updates waiting to be said and lets their hooks go, but never what needs him, what he asked to hear again, a notice, or the line being said", async () => {

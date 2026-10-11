@@ -841,6 +841,8 @@ export const make = (
       }
       const row = claimed === undefined ? yield* journal.write(entry) : Option.flatten(claimed)
       if (Option.isSome(row)) rows.set(update, row.value)
+      // What was kept quiet of its turn in its hook's place is told now, so it isn't what he missed as well.
+      if (finished.over?.row !== undefined) yield* journal.markHeard([finished.over.row], arrivedAt)
       yield* Effect.logInfo(`Ready: ${spoken}`)
     }).pipe(
       workers.withPermits(1),
