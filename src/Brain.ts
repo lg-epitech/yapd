@@ -983,6 +983,7 @@ export const muteLines = (lines: Lines, name: string, now: number) => {
     cleared: (any: boolean) => (any ? `Unmuted everything${sir}.` : `Nothing's muted${sir}.`),
     again: (muted: boolean) => (muted ? `Muted it again${sir}. I'll still tell you if it needs you.` : `Unmuted it again${sir}.`),
     unchanged: `There's no mute to take back${sir}.`,
+    elsewhere: `Ask me that with the shortcut${sir}. Over an update, I can only mute or unmute the one I'm reading.`,
   }
 }
 

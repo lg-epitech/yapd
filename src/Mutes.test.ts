@@ -228,6 +228,15 @@ describe("Mutes", () => {
     }
   })
 
+  test("what's about muting a thread, but not in so many words, is told from what could be for an agent", () => {
+    for (const said of ["Mute the Tezos one.", "Mute it for a bit.", "Unmute the Claude session in yapd.", "Silence the noisy threads.", "Mute it and tell it to stop.", "What's muted?", "Is it muted?", "Is anything muted?"]) {
+      expect([said, Mutes.aboutMuting(said)]).toEqual([said, true])
+    }
+    for (const said of ["Silence the linter warnings.", "Mute the logs in the tests.", "Fix the mute button.", "Are the tests muted?", "Tell it to mute the console."]) {
+      expect([said, Mutes.aboutMuting(said)]).toEqual([said, false])
+    }
+  })
+
   test("when a mute the model worked out ends: the time it gives, or how long it says from now, and never a time that's gone", () => {
     const now = Date.parse("2026-10-09T10:00:00.000Z")
     expect(Mutes.ending("2026-10-09T11:00:00.000+00:00", now)).toBe(now + 60 * 60_000)

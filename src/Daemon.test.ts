@@ -3493,6 +3493,98 @@ describe("Daemon muting over an update", () => {
     expect(result.mutes).toEqual([])
   })
 
+  test("'undo that' after a cough heard as words, or begun with a pause, still takes back the mute he made over the update", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, talk, speak, wait, played, responded, followUps } = yield* make("Mute it.", {
+          mutes,
+          transcripts: ["Mute it.", "Thank you.", "Undo that."],
+          answer: "Say that again?",
+        })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(2)
+        // A cough, too faint to be his, over what yapd says of the mute.
+        yield* speak
+        yield* wait(2)
+        yield* talk
+        yield* wait(11)
+        return { played: [...played], responded: [...responded], followUps: [...followUps], mutes: yield* mutes.list }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Still going.", "Muted it. I'll still tell you if it needs you.", "Say that again?", "Unmuted it again."])
+    expect(result.responded).toEqual(["Thank you."])
+    expect(result.followUps).toEqual([])
+    expect(result.mutes).toEqual([])
+  })
+
+  test("'undo that' after something for its agent said since a mute over an update is the model's, as that's what it's about", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, talk, wait, responded } = yield* make("Mute it.", { mutes, transcripts: ["Mute it.", "Fix the tests too.", "Undo that."] })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(2)
+        yield* talk
+        yield* wait(5)
+        yield* talk
+        yield* wait(11)
+        return { responded: [...responded], mutes: (yield* mutes.list).map(({ key }) => key) }
+      }),
+    )
+    expect(result.responded).toEqual(["Fix the tests too.", "Undo that."])
+    expect(result.mutes).toEqual([sessionKey("noisy")])
+  })
+
+  test("'undo that' over an update once a mute was made from the menu since takes nothing back, as the last change isn't the one made over it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, talk, wait, played, responded } = yield* make("Mute it.", { mutes, transcripts: ["Mute it.", "Undo that."], answer: "Say that again?" })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(1)
+        yield* Option.getOrThrow(made.controls).mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-mina" }), called: "the Mina tickets" })
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        return { played: [...played], responded: [...responded], mutes: (yield* mutes.list).map(({ key }) => key) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Still going.", "Muted it. I'll still tell you if it needs you.", "There's no mute to take back."])
+    expect(result.responded).toEqual([])
+    expect(result.mutes).toEqual([sessionKey("noisy"), "t3:Rosie:t-mina"])
+  })
+
+  test("anything else about mutes over an update, like a thread by name or 'what's muted?', is the shortcut's, never the model's", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { finish, talk, wait, played, responded, followUps } = yield* make("Mute the Tezos one.", {
+          mutes,
+          transcripts: ["Mute the Tezos one.", "Mute it for a bit.", "What's muted?"],
+        })
+        yield* finish("noisy", "Still going.")
+        for (let index = 0; index < 3; index++) {
+          yield* wait(1)
+          yield* talk
+        }
+        yield* wait(11)
+        return { played: [...played], responded: [...responded], followUps: [...followUps], mutes: yield* mutes.list }
+      }),
+    )
+    const elsewhere = "Ask me that with the shortcut. Over an update, I can only mute or unmute the one I'm reading."
+    expect(result.played).toEqual(["yapd. Still going.", elsewhere, elsewhere, elsewhere])
+    expect(result.responded).toEqual([])
+    expect(result.followUps).toEqual([])
+    expect(result.mutes).toEqual([])
+  })
+
   test("'unmute it' over a thread's update takes off the mute of its session, made before the session was found to be the thread's", async () => {
     const result = await run(
       Effect.gen(function* () {

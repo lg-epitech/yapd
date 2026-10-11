@@ -104,6 +104,22 @@ export const command = (heard: string): Option.Option<{ readonly how: "mute" | "
   return minutes === undefined ? Option.none() : Option.some({ how, minutes })
 }
 
+/**
+ * Whether what he said is about muting a thread, but not in so many words,
+ * like "mute it for a bit", "mute the Tezos one", "what's muted?" or "is it
+ * muted?". Unmuting is never for an agent, but what's muted is plainly a
+ * thread, a session or what he's on about, so "silence the linter
+ * warnings", which could be for an agent, isn't.
+ */
+export const aboutMuting = (heard: string) => {
+  const said = gist(heard)
+  return (
+    /^un ?mute\b/.test(said) ||
+    new RegExp(`^(?:mute|silence) (?:(?:${it}|them|everything|all)(?: |$)|the .*\\b(?:one|ones|thread|threads|session|sessions)\\b)`).test(said) ||
+    /^(?:what's|whats|what is|what are|which threads are|which ones are|which are|what have i|what did i|is anything|is everything|anything|is it|is this|is that|is this one|is that one|is this thread) (?:muted|mute)$/.test(said)
+  )
+}
+
 /** A thread he muted. */
 export interface Mute {
   readonly key: string

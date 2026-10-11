@@ -480,18 +480,24 @@ export const make = (
           if (latest?.update === update) latest = { ...latest, said: line, at, playing: true }
         }),
       ),
-    // Only what goes to its thread by yapd's own hand, which is held back when it could give a secret away.
+    // Only what goes to its thread by yapd's own hand, which is held back when it could give a secret away. Asked of whatever he
+    // says for its agent, which a "scratch that" said next is about, never a mute he made over it before.
     withholds: (update, message) =>
-      update.about !== undefined && options.hands !== undefined && steered(update) ? options.hands.keeps(update.about, message) : Effect.succeed(false),
+      Effect.zipRight(
+        Effect.sync(() => changedOver.delete(update)),
+        update.about !== undefined && options.hands !== undefined && steered(update) ? options.hands.keeps(update.about, message) : Effect.succeed(false),
+      ),
     // "Mute it" said over an update, plainly his and in so many words, is its thread muted: never anything sent to its agent. "Scratch that"
     // said next takes it back, rather than be the model's to make something of, which could take it for something to tell the agent.
+    // What he says in between that isn't for its agent, like a cough heard as "Thank you." or the "Scratch" of "Scratch... that", leaves
+    // it to be taken back, for as long as it's the last change he made.
     mute: (update, heard, voiced, echo) => {
       const muted = controls
       const plain = echo === undefined && voiced >= Brain.faintest
       const made = changedOver.get(update)
-      changedOver.delete(update)
       if (muted === undefined || !plain) return Option.none()
       if (made !== undefined && Brain.takesBack(heard)) {
+        changedOver.delete(update)
         return Option.some(
           Effect.gen(function* () {
             const said = Brain.muteLines(yield* persona.lines, "it", yield* Clock.currentTimeMillis)
@@ -503,7 +509,12 @@ export const make = (
         )
       }
       const asked = Mutes.command(heard)
-      if (Option.isNone(asked)) return Option.none()
+      // Anything else about mutes, like "mute the Tezos one", "mute it for a bit" or "what's muted?", is the shortcut's to work out:
+      // the model reading him this update knows only this thread, and could take it for something to tell the agent.
+      if (Option.isNone(asked)) {
+        return Mutes.aboutMuting(heard) ? Option.some(Effect.map(persona.lines, (lines) => Brain.muteLines(lines, "it", 0).elsewhere)) : Option.none()
+      }
+      changedOver.delete(update)
       const { how, minutes } = asked.value
       /** What he changed over it, for "scratch that" right after to take back. */
       const noted = (changed: boolean) =>
