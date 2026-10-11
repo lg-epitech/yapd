@@ -1043,18 +1043,21 @@ export const make = (options: {
       return { itself: false, unsure: !past, ...(past && outcome.at >= outcome.duration - ending ? {} : { echo }) }
     }
 
-    /** Logged when talk over its first seconds that went on past where it stopped wasn't meant for yapd, which isn't its own voice. */
-    const notMeant = "Picked up again over its first seconds after talk not meant for it"
-
     /**
      * Picks up again just before where its own voice, or what the model took
      * for it, stopped the line, `told` as by its words or by the model; from
      * then on, over the rest of the line's first seconds, it takes more
      * speech to stop it. Each time is logged, as how often it happens is
-     * only known on his speakers.
+     * only known on his speakers. Talk that went on past where it stopped,
+     * which its own voice can't, is logged apart, and takes no more to stop
+     * it after.
      */
-    const again = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, told: "words" | "model", from: number) =>
+    const again = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, told: "words" | "model", from: number, unsure: boolean) =>
       Effect.gen(function* () {
+        if (!unsure) {
+          yield* Effect.logInfo("Picked up again over its first seconds after talk not meant for it")
+          return Math.max(from, outcome.at - before)
+        }
         const how = told === "words" ? "as its words tell" : "as the model judged"
         yield* Effect.logInfo(
           outcome.capped === true
@@ -1121,7 +1124,7 @@ export const make = (options: {
                 if (listenOn()) continue
                 return true
               }
-              from = yield* again(outcome, "words", from)
+              from = yield* again(outcome, "words", from, unsure)
               continue
             }
             if (first === "") {
@@ -1180,13 +1183,9 @@ export const make = (options: {
                 if (echo !== undefined && listenOn()) continue
                 return true
               }
-              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so. Talk that
-              // went on past where it stopped can't be that, so it's talk that wasn't, as later in a line, and takes no more to stop it after.
-              if (echo !== undefined && unsure) from = yield* again(outcome, "model", from)
-              else {
-                if (echo !== undefined) yield* Effect.logInfo(notMeant)
-                carryOn()
-              }
+              // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when `own` tells so.
+              if (echo === undefined) carryOn()
+              else from = yield* again(outcome, "model", from, unsure)
               continue
             }
 
@@ -1266,11 +1265,10 @@ export const make = (options: {
           // Talk that wasn't meant for yapd, once all of it was said, ends it: a question is left unanswered.
           if (outcome.at >= outcome.duration) return false
           // Nor is what may have been its own voice, as `respond` was told, which is picked up just before.
-          if (itself || (echo !== undefined && unsure)) {
-            from = yield* again(outcome, itself ? "words" : "model", from)
+          if (itself || echo !== undefined) {
+            from = yield* again(outcome, itself ? "words" : "model", from, unsure)
             continue
           }
-          if (echo !== undefined) yield* Effect.logInfo(notMeant)
           missed++
           from = Math.max(from, outcome.at - rewind)
         }
