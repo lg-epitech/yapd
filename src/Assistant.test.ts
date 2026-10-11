@@ -4417,6 +4417,35 @@ describe("Assistant", () => {
     expect(await answered()).toEqual({ told: [{ speaker: "user", text: "Std. Yapd." }], started: ["/code/yapd"] })
   })
 
+  test("new work said over the first seconds of an answer reaches the prompt writer with what yapd was saying and what he said after a pause, and only then", async () => {
+    const started = (echo?: string) =>
+      run(
+        Effect.gen(function* () {
+          const told: Array<Line> = []
+          const { dictate, followUp, started } = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Who")
+                ? Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+                : Brain.decision({ act: "start", text: situation.utterance.heard }),
+            ({ lines }) => {
+              told.push(...lines)
+              return written({ project: "yapd", evidence: "yapd", spoken: "In yapd, on Opus, without a worktree." })
+            },
+          )
+          yield* dictate("Who needs me?")
+          // Its own "sir" heard first, then his request, after a pause.
+          yield* followUp("Sir. Start a session in yapd to fix the docs.", 3, undefined, echo, "Start a session in yapd to fix the docs.")
+          return { told, started: started.map(({ project }) => project) }
+        }),
+      )
+    expect(await started("Two threads need you, sir.")).toEqual({
+      told: [{ speaker: "user", text: "Sir. Start a session in yapd to fix the docs.", echo: "Two threads need you, sir.", afterPause: "Start a session in yapd to fix the docs." }],
+      started: ["/code/yapd"],
+    })
+    // Without the note on its own voice, nothing is set apart, as ever.
+    expect(await started()).toEqual({ told: [{ speaker: "user", text: "Sir. Start a session in yapd to fix the docs." }], started: ["/code/yapd"] })
+  })
+
   test("a request with fewer than two candidates says it couldn't tell, without asking", async () => {
     const result = await run(
       Effect.gen(function* () {

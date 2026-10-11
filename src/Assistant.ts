@@ -1480,7 +1480,8 @@ export const make = (options: {
     const start = (thought: Thought, said: Lines, step: number) =>
       Effect.gen(function* () {
         const { utterance } = thought
-        const ready = yield* written(utterance, [{ speaker: "user", text: utterance.heard }])
+        // Said over yapd's first seconds, the writer is told what of it may be its own voice, as the brain was.
+        const ready = yield* written(utterance, [{ speaker: "user", text: utterance.heard, ...overItself(utterance.echo, utterance.afterPause) }])
         if (Option.isNone(ready)) return quiet(thought.subject)
         const prompt = ready.value
         if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
