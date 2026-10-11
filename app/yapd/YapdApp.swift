@@ -1,9 +1,10 @@
 import ServiceManagement
 import SwiftUI
 
-// yapd in the menu bar: whether it's on, what it's doing, the updates it said
-// lately, to hear again, and the card it's showing, in a panel under the icon.
-// It only uses the API in docs/api.md, so another UI can do all of this too.
+// yapd in the menu bar: whether it's on, what it's doing, the threads with the
+// latest updates, to hear again and mute, and the card it's showing, in a
+// panel under the icon. It only uses the API in docs/api.md, so another UI can
+// do all of this too.
 
 @MainActor @Observable
 final class Yapd {
@@ -11,6 +12,10 @@ final class Yapd {
   private(set) var state: Status?
   /// The last card yapd showed, to show again.
   private(set) var last: String?
+  /// The time the menu's times are told from, moved on every minute.
+  private(set) var now = Date()
+  /// The recent threads' project icons.
+  let icons: Icons
   @ObservationIgnored private let panel: Panel
   /// The card the panel shows, as it follows the one yapd points at.
   @ObservationIgnored private let following: Following
@@ -36,7 +41,17 @@ final class Yapd {
     self.api = api
     self.panel = panel
     self.following = following
+    icons = Icons(api: api)
     Task { await watch() }
+    Task { await tick() }
+  }
+
+  /// Moves `now` on every minute, so "3 min ago" doesn't stay that.
+  private func tick() async {
+    while true {
+      try? await Task.sleep(for: .seconds(60))
+      now = Date()
+    }
   }
 
   /// yapd's own mark while it's on and quiet, off or not running, and what it's doing otherwise.
@@ -78,6 +93,8 @@ final class Yapd {
   /// Follows a state as it comes in: the panel, the card yapd points at, and whether yapd is talking about it.
   private func follow(_ status: Status, connecting: Bool) {
     if let showing = status.showing { last = showing.id }
+    if let recent = status.recent { icons.keep(only: recent) }
+    now = Date()
     following.follow(status.showing, revision: status.revision, connecting: connecting)
     // Kept by the panel even before the card it points at is fetched and up, so one yapd is talking about by then stays up until it's done.
     panel.heard(speaking: status.activity == "speaking")
@@ -95,6 +112,24 @@ final class Yapd {
 
   func replay(_ update: Status.Update) {
     send("POST", "updates/\(update.id)/replay")
+  }
+
+  /// Says a thread's latest update again, by its key, even a muted one.
+  func replay(_ row: Status.Recent) {
+    ask(Replaying(row))
+  }
+
+  /// Mutes a thread, until he takes it off, or takes it off. Only what yapd says changes: nothing is sent to the thread.
+  func mute(_ row: Status.Recent, _ on: Bool) {
+    ask(Muting(row, on: on))
+  }
+
+  /// Asks yapd something about a thread, by its key, encoded as it is. What comes of it shows in the state.
+  private func ask(_ asking: some Asking) {
+    guard let url = asking.url(at: api) else { return }
+    var request = URLRequest(url: url)
+    request.httpMethod = asking.method
+    Task { _ = try? await URLSession.shared.data(for: request) }
   }
 
   /// Shows the last card again, for a while, with nothing said of it, and has yapd put it back up too, so "hide that" takes it
@@ -153,7 +188,13 @@ struct YapdApp: App {
         Button(state.on ? "Turn Off" : "Turn On") { yapd.turn(on: !state.on) }
         Button("Show Last Card") { yapd.showLast() }
           .disabled(yapd.last == nil)
-        if !state.updates.isEmpty {
+        if let recent = state.recent {
+          if !recent.isEmpty {
+            Divider()
+            RecentItems(recent: recent, on: state.on, now: yapd.now, icons: yapd.icons, replay: yapd.replay, mute: yapd.mute)
+          }
+        } else if !state.updates.isEmpty {
+          // A yapd from before it listed threads: the updates it said, to hear again.
           Divider()
           Section("Hear Again") {
             ForEach(state.updates) { update in
@@ -170,6 +211,57 @@ struct YapdApp: App {
         .keyboardShortcut("q")
     } label: {
       yapd.icon
+    }
+  }
+}
+
+/// The threads with the latest updates, each with its project's icon, how long ago it ended and whether it's muted: clicking
+/// one says its latest update again, and the Mute menu mutes it or takes the mute off. On macOS 15 and later, holding Option
+/// turns each row into muting it, or taking the mute off.
+struct RecentItems: View {
+  let recent: [Status.Recent]
+  /// While yapd is off, it can't say anything again, but threads can still be muted.
+  let on: Bool
+  /// What the times are told from.
+  let now: Date
+  let icons: Icons
+  let replay: @MainActor (Status.Recent) -> Void
+  let mute: @MainActor (Status.Recent, Bool) -> Void
+
+  var body: some View {
+    Section("Recent") {
+      ForEach(recent) { row in
+        Button { replay(row) } label: { label(row) }
+          .disabled(!on)
+          .muting { Button(row.muted ? "Unmute \(row.label)" : "Mute \(row.label)") { mute(row, !row.muted) } }
+      }
+    }
+    Menu("Mute") {
+      ForEach(recent) { row in
+        Toggle(row.label, isOn: Binding(get: { row.muted }, set: { mute(row, $0) }))
+      }
+    }
+  }
+
+  /// Its icon and name, with how long ago it ended under them, where the menu has room for a second line.
+  @ViewBuilder private func label(_ row: Status.Recent) -> some View {
+    Image(nsImage: icons.icon(for: row))
+    if #available(macOS 14.4, *) {
+      Text(row.label)
+      Text(row.detail(now: now))
+    } else {
+      Text("\(row.label) — \(row.detail(now: now))")
+    }
+  }
+}
+
+extension View {
+  /// The row's Option-click alternate, on macOS 15 and later, where menus have them.
+  @ViewBuilder fileprivate func muting(@ViewBuilder _ alternate: () -> some View) -> some View {
+    if #available(macOS 15, *) {
+      modifierKeyAlternate(.option, alternate)
+    } else {
+      self
     }
   }
 }
