@@ -137,11 +137,21 @@ export const voiced = (audio: Float32Array) =>
 const rate = 16000
 const frame = 512
 
+/** How many of the words of `text` were said in `fraction` of its audio, at least the first. */
+const saidOf = (words: ReadonlyArray<string>, fraction: number) => Math.max(1, Math.round(words.length * fraction))
+
 /** The part of `text` heard in `fraction` of its audio, marked when it's cut short. */
 export const cut = (text: string, fraction: number) => {
   if (fraction >= 1) return text
   const words = text.split(/\s+/)
-  return `${words.slice(0, Math.max(1, Math.round(words.length * fraction))).join(" ")}…`
+  return `${words.slice(0, saidOf(words, fraction)).join(" ")}…`
+}
+
+/** The rest of `text`, that wasn't said in `fraction` of its audio: nothing when it was all said. */
+export const unsaid = (text: string, fraction: number) => {
+  if (fraction >= 1) return ""
+  const words = text.split(/\s+/)
+  return words.slice(saidOf(words, fraction)).join(" ")
 }
 
 /** Seconds either side of the user talking that yapd's words are looked for in what he said, since where each falls in a line is only guessed. */
@@ -1013,7 +1023,10 @@ export const make = (options: {
               continue
             }
 
-            const said = cut(text, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
+            const fraction = outcome.duration > 0 ? outcome.at / outcome.duration : 1
+            const said = cut(text, fraction)
+            // What it hadn't said yet, so the model knows whether he could have heard what he answers, like the agent's question.
+            const rest = unsaid(text, fraction)
             const { heard, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard) =>
               responder
                 .respond({
@@ -1023,6 +1036,7 @@ export const make = (options: {
                   lines: [...lines, { speaker: "yapd", text: said }],
                   heard,
                   ...(echo === undefined ? {} : { echo }),
+                  ...(rest === "" ? {} : { unsaid: rest }),
                 })
                 .pipe(
                   Effect.catchAll((error) =>

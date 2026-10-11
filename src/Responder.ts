@@ -35,6 +35,8 @@ export interface Interruption {
    * some of it, or their first word lost under it.
    */
   readonly echo?: string
+  /** When yapd was cut off, the words of its line they spoke over that it hadn't said yet. */
+  readonly unsaid?: string
 }
 
 export class RespondError extends Data.TaggedError("RespondError")<{ readonly cause: unknown }> {}
@@ -64,13 +66,7 @@ ${aloud}
 
 What they said was transcribed from speech and can have mistakes, so go with what they most likely meant. Write "message" in the language they spoke.`
 
-/** Whether yapd was cut off in its first line about an update the agent is waiting on, maybe before the agent's question. */
-const unheard = ({ needsYou, lines }: Pick<Interruption, "needsYou" | "lines">) =>
-  needsYou &&
-  !lines.some(({ speaker }) => speaker === "user") &&
-  (lines.findLast(({ speaker }) => speaker === "yapd")?.text.trim().endsWith("…") ?? false)
-
-export const prompt = ({ project, turn, needsYou, lines, heard, echo }: Interruption, style: Option.Option<string>) =>
+export const prompt = ({ project, turn, needsYou, lines, heard, echo, unsaid }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
@@ -83,11 +79,12 @@ export const prompt = ({ project, turn, needsYou, lines, heard, echo }: Interrup
     `Conversation so far, where "…" marks where you were cut off:\n${lines
       .map(({ speaker, text }) => `${speaker === "yapd" ? "You" : "User"}: ${text}`)
       .join("\n")}`,
-    ...(unheard({ needsYou, lines })
-      ? [
-          `You were cut off ("…") in your first line. If the agent asked something you hadn't got to yet, a bare "okay" or "thanks" said before it answers nothing, so it's "resume", so they hear it. When it asked nothing, like when something failed, acknowledging is "dismiss" as usual, and so is anything saying they've heard enough or will look at it later, like "I'll look at it later".`,
-        ]
-      : []),
+    ...(unsaid === undefined || unsaid === ""
+      ? []
+      : [
+          `What you hadn't said yet when they cut you off:\n${unsaid}`,
+          `An "okay" or "thanks" can't answer a question they haven't heard yet: if the agent's question is only in what you hadn't said yet, it's "resume", so they hear it. Otherwise go by the rules above.`,
+        ]),
     ...(echo === undefined
       ? []
       : [

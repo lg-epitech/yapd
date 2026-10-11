@@ -21,7 +21,7 @@ import {
 import { Audio, AudioError, native } from "./Audio.ts"
 import * as Condenser from "./Condenser.ts"
 import * as Conversation from "./Conversation.ts"
-import { between, cut, own, together, unfinished } from "./Conversation.ts"
+import { between, cut, own, together, unfinished, unsaid } from "./Conversation.ts"
 import { defaults } from "./Endpointer.ts"
 import { Relays } from "./Relay.ts"
 import * as Helper from "./Helper.ts"
@@ -230,6 +230,13 @@ describe("Conversation", () => {
     expect(cut("one two three four", 0.5)).toBe("one two…")
     expect(cut("one two three four", 0)).toBe("one…")
     expect(cut("one two three four", 1)).toBe("one two three four")
+  })
+
+  test("keeps the rest of a line that wasn't said yet, which is nothing once it all was", () => {
+    expect(unsaid("one two three four", 0.5)).toBe("three four")
+    expect(unsaid("one two three four", 0)).toBe("two three four")
+    expect(unsaid("one two three four", 1)).toBe("")
+    expect(unsaid("one", 0.5)).toBe("")
   })
 
   test("tells when the user trailed off", () => {
@@ -1086,6 +1093,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
           lines: [{ speaker: "yapd", text: "Over in yapd,…" }],
           heard: "Which PR was that?",
           echo: first,
+          unsaid: long.spoken.slice("Over in yapd, ".length),
         },
       ],
       rendered: [answered],
@@ -1847,24 +1855,34 @@ describe("quick replies", () => {
     expect(reply("Yes.", "Done. Shall I merge? The docs are updated too.", true, "Over in yapd, it's done. Shall I merge it?")?.intent).toBe("send")
   })
 
-  test("leaves a nod to an update cut off before the agent's question to the model, which is told only then that it answers nothing yet", () => {
+  test("leaves a nod to an update cut off to the model, shown what yapd hadn't said yet, and that a nod only answers what was heard", () => {
     const message = "The PR is ready. Should I merge it?"
     expect(reply("Okay.", message, true, "The PR is…")).toBeUndefined()
-    const told = (needsYou: boolean, lines: ReadonlyArray<Responder.Line>) =>
-      Responder.prompt({ project: "yapd", turn: { prompt: Option.none(), message }, needsYou, lines, heard: "Okay." }, Option.none())
-    const note = 'a bare "okay" or "thanks" said before it answers nothing, so it\'s "resume"'
-    expect(told(true, [{ speaker: "yapd", text: "The PR is…" }])).toContain(note)
-    expect(told(true, [{ speaker: "yapd", text: "The PR is…" }])).toContain('When it asked nothing, like when something failed, acknowledging is "dismiss" as usual')
-    // Not when the question was read out in full, nor to an answer of yapd's he's cut off, nor when the agent isn't waiting on him.
-    expect(told(true, [{ speaker: "yapd", text: message }])).not.toContain(note)
-    expect(
-      told(true, [
-        { speaker: "yapd", text: message },
-        { speaker: "user", text: "What changed in the tests?" },
-        { speaker: "yapd", text: "Mostly the login tests…" },
-      ]),
-    ).not.toContain(note)
-    expect(told(false, [{ speaker: "yapd", text: "The PR is…" }])).not.toContain(note)
+    const told = (unsaid?: string, echo?: string) =>
+      Responder.prompt(
+        {
+          project: "yapd",
+          turn: { prompt: Option.none(), message },
+          needsYou: true,
+          lines: [{ speaker: "yapd", text: unsaid === undefined ? message : "The PR is…" }],
+          heard: "Okay.",
+          ...(unsaid === undefined ? {} : { unsaid }),
+          ...(echo === undefined ? {} : { echo }),
+        },
+        Option.none(),
+      )
+    const note = `An "okay" or "thanks" can't answer a question they haven't heard yet: if the agent's question is only in what you hadn't said yet, it's "resume", so they hear it. Otherwise go by the rules above.`
+    // Right after the conversation, before the note on its own voice and what he said.
+    expect(told("ready. Should I merge it?", "The PR is ready.")).toContain(
+      `You: The PR is…\n\nWhat you hadn't said yet when they cut you off:\nready. Should I merge it?\n\n${note}\n\nThey began while your own voice`,
+    )
+    expect(told("ready. Should I merge it?").endsWith(`${note}\n\nWhat the user just said:\nOkay.`)).toBe(true)
+    // Said to the end, there's nothing it hadn't said, so neither.
+    expect(told()).not.toContain("hadn't said yet")
+    expect(told()).not.toContain(`can't answer a question they haven't heard yet`)
+    expect(told("")).not.toContain("hadn't said yet")
+    // Nor the guess this replaces, that a nod answers nothing whenever its first line was cut off.
+    expect(told("ready. Should I merge it?")).not.toContain("answers nothing")
   })
 
   test("leaves a yes begun while yapd's own voice could still get into the microphone to the model, which may be its own \"sir?\", but still ends it at a stop", () => {
