@@ -128,6 +128,10 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(yapd).toMatch(/private func ask\(_ asking: some Asking\) \{\s*guard let url = asking\.url\(at: api\) else \{ return \}/)
       // Rows are replayed and muted from the menu by the row, never by its text, and listed only while yapd sends them, else the updates it said.
       expect(yapd).toMatch(/Button \{ replay\(row\) \} label:/)
+      // A row yapd can't say again shows as any other, but hearing it again is turned off, and never asked for; muting it isn't.
+      expect(yapd).toMatch(/Button \{ replay\(row\) \} label: \{ label\(row\) \}\s*\.disabled\(!row\.hearable\(on: on\)\)/)
+      expect(yapd).toMatch(/func replay\(_ row: Status\.Recent\) \{\s*guard row\.replayable else \{ return \}\s*ask\(Replaying\(row\)\)/)
+      expect(yapd).not.toMatch(/Toggle\([^\n]*\n[^\n]*\.disabled/)
       expect(yapd).toMatch(/Toggle\(row\.label, isOn: Binding\(get: \{ row\.muted \}, set: \{ mute\(row, \$0\) \}\)\)/)
       expect(yapd).toMatch(/if let recent = state\.recent \{[\s\S]*\} else if !state\.updates\.isEmpty \{\s*\/\/[^\n]*\n\s*Divider\(\)\s*Section\("Hear Again"\)/)
       // An image is fetched only from yapd's own API, and anything it can't draw is drawn as the icon's monogram.

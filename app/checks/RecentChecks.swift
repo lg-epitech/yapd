@@ -18,6 +18,7 @@ import Foundation
   let first = both?.recent?.first
   check(first?.key == "t3:Rosie:850299f8" && first?.thread == "850299f8" && first?.title == "Migrate the Tezos integration", "reads a thread's key, id and title")
   check(first?.muted == true && first?.until == "2026-10-02T15:00:00.000Z" && first?.waiting == false, "reads whether a thread is muted, until when, and waiting")
+  check(first?.replayable == true, "takes a row from a yapd that doesn't say whether it can be heard again as one that can")
   check(first?.ended == Date(timeIntervalSince1970: 1_790_949_700), "reads when a thread's turn ended, not \(String(describing: first?.ended))")
   check(first?.project == Status.Recent.Project(name: "integration", id: "5c1e", icon: .image(url: "/projects/Rosie/5c1e/icon", revision: "9f2c", instead: Status.Monogram(text: "IN", color: "indigo"))), "reads a project and its image")
   let old = decoded(#"{"on": false, "activity": "idle", "updates": [\#(update)]}"#)
@@ -37,6 +38,21 @@ import Foundation
   let session = odd?.recent?.first
   check(session?.thread == nil && session?.project == Status.Recent.Project(name: "Tezos 2"), "keeps a session row whose icon can't be read, with none")
   check(session?.ended == Date(timeIntervalSince1970: 1_790_949_700), "reads a time without fractions of a second")
+
+  // Whether a row can be heard again, as yapd says, and a row it can't still listed and muted as before.
+  let says = { (replayable: String) in
+    decoded(#"{"on": true, "activity": "idle", "recent": [{"key": "session:Rosie:claude:s", "machine": "Rosie", "thread": null, "title": "Claude session", "text": "Done.", "at": "2026-10-02T14:01:40Z", "muted": true, "waiting": false, "replayable": \#(replayable)}]}"#)?.recent?.first
+  }
+  check(says("false")?.replayable == false && says("true")?.replayable == true, "reads whether a row can be heard again")
+  check(says("false")?.key == "session:Rosie:claude:s" && says("false")?.muted == true && says("false")?.label == "Claude session", "lists a row that can't be heard again as any other")
+  check(says("\"no\"")?.replayable == true, "takes a row whose replayable it can't read as one that can be heard again")
+  if let unreachable = says("false"), let first {
+    check(!unreachable.hearable(on: true) && !unreachable.hearable(on: false), "never lets him hear again a row yapd can't say again")
+    check(first.hearable(on: true) && !first.hearable(on: false), "lets him hear again a row yapd can say again, while it's on")
+    check(Muting(unreachable, on: false).url(at: URL(string: "http://127.0.0.1:4747")!)?.absoluteString == "http://127.0.0.1:4747/threads/session%3ARosie%3Aclaude%3As/mute", "still unmutes a row that can't be heard again")
+  } else {
+    check(false, "reads a row that can't be heard again")
+  }
 
   // Every kind of icon, and one the app doesn't know, which is the monogram it carries.
   let icon = { (json: String) in try? JSONDecoder().decode(Status.Icon.self, from: Data(json.utf8)) }

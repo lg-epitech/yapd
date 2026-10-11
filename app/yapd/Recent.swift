@@ -20,6 +20,12 @@ extension Status.Recent {
     return parts.joined(separator: " · ")
   }
 
+  /// Whether the menu lets him hear it again: only while yapd is on, and only a row yapd can say again. Muting it works
+  /// either way.
+  func hearable(on: Bool) -> Bool {
+    on && replayable
+  }
+
   /// The monogram to draw when its icon can't be, as T3 Code draws a project: the one the icon carries, else one made from
   /// the project's name. None for a row with no project.
   var monogram: Status.Monogram? {

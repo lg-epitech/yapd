@@ -114,8 +114,9 @@ final class Yapd {
     send("POST", "updates/\(update.id)/replay")
   }
 
-  /// Says a thread's latest update again, by its key, even a muted one.
+  /// Says a thread's latest update again, by its key, even a muted one, unless yapd says it can't.
   func replay(_ row: Status.Recent) {
+    guard row.replayable else { return }
     ask(Replaying(row))
   }
 
@@ -216,7 +217,7 @@ struct YapdApp: App {
 }
 
 /// The threads with the latest updates, each with its project's icon, how long ago it ended and whether it's muted: clicking
-/// one says its latest update again, and the Mute menu mutes it or takes the mute off. On macOS 15 and later, holding Option
+/// one says its latest update again, unless yapd can't reach it, and the Mute menu mutes it or takes the mute off. On macOS 15 and later, holding Option
 /// turns each row into muting it, or taking the mute off.
 struct RecentItems: View {
   let recent: [Status.Recent]
@@ -232,7 +233,7 @@ struct RecentItems: View {
     Section("Recent") {
       ForEach(recent) { row in
         Button { replay(row) } label: { label(row) }
-          .disabled(!on)
+          .disabled(!row.hearable(on: on))
           .muting { Button(row.muted ? "Unmute \(row.label)" : "Mute \(row.label)") { mute(row, !row.muted) } }
       }
     }

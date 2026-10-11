@@ -72,17 +72,20 @@ struct Status: Decodable {
     let until: String?
     /// Whether it waits on him, for an approval or an answer.
     let waiting: Bool
+    /// Whether it can be heard again: not a terminal session's or an archived thread's older update, which yapd can't reach. A
+    /// yapd from before it doesn't send it, and hears every row again.
+    let replayable: Bool
 
     var id: String { key }
 
     /// When the agent's turn ended, unless yapd sent a time the app can't read.
     var ended: Date? { Status.date(at) }
 
-    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting }
+    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting, replayable }
 
     init(
       key: String, machine: String, thread: String? = nil, title: String, project: Project? = nil, text: String, at: String,
-      muted: Bool = false, until: String? = nil, waiting: Bool = false
+      muted: Bool = false, until: String? = nil, waiting: Bool = false, replayable: Bool = true
     ) {
       self.key = key
       self.machine = machine
@@ -94,6 +97,7 @@ struct Status: Decodable {
       self.muted = muted
       self.until = until
       self.waiting = waiting
+      self.replayable = replayable
     }
 
     init(from decoder: Decoder) throws {
@@ -108,6 +112,7 @@ struct Status: Decodable {
       muted = try container.decodeIfPresent(Bool.self, forKey: .muted) ?? false
       until = try? container.decodeIfPresent(String.self, forKey: .until)
       waiting = (try? container.decodeIfPresent(Bool.self, forKey: .waiting)) ?? false
+      replayable = (try? container.decodeIfPresent(Bool.self, forKey: .replayable)) ?? true
     }
   }
 
