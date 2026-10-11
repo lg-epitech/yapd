@@ -320,19 +320,25 @@ const heard = (listings: ReadonlyArray<Listing>, now: number) => (said: Heard) =
 
 const fenced = (text: string) => `«${squash(text).replace(/[«»]/g, '"')}»`
 
-/** What's known of your own voice in what they said back, as they said it: what came first may be yours, and what followed a pause is theirs. */
-const overYou = ({ echo, afterPause }: Line) =>
+/**
+ * What's known of your own voice in what they said, as they said it: what
+ * came first may be yours, and what followed a pause is theirs, even naming
+ * one of the projects you `offered`, when it's an answer to you.
+ */
+const overYou = ({ echo, afterPause }: Line, offered: boolean) =>
   echo === undefined
     ? ""
     : `\nThey began that while your own voice could still get into their microphone, so what came first may be your own words, from around ${fenced(echo)}, misheard or not, and words that sound like yours there are yours.${
-        afterPause === undefined || afterPause.trim() === "" ? "" : ` What they said after a pause, ${fenced(afterPause)}, is surely theirs, even where it repeats your words, like naming one of the projects you offered.`
+        afterPause === undefined || afterPause.trim() === ""
+          ? ""
+          : ` What they said after a pause, ${fenced(afterPause)}, is surely theirs, even where it repeats your words${offered ? ", like naming one of the projects you offered" : ""}.`
       }`
 
 const dialogue = (lines: ReadonlyArray<Line>) => {
   const [first, ...rest] = lines
   return [
-    `What they dictated:\n${first?.text ?? ""}`,
-    ...rest.map((line) => (line.speaker === "yapd" ? `You asked: ${line.text}` : `They said, right after: ${line.text}${overYou(line)}`)),
+    `What they dictated:\n${first?.text ?? ""}${first === undefined ? "" : overYou(first, false)}`,
+    ...rest.map((line) => (line.speaker === "yapd" ? `You asked: ${line.text}` : `They said, right after: ${line.text}${overYou(line, true)}`)),
   ].join("\n\n")
 }
 

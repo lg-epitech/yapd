@@ -133,4 +133,26 @@ describe("Writer", () => {
     // Without the note on its own voice, his words alone, as ever.
     expect(answer({ afterPause: "Yapd." }).endsWith("They said, right after: Std. Yapd.")).toBe(true)
   })
+
+  test("tells it what of new work may be its own voice and what he said after a pause, deciding and researching alike, only when it's known yapd could be heard", () => {
+    const said = (line: Partial<Line> = {}) => material({ lines: [{ speaker: "user", text: "In a worktree. Start a session in yapd to fix the docs.", ...line }] })
+    const noted = `What they dictated:\nIn a worktree. Start a session in yapd to fix the docs.\nThey began that while your own voice could still get into their microphone, so what came first may be your own words, from around «On Opus, in a worktree.», misheard or not, and words that sound like yours there are yours. What they said after a pause, «Start a session in yapd to fix the docs.», is surely theirs, even where it repeats your words.`
+    const over = { echo: "On Opus, in a worktree.", afterPause: "Start a session in yapd to fix the docs." }
+    expect(Writer.prompt(said(over), Option.none()).endsWith(noted)).toBe(true)
+    const destination: Writer.Destination = {
+      about: "the docs fix",
+      project: "yapd",
+      machine: "",
+      directory: "/code/yapd",
+      model: "claude-fable-5-1",
+      effort: "high",
+      worktree: true,
+      lookFor: "What the docs say.",
+    }
+    expect(Writer.researchPrompt(said(over), destination, Option.none())).toContain(noted)
+    // Without the note on its own voice, his words alone, as ever.
+    expect(Writer.prompt(said({ afterPause: "Start a session in yapd to fix the docs." }), Option.none()).endsWith(
+      "What they dictated:\nIn a worktree. Start a session in yapd to fix the docs.",
+    )).toBe(true)
+  })
 })
