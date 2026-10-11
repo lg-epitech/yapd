@@ -4487,6 +4487,44 @@ describe("Assistant", () => {
     expect(plain.prompts[0]).not.toContain("your own voice")
   })
 
+  test("work started once he says which project is shown to the model after with what of his request may have been yapd's own voice, never his answer's", async () => {
+    const asking = "For the docs fix, is that yapd or std?"
+    const result = await run(
+      Effect.gen(function* () {
+        const prompts: Array<string> = []
+        const { dictate, followUp, answer, started } = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Who")) return Brain.decision({ act: "answer", spoken: "Two threads need you, sir." })
+            if (heard.startsWith("Sir")) return Brain.decision({ act: "start", text: heard })
+            if (heard.startsWith("How")) {
+              prompts.push(Brain.prompt(situation, Option.none()))
+              return Brain.decision({ act: "answer", spoken: "It's under way, sir." })
+            }
+            return Brain.decision({ act: "start", text: heard, pending: "answers" })
+          },
+          ({ lines }) =>
+            lines.length === 1
+              ? written({ action: "ask", project: "", evidence: "", spoken: asking })
+              : written({ project: "yapd", evidence: "Yapd", spoken: "In yapd, on Opus, without a worktree." }),
+          { others: [thread("new-thread", "Fix the docs", "yapd", { updatedAt: new Date(now).toISOString() })] },
+        )
+        yield* dictate("Who needs me?")
+        yield* followUp("Sir. Start a session in yapd to fix the docs.", 3, undefined, "Two threads need you, sir.", "Start a session in yapd to fix the docs.")
+        // His answer, said over the question in turn.
+        yield* answer("Std. Yapd.", undefined, asking, "Yapd.")
+        yield* dictate("How's the docs one doing?")
+        return { started: started.length, prompts }
+      }),
+    )
+    expect(result.started).toBe(1)
+    const listed = result.prompts[0]!.split("\n").find((line) => line.includes("«Fix the docs»"))
+    expect(listed).toContain(
+      `you started it: «Sir. Start a session in yapd to fix the docs.» (he began that while your own voice could still get into his microphone, so what came first may be your own words, from around «Two threads need you, sir.»; what he said after a pause, «Start a session in yapd to fix the docs.», is surely his)`,
+    )
+    expect(listed).not.toContain(asking)
+  })
+
   test("a second clarification closes the request instead of asking again", async () => {
     const result = await run(
       Effect.gen(function* () {
