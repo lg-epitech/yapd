@@ -1590,11 +1590,14 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     },
   )
 
-  test("gives what he said after a pause apart only when yapd's own voice may be in what came before", async () => {
+  test.each([
+    ["an update", false],
+    ["a question", true],
+  ] as const)("gives what he said after a pause over %s apart only when yapd's own voice may be in what came before", async (_, ask) => {
     const after = (at: number) =>
       overHelperScoped(
         Effect.gen(function* () {
-          const helper = yield* overHelper([[0.9, "Hmm, hold on."], [0.91, "Merge it."], [0.92, "And deploy."]], { responding: 2 })
+          const helper = yield* overHelper([[0.9, "Hmm, hold on."], [0.91, "Merge it."], [0.92, "And deploy."]], { responding: 2, ask })
           yield* helper.wait(at)
           yield* helper.talk(0, defaults.lead)
           yield* helper.talk(0.9, 20)
@@ -1607,7 +1610,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
           yield* helper.talk(0.92, 20)
           yield* helper.quiet
           yield* helper.wait(3)
-          return helper.responded.map(({ heard, echo, afterPause }) => ({ heard, told: echo !== undefined, afterPause }))
+          return (ask ? helper.offered : helper.responded).map(({ heard, echo, afterPause }) => ({ heard, told: echo !== undefined, afterPause }))
         }),
       )
     // Begun over its first seconds.
@@ -1622,6 +1625,28 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       { heard: "Hmm, hold on.", told: false, afterPause: undefined },
       { heard: "Hmm, hold on. Merge it.", told: false, afterPause: undefined },
       { heard: "Hmm, hold on. Merge it. And deploy.", told: false, afterPause: undefined },
+    ])
+  })
+
+  test("still gives what he said after a pause apart when all of it trails off and is given a moment more", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Hmm, hold on."], [0.91, "Merge it, and…"]], { responding: 2 })
+        yield* helper.wait(1)
+        yield* helper.talk(0, defaults.lead)
+        yield* helper.talk(0.9, 20)
+        yield* helper.quiet
+        // He goes on before the reply to it is ready, and trails off.
+        yield* helper.wait(0.5)
+        yield* helper.talk(0.91, 20)
+        yield* helper.quiet
+        yield* helper.wait(6)
+        return helper.responded.map(({ heard, echo, afterPause }) => ({ heard, told: echo !== undefined, afterPause }))
+      }),
+    )
+    expect(result).toEqual([
+      { heard: "Hmm, hold on.", told: true, afterPause: undefined },
+      { heard: "Hmm, hold on. Merge it, and…", told: true, afterPause: "Merge it, and…" },
     ])
   })
 
