@@ -11,13 +11,13 @@ import * as Conversation from "./Conversation.ts"
 import * as Floor from "./Floor.ts"
 import * as Inbox from "./Inbox.ts"
 import * as Hands from "./Hands.ts"
-import { type Entry, type Held, Journal, type Naming } from "./Journal.ts"
+import { type Entry, type Held, Journal, type Kept, type Naming } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import type * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import type { Origin } from "./Origin.ts"
-import { type Agent, key, type Payload } from "./Payload.ts"
+import { Agent, key, type Payload } from "./Payload.ts"
 import { Persona } from "./Persona.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
@@ -48,6 +48,53 @@ export interface State {
 
 /** How many updates can be heard again. */
 const replayable = 5
+
+/** How many of the latest updates kept are looked through, at startup, for those he heard. */
+const lookedBack = 50
+
+/** What a kept update's detail says of it, as it was kept. */
+const told = (kept: Kept) => {
+  const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as Record<string, unknown>
+  const text = (name: string) => (typeof detail[name] === "string" ? (detail[name] as string) : undefined)
+  return { session: text("session"), host: text("host"), prompt: text("prompt"), more: text("more"), priority: text("priority"), quiet: detail.muted === true || text("held") !== undefined }
+}
+
+/**
+ * An update he heard before yapd restarted, as it was said, to hear again:
+ * under its session, or its hook's session once it was tied to a thread,
+ * which is this machine's to reply to through T3 Code, or another's, kept,
+ * shown and muted by it. Never one kept quiet or held, which he never heard
+ * said, nor one too little was kept of. Its audio is rendered as it's asked for.
+ */
+export const restored = (kept: Kept, here: string): Option.Option<Conversation.Update> => {
+  const was = told(kept)
+  const session = was.session ?? kept.thread
+  if (kept.kind !== "update" || kept.heardAt === undefined || was.quiet || session === undefined || kept.said === undefined) return Option.none()
+  const ref = was.session !== undefined && kept.machine !== undefined && kept.thread !== undefined ? { machine: kept.machine, id: kept.thread } : undefined
+  const finished = session.startsWith("finished:")
+  const [agent, ...rest] = session.split(":")
+  const native = finished ? (ref?.id ?? "") : rest.join(":")
+  if (!finished && !Agent.literals.some((known) => known === agent)) return Option.none()
+  const message = kept.text ?? ""
+  return Option.some({
+    session,
+    project: kept.project ?? "",
+    turn: { prompt: Option.fromNullable(was.prompt), message },
+    needsYou: was.priority === "needs-you",
+    spoken: kept.said,
+    ...(was.more === undefined || was.more === "" ? {} : { more: was.more }),
+    audio: "",
+    thread: {
+      agent: finished ? "claude" : (agent as Agent),
+      session: native,
+      cwd: kept.directory ?? "",
+      message,
+      origin: finished ? { host: hostname(), app: T3Code.bundle } : was.host === undefined ? {} : { host: was.host },
+    },
+    at: kept.at,
+    ...(ref === undefined ? {} : ref.machine === here ? { about: ref } : { owner: ref }),
+  })
+}
 
 /** How long the speaker stays ready for something that was about to be said, before it rests again. */
 const patience = "15 seconds"
@@ -232,7 +279,16 @@ export const make = (
   /** Something is about to be ready to say, so the speaker can be got ready meanwhile. */
   const coming = yield* STM.commit(TRef.make(false))
   const soon = STM.commit(TRef.set(coming, true))
-  const state = yield* SubscriptionRef.make<State>({ on: true, heard: [] })
+  // What he heard last, kept through a restart under the ids its entries in the journal have.
+  const seeded: Array<HeardUpdate> = []
+  for (const kept of yield* journal.page({ most: lookedBack, kinds: ["update"] })) {
+    if (seeded.length >= replayable) break
+    const update = restored(kept, called(hostname()))
+    if (Option.isNone(update) || seeded.some(({ update: other }) => other.session === update.value.session && other.at === update.value.at)) continue
+    rows.set(update.value, kept.id)
+    seeded.push({ id: String(kept.id), update: update.value })
+  }
+  const state = yield* SubscriptionRef.make<State>({ on: true, heard: seeded })
   /** Each time something said over an update is taken in. */
   const replied = yield* PubSub.unbounded<void>()
   /**
@@ -1447,12 +1503,12 @@ export const make = (
   const heardAlready = (heard: ReadonlyArray<HeardUpdate>, update: Conversation.Update) =>
     heard.some((heard) => heard.update.session === update.session && heard.update.at === update.at)
 
-  /** Keeps an update the user is hearing, unless they're hearing it again. */
+  /** Keeps an update the user is hearing, unless they're hearing it again, by its entry in the journal, so it's the same after a restart. */
   const hear = (update: Conversation.Update) =>
     SubscriptionRef.update(state, (current) =>
       heardAlready(current.heard, update)
         ? current
-        : { ...current, heard: [{ id: crypto.randomUUID(), update }, ...current.heard].slice(0, replayable) },
+        : { ...current, heard: [{ id: String(rows.get(update) ?? crypto.randomUUID()), update }, ...current.heard].slice(0, replayable) },
     )
 
   /** An update heard again has been said, or won't be. */

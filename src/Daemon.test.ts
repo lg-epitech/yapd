@@ -93,6 +93,8 @@ const make = (says?: string, options: {
   readonly command?: (heard: string) => Option.Option<Effect.Effect<string>>
   /** Whether what he says over an update is first worked out as the Responder does without the model. */
   readonly quickly?: boolean
+  /** The journal, when it's kept from before a restart, rather than one of its own. */
+  readonly journal?: Journal.Journal["Type"]
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -132,7 +134,7 @@ const make = (says?: string, options: {
           onIt: () => Effect.succeed(Persona.plain.onIt),
           said: (line) => Effect.sync(() => void options.noted?.push(line)),
         }),
-    Journal.memory,
+    options.journal === undefined ? Journal.memory : Layer.succeed(Journal.Journal, options.journal),
     Layer.succeed(Condenser, {
       condense: (_, turn) => options.unsummarizable?.includes(turn.message) ? Effect.fail(new CondenseError({ cause: "the model is down" })) : Effect.sync(() => {
         condensed.push(turn)
@@ -3354,6 +3356,60 @@ describe("Daemon headline first", () => {
       }),
     )
     expect(result.responded).toEqual(["More."])
+  })
+
+  test("an update he heard keeps its id across a restart, and is said again as it was, with its rest for more", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        const before = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { finish, wait, heard } = yield* make(undefined, { journal, mores: { "The loader is fixed.": "Retries back off now." } })
+            yield* finish("loader", "The loader is fixed.")
+            yield* wait(11)
+            // Held as progress, he never heard it, so it isn't one to hear again.
+            yield* journal.write({ at: 30_000, kind: "update", thread: "claude:review", project: "yapd", said: "yapd. Pass 7 is running.", detail: { held: "progress" } })
+            return yield* heard
+          }),
+        )
+        const rows = yield* journal.since(0, { kinds: ["update"] })
+        const { heard, replay, wait, played, lastHeard } = yield* make(undefined, { journal })
+        const after = yield* heard
+        const replayed = yield* replay(after[0]!)
+        yield* wait(11)
+        return { before, after, rows: rows.map(({ id }) => String(id)), replayed, played: [...played], more: Option.map(yield* lastHeard, ({ update }) => update.more) }
+      }),
+    )
+    expect(result.before).toEqual([result.rows[0]!])
+    expect(result.after).toEqual(result.before)
+    expect(result.replayed).toBe("queued")
+    expect(result.played).toEqual(["yapd. The loader is fixed."])
+    expect(result.more).toEqual(Option.some("Retries back off now."))
+  })
+
+  test("a reply to an update heard before a restart, tied to its thread, reaches that thread through T3 Code", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { handle, wait } = yield* make(undefined, { journal, link: () => Effect.succeedSome({ machine: "Rosie", id: "t-tezos" }) })
+            yield* handle("claude", { hook_event_name: "Stop", session_id: "s-tezos", cwd: "/code/yapd", last_assistant_message: "The migration compiles." }, { project: "yapd", host: hostname() }, false)
+            yield* wait(11)
+          }),
+        )
+        const t3 = yield* handing
+        const { heard, replay, speak, wait, nextPlayback, followUps } = yield* make("Use the fee table.", { journal, hands: t3.hands })
+        yield* replay((yield* heard)[0]!)
+        yield* nextPlayback
+        yield* speak
+        yield* wait(4)
+        return { sent: t3.sent(), relayed: [...followUps], told: yield* nextPlayback }
+      }),
+    )
+    expect(result.sent).toEqual(["t-tezos: Use the fee table."])
+    expect(result.relayed).toEqual([])
+    expect(result.told).toBe("Okay, passed on.")
   })
 
   test("words that change how yapd talks, said over an update, plainly his, change it there and never reach the agent or the model", async () => {

@@ -371,13 +371,29 @@ describe("Latest", () => {
             replay: (id, menu) => Effect.sync(() => void replayed.push(`${id} for ${menu}`)).pipe(Effect.as("queued" as const)),
             power: Effect.succeed({ on, turns: 1 }),
             // Said at once, which makes "it" the thread it's about.
-            tell: (notice) => Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.as(true)),
+            tell: (notice) =>
+              Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.saying ?? Effect.void), Effect.zipRight(notice.heard ?? Effect.void), Effect.as(true)),
           } as Parameters<typeof Latest.menu>[0]["daemon"],
           mention: (ref, said) => Effect.sync(() => void mentioned.push(`${ref.machine}/${ref.id}: ${said}`)),
+          journal: listed.journal,
         })
         const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
         return { ...listed, menu, told, replayed, mentioned, settle }
       })
+
+    test("a row held for later, heard again from the menu, counts as heard once it's said, so the digest doesn't tell of it again", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, settle } = yield* menuOf([])
+          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "integration's review pass 7 is running.", detail: { session: "claude:s", held: "progress" } })
+          yield* settle
+          const before = (yield* journal.held(0)).length
+          const replayed = yield* menu.replayThread("t3:Rosie:t-tezos")
+          return { before, replayed, told: [...told], after: (yield* journal.held(0)).length }
+        }),
+      )
+      expect(result).toEqual({ before: 1, replayed: "queued", told: ["integration's review pass 7 is running."], after: 0 })
+    })
 
     test("hears a thread again from the update it shows, not one he heard before what was kept quiet of it or a question it asked since", async () => {
       const result = await run(

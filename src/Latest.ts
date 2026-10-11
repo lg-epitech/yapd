@@ -51,6 +51,8 @@ export interface Latest {
    * to be the thread's. Unmuting the thread takes those off too.
    */
   readonly under: (key: string) => Effect.Effect<ReadonlyArray<string>>
+  /** The journal entry a thread listed now shows, by its key. */
+  readonly row: (key: string) => Effect.Effect<Option.Option<number>>
 }
 
 /**
@@ -89,7 +91,7 @@ export const make = (options: {
     const heard = options.heard ?? (() => Effect.succeedNone)
 
     /** Nothing listed yet, and the keys nothing is muted under. */
-    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), blind: false }
+    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, number>(), blind: false }
 
     const compute = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
@@ -127,6 +129,7 @@ export const make = (options: {
         .toSorted((one, other) => other.last.at - one.last.at || other.last.id - one.last.id)
         .slice(0, shown)
       const under = new Map<string, ReadonlyArray<string>>()
+      const entries = new Map<string, number>()
       let blind = false
       const listed = yield* Effect.forEach(rows, ({ kept, last }) =>
         Effect.gen(function* () {
@@ -138,6 +141,7 @@ export const make = (options: {
           const own = last === kept ? found.get(kept)?.own : last.thread
           const by = [...new Set([found.get(kept)?.own, own])].flatMap((own) => (own === undefined || own.startsWith("finished:") ? [] : [Mutes.key.session(machine, own)]))
           under.set(key, by)
+          entries.set(key, last.id)
           const mute = [key, ...by].map((key) => muted.get(key)).find((mute) => mute !== undefined)
           const thread = session ? Option.none() : yield* threads.find({ machine, id })
           // Its machine's threads not in yet, what it's called and its project are looked for again soon. Never for a session's own
@@ -171,17 +175,18 @@ export const make = (options: {
           } satisfies Server.Recent
         }),
       )
-      return { rows: listed, under, blind }
+      return { rows: listed, under, entries, blind }
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not list the latest threads", cause), none)))
 
     const first = yield* compute
     const ref = yield* SubscriptionRef.make(first.rows)
-    let { under, blind } = first
+    let { under, entries, blind } = first
     /** Built again, and kept only when it changed, so nothing that follows the state hears of what didn't. */
     const refresh = Effect.flatMap(compute, (built) =>
       Effect.zipRight(
         Effect.sync(() => {
           under = built.under
+          entries = built.entries
           blind = built.blind
         }),
         SubscriptionRef.update(ref, (before) => (JSON.stringify(before) === JSON.stringify(built.rows) ? before : built.rows)),
@@ -208,6 +213,7 @@ export const make = (options: {
       rows: Stream.changesWith(ref.changes, (one, other) => one === other),
       current: SubscriptionRef.get(ref),
       under: (key) => Effect.sync(() => under.get(key) ?? []),
+      row: (key) => Effect.sync(() => Option.fromNullable(entries.get(key))),
     } satisfies Latest
   })
 
@@ -226,8 +232,10 @@ export const menu = (options: {
   readonly daemon: Speaker
   /** Makes "it" the thread what's said is about, as an answer about it does. */
   readonly mention: (ref: Threads.Ref, said: string) => Effect.Effect<void>
+  /** Where what's said again of a row is noted as heard, so a digest or "what did I miss?" doesn't tell of it again. */
+  readonly journal?: Pick<Journal["Type"], "markHeard">
 }) => {
-  const { latest, threads, mutes, controls, daemon, mention } = options
+  const { latest, threads, mutes, controls, daemon, mention, journal } = options
   return {
     /**
      * Mutes a thread from the menu, by its key: one it lists, one /threads
@@ -273,6 +281,8 @@ export const menu = (options: {
         const { on, turns } = yield* daemon.power
         if (!on) return "off" as const
         const now = yield* Clock.currentTimeMillis
+        // Held for later, or unheard, it's heard once it's said to the end.
+        const entry = yield* latest.row(key)
         yield* daemon.tell(
           {
             id: `again:${key}:${now}`,
@@ -282,6 +292,9 @@ export const menu = (options: {
             at: now,
             stale: Effect.succeed(false),
             saying: mention(ref, row.text),
+            ...(journal === undefined || Option.isNone(entry)
+              ? {}
+              : { heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([entry.value], at)) }),
           },
           turns,
         )
