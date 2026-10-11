@@ -223,9 +223,9 @@ curl -X PUT 'http://127.0.0.1:4747/threads/t3%3ARosie%3A850299f8-3b2a-4c1d-8e7f-
 
 | Status | |
 | --- | --- |
-| `204` | It's muted, or no longer muted. |
-| `400` | The body couldn't be read, or `until` isn't a time to come. |
-| `404` | No such thread: its key is in neither `recent` nor [`/threads`](#threads), and isn't muted. |
+| `204` | It's muted, or no longer muted, also when it wasn't muted. |
+| `400` | The key isn't one yapd makes, or, muting, the body couldn't be read or `until` isn't a time to come. |
+| `404` | Muting, no thread yapd knows: not in `recent`, not one T3 Code has, as [`/threads`](#threads) lists them and those it archived, and not muted already. |
 
 You can mute by voice too: "mute it", "mute that for an hour", "unmute it", "what's muted?" and "unmute everything". "Scratch that" takes back a mute you just made. Muting never sends anything to the thread.
 
