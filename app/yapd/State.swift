@@ -75,17 +75,19 @@ struct Status: Decodable {
     /// Whether it can be heard again: not a terminal session's or an archived thread's older update, which yapd can't reach. A
     /// yapd from before it doesn't send it, and hears every row again.
     let replayable: Bool
+    /// How many of its updates and notices he hasn't heard, muted or not. 0 from a yapd from before it.
+    let unheard: Int
 
     var id: String { key }
 
     /// When the agent's turn ended, unless yapd sent a time the app can't read.
     var ended: Date? { Status.date(at) }
 
-    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting, replayable }
+    private enum CodingKeys: String, CodingKey { case key, machine, thread, title, project, text, at, muted, until, waiting, replayable, unheard }
 
     init(
       key: String, machine: String, thread: String? = nil, title: String, project: Project? = nil, text: String, at: String,
-      muted: Bool = false, until: String? = nil, waiting: Bool = false, replayable: Bool = true
+      muted: Bool = false, until: String? = nil, waiting: Bool = false, replayable: Bool = true, unheard: Int = 0
     ) {
       self.key = key
       self.machine = machine
@@ -98,6 +100,7 @@ struct Status: Decodable {
       self.until = until
       self.waiting = waiting
       self.replayable = replayable
+      self.unheard = max(0, unheard)
     }
 
     init(from decoder: Decoder) throws {
@@ -113,6 +116,7 @@ struct Status: Decodable {
       until = try? container.decodeIfPresent(String.self, forKey: .until)
       waiting = (try? container.decodeIfPresent(Bool.self, forKey: .waiting)) ?? false
       replayable = (try? container.decodeIfPresent(Bool.self, forKey: .replayable)) ?? true
+      unheard = max(0, (try? container.decodeIfPresent(Int.self, forKey: .unheard)) ?? 0)
     }
   }
 
@@ -198,8 +202,13 @@ struct Status: Decodable {
   let until: String?
   /// How many threads wait on him, on every machine yapd can see. 0 from a yapd from before it.
   let waiting: Int
+  /// How many updates and notices a catch-up would tell him of now, muted threads aside. 0 from a yapd from before it.
+  let unheard: Int
+  /// Whether yapd answers what it's asked even while it's off, as one that counts what's unheard does. One from before that
+  /// turns a request away while it's off.
+  private let answersOff: Bool
 
-  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, showing, revision, mode, until, waiting }
+  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, showing, revision, mode, until, waiting, unheard }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -215,7 +224,13 @@ struct Status: Decodable {
     mode = (try? container.decodeIfPresent(String.self, forKey: .mode)).flatMap(Mode.init(rawValue:))
     until = mode == nil || mode == .normal ? nil : try? container.decodeIfPresent(String.self, forKey: .until)
     waiting = max(0, (try? container.decodeIfPresent(Int.self, forKey: .waiting)) ?? 0)
+    unheard = max(0, (try? container.decodeIfPresent(Int.self, forKey: .unheard)) ?? 0)
+    answersOff = container.contains(.unheard)
   }
+
+  /// Whether yapd answers what it's asked now, as by the shortcut: always, from a yapd that answers while it's off, and
+  /// otherwise only while it's on.
+  var answers: Bool { on || answersOff }
 }
 
 /// How yapd talks of its own accord: `normal` says what finished and what needs him; `focus` and `quiet` say only what needs
@@ -245,6 +260,9 @@ struct Utterance: Encodable, Equatable {
 
   /// Asks yapd who's waiting on him, so the answer is said, as any answer is. It only reads his threads.
   static let whoNeedsMe = Utterance(text: "who needs me?")
+  /// Asks yapd to catch him up, in his own words, so its model decides what that means, as it would by the shortcut. It only
+  /// reads what yapd kept, and nothing reaches an agent.
+  static let catchMeUp = Utterance(text: "catch me up")
 }
 
 extension Status {
@@ -294,6 +312,12 @@ extension Status {
   /// What the menu says of the threads waiting on him, none while there are none.
   var waitingLine: String? {
     waiting == 0 ? nil : "\(waiting) \(waiting == 1 ? "Thread" : "Threads") Waiting on You"
+  }
+
+  /// What the menu offers of what he hasn't heard, like "Catch Me Up (3)", none while there's nothing, and from a yapd from
+  /// before it.
+  var unheardLine: String? {
+    unheard == 0 ? nil : "Catch Me Up (\(unheard))"
   }
 
   /// What `PUT /state` is sent to have yapd talk in `mode`: none from a yapd from before modes, which would turn it away, and

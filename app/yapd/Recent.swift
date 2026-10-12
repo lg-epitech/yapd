@@ -11,11 +11,13 @@ extension Status.Recent {
     return named.count > 60 ? "\(named.prefix(59))…" : named
   }
 
-  /// What the menu says under it: how long ago its turn ended, and whether it's muted or waits on him.
+  /// What the menu says under it: how long ago its turn ended, whether it waits on him, how many of its updates he hasn't
+  /// heard unless it's muted, and whether it's muted.
   func detail(now: Date) -> String {
     var parts: [String] = []
     if let ended { parts.append(ago(ended, now: now)) }
     if waiting { parts.append("waiting on you") }
+    if unheard > 0 && !muted { parts.append("\(unheard) unheard") }
     if muted { parts.append("muted") }
     return parts.joined(separator: " · ")
   }

@@ -160,9 +160,30 @@ describe.skipIf(swiftc === undefined)("App", () => {
       // The menu offers the modes only to a yapd that has them, each choice through `talk`, and its line while one is on.
       expect(yapd).toMatch(/if let mode = state\.mode \{\s*if let line = state\.modeLine\(now: yapd\.now\) \{ Text\(line\) \}\s*ModeItems\(mode: mode, talk: yapd\.talk\)/)
       expect(yapd).toMatch(/Toggle\(each\.item, isOn: Binding\(get: \{ mode == each \}, set: \{ _ in talk\(each\) \}\)\)/)
-      // Who's waiting is asked only with the words the checks check, and only while yapd is on to answer it.
-      expect(yapd.match(/send\("POST", "utterances"[^\n]*/g)).toEqual(['send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.whoNeedsMe))'])
-      expect(yapd).toMatch(/if let waiting = state\.waitingLine \{[^}]*Button\(waiting\) \{ yapd\.whoNeedsMe\(\) \}\s*\.disabled\(!state\.on\)/)
+      // Who's waiting is asked only with the words the checks check, and only while yapd answers it: on, or off for one that answers then.
+      expect(yapd.match(/send\("POST", "utterances"[^\n]*/g)).toEqual([
+        'send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.whoNeedsMe))',
+        'send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.catchMeUp))',
+      ])
+      expect(yapd).toMatch(/if let waiting = state\.waitingLine \{[^}]*Button\(waiting\) \{ yapd\.whoNeedsMe\(\) \}\s*\.disabled\(!state\.answers\)/)
+    },
+    120_000,
+  )
+
+  test(
+    "the menu reads how much he hasn't heard from any yapd, says it beside a thread that isn't muted, and offers Catch Me Up only while there's something, asking for it as he'd say it, even while yapd is off",
+    async () => {
+      expect(await run("unheard")).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
+      // Offered under the threads waiting, by the line the checks check, and never turned off while yapd is off: it answers then, as the shortcut does.
+      expect(yapd).toMatch(/Button\(waiting\) \{ yapd\.whoNeedsMe\(\) \}\s*\.disabled\(!state\.answers\)\s*\}\s*if let unheard = state\.unheardLine \{\s*\/\/[^\n]*\n\s*Button\(unheard\) \{ yapd\.catchMeUp\(\) \}\s*\}/)
+      expect(yapd).toMatch(/func catchMeUp\(\) \{\s*send\("POST", "utterances", body: try\? JSONEncoder\(\)\.encode\(Utterance\.catchMeUp\)\)\s*\}/)
+      // Nothing about catching up is sent anywhere but as his words to /utterances: no thread, no replay, no state.
+      expect(yapd.match(/catchMeUp/g)?.length).toBe(3)
+      // A row is still heard again only as yapd says it can, while it's on, whatever is unheard of it.
+      const recent = await Bun.file(join(app, "yapd", "Recent.swift")).text()
+      expect(recent).toMatch(/func hearable\(on: Bool\) -> Bool \{\s*on && replayable\s*\}/)
+      expect(recent).toMatch(/if unheard > 0 && !muted \{ parts\.append\("\\\(unheard\) unheard"\) \}/)
     },
     120_000,
   )

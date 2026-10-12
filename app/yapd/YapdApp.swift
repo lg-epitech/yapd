@@ -2,9 +2,10 @@ import ServiceManagement
 import SwiftUI
 
 // yapd in the menu bar: whether it's on, what it's doing, its mode, the
-// threads waiting on him, the threads with the latest updates, to hear again
-// and mute, and the card it's showing, in a panel under the icon. It only uses
-// the API in docs/api.md, so another UI can do all of this too.
+// threads waiting on him, what he hasn't heard, to be caught up on, the threads
+// with the latest updates, to hear again and mute, and the card it's showing,
+// in a panel under the icon. It only uses the API in docs/api.md, so another UI
+// can do all of this too.
 
 @MainActor @Observable
 final class Yapd {
@@ -125,6 +126,12 @@ final class Yapd {
     send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.whoNeedsMe))
   }
 
+  /// Asks yapd to catch him up, as if he'd said it, so its model decides what to tell and the answer is said. It only reads
+  /// what yapd kept: nothing reaches an agent.
+  func catchMeUp() {
+    send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.catchMeUp))
+  }
+
   func replay(_ update: Status.Update) {
     send("POST", "updates/\(update.id)/replay")
   }
@@ -207,9 +214,13 @@ struct YapdApp: App {
           ModeItems(mode: mode, talk: yapd.talk)
         }
         if let waiting = state.waitingLine {
-          // yapd answers it aloud, which it can't while it's off.
+          // yapd answers it aloud, which a yapd from before it answered while off can't do while it's off.
           Button(waiting) { yapd.whoNeedsMe() }
-            .disabled(!state.on)
+            .disabled(!state.answers)
+        }
+        if let unheard = state.unheardLine {
+          // Answered aloud even while yapd is off, as the shortcut is, and then it's quiet again.
+          Button(unheard) { yapd.catchMeUp() }
         }
         Button("Show Last Card") { yapd.showLast() }
           .disabled(yapd.last == nil)
