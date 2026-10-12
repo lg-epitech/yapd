@@ -18,6 +18,7 @@ import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Modes from "./Modes.ts"
+import type * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import { machines } from "./Machines.ts"
@@ -169,6 +170,8 @@ export const serve = Effect.gen(function* () {
       ),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
+  /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
+  let missing: Effect.Effect<ReadonlyArray<Missed.Group>> | undefined
   const latest = yield* Latest.make({
     here: machine,
     journal,
@@ -182,6 +185,8 @@ export const serve = Effect.gen(function* () {
     ),
     // Every thread it can see, to count those that wait on him.
     desk: threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER),
+    // What he hasn't heard, to count by thread and in all.
+    missed: Effect.suspend(() => missing ?? Effect.succeed([])),
   })
   // Muting from the menu or by voice: never anything that reaches an agent. A thread the menu shows muted by its session is unmuted by it too.
   const controls = Mutes.widened(
@@ -221,6 +226,7 @@ export const serve = Effect.gen(function* () {
     modes,
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
+  missing = Effect.map(assistant.missed, ({ groups }) => groups)
   // What threads need him for, what failed and what finished with no hook, each said once, ever.
   const notices = yield* Notices.make({
     threads,
@@ -296,13 +302,14 @@ export const serve = Effect.gen(function* () {
   const heard = (text: string, via: Assistant.Utterance["via"], voiced: number, turns: number, press?: number, at?: number) =>
     Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) => assistant.heard({ heard: text, via, at, voiced, turns }, press))
 
-  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, latest.rows, modes.changes, latest.waiting).pipe(
-    Stream.map(([state, activity, recent, { mode }, waiting]) => ({
+  const state = Stream.zipLatestAll(daemon.state, (yield* Activity).changes, latest.rows, modes.changes, latest.waiting, latest.unheard).pipe(
+    Stream.map(([state, activity, recent, { mode }, waiting, unheard]) => ({
       on: state.on,
       activity,
       mode: mode.mode,
       ...(mode.mode === "normal" || mode.until === undefined ? {} : { until: new Date(mode.until).toISOString() }),
       waiting,
+      unheard,
       updates: state.heard.map(({ id, update }) => ({
         id,
         project: update.project,

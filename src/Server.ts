@@ -38,6 +38,8 @@ export interface State {
   readonly until?: string
   /** How many threads wait on him, on every machine yapd can see. */
   readonly waiting?: number
+  /** How many updates and notices a catch-up would tell him of now, muted threads aside. */
+  readonly unheard?: number
   readonly updates: ReadonlyArray<{
     readonly id: string
     readonly project: string
@@ -86,6 +88,8 @@ export interface Recent {
    * didn't hear just now, nor an archived thread or one on a machine away.
    */
   readonly replayable: boolean
+  /** How many of its updates and notices he hasn't heard, that a catch-up about it would tell him of, muted or not. */
+  readonly unheard?: number
 }
 
 /** A card as `/state` points at it. */
@@ -153,6 +157,8 @@ export interface Entry {
   readonly utterance?: string
   /** ISO 8601, when the user heard it through. */
   readonly heard?: string
+  /** For an update yapd didn't read out, why: kept quiet as he muted its thread, or held for focus, quiet, the digest, or as yapd was off. */
+  readonly unsaid?: "muted" | "focus" | "quiet" | "progress" | "off"
 }
 
 /** Which of the journal's entries `/journal` returns. */

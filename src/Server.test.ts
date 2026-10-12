@@ -117,6 +117,26 @@ const stateful = Effect.gen(function* () {
 })
 
 describe("Server", () => {
+  test("the state says how much a catch-up would tell of now, and the journal why an update wasn't read out", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const server = yield* Server.serve(0, {
+        ...hooks(() => Effect.succeed(undefined)),
+        state: Stream.succeed<Server.State>({ on: false, activity: "idle", updates: [], unheard: 6, recent: [] }),
+        journal: () =>
+          Effect.succeed([
+            { id: 9, at: "2026-10-02T10:00:00.000Z", kind: "update" as const, said: "yapd. Distribox migrated.", unsaid: "off" as const },
+            { id: 8, at: "2026-10-02T09:00:00.000Z", kind: "update" as const, said: "yapd. The tests pass.", heard: "2026-10-02T09:00:09.000Z" },
+          ]),
+      })
+      const json = (path: string) => Effect.promise(() => fetch(`http://127.0.0.1:${server.port}${path}`).then((response) => response.json()))
+      expect(yield* json("/state")).toMatchObject({ on: false, unheard: 6 })
+      expect(yield* json("/journal")).toEqual([
+        { id: 9, at: "2026-10-02T10:00:00.000Z", kind: "update", said: "yapd. Distribox migrated.", unsaid: "off" },
+        { id: 8, at: "2026-10-02T09:00:00.000Z", kind: "update", said: "yapd. The tests pass.", heard: "2026-10-02T09:00:09.000Z" },
+      ])
+    })))
+  })
+
   test("accepts valid events and rejects invalid payloads", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const server = yield* Server.serve(0, hooks(() => Effect.succeed("Follow up.")))

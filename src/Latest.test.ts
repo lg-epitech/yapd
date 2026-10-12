@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option, PubSub, Queue, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Clock, Effect, Option, PubSub, Queue, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as Icons from "./Icons.ts"
 import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
+import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import type * as Server from "./Server.ts"
 import * as Store from "./Store.ts"
@@ -45,10 +46,12 @@ const listing = (
   path = ":memory:",
   /** What he heard, and each time that changes. */
   hearing: Pick<Parameters<typeof Latest.make>[0], "heard" | "hearing" | "desk"> = {},
+  /** Whether what he hasn't heard is counted, as a catch-up gathers it. */
+  counting = false,
 ) =>
   Effect.gen(function* () {
     const store = yield* Store.make(path)
-    const journal = Journal.fromStore(store, (host) => host.split(".")[0] ?? host, yield* PubSub.unbounded<Journal.Kept>())
+    const journal = Journal.fromStore(store, (host) => host.split(".")[0] ?? host, yield* PubSub.unbounded<Journal.Kept>(), yield* PubSub.unbounded<void>())
     const mutes = yield* Mutes.make(store)
     const icons = yield* Icons.make({ actions: () => Option.none() })
     const changes = yield* Queue.unbounded<{ readonly machine: string; readonly change: T3Live.Change }>()
@@ -65,7 +68,10 @@ const listing = (
         )),
       changes: Stream.fromQueue(changes),
     }
-    const latest = yield* Latest.make({ here: "Rosie", journal, mutes, icons, threads, ...hearing })
+    const missed = Effect.flatMap(Clock.currentTimeMillis, (now) =>
+      Effect.map(Missed.gather(journal, { now, spoke: now - day, coming: [], desk: { threads: [], away: [] } }), ({ groups }) => groups),
+    )
+    const latest = yield* Latest.make({ here: "Rosie", journal, mutes, icons, threads, ...hearing, ...(counting ? { missed } : {}) })
     // Following what changes from here on.
     yield* flush
     return {
@@ -540,5 +546,74 @@ describe("Latest", () => {
         { key: "t3:Rosie:t-tezos", called: "Migrate the Tezos integration", project: undefined, ends: 10 * 60_000 },
       ])
     })
+  })
+
+  test("counts what he hasn't heard of each thread, what came in while yapd was off and what was kept quiet too, and in all only what wasn't kept quiet, and drops once he's heard it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.adjust(`${day} millis`)
+        const { latest, journal } = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration"), thread("t-docs", "Sweep the docs")] }, ":memory:", {}, true)
+        const at = (yield* Clock.currentTimeMillis) - 60_000
+        const off = Option.getOrThrow(yield* journal.write({ at, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Distribox migrated.", detail: { session: "claude:s", held: "off" } }))
+        const failed = Option.getOrThrow(yield* journal.write({ at: at + 1, kind: "notice", machine: "Rosie", thread: "t-tezos", key: "fail:Rosie:r1", said: "It failed.", detail: { failure: "provider_error" } }))
+        yield* journal.write({ at: at + 2, kind: "update", machine: "Rosie", thread: "t-docs", said: "Docs swept.", detail: { session: "claude:d", muted: true } })
+        const totals: Array<number> = []
+        yield* Effect.forkScoped(Stream.runForEach(latest.unheard, (count) => Effect.sync(() => void totals.push(count))))
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const counts = (yield* latest.current).map(({ key, unheard }) => [key, unheard])
+        // A catch-up he heard to the end clears them at once.
+        yield* journal.markHeard([off, failed], at + 30_000)
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { counts, after: (yield* latest.current).map(({ key, unheard }) => [key, unheard]), totals }
+      }),
+    )
+    expect(result.counts).toEqual([
+      ["t3:Rosie:t-docs", 1],
+      ["t3:Rosie:t-tezos", 2],
+    ])
+    expect(result.after).toEqual([
+      ["t3:Rosie:t-docs", 1],
+      ["t3:Rosie:t-tezos", 0],
+    ])
+    // Nothing before what was kept came in, then the two that weren't kept quiet, then none once heard.
+    expect(result.totals).toEqual([0, 2, 0])
+  })
+
+  test("a row kept while yapd was off, of a thread it can reach, is heard again from the menu and heard once it's said; a terminal session's isn't", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const listed = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] })
+        const told: Array<string> = []
+        const menu = Latest.menu({
+          latest: listed.latest,
+          threads: listed.threads,
+          mutes: listed.mutes,
+          controls: Mutes.controls({ mutes: listed.mutes, silence: () => Effect.void, journal: listed.journal }),
+          daemon: {
+            latestHeard: () => Effect.succeedNone,
+            replay: () => Effect.succeed("queued" as const),
+            power: Effect.succeed({ on: true, turns: 1 }),
+            tell: (notice) => Effect.sync(() => void told.push(notice.spoken)).pipe(Effect.zipRight(notice.heard ?? Effect.void), Effect.as(true)),
+          } as Parameters<typeof Latest.menu>[0]["daemon"],
+          mention: () => Effect.void,
+          journal: listed.journal,
+        })
+        yield* listed.journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Distribox migrated.", detail: { session: "claude:s", held: "off" } })
+        yield* listed.journal.write({ at: 2, kind: "update", machine: "Rosie", thread: "claude:term", directory: "/tmp", said: "The terminal one is done.", detail: { held: "off" } })
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        const rows = (yield* listed.latest.current).map(({ key, replayable }) => [key, replayable])
+        const again = yield* menu.replayThread("t3:Rosie:t-tezos")
+        const session = yield* menu.replayThread("session:Rosie:claude:term")
+        return { rows, thread: again, session, told, unheard: (yield* listed.journal.unheard(0, 10)).map(({ said }) => said) }
+      }),
+    )
+    expect(result.rows).toEqual([
+      ["session:Rosie:claude:term", false],
+      ["t3:Rosie:t-tezos", true],
+    ])
+    expect(result).toMatchObject({ thread: "queued", session: "unreachable", told: ["Distribox migrated."], unheard: ["The terminal one is done."] })
   })
 })

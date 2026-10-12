@@ -298,6 +298,18 @@ describe("Show", () => {
     // Only what's documented, never where it ran on disk or what's kept besides.
     const typed: Kept = { id: 8, at: now, kind: "dictation", text: "Who needs me?", utterance: "u1", directory: "/code/yapd", key: "k", detail: { via: "typed" } }
     expect(Show.entry(typed)).toStrictEqual({ id: 8, at: "2026-10-08T22:00:00.000Z", kind: "dictation", text: "Who needs me?", utterance: "u1" })
+    // Why an update wasn't read out: kept quiet as he muted it, or held, and for what, as yapd was off too; never for a line read out.
+    const unsaid = (detail: unknown) => Show.entry({ id: 9, at: now, kind: "update", said: "yapd. Distribox migrated.", detail }).unsaid
+    expect([{ muted: true }, { held: "focus" }, { held: "quiet" }, { held: "progress" }, { held: "off" }, { priority: "done" }, undefined].map(unsaid)).toEqual([
+      "muted",
+      "focus",
+      "quiet",
+      "progress",
+      "off",
+      undefined,
+      undefined,
+    ])
+    expect(Show.entry({ id: 10, at: now, kind: "notice", said: "It failed.", detail: { held: "off" } }).unsaid).toBeUndefined()
   })
 
   test("the API serves the card that's up, the cards, the threads and the journal, and counts only a stream that asks for cards as watching", async () => {

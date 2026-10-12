@@ -2,6 +2,7 @@ import { Clock, Effect, Option, Schedule, Stream, SubscriptionRef } from "effect
 import type * as Daemon from "./Daemon.ts"
 import type * as Icons from "./Icons.ts"
 import type { Journal, Kept } from "./Journal.ts"
+import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import type * as Server from "./Server.ts"
 import type * as T3Live from "./T3Live.ts"
@@ -45,6 +46,8 @@ export interface Latest {
   readonly rows: Stream.Stream<ReadonlyArray<Server.Recent>>
   /** How many threads wait on him, on every machine whose threads can be seen, then each time that changes. */
   readonly waiting: Stream.Stream<number>
+  /** How many updates and notices a catch-up would tell him of now, muted threads aside, then each time that changes. */
+  readonly unheard: Stream.Stream<number>
   /** The threads as listed now. */
   readonly current: Effect.Effect<ReadonlyArray<Server.Recent>>
   /**
@@ -89,13 +92,15 @@ export const make = (options: {
   readonly hearing?: Stream.Stream<unknown>
   /** Every thread yapd can see, on every machine, to count those that wait on him: none without it. */
   readonly desk?: Effect.Effect<Threads.Desk>
+  /** What he hasn't heard, as a catch-up would gather it, a thread at a time, to count: nothing without it. */
+  readonly missed?: Effect.Effect<ReadonlyArray<Missed.Group>>
 }) =>
   Effect.gen(function* () {
     const { here, journal, mutes, icons, threads } = options
     const heard = options.heard ?? (() => Effect.succeedNone)
 
     /** Nothing listed yet, and the keys nothing is muted under. */
-    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, number>(), waiting: 0, blind: false }
+    const none = { rows: [] as ReadonlyArray<Server.Recent>, under: new Map<string, ReadonlyArray<string>>(), entries: new Map<string, number>(), waiting: 0, unheard: 0, blind: false }
 
     const compute = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
@@ -135,6 +140,10 @@ export const make = (options: {
       const under = new Map<string, ReadonlyArray<string>>()
       const entries = new Map<string, number>()
       let blind = false
+      const missed = options.missed === undefined ? [] : yield* options.missed
+      /** How many of a thread's updates and notices he hasn't heard, muted or not: under its own key, and the sessions it's shown from. */
+      const unheardOf = (machine: string, threads: ReadonlyArray<string>) =>
+        missed.filter((group) => (group.machine ?? here) === machine && group.thread !== undefined && threads.includes(group.thread)).reduce((sum, { rows }) => sum + rows.length, 0)
       const listed = yield* Effect.forEach(rows, ({ kept, last }) =>
         Effect.gen(function* () {
           const machine = kept.machine ?? here
@@ -143,7 +152,8 @@ export const make = (options: {
           const key = session ? Mutes.key.session(machine, id) : Mutes.key.thread({ machine, id })
           // Muted by its session, before that session was found to be the thread's: its latest update's, or the newer session row's it shows.
           const own = last === kept ? found.get(kept)?.own : last.thread
-          const by = [...new Set([found.get(kept)?.own, own])].flatMap((own) => (own === undefined || own.startsWith("finished:") ? [] : [Mutes.key.session(machine, own)]))
+          const sessions = [...new Set([found.get(kept)?.own, own])].flatMap((own) => (own === undefined || own.startsWith("finished:") ? [] : [own]))
+          const by = sessions.map((own) => Mutes.key.session(machine, own))
           under.set(key, by)
           entries.set(key, last.id)
           const mute = [key, ...by].map((key) => muted.get(key)).find((mute) => mute !== undefined)
@@ -176,17 +186,21 @@ export const make = (options: {
             ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
             waiting: Option.exists(thread, ({ pendingRuntimeRequest }) => pendingRuntimeRequest !== null),
             replayable: Option.isSome(still) || reachable(thread),
+            ...(options.missed === undefined ? {} : { unheard: unheardOf(machine, [id, ...sessions]) }),
           } satisfies Server.Recent
         }),
       )
       const desk = options.desk === undefined ? undefined : yield* options.desk
       const waiting = desk === undefined ? 0 : desk.threads.filter(({ state }) => state === "approval" || state === "question").length
-      return { rows: listed, under, entries, waiting, blind }
+      // What a catch-up of everything would tell him of: what was kept quiet as he muted its thread aside.
+      const unheard = missed.reduce((sum, group) => sum + group.rows.filter((kept) => !Missed.muted(kept)).length, 0)
+      return { rows: listed, under, entries, waiting, unheard, blind }
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not list the latest threads", cause), none)))
 
     const first = yield* compute
     const ref = yield* SubscriptionRef.make(first.rows)
     const waiting = yield* SubscriptionRef.make(first.waiting)
+    const unheard = yield* SubscriptionRef.make(first.unheard)
     let { under, entries, blind } = first
     /** Built again, and kept only when it changed, so nothing that follows the state hears of what didn't. */
     const refresh = Effect.flatMap(compute, (built) =>
@@ -197,12 +211,14 @@ export const make = (options: {
           blind = built.blind
         }),
         SubscriptionRef.update(ref, (before) => (JSON.stringify(before) === JSON.stringify(built.rows) ? before : built.rows)),
-      ).pipe(Effect.zipRight(SubscriptionRef.set(waiting, built.waiting))),
+      ).pipe(Effect.zipRight(SubscriptionRef.set(waiting, built.waiting)), Effect.zipRight(SubscriptionRef.set(unheard, built.unheard))),
     )
     const shows = new Set(["Renamed", "Asked", "Answered", "Removed"])
     yield* Stream.mergeAll(
       [
         Stream.map(journal.kept, () => undefined),
+        // Heard, held or muted, so a catch-up he heard to the end clears the counts at once.
+        journal.marked,
         mutes.changes,
         icons.changes,
         Stream.filter(threads.changes, ({ change }) => shows.has(change._tag)).pipe(Stream.map(() => undefined)),
@@ -219,6 +235,7 @@ export const make = (options: {
     return {
       rows: Stream.changesWith(ref.changes, (one, other) => one === other),
       waiting: Stream.changes(waiting.changes),
+      unheard: Stream.changes(unheard.changes),
       current: SubscriptionRef.get(ref),
       under: (key) => Effect.sync(() => under.get(key) ?? []),
       row: (key) => Effect.sync(() => Option.fromNullable(entries.get(key))),

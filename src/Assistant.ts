@@ -327,6 +327,8 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
     readonly rundown: (count: number, was: Modes.Hold) => Effect.Effect<void>
     /** He said he's back over an update: the catch-up is said, in its turn, as an answer, without the model working out what he meant. */
     readonly welcome: Effect.Effect<void>
+    /** What he hasn't heard, as a catch-up of everything would gather it, muted threads too, a thread at a time. */
+    readonly missed: Effect.Effect<Missed.Missed>
   }
 >() {}
 
@@ -3919,6 +3921,10 @@ export const make = (options: {
           offered = { kind: "rundown", count, was }
           return Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope))
         }),
+      missed: Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        return yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* options.upcoming, desk: nowhere })
+      }),
       welcome: Effect.gen(function* () {
         const { on, turns } = yield* options.power
         if (!on) return
