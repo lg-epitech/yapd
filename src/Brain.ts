@@ -1943,7 +1943,7 @@ const contract = `Reply with only a JSON object with the keys "act", "target", "
 
 "act", what he wants:
 - "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD and USAGE, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one.
-- "catchup": he wants to hear what he hasn't heard, or what came in while he was away or had you off, about everything or part of it, however he puts it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS or UNHEARD for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is ISO 8601 with offset for "since …"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like "did the Distribox one finish?" or "how much did I miss?", is "answer" from UNHEARD.
+- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS or UNHEARD for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is ISO 8601 with offset for "since …"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD.
 - "look": he asked what a thread is doing right now, or for detail none of the lines below give. "target" is the thread; "spoken" is empty. You'll be shown what it's doing and asked again.
 - "find": he named something specific that nothing in THREADS fits, or asked what was said or done a while ago. "text" is the words to search for, "how" is "threads" to search what was written in the threads, or "journal" for what you heard and said. You'll be shown what's found and asked again.
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
@@ -2487,7 +2487,7 @@ const briefing = (kind: Brief["kind"]) => `You're yapd, his assistant, the one g
 Reply with only a JSON object with the key "spoken".
 
 "spoken":
-- At most ${kind === "digest" ? briefWords : catchupWords} words. First anything in WAITING ON YOU, in a few words, then NEEDS YOU, then the threads, oldest first, a thread at a time.
+- At most ${kind === "digest" ? briefWords : catchupWords} words. First anything in WAITING ON YOU, in a few words, then what NEEDS YOU lists, then the threads, oldest first, a thread at a time. Skip a list with nothing in it, and never say the lists' names: tell it as plain news.
 - Sum it up: what each thread got to, never every update, nor the same thing twice.
 - When some of it came in while he had you off, you may say so, once at most.
 - When LEFT OUT has any, end with one short clause saying how many more threads and updates there are, and that he can ask for more.

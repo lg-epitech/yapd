@@ -1778,7 +1778,8 @@ describe("Brain", () => {
       const on = desk()
       const prompt = Brain.briefPrompt({ kind: "digest", groups: Missed.group(held, on), left: { threads: 0, rows: 0 } }, on, now, Option.some("Call me sir."))
       expect(prompt).toContain("While he wasn't listening, you held some updates about the work for later.")
-      expect(prompt).toContain("At most 60 words. First anything in WAITING ON YOU")
+      expect(prompt).toContain("At most 60 words. First anything in WAITING ON YOU, in a few words, then what NEEDS YOU lists")
+      expect(prompt).toContain("Skip a list with nothing in it, and never say the lists' names: tell it as plain news.")
       expect(prompt).toContain("Call me sir.")
       expect(prompt).toContain(`WAITING ON YOU:\n- «Fix the transcription upload»: waiting for your approval (command)`)
       expect(prompt).toContain(`- «Migrate Tezos Integration», 2 updates, the latest 10 min ago:\n  - «Pass 6 found nothing new.»\n  - «Pass 7 is running.»`)
@@ -1836,8 +1837,8 @@ describe("catching up", () => {
 
   test("the contract has catchup, and the answer no longer has its own way of telling what he missed", () => {
     const prompt = Brain.prompt(situation("Catch me up."), Option.none())
-    expect(prompt).toContain(`- "catchup": he wants to hear what he hasn't heard, or what came in while he was away or had you off, about everything or part of it, however he puts it.`)
-    expect(prompt).toContain(`A question about it that isn't asking to be caught up, like "did the Distribox one finish?" or "how much did I miss?", is "answer" from UNHEARD.`)
+    expect(prompt).toContain(`- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it.`)
+    expect(prompt).toContain(`A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD.`)
     expect(prompt).toContain(`"normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up`)
     expect(prompt).not.toContain(`"how" is "missed"`)
     expect(Brain.enabled.has("catchup")).toBe(true)
