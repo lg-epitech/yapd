@@ -2665,7 +2665,12 @@ export const make = (options: {
      * his muted threads said.
      */
     const within = (scope: Scope, group: Missed.Group, loosely = false) => {
-      if (scope.thread !== undefined && (group.machine !== scope.thread.machine || group.thread !== scope.thread.thread)) return undefined
+      // By its machine only when both are known: a session's rows kept before machines were, or a scope without one, go by the thread alone.
+      if (
+        scope.thread !== undefined &&
+        ((group.machine !== undefined && scope.thread.machine !== undefined && group.machine !== scope.thread.machine) || group.thread !== scope.thread.thread)
+      )
+        return undefined
       if (scope.project !== undefined && !names(group.project, scope.project, loosely) && !names(group.called, scope.project, loosely)) return undefined
       if (scope.machine !== undefined && group.machine?.toLowerCase() !== scope.machine.toLowerCase()) return undefined
       return Missed.only(
@@ -2700,7 +2705,7 @@ export const make = (options: {
               ? undefined
               : muted._tag === "Thread"
                 ? { machine: muted.ref.machine, thread: muted.ref.id }
-                : { machine: undefined, thread: `${muted.agent}:${muted.session}` },
+                : { machine: muted.machine, thread: `${muted.agent}:${muted.session}` },
         onSome: ({ ref }) => ({ machine: ref.machine, thread: ref.id }),
       })
       const project = decision.text.trim()
