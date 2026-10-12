@@ -1249,6 +1249,13 @@ export const make = (options: {
         } satisfies Outcome
       })
 
+    /**
+     * What came in while yapd was off is offered the once: anything but a
+     * yes lets it go without a word, nothing marked heard, and what's next is
+     * asked. It's never asked again, nor put back behind a thread's question.
+     */
+    const passOver = (open: Open): Effect.Effect<void> => Effect.zipRight(close(open, "dropped: unanswered"), offering)
+
     /** A minute on, the question is asked once more in other words, or let go with a word if it's been asked as often as it will be. */
     const due = (id: string): Effect.Effect<void> =>
       Effect.gen(function* () {
@@ -1258,6 +1265,7 @@ export const make = (options: {
         asking.due = undefined
         const power = yield* options.power
         if (!power.on || asking?.open.id !== id) return
+        if (asking.offer?.kind === "missed") return yield* passOver(asking.open)
         if (asking.asks >= asks) return yield* letGo(asking.open)
         const { utterance } = asking.open
         yield* deliver(yield* reask(yield* persona.lines), { id: utterance, turns: power.turns })
@@ -1292,10 +1300,7 @@ export const make = (options: {
         if (!(yield* options.power).on) return
         // What came in while yapd was off is offered the once: not taken up, it's let go without a word, nothing marked heard, and what's
         // next is asked.
-        if (asking.offer?.kind === "missed") {
-          yield* close(asking.open, "dropped: unanswered")
-          return yield* offering
-        }
+        if (asking.offer?.kind === "missed") return yield* passOver(asking.open)
         if (asking.asks >= asks) return yield* letGo(asking.open)
         const now = yield* Clock.currentTimeMillis
         const { open, from, asks: count, offer } = asking
@@ -1334,6 +1339,8 @@ export const make = (options: {
     const resume = (id: string) =>
       Effect.suspend(() => {
         if (asking?.open.id !== id || asking.held.size > 0) return Effect.void
+        // What came in while yapd was off is offered the once: a press that came to nothing over it lets it go, as anything but a yes does.
+        if (asking.offer?.kind === "missed") return Effect.zipRight(close(asking.open, "dropped: unanswered"), Effect.forkIn(turn.withPermits(1)(offering), scope))
         if (asking.open.kind !== "question" || asking.from === undefined || asking.whole !== undefined) return later(id)
         return Effect.zipRight(close(asking.open, "dropped: nothing said"), Effect.forkIn(turn.withPermits(1)(offering), scope))
       })
@@ -3572,6 +3579,8 @@ export const make = (options: {
       const now = yield* Clock.currentTimeMillis
       if (!((open.kind === "question" && from !== undefined) || offer !== undefined) || due === undefined || Option.isNone(yield* askable(now))) return
       if (asking?.open.id !== open.id) return
+      // What came in while yapd was off is offered the once, never put back.
+      if (offer?.kind === "missed") return yield* close(open, "dropped: unanswered")
       if (asking.asks >= asks) return yield* letGo(open)
       const count = asking.asks
       yield* close(open, "dropped: unanswered, others waiting")

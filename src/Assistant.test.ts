@@ -10871,6 +10871,37 @@ describe("Assistant turned off and on", () => {
     expect(result.after).toEqual(["Distribox migrated."])
   })
 
+  test("a press over the offer that comes to nothing lets it go, never asked again, and a thread's question that comes meanwhile is asked next, the offer not after", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const pressed = (asks: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), briefs: () => "Distribox migrated, sir." })
+          yield* made.journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+          yield* kept(made.journal, 90, "Distribox migrated.")
+          yield* made.back
+          yield* made.flush
+          // He presses the shortcut over it, and what he dictates comes to nothing.
+          yield* made.prepare(1, 1)
+          yield* made.nothing(1)
+          yield* made.wait(30)
+          // A thread asks meanwhile.
+          if (asks) {
+            yield* asked(made, cloud)
+            yield* made.answer("Red.")
+          }
+          yield* made.wait(180)
+          return { spoken: made.spoken(), after: yield* unheard(made.journal) }
+        }),
+      )
+    const offer = "You missed one, sir. Want the rundown?"
+    expect(await pressed(false)).toEqual({ spoken: [offer], after: ["Distribox migrated."] })
+    expect(await pressed(true)).toEqual({
+      spoken: [offer, "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.", "Red it is, sir."],
+      after: ["Distribox migrated."],
+    })
+  })
+
   test("caught up some other way, the offer isn't made after: once it gave way to a thread's question, or while he was pressing the shortcut as it was turned on", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const gaveWay = await run(
