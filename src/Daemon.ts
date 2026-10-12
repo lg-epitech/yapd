@@ -813,8 +813,9 @@ export const make = (
         fallback.heard = true
         fallback.quiet = true
       }
-      // Held as yapd was off, what its Stop told of is kept unheard for catching up, a failure left to it with it: it isn't said apart.
-      if (quieting._tag === "Muted" || quieting.why !== "off") yield* quieten(finished.stop)
+      // What its Stop told of isn't said now, so a failure left to it is handed on after all: while yapd is off, or was turned off since,
+      // that keeps it unheard, apart, so it leads a catch-up, and muting the thread later never keeps it quiet.
+      yield* quieten(finished.stop)
       if (quieting._tag === "Held") return yield* Effect.logInfo(`Held update for ${project}, for later (${quieting.why})`)
       const thread = keys.find((key) => key.startsWith("t3:"))
       if (thread !== undefined && quieting.mute.key !== thread && options.mutes !== undefined) yield* options.mutes.rekey(quieting.mute.key, thread)
@@ -1842,7 +1843,8 @@ export const make = (
         Effect.suspend(() => {
           if (!cut || through || !("update" in ready) || ready.replay !== undefined) return Effect.void
           const row = rows.get(ready.update)
-          return row === undefined ? Effect.void : journal.hold([row], "off")
+          // Never heard to the end now, so a failure left to its Stop is handed on, to be kept unheard apart.
+          return Effect.zipRight(row === undefined ? Effect.void : journal.hold([row], "off"), quieten(stopOf.get(ready.update)))
         }),
       ),
       // Not put back, it's done with, said or not.
@@ -1925,6 +1927,8 @@ export const make = (
         }
         const row = rows.get(entry.update)
         if (row !== undefined) kept.push(row)
+        // Never said now, so a failure left to its Stop is handed on, to be kept unheard apart.
+        yield* quieten(stopOf.get(entry.update))
       }
       yield* journal.hold(kept, "off")
     })

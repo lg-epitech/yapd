@@ -5167,21 +5167,45 @@ describe("Daemon holding what a failure was left to", () => {
     })
   }
 
-  test("a failure left to a Stop whose update is kept as what came in while yapd was off isn't said apart: that update tells of it", async () => {
+  test("a failure left to a Stop whose update is kept as what came in while yapd was off, being read, waiting or coming in then, is handed on to be kept apart, and muting the thread later never keeps it quiet", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { made, finish, toggle, nextEvent, wait } = yield* make()
-        const told: Array<string> = []
+        const mutes = yield* muting
+        const { made, finish, toggle, nextEvent, wait, journal } = yield* make(undefined, { mutes })
+        /** A failure as Notices keeps one while yapd is off: unheard, under its key. */
+        const failed = (session: string) =>
+          Effect.flatMap(made.stopped([session]), (stops) =>
+            made.unheard(
+              stops,
+              Effect.asVoid(journal.claim({ at: 0, kind: "notice", thread: `claude:${session}`, key: `fail:${session}`, said: `${session} failed.`, detail: { failure: "provider_error" } })),
+            ),
+          )
+        // Being read, and waiting to be, as he turns it off.
+        yield* finish("reading", "The provider had an error, so I stopped.")
+        yield* finish("waiting", "The model is down, so I stopped.")
+        yield* wait(1)
         yield* toggle(false)
-        yield* finish("off", "The provider had an error, so I stopped.")
+        // And coming in while it's off.
+        yield* finish("off", "The provider failed, so I stopped.")
         yield* nextEvent("Held update for yapd, for later (off)")
-        yield* Effect.flatMap(made.stopped(["off"]), (stops) => made.unheard(stops, Effect.sync(() => void told.push("off"))))
+        for (const session of ["reading", "waiting", "off"]) yield* failed(session)
         yield* toggle(true)
         yield* wait(30)
-        return told
+        const keys = ["reading", "waiting", "off"].map(sessionKey)
+        for (const key of keys) yield* mutes.mute({ key })
+        yield* made.silence(keys)
+        const kept = (yield* journal.since(0, { kinds: ["update", "notice"] })).toSorted((one, other) => one.kind.localeCompare(other.kind) || one.id - other.id)
+        return kept.map((row) => [row.kind, row.said, row.heardAt, quieted(row)])
       }),
     )
-    expect(result).toEqual([])
+    expect(result).toEqual([
+      ["notice", "reading failed.", undefined, false],
+      ["notice", "waiting failed.", undefined, false],
+      ["notice", "off failed.", undefined, false],
+      ["update", "yapd. The provider had an error, so I stopped.", undefined, true],
+      ["update", "yapd. The model is down, so I stopped.", undefined, true],
+      ["update", "yapd. The provider failed, so I stopped.", undefined, true],
+    ])
   })
 
   test("after a restart in the middle of a turn, the answer to what he said back through its hook before then is said, never held as progress", async () => {
