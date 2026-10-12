@@ -134,6 +134,8 @@ protocol Asking {
   var method: String { get }
   /// Relative to yapd's API.
   var path: String { get }
+  /// JSON, for a request that's sent one.
+  var body: Data? { get }
 }
 
 extension Asking {
@@ -141,6 +143,8 @@ extension Asking {
   func url(at api: URL) -> URL? {
     URL(string: path, relativeTo: api)?.absoluteURL
   }
+
+  var body: Data? { nil }
 }
 
 /// A thread's key as one piece of a path: everything but what's never encoded is.
@@ -150,18 +154,35 @@ func encoded(_ key: String) -> String {
   return key.addingPercentEncoding(withAllowedCharacters: unreserved) ?? key
 }
 
-/// Muting a thread, as `PUT /threads/{key}/mute`, until he takes it off, or taking it off, as `DELETE`.
+/// Muting a thread, as `PUT /threads/{key}/mute`, until he takes it off or until a time, or taking it off, as `DELETE`.
 struct Muting: Asking, Equatable {
   let key: String
   let on: Bool
+  /// When the mute ends on its own, if it does.
+  let until: Date?
 
-  init(_ row: Status.Recent, on: Bool) {
+  init(_ row: Status.Recent, on: Bool, until: Date? = nil) {
     key = row.key
     self.on = on
+    self.until = on ? until : nil
+  }
+
+  /// Muting it for an hour from `now`, after which yapd takes the mute off on its own.
+  static func forAnHour(_ row: Status.Recent, from now: Date) -> Muting {
+    Muting(row, on: true, until: now.addingTimeInterval(60 * 60))
   }
 
   var method: String { on ? "PUT" : "DELETE" }
   var path: String { "threads/\(encoded(key))/mute" }
+
+  /// `{"until": …}` in ISO 8601, as yapd reads it, for a mute that ends on its own; none for one that lasts until he takes it
+  /// off, and to take it off.
+  var body: Data? {
+    guard let until else { return nil }
+    let format = ISO8601DateFormatter()
+    format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return try? JSONEncoder().encode(["until": format.string(from: until)])
+  }
 }
 
 /// Hearing a thread's latest update again, as `POST /threads/{key}/replay`.
@@ -174,6 +195,18 @@ struct Replaying: Asking, Equatable {
 
   var method: String { "POST" }
   var path: String { "threads/\(encoded(key))/replay" }
+}
+
+/// Asking what yapd tells of a thread for its panel, as `GET /threads/{key}`.
+struct Detailing: Asking, Equatable {
+  let key: String
+
+  init(_ row: Status.Recent) {
+    key = row.key
+  }
+
+  var method: String { "GET" }
+  var path: String { "threads/\(encoded(key))" }
 }
 
 /// Where a project's image is fetched from: the path yapd gave, on yapd's own API, and never anywhere else, nor with a query.

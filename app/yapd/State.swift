@@ -6,7 +6,7 @@ import Foundation
 
 /// What `GET /state` returns.
 struct Status: Decodable {
-  struct Update: Decodable, Identifiable {
+  struct Update: Decodable, Identifiable, Equatable {
     let id: String
     let text: String
   }
@@ -298,15 +298,18 @@ extension Status {
     case .normal, nil: return nil
     }
     guard let ends = until.flatMap(Status.date) else { return name }
-    let format = DateFormatter()
-    format.locale = locale
-    format.timeZone = zone
-    format.dateStyle = .none
-    format.timeStyle = .short
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = zone
-    let later = calendar.startOfDay(for: ends) > calendar.startOfDay(for: now)
-    return "\(name) until \(format.string(from: ends))\(later ? " tomorrow" : "")"
+    return "\(name) until \(clock(ends, now: now, zone: zone, locale: locale))"
+  }
+
+  /// What the icon tells VoiceOver: what it shows, and while yapd is on and quiet, its mode and the threads waiting on him.
+  static func told(_ state: Status?, now: Date) -> String {
+    switch look(state) {
+    case .down: "yapd isn't running"
+    case .off: "yapd is off"
+    case .speaking: "yapd is speaking"
+    case .listening: "yapd is listening"
+    case .on: (["yapd is on"] + [state?.modeLine(now: now), state?.waitingLine].compactMap { $0 }).joined(separator: ", ")
+    }
   }
 
   /// What the menu says of the threads waiting on him, none while there are none.
@@ -326,6 +329,19 @@ extension Status {
     guard let current = self.mode else { return nil }
     return current == .normal && mode == .normal ? nil : ModeChange(mode: mode)
   }
+}
+
+/// A time as the menu says it, like "3:00 PM", with "tomorrow" after it when it's on a later day than `now`.
+func clock(_ at: Date, now: Date, zone: TimeZone = .current, locale: Locale = .current) -> String {
+  let format = DateFormatter()
+  format.locale = locale
+  format.timeZone = zone
+  format.dateStyle = .none
+  format.timeStyle = .short
+  var calendar = Calendar(identifier: .gregorian)
+  calendar.timeZone = zone
+  let later = calendar.startOfDay(for: at) > calendar.startOfDay(for: now)
+  return "\(format.string(from: at))\(later ? " tomorrow" : "")"
 }
 
 /// One of a list, or none when it can't be read, so the rest of the list still is.

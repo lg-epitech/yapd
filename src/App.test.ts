@@ -18,7 +18,7 @@ const swiftc = (() => {
 })()
 
 /** The app's files the checks check, which need neither AppKit nor SwiftUI. */
-const checked = ["Cards.swift", "Fading.swift", "Recent.swift", "State.swift"]
+const checked = ["Cards.swift", "Details.swift", "Fading.swift", "Menu.swift", "Recent.swift", "State.swift"]
 
 /** Where the checks are built, once, and removed after. */
 const dir = mkdtemp(join(tmpdir(), "yapd-app-"))
@@ -122,18 +122,25 @@ describe.skipIf(swiftc === undefined)("App", () => {
       const monograms = names.map((name) => [name, Icons.monogram(name).text, Icons.monogram(name).color])
       expect(await run("recent", { YAPD_COLORS: Icons.colors.join(","), YAPD_MONOGRAMS: JSON.stringify(monograms) })).toEqual({ code: 0, out: "The app's checks pass.\n" })
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
-      // A thread is muted, unmuted and heard again only through Muting and Replaying, which encode its key whole, and nothing else is sent of it.
-      expect(yapd.match(/(Muting|Replaying)\([^)]*\)/g)).toEqual(["Replaying(row)", "Muting(row, on: on)"])
+      // A thread is muted, unmuted, heard again and asked about only through Muting, Replaying and Detailing, which encode its key whole, and
+      // nothing else is sent of it.
+      expect(yapd.match(/(Muting|Replaying|Detailing)(\.\w+)?\([^)]*\)/g)).toEqual([
+        "Replaying(row)",
+        "Muting.forAnHour(row, from: Date()",
+        "Muting(row, on: true)",
+        "Muting(row, on: false)",
+        "Detailing(row)",
+      ])
       expect(yapd).not.toMatch(/threads\//)
-      expect(yapd).toMatch(/private func ask\(_ asking: some Asking\) \{\s*guard let url = asking\.url\(at: api\) else \{ return \}/)
-      // Rows are replayed and muted from the menu by the row, never by its text, and listed only while yapd sends them, else the updates it said.
-      expect(yapd).toMatch(/Button \{ replay\(row\) \} label:/)
-      // A row yapd can't say again shows as any other, but hearing it again is turned off, and never asked for; muting it isn't.
-      expect(yapd).toMatch(/Button \{ replay\(row\) \} label: \{ label\(row\) \}\s*\.disabled\(!row\.hearable\(on: on\)\)/)
+      expect(yapd).toMatch(/private func ask\(_ asking: some Asking\) \{\s*guard let request = request\(asking\) else \{ return \}/)
+      expect(yapd).toMatch(/private func request\(_ asking: some Asking\) -> URLRequest\? \{\s*guard let url = asking\.url\(at: api\) else \{ return nil \}/)
+      // A row yapd can't say again shows as any other, but hearing it again does nothing, and is never asked for; muting it isn't.
       expect(yapd).toMatch(/func replay\(_ row: Status\.Recent\) \{\s*guard row\.replayable else \{ return \}\s*ask\(Replaying\(row\)\)/)
-      expect(yapd).not.toMatch(/Toggle\([^\n]*\n[^\n]*\.disabled/)
-      expect(yapd).toMatch(/Toggle\(row\.label, isOn: Binding\(get: \{ row\.muted \}, set: \{ mute\(row, \$0\) \}\)\)/)
-      expect(yapd).toMatch(/if let recent = state\.recent \{[\s\S]*\} else if !state\.updates\.isEmpty \{\s*\/\/[^\n]*\n\s*Divider\(\)\s*Section\("Hear Again"\)/)
+      // Rows are replayed and muted from the menu by the row, never by its text, as the menu's checks check what each item does.
+      const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
+      expect(bar).toMatch(/case \.hear\(let row\): yapd\.replay\(row\)/)
+      expect(bar).toMatch(/case \.mute\(let row, let forAnHour\): yapd\.mute\(row, forAnHour: forAnHour\)/)
+      expect(bar).toMatch(/case \.unmute\(let row\): yapd\.unmute\(row\)/)
       // An image is fetched only from yapd's own API, and anything it can't draw is drawn as the icon's monogram.
       const icons = await Bun.file(join(app, "yapd", "Icons.swift")).text()
       expect(icons.match(/URLRequest\(url: [^)]*\)/g)).toEqual(["URLRequest(url: address)"])
@@ -150,22 +157,25 @@ describe.skipIf(swiftc === undefined)("App", () => {
     async () => {
       expect(await run("mode")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
-      // The icon is what the checks say it is, and the mode is changed only by what they check, never with `on` or a time of the app's own.
-      expect(yapd).toMatch(/switch Status\.look\(state\) \{/)
-      expect(yapd).toMatch(/case \.on\(let moon, let dot\):[\s\S]*?Mark\.on\(moon: moon, dot: dot\)/)
-      expect(yapd).not.toMatch(/Mark\.on\)/)
+      const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
+      // The icon is what the checks say it is, and tells VoiceOver what they check, and the mode is changed only by what they check, never with
+      // `on` or a time of the app's own.
+      expect(bar).toMatch(/switch Status\.look\(state\) \{/)
+      expect(bar).toMatch(/case \.on\(let moon, let dot\):[\s\S]*?Mark\.on\(moon: moon, dot: dot\)/)
+      expect(bar).not.toMatch(/Mark\.on\)/)
+      expect(bar).toMatch(/button\.setAccessibilityLabel\(Status\.told\(state, now: yapd\.now\)\)/)
       expect(yapd).toMatch(/func talk\(in mode: Mode\) \{\s*guard let change = state\?\.change\(to: mode\) else \{ return \}\s*send\("PUT", "state", body: try\? JSONEncoder\(\)\.encode\(change\)\)\s*\}/)
       expect(yapd.match(/send\("PUT", "state"[^\n]*/g)).toEqual(['send("PUT", "state", body: try? JSONEncoder().encode(["on": on]))', 'send("PUT", "state", body: try? JSONEncoder().encode(change))'])
       expect(yapd).not.toMatch(/until:/)
-      // The menu offers the modes only to a yapd that has them, each choice through `talk`, and its line while one is on.
-      expect(yapd).toMatch(/if let mode = state\.mode \{\s*if let line = state\.modeLine\(now: yapd\.now\) \{ Text\(line\) \}\s*ModeItems\(mode: mode, talk: yapd\.talk\)/)
-      expect(yapd).toMatch(/Toggle\(each\.item, isOn: Binding\(get: \{ mode == each \}, set: \{ _ in talk\(each\) \}\)\)/)
+      // The menu offers the modes as its checks check, each choice through `talk`, checked as the item has it.
+      expect(bar).toMatch(/case \.talk\(let mode\): yapd\.talk\(in: mode\)/)
+      expect(bar).toMatch(/made\.state = item\.checked \? \.on : \.off/)
       // Who's waiting is asked only with the words the checks check, and only while yapd answers it: on, or off for one that answers then.
       expect(yapd.match(/send\("POST", "utterances"[^\n]*/g)).toEqual([
         'send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.whoNeedsMe))',
         'send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.catchMeUp))',
       ])
-      expect(yapd).toMatch(/if let waiting = state\.waitingLine \{[^}]*Button\(waiting\) \{ yapd\.whoNeedsMe\(\) \}\s*\.disabled\(!state\.answers\)/)
+      expect(bar).toMatch(/case \.whoNeedsMe: yapd\.whoNeedsMe\(\)/)
     },
     120_000,
   )
@@ -175,15 +185,75 @@ describe.skipIf(swiftc === undefined)("App", () => {
     async () => {
       expect(await run("unheard")).toEqual({ code: 0, out: "The app's checks pass.\n" })
       const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
-      // Offered under the threads waiting, by the line the checks check, and never turned off while yapd is off: it answers then, as the shortcut does.
-      expect(yapd).toMatch(/Button\(waiting\) \{ yapd\.whoNeedsMe\(\) \}\s*\.disabled\(!state\.answers\)\s*\}\s*if let unheard = state\.unheardLine \{\s*\/\/[^\n]*\n\s*Button\(unheard\) \{ yapd\.catchMeUp\(\) \}\s*\}/)
+      // Offered under the threads waiting, by the line the checks check, and never turned off while yapd is off: it answers then, as the shortcut
+      // does. Choosing it only asks for it.
+      const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
+      expect(bar.match(/catchMeUp/g)).toEqual(["catchMeUp", "catchMeUp"])
+      expect(bar).toMatch(/case \.catchMeUp: yapd\.catchMeUp\(\)/)
       expect(yapd).toMatch(/func catchMeUp\(\) \{\s*send\("POST", "utterances", body: try\? JSONEncoder\(\)\.encode\(Utterance\.catchMeUp\)\)\s*\}/)
       // Nothing about catching up is sent anywhere but as his words to /utterances: no thread, no replay, no state.
-      expect(yapd.match(/catchMeUp/g)?.length).toBe(3)
+      expect(yapd.match(/catchMeUp/g)?.length).toBe(2)
       // A row is still heard again only as yapd says it can, while it's on, whatever is unheard of it.
       const recent = await Bun.file(join(app, "yapd", "Recent.swift")).text()
       expect(recent).toMatch(/func hearable\(on: Bool\) -> Bool \{\s*on && replayable\s*\}/)
       expect(recent).toMatch(/if unheard > 0 && !muted \{ parts\.append\("\\\(unheard\) unheard"\) \}/)
+    },
+    120_000,
+  )
+
+  test(
+    "the menu shows everything it did, in the same order and turned on and off by the same rules, with a panel beside each recent thread instead of the Mute menu, to hear it again, mute it, for an hour too, or take the mute off, and keeps each item by an id, so the open menu changes in place",
+    async () => {
+      expect(await run("menu")).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      // What the checks cover is what the menu bar draws: the menu and each panel are only ever built from Menu, and what's chosen does what the
+      // item says.
+      const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
+      expect(bar.match(/\bMenu\([^)]*\)/g)).toEqual(["Menu(state, now: yapd.now, last: yapd.last != nil)", "Menu(yapd.state, now: yapd.now, last: yapd.last != nil)"])
+      expect(bar.match(/Menu\.panel\([^)]*\)/g)).toEqual(["Menu.panel(for: row, details: details[key])", "Menu.panel(for: row, details: details[key])"])
+      expect(bar).toMatch(/@objc private func choose\(_ item: NSMenuItem\) \{\s*guard let action = item\.representedObject as\? Menu\.Action else \{ return \}\s*perform\(action\)\s*\}/)
+      expect(bar.match(/made\.isEnabled = [^\n]*/g)).toEqual(["made.isEnabled = item.enabled"])
+      expect(bar).toMatch(/case \.turn\(let on\): yapd\.turn\(on: on\)/)
+      expect(bar).toMatch(/case \.showLast: yapd\.showLast\(\)/)
+      expect(bar).toMatch(/case \.replay\(let update\): yapd\.replay\(update\)/)
+      expect(bar).toMatch(/case \.quit: NSApplication\.shared\.terminate\(nil\)/)
+      // A row clicked is heard again only when it can be, and closes the menu then; otherwise the menu stays open, and its panel still opens.
+      expect(bar).toMatch(/private func click\(_ key: String\) \{\s*guard let row = rows\[key\], row\.hearable else \{ return \}\s*menu\.cancelTracking\(\)\s*perform\(\.hear\(row\.recent\)\)\s*\}/)
+      // Open, the menu changes only what it shows already, in place; built again only as it opens.
+      expect(bar).toMatch(/if open \{ change\(menu\) \}/)
+      expect(bar).toMatch(/for item in model\.all \{\s*if let made = made\[item\.id\] \{ apply\(item, to: made\) \}\s*\}/)
+      expect(bar).toMatch(/func menuNeedsUpdate\(_ menu: NSMenu\) \{\s*if menu === self\.menu \{\s*build\(\)/)
+      // A row follows its own click from the mouse-down, since its panel's menu takes the mouse-up, and is one menu item to VoiceOver, told by all
+      // it shows, which pressing clicks.
+      const row = await Bun.file(join(app, "yapd", "RecentRow.swift")).text()
+      expect(row).toMatch(/override func mouseDown\(with event: NSEvent\) \{[\s\S]*window\.trackEvents\(matching: \[\.leftMouseDragged, \.leftMouseUp\]/)
+      expect(row).toMatch(/setAccessibilityLabel\(row\.told\)/)
+      expect(row).toMatch(/accessibilityRole\(\) -> NSAccessibility\.Role\? \{\s*\.menuItem\s*\}/)
+      expect(row).toMatch(/accessibilityPerformPress\(\) -> Bool \{\s*guard hearable else \{ return false \}\s*clicked\(\)/)
+      expect(row).toMatch(/hearable = row\.hearable/)
+    },
+    120_000,
+  )
+
+  test(
+    "a recent thread's panel reads what yapd tells of it from any yapd, asks for it only by its key, mutes it for an hour as yapd reads it, and its card says what the thread is doing, its pull request, whether it's muted and the latest told of it, from the row alone until yapd tells more, or when it can't",
+    async () => {
+      expect(await run("details")).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      // What the checks cover is what the app uses: details are asked for as the menu opens, read as the checks read them, and shown through Glance.
+      const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
+      expect(yapd).toMatch(/func details\(of row: Status\.Recent\) async -> Details\? \{\s*guard let request = request\(Detailing\(row\)\)[^\n]*\n\s*return Details\(body, response\)\s*\}/)
+      expect(yapd).toMatch(/func mute\(_ row: Status\.Recent, forAnHour: Bool\) \{\s*ask\(forAnHour \? Muting\.forAnHour\(row, from: Date\(\)\) : Muting\(row, on: true\)\)\s*\}/)
+      // Sent with the body the checks check, as JSON.
+      expect(yapd).toMatch(/if let body = asking\.body \{\s*request\.setValue\("application\/json", forHTTPHeaderField: "Content-Type"\)\s*request\.httpBody = body/)
+      const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
+      expect(bar).toMatch(/func menuWillOpen\(_ menu: NSMenu\) \{\s*guard menu === self\.menu else \{ return \}\s*open = true\s*fetch\(\)/)
+      expect(bar).toMatch(/details\[key\] = await yapd\.details\(of: row\.recent\)\s*change\(panel: key\)/)
+      expect(bar.match(/Glance\([^)]*\)/g)).toEqual(["Glance(row.recent, details: details[key], now: yapd.now)"])
+      // A pull request is opened only at an https address, as a card's links are.
+      expect(bar.match(/NSWorkspace\.shared\.open\([^)]*\)/g)).toEqual(["NSWorkspace.shared.open(address)"])
+      expect(bar).toMatch(/case \.open\(let address\): if opens\(address\) \{ NSWorkspace\.shared\.open\(address\) \}/)
+      // The card only shows: nothing on it can be clicked, and none of its text is read as markdown or opened.
+      const card = await Bun.file(join(app, "yapd", "GlanceCard.swift")).text()
+      expect(card).not.toMatch(/Button|Link\(|openURL|onTapGesture|AttributedString/)
     },
     120_000,
   )

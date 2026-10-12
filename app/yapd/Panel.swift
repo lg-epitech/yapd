@@ -23,6 +23,8 @@ final class Panel {
   private var shown = 0
   /// Told when a card goes away, by its close button or by fading, so yapd can take it down too.
   var closed: (Card) -> Void = { _ in }
+  /// Where the menu bar icon is on screen, to put the card under it, unless it can't be found.
+  var anchor: () -> NSRect? = { nil }
 
   init() {
     fading = Fading(
@@ -127,8 +129,7 @@ final class Panel {
 
   /// Under the menu bar icon, kept on its screen, or at the top right of the main screen when the icon can't be found.
   private func place(height: CGFloat) -> (frame: NSRect, screen: NSScreen?) {
-    // The icon lives in a window of its own as tall as the menu bar.
-    let icon = NSApp.windows.first { $0.className.contains("StatusBarWindow") && $0.frame.height < 50 }?.frame
+    let icon = anchor()
     let screen = icon.flatMap { icon in NSScreen.screens.first { $0.frame.intersects(icon) } } ?? NSScreen.main
     let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
     let centre = icon?.midX ?? visible.maxX - Self.width / 2 - 12

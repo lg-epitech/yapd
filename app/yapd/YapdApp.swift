@@ -1,11 +1,11 @@
+import AppKit
 import ServiceManagement
-import SwiftUI
 
 // yapd in the menu bar: whether it's on, what it's doing, its mode, the
 // threads waiting on him, what he hasn't heard, to be caught up on, the threads
-// with the latest updates, to hear again and mute, and the card it's showing,
-// in a panel under the icon. It only uses the API in docs/api.md, so another UI
-// can do all of this too.
+// with the latest updates, each with a panel beside it to see more of it, hear
+// it again and mute it, and the card it's showing, in a panel under the icon.
+// It only uses the API in docs/api.md, so another UI can do all of this too.
 
 @MainActor @Observable
 final class Yapd {
@@ -55,17 +55,11 @@ final class Yapd {
     }
   }
 
-  /// yapd's own mark while it's on and quiet, with a moon in focus or quiet and a dot while a thread waits on him, off or not
-  /// running, and what it's doing otherwise.
-  var icon: some View {
-    switch Status.look(state) {
-    case .down: return Image(nsImage: Mark.down).accessibilityLabel("yapd isn't running")
-    case .off: return Image(nsImage: Mark.off).accessibilityLabel("yapd is off")
-    case .speaking: return Image(systemName: "speaker.wave.2.fill").accessibilityLabel("yapd is speaking")
-    case .listening: return Image(systemName: "mic.fill").accessibilityLabel("yapd is listening")
-    case .on(let moon, let dot):
-      let told = [state?.modeLine(now: now), state?.waitingLine].compactMap { $0 }
-      return Image(nsImage: Mark.on(moon: moon, dot: dot)).accessibilityLabel((["yapd is on"] + told).joined(separator: ", "))
+  /// Puts the card under the menu bar icon's button, wherever that is.
+  func place(under button: NSStatusBarButton) {
+    panel.anchor = { [weak button] in
+      guard let button, let window = button.window else { return nil }
+      return window.convertToScreen(button.convert(button.bounds, to: nil))
     }
   }
 
@@ -142,17 +136,39 @@ final class Yapd {
     ask(Replaying(row))
   }
 
-  /// Mutes a thread, until he takes it off, or takes it off. Only what yapd says changes: nothing is sent to the thread.
-  func mute(_ row: Status.Recent, _ on: Bool) {
-    ask(Muting(row, on: on))
+  /// Mutes a thread until he takes it off, or for an hour. Only what yapd says changes: nothing is sent to the thread.
+  func mute(_ row: Status.Recent, forAnHour: Bool) {
+    ask(forAnHour ? Muting.forAnHour(row, from: Date()) : Muting(row, on: true))
+  }
+
+  /// Takes a thread's mute off.
+  func unmute(_ row: Status.Recent) {
+    ask(Muting(row, on: false))
+  }
+
+  /// What yapd tells of a thread for its panel, by its key, unless it doesn't know it, is too old to tell, or doesn't answer.
+  /// It only reads: nothing counts as heard.
+  func details(of row: Status.Recent) async -> Details? {
+    guard let request = request(Detailing(row)), let (body, response) = try? await URLSession.shared.data(for: request) else { return nil }
+    return Details(body, response)
   }
 
   /// Asks yapd something about a thread, by its key, encoded as it is. What comes of it shows in the state.
   private func ask(_ asking: some Asking) {
-    guard let url = asking.url(at: api) else { return }
+    guard let request = request(asking) else { return }
+    Task { _ = try? await URLSession.shared.data(for: request) }
+  }
+
+  /// The request that asks it of yapd, with its body as JSON when it has one.
+  private func request(_ asking: some Asking) -> URLRequest? {
+    guard let url = asking.url(at: api) else { return nil }
     var request = URLRequest(url: url)
     request.httpMethod = asking.method
-    Task { _ = try? await URLSession.shared.data(for: request) }
+    if let body = asking.body {
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      request.httpBody = body
+    }
+    return request
   }
 
   /// Shows the last card again, for a while, with nothing said of it, and has yapd put it back up too, so "hide that" takes it
@@ -189,11 +205,21 @@ final class Yapd {
   }
 }
 
+/// The app: yapd's icon in the menu bar, and nothing else on screen but its menu and the card it shows.
 @main
-struct YapdApp: App {
-  @State private var yapd = Yapd()
+@MainActor
+final class YapdApp: NSObject, NSApplicationDelegate {
+  private var bar: MenuBar?
 
-  init() {
+  static func main() {
+    let app = NSApplication.shared
+    let delegate = YapdApp()
+    app.delegate = delegate
+    // The app holds on to its delegate only weakly.
+    withExtendedLifetime(delegate) { app.run() }
+  }
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
     // Only the first time, so turning it off in System Settings, Login Items, sticks.
     if !UserDefaults.standard.bool(forKey: "registered") {
       do {
@@ -203,116 +229,6 @@ struct YapdApp: App {
         NSLog("Could not open yapd at login: \(error)")
       }
     }
-  }
-
-  var body: some Scene {
-    MenuBarExtra {
-      if let state = yapd.state {
-        Button(state.on ? "Turn Off" : "Turn On") { yapd.turn(on: !state.on) }
-        if let mode = state.mode {
-          if let line = state.modeLine(now: yapd.now) { Text(line) }
-          ModeItems(mode: mode, talk: yapd.talk)
-        }
-        if let waiting = state.waitingLine {
-          // yapd answers it aloud, which a yapd from before it answered while off can't do while it's off.
-          Button(waiting) { yapd.whoNeedsMe() }
-            .disabled(!state.answers)
-        }
-        if let unheard = state.unheardLine {
-          // Answered aloud even while yapd is off, as the shortcut is, and then it's quiet again.
-          Button(unheard) { yapd.catchMeUp() }
-        }
-        Button("Show Last Card") { yapd.showLast() }
-          .disabled(yapd.last == nil)
-        if let recent = state.recent {
-          if !recent.isEmpty {
-            Divider()
-            RecentItems(recent: recent, on: state.on, now: yapd.now, icons: yapd.icons, replay: yapd.replay, mute: yapd.mute)
-          }
-        } else if !state.updates.isEmpty {
-          // A yapd from before it listed threads: the updates it said, to hear again.
-          Divider()
-          Section("Hear Again") {
-            ForEach(state.updates) { update in
-              Button(update.text.count > 60 ? "\(update.text.prefix(60))…" : update.text) { yapd.replay(update) }
-            }
-          }
-          .disabled(!state.on)
-        }
-      } else {
-        Text("yapd isn't running")
-      }
-      Divider()
-      Button("Quit") { NSApplication.shared.terminate(nil) }
-        .keyboardShortcut("q")
-    } label: {
-      yapd.icon
-    }
-  }
-}
-
-/// The modes, with the one yapd is in checked: choosing one has yapd talk in it, focus or quiet for as long as yapd gives it,
-/// and choosing focus or quiet again starts its time again. While yapd is off, its mode still changes, for when it's back on.
-struct ModeItems: View {
-  let mode: Mode
-  let talk: @MainActor (Mode) -> Void
-
-  var body: some View {
-    Menu("Mode") {
-      ForEach(Mode.allCases, id: \.self) { each in
-        Toggle(each.item, isOn: Binding(get: { mode == each }, set: { _ in talk(each) }))
-      }
-    }
-  }
-}
-
-/// The threads with the latest updates, each with its project's icon, how long ago it ended and whether it's muted: clicking
-/// one says its latest update again, unless yapd can't reach it, and the Mute menu mutes it or takes the mute off. On macOS 15 and later, holding Option
-/// turns each row into muting it, or taking the mute off.
-struct RecentItems: View {
-  let recent: [Status.Recent]
-  /// While yapd is off, it can't say anything again, but threads can still be muted.
-  let on: Bool
-  /// What the times are told from.
-  let now: Date
-  let icons: Icons
-  let replay: @MainActor (Status.Recent) -> Void
-  let mute: @MainActor (Status.Recent, Bool) -> Void
-
-  var body: some View {
-    Section("Recent") {
-      ForEach(recent) { row in
-        Button { replay(row) } label: { label(row) }
-          .disabled(!row.hearable(on: on))
-          .muting { Button(row.muted ? "Unmute \(row.label)" : "Mute \(row.label)") { mute(row, !row.muted) } }
-      }
-    }
-    Menu("Mute") {
-      ForEach(recent) { row in
-        Toggle(row.label, isOn: Binding(get: { row.muted }, set: { mute(row, $0) }))
-      }
-    }
-  }
-
-  /// Its icon and name, with how long ago it ended under them, where the menu has room for a second line.
-  @ViewBuilder private func label(_ row: Status.Recent) -> some View {
-    Image(nsImage: icons.icon(for: row))
-    if #available(macOS 14.4, *) {
-      Text(row.label)
-      Text(row.detail(now: now))
-    } else {
-      Text("\(row.label) — \(row.detail(now: now))")
-    }
-  }
-}
-
-extension View {
-  /// The row's Option-click alternate, on macOS 15 and later, where menus have them.
-  @ViewBuilder fileprivate func muting(@ViewBuilder _ alternate: () -> some View) -> some View {
-    if #available(macOS 15, *) {
-      modifierKeyAlternate(.option, alternate)
-    } else {
-      self
-    }
+    bar = MenuBar(Yapd())
   }
 }
