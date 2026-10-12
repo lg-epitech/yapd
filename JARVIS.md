@@ -36,9 +36,9 @@ Live on `dev` now: everything below but headline first, focus and quiet, which a
 ## Headline first, focus and quiet (on `jarvis-m5`)
 
 - Updates are said as a headline of about fifteen words, and "more" over it or just after says the rest at once, rendered as the headline plays; over yapd's first seconds the model decides. What needs you is said in full, question and all. Real headlines from six test messages kept the question and the outcome, at 8 to 15 words.
-- Progress, like "pass 7 is running" or "still waiting on CI", is held for a digest, told from news by what yapd last said about the same work. The digest comes once it's been quiet a minute, with three held or one held twenty minutes, at most every twenty minutes, never in focus or quiet; you can reply to it or cut it off, and only what you heard to the end counts as heard.
+- Progress, like "pass 7 is running" or "still waiting on CI", is held for a digest, told from news by what yapd last said about the same work. The digest comes once it's been quiet a minute, with three held or one held twenty minutes, at most every twenty minutes, never in focus or quiet; you can reply to it or cut it off, and only what you heard to the end counts as heard. Progress of work you've since heard the outcome of, or of a thread you mute since, never comes up in it, nor in the rundown.
 - "Focus", "focus for two hours", "goodnight", "quiet for an hour", "I'm back", "talk shorter" and "give me everything", by the shortcut or over an update, in so many words; anything else about them goes to the model, or over an update gets "Ask me that with the shortcut." A bare "quiet" still only stops yapd. Focus and quiet keep your mute rule: what needs you and the answer to your own message still come through. "I'm back" gives the rundown straight away; a mode that ends on its own, or from the API, offers it once.
-- What finished while yapd was down is held as "… finished while I was offline", with no model call, each once, ever; a failure from then is said.
+- What finished while yapd was down is held as "… finished while I was offline", with no model call, each once, ever. The answer to a message you sent it, by voice or the shortcut, is summed up and said instead, muted or not; a run you stopped, or one so short you were likely watching it, isn't brought up; a failure from then is said.
 - The updates you heard last can be heard again after a restart, under the same ids, and a reply to one goes to its thread through T3 Code.
 - The API's state has `mode`, `until` and `waiting`, and `PUT /state` changes only what it names.
 - The menu bar app has a Mode menu (Normal, Focus for an Hour, Quiet until Morning) and says when focus or quiet ends; its icon gets a moon in focus or quiet and a dot while a thread waits on you, and "N Threads Waiting on You" has yapd say who, as "who needs me?" would. With a yapd from before modes it shows none of this.
@@ -79,6 +79,8 @@ Live on `dev` now: everything below but headline first, focus and quiet, which a
 - An update heard before a restart from rig is answered the way rig's hooks are, which may not reach it.
 - "I'm back" said over an update ends it there, and the rundown comes right after as an answer.
 - A mode change said over an update is kept in the journal as a reply whose intent is "mute".
+- Progress held before a thread failed can still come up in the digest after you heard the failure: only an update said about the same work makes it out of date.
+- "Focus is over, sir. Want the rundown?" waiting behind another line as you start focus again is still said.
 
 - With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
 - After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.
