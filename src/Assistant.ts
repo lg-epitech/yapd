@@ -2817,7 +2817,7 @@ export const make = (options: {
         const told = Either.isRight(brief) ? [...read.map(({ id }) => id), ...ids(shown)] : read.map(({ id }) => id)
         const covered = new Set(told)
         const coveredGroups = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => covered.has(id)))))
-        const say = `${[...read.map(({ said }) => (said ?? "").trim()), Either.isRight(brief) ? brief.right.trim() : lines.unbriefedRest].filter((part) => part !== "").join(" ")}${comingUp(coming.length, said)}`
+        const say = `${[...read.map(Missed.full), Either.isRight(brief) ? brief.right.trim() : lines.unbriefedRest].filter((part) => part !== "").join(" ")}${comingUp(coming.length, said)}`
         // "It" is the thread it told of, when it told of one the desk has.
         const [only] = coveredGroups
         const about =

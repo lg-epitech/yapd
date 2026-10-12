@@ -10549,10 +10549,16 @@ describe("Assistant catching up", () => {
           waiting: true,
           briefs: (rows) => `${rows.length} passes running, sir.`,
         })
-        yield* kept(journal, 120, tezos.id, "Switched to TzKT's rounding as you asked; the March totals now match.", { priority: "done", held: "off", audible: true })
+        // Each read with the rest of what it said, never only its headline.
+        yield* kept(journal, 120, tezos.id, "Switched to TzKT's rounding as you asked; the March totals now match.", {
+          priority: "done",
+          held: "off",
+          audible: true,
+          more: "Run the backfill with the new rounding before Friday's report.",
+        })
         yield* kept(journal, 110, mina.id, "Mina finished a turn, but I couldn't summarize it.", { priority: "done", held: "off", audible: true })
         for (const pass of [8, 9, 10, 11]) yield* kept(journal, 100 - pass, tezos.id, `Pass ${pass} is running.`, { priority: "progress", held: "off" })
-        yield* kept(journal, 50, distractors[0]!.id, "Which network first?", { priority: "needs-you", held: "off" })
+        yield* kept(journal, 50, distractors[0]!.id, "Which network first?", { priority: "needs-you", held: "off", more: "Mainnet costs more but has the real fees." })
         yield* dictate("Catch me up.")
         yield* play()
         return {
@@ -10564,7 +10570,7 @@ describe("Assistant catching up", () => {
       }),
     )
     expect(result.spoken).toEqual([
-      "Which network first? Switched to TzKT's rounding as you asked; the March totals now match. Mina finished a turn, but I couldn't summarize it. 4 passes running, sir.",
+      "Which network first? Mainnet costs more but has the real fees. Switched to TzKT's rounding as you asked; the March totals now match. Run the backfill with the new rounding before Friday's report. Mina finished a turn, but I couldn't summarize it. 4 passes running, sir.",
     ])
     expect(result.briefed).toEqual(["Pass 8 is running.", "Pass 9 is running.", "Pass 10 is running.", "Pass 11 is running."])
     expect(result.read).toEqual([3])

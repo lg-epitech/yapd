@@ -54,6 +54,14 @@ export const needs = (kept: Kept) => kept.kind === "notice" || detail(kept).prio
 /** Whether a row is said whatever he muted: what needs him, the answer to what he asked its thread, or a turn yapd couldn't sum up. */
 export const audible = (kept: Kept) => needs(kept) || detail(kept).audible === true
 
+/** All of a row as it was kept, its "more" too, as it's read to him in full: never only its headline. */
+export const full = (kept: Kept) => {
+  const said = (kept.said ?? "").trim()
+  const more = detail(kept).more
+  const rest = typeof more === "string" ? more.trim() : ""
+  return rest === "" || said.includes(rest) ? said : `${said} ${rest}`.trim()
+}
+
 /** Whether a row came in while yapd was off. */
 export const whileOff = (kept: Kept) => detail(kept).held === "off"
 
