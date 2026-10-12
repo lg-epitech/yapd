@@ -252,7 +252,7 @@ export const make = (
      * still said when it needs him.
      */
     quiet: boolean
-    /** Its entry in the journal, once it's kept, to note as dealt with if a Stop of its own takes its place. */
+    /** Its entry in the journal, once it's kept, whose place the entry of a Stop of its own takes, to be heard with it. */
     row?: number
   }
   /** Each turn said in its hook's place, by the key it's said once under, which is its run's, for an hour: only it or its Stop's update is said. */
@@ -724,9 +724,15 @@ export const make = (
      * For a Stop whose turn was said in its hook's place, but kept quiet as
      * he muted its thread, held or kept as yapd was off, that turn: the Stop
      * is said only if it needs him, as otherwise the turn was kept quiet
-     * already, and then its entry takes the place of that turn's.
+     * already.
      */
     readonly over?: Fallback
+    /**
+     * For a Stop, the turn said in its hook's place that it is by its own
+     * words, whose entry its own takes the place of: that turn is read and
+     * counted once, as this, and heard with it, never before.
+     */
+    readonly replaced?: Fallback
     /** The Stop it's of, for a hook's. */
     readonly stop?: Notices.Stop
     /** For a hook's, whether its turn began before yapd started, as no hook of its session came since, so its prompt isn't known. */
@@ -937,9 +943,9 @@ export const make = (
         // Said whatever he mutes, though it doesn't need him: the answer to what he asked its thread, or a turn yapd couldn't sum up. So
         // held as yapd was off, it isn't kept quiet when he mutes its thread later.
         ...(mutable || priority === "needs-you" ? {} : { audible: true }),
-        // A Stop come late for a turn kept quiet in its hook's place: it takes the place of what was kept of that turn, so the turn is
-        // read and counted once, as this, and what was kept is heard with it, never before.
-        ...(finished.over?.row === undefined ? {} : { replaces: finished.over.row }),
+        // A Stop come late for a turn kept in its hook's place, by its own words: it takes the place of what was kept of that turn, so the
+        // turn is read and counted once, as this, and what was kept is heard with it, never before.
+        ...(finished.replaced?.row === undefined ? {} : { replaces: finished.replaced.row }),
       }
       const entry: Entry = {
         at: arrivedAt,
@@ -1149,6 +1155,8 @@ export const make = (
       /** The turn of the run its thread is still on that the Stop is, and the newest of a run the thread moved on from that it's by its words. */
       let still: Fallback | undefined
       let late: Fallback | undefined
+      /** The newest turn he hasn't heard that gave way to it by its own words. */
+      let instead: Fallback | undefined
       let withdrawn = false
       for (const fallback of [...fallbacks.values()].filter((fallback) => fallback.run.natives.includes(session))) {
         const whose = Notices.whose(stop, fallback.run)
@@ -1160,15 +1168,19 @@ export const make = (
           continue
         }
         withdrawn = true
+        if (whose === "own" && (instead === undefined || fallback.at > instead.at)) instead = fallback
         fallbacks.delete(fallback.key)
         yield* discard(fallback.session)
         yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came after all")
-        if (fallback.row !== undefined) yield* journal.markHeard([fallback.row], stop.at)
       }
       // A turn still to be said gave way to it, like a newer run's that ended on the same words: whose Stop it is can't be told, so the hook wins.
       const through = still ?? (withdrawn ? undefined : late)
       if (through !== undefined) taken.add(stop)
-      return through
+      // What was kept of the turn it is by its own words is heard only with the Stop's entry, which takes its place. Nothing is noted as heard
+      // now: should the Stop leave no entry, as a quick or trivial turn, or one cut short by newer work, a turn he heard was noted as he did,
+      // and one he didn't is still to hear. One in words that can't be told keeps its own entry, as it may be another turn: told twice at worst.
+      const replaced = through === undefined ? instead : Notices.whose(stop, through.run) === "own" ? through : undefined
+      return { through, replaced }
     })
 
   /**
@@ -1339,7 +1351,7 @@ export const make = (
             return hook
           }
           // Said already in its place from T3 Code's word, it isn't said again; still to be said that way, it's said this way instead.
-          const through = yield* giveWay(payload.session_id, stop, prompt?.at)
+          const { through, replaced } = yield* giveWay(payload.session_id, stop, prompt?.at)
           const needsYou = payload.needs_you === true
           // Nobody watches a session yapd started, so it's heard from however quick its turn, as is one that needs the user.
           const watched = !needsYou && origin.launched !== true
@@ -1383,6 +1395,7 @@ export const make = (
               answering: followedUp,
               ...(prompt === undefined ? {} : { prompted: prompt }),
               ...(through === undefined ? {} : { over: through }),
+              ...(replaced === undefined ? {} : { replaced }),
               stop,
               ...(prompt === undefined && first ? { unprompted: true } : {}),
             }),
