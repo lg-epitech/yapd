@@ -10402,6 +10402,25 @@ describe("Assistant modes", () => {
     expect(result.stale).toBe(true)
   })
 
+  test("a digest never said is never kept as said, and one waiting its turn as focus begins isn't said in focus", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { digest, notices, modes, journal } = yield* assistant(() => undefined, undefined, {
+          modes: true,
+          waiting: true,
+          briefs: () => "The Tezos review is on pass 7, sir.",
+        })
+        yield* held(journal, now - 30 * 60_000, "integration's review pass 7 is running.", "progress")
+        yield* digest(yield* journal.held(0))
+        const told = notices().at(-1)!
+        const fresh = yield* told.stale
+        yield* modes!.set("focus")
+        return { fresh, focused: yield* told.stale, kept: (yield* journal.since(0, { kinds: ["brief"] })).length, unheard: yield* unheard(journal) }
+      }),
+    )
+    expect(result).toEqual({ fresh: false, focused: true, kept: 0, unheard: ["integration's review pass 7 is running."] })
+  })
+
   test("a digest the model can't sum up says nothing, and leaves what was held unheard", async () => {
     const result = await run(
       Effect.gen(function* () {

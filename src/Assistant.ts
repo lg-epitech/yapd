@@ -3674,9 +3674,12 @@ export const make = (options: {
           if (Either.isLeft(brief)) return yield* Effect.logWarning("Could not sum up what I held", brief.left)
           const spoken = brief.right
           const covered = held.map(({ id }) => id)
-          const entry = yield* journal.write({ at: now, kind: "brief", said: spoken, detail: { covered } })
+          /** Kept once it starts being said, so words he never heard, as when yapd is turned off first, are never what he was told. */
+          let entry: Option.Option<number> | undefined
           const subject: Subject = { _tag: "Answer", said: spoken, about: Option.none(), missed: covered }
           const oldest = Math.min(...held.map(({ at }) => at))
+          /** Focus or quiet began while it was summed up or waited its turn: what it covers is held for when it ends. */
+          const holding = options.modes?.holding ?? Effect.succeedNone
           yield* options.tell(
             {
               id: mint(now, "d"),
@@ -3686,12 +3689,13 @@ export const make = (options: {
               spoken,
               at: now,
               // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell.
-              stale: Effect.map(journal.held(oldest), (still) => !still.some(({ id }) => covered.includes(id))),
-              saying: Effect.sync(() => {
+              stale: Effect.zipWith(holding, journal.held(oldest), (mode, still) => Option.isSome(mode) || !still.some(({ id }) => covered.includes(id))),
+              saying: Effect.gen(function* () {
                 answered = { subject, at: now, turns: power.turns }
+                if (entry === undefined) entry = yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "brief", said: spoken, detail: { covered } })
               }),
               // Cut off, what it covered is still his to catch up on.
-              heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([...covered, ...Option.toArray(entry)], at)),
+              heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([...covered, ...Option.toArray(entry ?? Option.none())], at)),
               followUp: followUp(subject, Effect.succeed(spoken)),
             },
             power.turns,
