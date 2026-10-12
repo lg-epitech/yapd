@@ -90,7 +90,7 @@ const make = (says?: string, options: {
   /** How much of an update is said. */
   readonly detail?: Effect.Effect<"brief" | "full">
   /** What changes how yapd talks, said over an update. */
-  readonly command?: (heard: string) => Option.Option<Effect.Effect<string>>
+  readonly command?: (heard: string, asks: boolean) => Option.Option<Effect.Effect<string>>
   /** Whether what he says over an update is first worked out as the Responder does without the model. */
   readonly quickly?: boolean
   /** The journal, when it's kept from before a restart, rather than one of its own. */
@@ -3601,6 +3601,80 @@ describe("Daemon headline first", () => {
     expect(result.played).toEqual(["yapd. Still going.", "Only what needs you until three."])
     expect(result.responded).toEqual([])
     expect(result.followUps).toEqual([])
+  })
+  for (const [words, line] of [["Focus.", "Only what needs you until three."], ["I'm back.", ""]] as const) {
+    test(`"${words}" said partway through an update that needs him is done, then the update carries on, heard only once all of it is`, async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const asked: Array<boolean> = []
+          const question = "Should I keep the historical rounding or recompute?"
+          const { finish, talk, wait, played, responded, followUps, journal } = yield* make(words, {
+            urgentMessages: [question],
+            command: (heard, asks) => {
+              asked.push(asks)
+              return heard === words ? Option.some(Effect.succeed(line)) : Option.none()
+            },
+          })
+          const heardAt = Effect.map(journal.since(0, { kinds: ["update"] }), (rows) => rows.map(({ heardAt }) => heardAt))
+          yield* finish("tezos", question)
+          yield* wait(1)
+          yield* talk
+          yield* wait(5)
+          const early = yield* heardAt
+          yield* wait(30)
+          return { played: [...played], responded: [...responded], followUps: [...followUps], early, late: yield* heardAt, asked }
+        }),
+      )
+      expect(result.asked).toEqual([true])
+      expect(result.played).toEqual(line === "" ? ["yapd. Should I keep the historical rounding or recompute?", "yapd. Should I keep the historical rounding or recompute?"] : ["yapd. Should I keep the historical rounding or recompute?", line, "yapd. Should I keep the historical rounding or recompute?"])
+      expect(result.responded).toEqual([])
+      expect(result.followUps).toEqual([])
+      expect(result.early).toEqual([undefined])
+      expect(result.late[0]).toBeNumber()
+    })
+  }
+
+  test("muting the thread partway through its question is done, then the question carries on, as what needs him always comes through", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const question = "Should I keep the historical rounding or recompute?"
+        const { finish, talk, wait, played, responded, followUps } = yield* make("Mute it.", { mutes, urgentMessages: [question] })
+        yield* finish("tezos", question)
+        yield* wait(1)
+        yield* talk
+        yield* wait(36)
+        return { played: [...played], responded: [...responded], followUps: [...followUps], muted: (yield* mutes.list).length }
+      }),
+    )
+    expect(result.muted).toBe(1)
+    expect(result.played[0]).toBe("yapd. Should I keep the historical rounding or recompute?")
+    expect(result.played.at(-1)).toBe("yapd. Should I keep the historical rounding or recompute?")
+    expect(result.played).toHaveLength(3)
+    expect(result.responded).toEqual([])
+    expect(result.followUps).toEqual([])
+  })
+
+  test("words that may be his answer to an update that asks him something go to the model, never taken for how yapd talks", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const question = "Should I write the migration guide in full or keep it short?"
+        const changed: Array<string> = []
+        const { finish, talk, wait, played, responded, followUps } = yield* make("Keep it short.", {
+          urgentMessages: [question],
+          command: (heard, asks) => Option.map(Brain.modeCommand(heard, asks), ({ how }) => Effect.sync(() => void changed.push(how)).pipe(Effect.as("I'll keep it short."))),
+        })
+        yield* finish("tezos", question)
+        yield* wait(1)
+        yield* talk
+        yield* wait(20)
+        return { played: [...played], responded: [...responded], followUps: [...followUps], changed }
+      }),
+    )
+    expect(result.changed).toEqual([])
+    expect(result.responded).toEqual(["Keep it short."])
+    expect(result.followUps).toEqual(["tezos sent: Keep it short."])
+    expect(result.played).toEqual(["yapd. Should I write the migration guide in full or keep it short?", "Okay, passed on."])
   })
 })
 

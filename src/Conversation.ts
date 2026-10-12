@@ -716,6 +716,22 @@ export const make = (options: {
           let ended: number | undefined
           let lingered = false
           /**
+           * Where to pick the update up again once yapd has said what it did of his over it, like going into focus or muting it, when it
+           * needs him and he hadn't heard all of it: what it asks him always comes through, as it does whatever the mode or mute.
+           */
+          let resume: number | undefined
+          /** Picks the update up again, when it's to be: whether it is. */
+          const pickUp = () => {
+            if (resume === undefined) return false
+            from = resume
+            resume = undefined
+            path = update.audio
+            text = update.spoken
+            missed = 0
+            lingered = false
+            return true
+          }
+          /**
            * The rest of the update, rendered as its headline starts to play, so "more" plays it at once: not before, since one voice
            * renders one thing at a time, and the next update's headline would wait behind it.
            */
@@ -738,7 +754,10 @@ export const make = (options: {
                   })
                 : yield* harken(text, ended, listening, linger)
             ended = undefined
-            if (outcome._tag === "Finished") return true
+            if (outcome._tag === "Finished") {
+              if (pickUp()) continue
+              return true
+            }
             // Replying to something yapd had finished saying: there's nothing to go back to.
             const after = outcome.at >= outcome.duration
             // Always forward, so talk that keeps coming can't hold an update back forever.
@@ -759,14 +778,17 @@ export const make = (options: {
             // Not talk that wasn't meant for yapd, which it stops listening after so much of: only over its first seconds.
             if (itself) {
               if (after) {
-                if (listenOn()) continue
+                if (listenOn() || pickUp()) continue
                 return true
               }
               from = yield* again(outcome, true, from)
               continue
             }
             if (first === "") {
-              if (after) return true
+              if (after) {
+                if (pickUp()) continue
+                return true
+              }
               carryOn()
               continue
             }
@@ -835,10 +857,14 @@ export const make = (options: {
               yield* options.replied
             }
 
-            if (reply.intent === "dismiss") return !doubted
+            if (reply.intent === "dismiss") {
+              if (doubted) return false
+              if (pickUp()) continue
+              return true
+            }
             if (reply.intent === "resume") {
               if (after) {
-                if (echo !== undefined && listenOn()) continue
+                if ((echo !== undefined && listenOn()) || pickUp()) continue
                 return true
               }
               // Taken by the model for its own voice, it's no more talk that wasn't meant for yapd than when Whisper heard nothing. Nor is
@@ -854,8 +880,13 @@ export const make = (options: {
               { speaker: "yapd", text: said },
               { speaker: "user", text: heard, ...(echo === undefined ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }) },
             )
+            // Over an update that needs him, before all of it was said, what he changed is said, then it carries on from where it stopped.
+            if (reply.intent === "mute" && update.needsYou && !after && path === update.audio) resume = Math.max(from, outcome.at - rewind)
             text = reply.intent === "send" ? yield* pass(update, reply) : answer
-            if (text === "") return true
+            if (text === "") {
+              if (pickUp()) continue
+              return true
+            }
             // The rest he asked for, rendered already, or still rendering, is played as it is, even with the model's "sir" around it;
             // rendered again only if that failed.
             const early = rest !== undefined && restOf(text, more) && Exit.isSuccess(yield* Fiber.await(rest.fiber)) ? rest.path : undefined
