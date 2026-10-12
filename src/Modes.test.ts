@@ -256,23 +256,4 @@ describe("Modes", () => {
     expect(result.quiet).toBe(day)
     expect(result.offered).toEqual([[1, "quiet"]])
   })
-
-  test("the heartbeat is written as it starts and every minute, and read once, before that, for what finished while yapd was down", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        yield* TestClock.setTime(day)
-        const database = yield* kept
-        const before = (yield* Modes.make(database)).alive
-        yield* running(database)
-        const started = yield* database.settings.read("alive")
-        yield* wait("1 minute")
-        const later = yield* database.settings.read("alive")
-        return { before, started, later, after: (yield* Modes.make(database)).alive }
-      }),
-    )
-    expect(result.before).toEqual(Option.none())
-    expect(result.started).toEqual(Option.some(String(day)))
-    expect(result.later).toEqual(Option.some(String(day + minute)))
-    expect(result.after).toEqual(Option.some(day + minute))
-  })
 })

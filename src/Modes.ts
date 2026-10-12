@@ -7,9 +7,7 @@ import type * as Settings from "./Settings.ts"
 // his own message still come through; and whether updates are said in their
 // headline, with the rest kept for "more", or in full. Both are kept across
 // restarts. While it's on and the mode is normal, what was held as progress is
-// brought up in a short digest once things have been quiet a while. A
-// heartbeat, written every minute, tells the next start how long yapd was
-// down, for what finished meanwhile.
+// brought up in a short digest once things have been quiet a while.
 
 /** The modes that hold what doesn't need him for later. */
 export type Hold = "focus" | "quiet"
@@ -72,9 +70,6 @@ export const digesting = {
   look: "15 seconds",
 } as const
 
-/** How often the heartbeat is written. */
-const beating = "1 minute"
-
 /** Whether a mode holds now: focus or quiet, until it ends. */
 const holds = (mode: Mode, now: number): Option.Option<Hold> =>
   mode.mode !== "normal" && (mode.until === undefined || mode.until > now) ? Option.some(mode.mode) : Option.none()
@@ -86,8 +81,6 @@ export interface Modes {
   /** Focus or quiet, while one holds. */
   readonly holding: Effect.Effect<Option.Option<Hold>>
   readonly detail: Effect.Effect<Detail>
-  /** When yapd was last known to be up before it started, from the heartbeat: none the first time. */
-  readonly alive: Option.Option<number>
   /** Changes the mode, ending at `until` if it's to come within a day, or else when its default says, and gives what it was. */
   readonly set: (mode: Mode["mode"], until?: number) => Effect.Effect<{ readonly was: Mode; readonly now: Mode }>
   readonly setDetail: (detail: Detail) => Effect.Effect<void>
@@ -108,7 +101,6 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
     const number = (value: Option.Option<string>) => Option.filter(Option.map(value, Number), Number.isFinite)
     const mode = Option.getOrElse(Option.flatMap(yield* read("mode"), stored), (): Mode => ({ mode: "normal" }))
     const detail: Detail = Option.getOrUndefined(yield* read("detail")) === "full" ? "full" : "brief"
-    const alive = number(yield* read("alive"))
     let briefedAt = Option.getOrElse(number(yield* read("briefedAt")), () => 0)
     const state = yield* SubscriptionRef.make<State>({ mode, detail })
     const current = SubscriptionRef.get(state)
@@ -117,7 +109,6 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
       changes: state.changes,
       holding: Effect.flatMap(current, ({ mode }) => Effect.map(Clock.currentTimeMillis, (now) => holds(mode, now))),
       detail: Effect.map(current, ({ detail }) => detail),
-      alive,
       set: (mode, until) =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis
@@ -154,7 +145,6 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
 
 /** What the runner needs of the rest of yapd. */
 export interface Running {
-  readonly settings: Settings.Settings["Type"]
   readonly journal: Journal["Type"]
   readonly power: Effect.Effect<{ readonly on: boolean; readonly turns: number }>
   /** How long it's been quiet, in ms: none while anything is being said, waits to be, or he's dictating. */
@@ -169,8 +159,7 @@ export interface Running {
 
 /**
  * Runs the modes for as long as the scope lasts: holds what waits as focus or
- * quiet begins, ends either when its time is up, writes the heartbeat, and
- * brings up the digest, looked at every `look`. Gives back what ends a mode
+ * quiet begins, ends either when its time is up, and brings up the digest, looked at every `look`. Gives back what ends a mode
  * as the menu does, which offers the rundown, as its time running out does.
  */
 export const run = (modes: Modes, running: Running, look: Duration.DurationInput = digesting.look) =>
@@ -238,12 +227,6 @@ export const run = (modes: Modes, running: Running, look: Duration.DurationInput
     })
 
     yield* Effect.forkScoped(Stream.runForEach(Stream.changesWith(Stream.map(modes.changes, ({ mode }) => mode), (one, other) => one === other), follow))
-    yield* Effect.forkScoped(
-      Effect.flatMap(Clock.currentTimeMillis, (now) => running.settings.write("alive", String(now))).pipe(
-        Effect.catchAll((error) => Effect.logWarning("Could not note that I'm up", error)),
-        Effect.repeat(Schedule.spaced(beating)),
-      ),
-    )
     yield* Effect.forkScoped(
       digest.pipe(
         Effect.catchAllCause((cause) => Effect.logWarning("Could not bring up what I held", cause)),

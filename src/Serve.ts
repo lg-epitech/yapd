@@ -310,9 +310,8 @@ export const serve = Effect.gen(function* () {
     })),
   )
 
-  // Focus and quiet end on their own, the heartbeat is written, and what was held is brought up in a digest once it's quiet.
+  // Focus and quiet end on their own, and what was held is brought up in a digest once it's quiet.
   const running = yield* Modes.run(modes, {
-    settings,
     journal,
     power: daemon.power,
     idle: daemon.idle,
