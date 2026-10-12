@@ -437,6 +437,29 @@ describe("Latest", () => {
       })
     })
 
+    test("a row heard again from the menu in full is what 'say that again' repeats then, its more too, not only its headline", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, mentioned, settle } = yield* menuOf([])
+          yield* journal.write({
+            at: 1,
+            kind: "update",
+            machine: "Rosie",
+            thread: "t-tezos",
+            said: "Tezos asks which network to deploy to first.",
+            detail: { session: "claude:s", held: "off", priority: "needs-you", more: "Mainnet or Ghostnet?" },
+          })
+          yield* settle
+          yield* menu.replayThread("t3:Rosie:t-tezos")
+          return { told: [...told], mentioned: [...mentioned] }
+        }),
+      )
+      expect(result).toEqual({
+        told: ["Tezos asks which network to deploy to first. Mainnet or Ghostnet?"],
+        mentioned: ["Rosie/t-tezos: Tezos asks which network to deploy to first. Mainnet or Ghostnet?"],
+      })
+    })
+
     test("a row held for later, heard again from the menu, counts as heard once it's said, so the digest doesn't tell of it again", async () => {
       const result = await run(
         Effect.gen(function* () {

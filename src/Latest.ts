@@ -279,9 +279,10 @@ export const menu = (options: {
         return "muted" as const
       }),
     /**
-     * Says a thread's latest update again, by its key: as it was said, when
-     * it's one he heard, so a reply to it still gets there, otherwise what was
-     * kept of it, as an answer that makes "it" the thread. A session's row, or
+     * Says a thread's latest update again, by its key, all of it, its "more"
+     * too: as an update, when it's one he heard, so a reply to it still gets
+     * there, otherwise what was kept of it, as an answer that makes "it" the
+     * thread. A session's row, or
      * a thread yapd can't reach now, as when it was archived or its machine
      * can't be seen, isn't said again then: "it" would be something nothing
      * he says can act on.
@@ -307,16 +308,18 @@ export const menu = (options: {
         if (!on) return "off" as const
         const now = yield* Clock.currentTimeMillis
         // Held for later, or unheard, it's heard once it's said to the end, and all of it, its "more" too, never only its headline.
+        // What "say that again" says is all of what was played, never only its headline.
         const entry = yield* latest.row(key)
+        const spoken = Option.match(entry, { onNone: () => row.text, onSome: ({ full }) => (full === "" ? row.text : full) })
         yield* daemon.tell(
           {
             id: `again:${key}:${now}`,
             kind: "answer",
             priority: "needs-you",
-            spoken: Option.match(entry, { onNone: () => row.text, onSome: ({ full }) => (full === "" ? row.text : full) }),
+            spoken,
             at: now,
             stale: Effect.succeed(false),
-            saying: mention(ref, row.text),
+            saying: mention(ref, spoken),
             ...(journal === undefined || Option.isNone(entry)
               ? {}
               : { heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([entry.value.id], at)) }),
