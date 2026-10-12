@@ -10548,6 +10548,7 @@ describe("Assistant catching up", () => {
         const scopes: Record<string, (situation: Brain.Situation) => Brain.Decision> = {
           "What did I miss on the Tezos one?": (situation) => Brain.decision({ act: "catchup", target: handle(situation, tezos) }),
           "Anything from connectors?": () => Brain.decision({ act: "catchup", text: "connectors" }),
+          "Anything from integration connectors?": () => Brain.decision({ act: "catchup", text: "Integration Connectors" }),
           "Anything from rig?": () => Brain.decision({ act: "catchup", machine: "rig" }),
           "What came in since midnight?": () => Brain.decision({ act: "catchup", when: new Date(now - 60 * 60_000).toISOString() }),
           "What did I miss on the importer?": (situation) => Brain.decision({ act: "catchup", target: situation.missed.groups.find(({ project }) => project === "importer")?.handle ?? "" }),
@@ -10558,24 +10559,27 @@ describe("Assistant catching up", () => {
           briefs: (rows) => rows.map(({ said }) => said).join(" "),
         })
         yield* kept(journal, 120, tezos.id, "Tezos pass 7 is running.")
-        yield* kept(journal, 90, mina.id, "The Mina tickets are filed.", undefined, "Rosie", "connectors")
+        yield* kept(journal, 90, mina.id, "The Mina tickets are filed.", undefined, "Rosie", "integration-connectors")
         yield* kept(journal, 30, "claude:s-importer", "The importer compiles.", undefined, "rig", "importer")
         for (const heard of Object.keys(scopes)) yield* dictate(heard)
         const scoped = spoken()
         // Heard to the end, one covers what it told of, and none of the rest.
-        yield* play(notices()[2])
+        yield* play(notices()[3])
         return { scoped, briefs: briefings.length, after: yield* unheard(journal) }
       }),
     )
     expect(result.scoped).toEqual([
       "Tezos pass 7 is running.",
+      // Named by a word of its project, or its words joined otherwise.
+      "The Mina tickets are filed.",
       "The Mina tickets are filed.",
       "The importer compiles.",
       "The importer compiles.",
       "The importer compiles.",
-      "Nothing new from foo, sir.",
+      // Named nowhere, rather than "nothing new".
+      "I couldn't tell which one you meant, sir.",
     ])
-    expect(result.briefs).toBe(5)
+    expect(result.briefs).toBe(6)
     expect(result.after).toEqual(["Tezos pass 7 is running.", "The Mina tickets are filed."])
   })
 

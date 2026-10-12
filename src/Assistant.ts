@@ -357,6 +357,14 @@ const desk = { asked: 30, reply: 12, named: 120, vocabulary: 15 }
 const cap = "100 millis"
 
 const day = 24 * 60 * 60_000
+
+/** A name as it's said: lower case, its words only, so "integration-connectors" is "integration connectors". */
+const spokenName = (name: string) =>
+  name
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word !== "")
+    .join(" ")
 /** What "scratch that" can take back: what was done this long ago at most. */
 const scratchable = "2 minutes"
 /** Steps one request can take at most, so a "rest" that never runs out can't go on for ever. */
@@ -2645,14 +2653,25 @@ export const make = (options: {
      * a thread he muted, only when he asked about that thread or about what
      * his muted threads said.
      */
-    const within = (scope: Scope, group: Missed.Group) => {
+    const within = (scope: Scope, group: Missed.Group, loosely = false) => {
       if (scope.thread !== undefined && (group.machine !== scope.thread.machine || group.thread !== scope.thread.thread)) return undefined
-      if (scope.project !== undefined && group.project?.toLowerCase() !== scope.project.toLowerCase()) return undefined
+      if (scope.project !== undefined && !names(group.project, scope.project, loosely) && !names(group.called, scope.project, loosely)) return undefined
       if (scope.machine !== undefined && group.machine?.toLowerCase() !== scope.machine.toLowerCase()) return undefined
       return Missed.only(
         group,
         (kept) => (scope.since === undefined || kept.at >= scope.since) && (scope.muted === true ? Missed.muted(kept) : scope.thread !== undefined || !Missed.muted(kept)),
       )
+    }
+
+    /**
+     * Whether `asked`, a project as the model wrote it, names `name`: all of
+     * it, however its words are joined, or, `loosely`, whole words of it, so
+     * "connectors" names "integration-connectors".
+     */
+    const names = (name: string | undefined, asked: string, loosely: boolean) => {
+      if (name === undefined) return false
+      const [whole, part] = [spokenName(name), spokenName(asked)]
+      return part !== "" && (whole === part || (loosely && ` ${whole} `.includes(` ${part} `)))
     }
 
     /** What a catch-up decided by the model is about, as it named it: what's named in it only has to be there to be gathered. */
@@ -2711,7 +2730,15 @@ export const make = (options: {
         // Caught up, however he asked, what came in while yapd was off isn't offered after.
         if (offered?.kind === "missed") offered = undefined
         const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming, desk })
-        const inScope = (groups: ReadonlyArray<Missed.Group>) => groups.flatMap((group) => Option.toArray(Option.fromNullable(within(scope, group))))
+        // A project he named as it's called, or else by whole words of its name, like "connectors"; one named nowhere, he's told yapd
+        // couldn't tell what he meant, rather than that nothing came in.
+        const { project } = scope
+        const projects = [...missed.groups.flatMap(({ project, called }) => [project, called]), ...desk.threads.flatMap(({ project, called }) => [project, called])]
+        const loosely = project !== undefined && !projects.some((name) => names(name, project, false))
+        if (project !== undefined && loosely && !projects.some((name) => names(name, project, true))) {
+          return { say: said.cantTell, subject: { _tag: "Answer", said: said.cantTell, about: Option.none(), catchingUp: true }, kind: "answer" } satisfies Outcome
+        }
+        const inScope = (groups: ReadonlyArray<Missed.Group>) => groups.flatMap((group) => Option.toArray(Option.fromNullable(within(scope, group, loosely))))
         const before = given.more === true && given.about._tag === "Answer" ? given.about.catchup : undefined
         let groups = inScope(missed.groups)
         let kind: Brain.Brief["kind"] = "catchup"
