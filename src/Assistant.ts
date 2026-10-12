@@ -2909,9 +2909,11 @@ export const make = (options: {
             const say = Show.offScreen((taken ? theirs : "") || last, said)
             // Shown too while an app watches, for what's still not caught the second time.
             const card = subject._tag === "Nothing" ? Option.none() : yield* options.show.caption(say, situation)
+            // The rest of an update said for "more" is what "say that again" says next, as when he asks for it over the update.
+            const told = decision.how === "more" && subject._tag === "Session" ? { ...subject, said: say } : subject
             return {
               say,
-              subject,
+              subject: told,
               kind: "answer",
               ...(missed === undefined ? {} : { missed }),
               ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),

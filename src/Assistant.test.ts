@@ -131,12 +131,13 @@ const lines: Persona.Lines = {
 }
 
 /** An update from a session T3 Code doesn't run, read to him at `at`. */
-const update = (project: string, spoken: string, at: number): Conversation.Update => ({
+const update = (project: string, spoken: string, at: number, more?: string): Conversation.Update => ({
   session: `claude:${project}`,
   project,
   turn: { prompt: Option.none(), message: spoken },
   needsYou: false,
   spoken,
+  ...(more === undefined ? {} : { more }),
   audio: `/tmp/${project}.wav`,
   thread: { agent: "claude", session: project, cwd: `/code/${project}`, message: spoken, origin: {} },
   at,
@@ -560,13 +561,19 @@ const assistant = (
       questions,
       flush,
       until,
-      /** An update starts being read to him. */
-      reading: (project: string, spoken: string) =>
+      /** An update starts being read to him, only its headline when it has `more`. */
+      reading: (project: string, spoken: string, more?: string) =>
         Effect.flatMap(TestClock.currentTimeMillis, (at) =>
           Effect.sync(() => {
-            listening = Option.some({ update: update(project, spoken, at), said: spoken, at, playing: true, turns: power.turns })
+            listening = Option.some({ update: update(project, spoken, at, more), said: spoken, at, playing: true, turns: power.turns })
           }),
         ),
+      /** The update being read was said to the end. */
+      ended: Effect.flatMap(TestClock.currentTimeMillis, (at) =>
+        Effect.sync(() => {
+          listening = Option.map(listening, (heard) => ({ ...heard, at, playing: false }))
+        }),
+      ),
       /** yapd starts saying something back over the update being read, like an answer to what he asked over it. */
       answering: (line: string) =>
         Effect.flatMap(TestClock.currentTimeMillis, (at) =>
@@ -4243,6 +4250,22 @@ describe("Assistant", () => {
       }),
     )
     expect(result).toEqual(["The PR changes the microphone buffer."])
+  })
+
+  test("\"say that again\" after \"more\" over an update says the rest he just heard, not its headline", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { reading, ended, wait, dictate, spoken } = yield* assistant(() => undefined)
+        yield* reading("yapd", "Yapd. The loader is fixed.", "Retries back off now.")
+        yield* wait(5)
+        yield* ended
+        yield* wait(10)
+        yield* dictate("More.")
+        yield* dictate("Say that again.")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["Retries back off now.", "Retries back off now."])
   })
 
   test("a garbled answer to an open question closes it without asking again", async () => {
