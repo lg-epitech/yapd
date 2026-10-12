@@ -2903,10 +2903,17 @@ export const make = (options: {
             // punctuation or wherever it addresses him (I4), nor once "it's on your screen" is taken off it, in whatever case or punctuation, as
             // it is before it's said.
             const theirs = Show.offScreen(decision.spoken.trim(), said)
+            // Said again as it was, it's all of the line itself, never the model's copy of it, which it may only have been shown cut short.
+            const same = decision.how === "same" && subject._tag !== "Nothing"
             const taken =
-              subject._tag !== "Nothing" && !(subject._tag === "Answer" && subject.asked !== undefined) && !Brain.echoes(theirs, situation.asked, said)
+              !same &&
+              subject._tag !== "Nothing" &&
+              !(subject._tag === "Answer" && subject.asked !== undefined) &&
+              !Brain.echoes(theirs, situation.asked, said)
             // Whether what was asked to be seen is on his screen is told only as it goes up.
             const say = Show.offScreen((taken ? theirs : "") || last, said)
+            // What it told of counts as heard only once all of the line it told of it in is said again, never the model's words for it.
+            const whole = !taken || theirs === ""
             // Shown too while an app watches, for what's still not caught the second time.
             const card = subject._tag === "Nothing" ? Option.none() : yield* options.show.caption(say, situation)
             // The rest of an update said for "more" is what "say that again" says next, as when he asks for it over the update.
@@ -2915,7 +2922,7 @@ export const make = (options: {
               say,
               subject: told,
               kind: "answer",
-              ...(missed === undefined ? {} : { missed }),
+              ...(missed === undefined || !whole ? {} : { missed }),
               ...Option.match(card, { onNone: () => ({}), onSome: (card) => ({ card }) }),
             } satisfies Outcome
           })

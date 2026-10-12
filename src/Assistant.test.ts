@@ -8320,8 +8320,8 @@ describe("Assistant", () => {
     for (const echo of ["Again, sir?", "Sir, again?", "It's, sir, on your screen. Again?"]) expect((await echoed("twice", echo)).said).toBe("The loader is fixed.")
     // The whole line, news and all, too.
     expect((await echoed("lost", "I couldn't confirm it got to Migrate Tezos Integration. Send it again, sir?")).said).toBe("The loader is fixed.")
-    // Anything else is said in the model's words.
-    expect((await echoed("lost", "The loader is fixed, sir.")).said).toBe("The loader is fixed, sir.")
+    // Said again as it was, it's the line itself, never the model's copy of it, whatever that says.
+    expect((await echoed("lost", "The loader is fixed, sir.")).said).toBe("The loader is fixed.")
   })
 
   test("a pull request taken on a low guess between two is asked about before anything opens, and the one he picks is opened", async () => {
@@ -10563,6 +10563,33 @@ describe("Assistant catching up", () => {
     expect(result.more).toBe(questions[4])
     expect(result.down).toBe("Late: ship it tonight or tomorrow? I couldn't sum up the rest just now, sir. Ask me again in a moment.")
     expect(result.after).toEqual(["The Mina tickets are filed."])
+  })
+
+  test("a catch-up said again in words the model takes is all of it again, never the model's copy cut short, and only then counts as heard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const long = "Distribox asks which copy of the bucket to migrate first, the US one with most customers or the EU one with the strictest rules, and whether to keep the old one read-only for a week. "
+        const { dictate, play, spoken, journal } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Catch")
+              ? Brain.decision({ act: "catchup" })
+              : // As the model would, from the line it was shown, cut short.
+                Brain.decision({ act: "again", how: "same", spoken: `${situation.subject._tag === "Nothing" ? "" : situation.subject.said.slice(0, 120)}…` }),
+          undefined,
+          { waiting: true, briefs: (rows) => `${rows.length} more passes, sir.` },
+        )
+        for (const minutes of [50, 40, 30, 20]) yield* kept(journal, minutes, distractors[0]!.id, long.repeat(1), { priority: "needs-you", held: "off" })
+        yield* dictate("Catch me up.")
+        yield* play()
+        const first = spoken().at(-1)
+        yield* dictate("Sorry, could you go over all of that once more?")
+        yield* play()
+        return { first, again: spoken().at(-1), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.again).toBe(result.first)
+    expect(result.again?.endsWith("…")).toBe(false)
+    expect(result.after).toEqual([])
   })
 
   test("the answer to what he asked a thread, and a turn yapd couldn't sum up, are read in full after what needs him, however many came after them, which only the brief tells of", async () => {
