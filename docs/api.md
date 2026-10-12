@@ -238,7 +238,7 @@ Each row of `recent` in the [state](#state) is a thread, by its newest update or
 - `muted`: whether it's muted, and `until`, when the mute ends on its own, only then.
 - `waiting`: whether the thread waits on you, for an approval or an answer.
 - `replayable`: whether it can be [heard again](#hearing-a-thread-again). It's `true` while its latest update is one of the `updates` you heard, and otherwise only for a thread yapd can reach: one T3 Code has, not archived, on a machine whose threads yapd can see now. A session's row, or an archived or deleted thread, or one on a machine that's away, is `false` once its update is no longer among the `updates`. It can lag a minute behind, as when a thread is archived; hearing it again checks then. A yapd from before it doesn't send it: take that as `true`.
-- `unheard`: how many of the thread's updates and notices you haven't heard that a [catch-up](#catching-up) about it would tell you of, muted or not. A menu shows it beside a thread that isn't muted. It drops as soon as you've heard them through. A yapd from before it doesn't send it: take that as `0`.
+- `unheard`: how many of the thread's updates and notices you haven't heard, from every session of it, that a [catch-up](#catching-up) about it would tell you of, muted or not. A menu shows it beside a thread that isn't muted. It drops as soon as you've heard them through. A yapd from before it doesn't send it: take that as `0`.
 
 `icon` is how T3 Code draws the project, as one of these `kind`s:
 

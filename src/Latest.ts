@@ -106,9 +106,11 @@ export const make = (options: {
       const now = yield* Clock.currentTimeMillis
       const latest = yield* journal.latest(now - week, read)
       const muted = new Map((yield* mutes.list).map((mute) => [mute.key, mute]))
-      const sessions = latest.some(sessionRow)
+      const missed = options.missed === undefined ? [] : yield* options.missed
+      const sessions = latest.some(sessionRow) || missed.some(({ rows }) => rows.some(sessionRow))
       // The session of each thread's latest update, even when what came since, like a question it asked, has none, and, beside a
-      // session's own row, every session its recent updates came from, as a resumed one, or one whose link timed out before.
+      // session's own row, shown or still unheard, every session its recent updates came from, as a resumed one, or one whose link
+      // timed out before.
       const found = new Map<Kept, { readonly own: string | undefined; readonly all: ReadonlyArray<string> }>()
       yield* Effect.forEach(
         latest,
@@ -140,8 +142,7 @@ export const make = (options: {
       const under = new Map<string, ReadonlyArray<string>>()
       const entries = new Map<string, { readonly id: number; readonly full: string }>()
       let blind = false
-      const missed = options.missed === undefined ? [] : yield* options.missed
-      /** How many of a thread's updates and notices he hasn't heard, muted or not: under its own key, and the sessions it's shown from. */
+      /** How many of a thread's updates and notices he hasn't heard, muted or not: under its own key, and every session of it, as a catch-up of everything tells of them. */
       const unheardOf = (machine: string, threads: ReadonlyArray<string>) =>
         missed.filter((group) => (group.machine ?? here) === machine && group.thread !== undefined && threads.includes(group.thread)).reduce((sum, { rows }) => sum + rows.length, 0)
       const listed = yield* Effect.forEach(rows, ({ kept, last }) =>
@@ -186,7 +187,7 @@ export const make = (options: {
             ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
             waiting: Option.exists(thread, ({ pendingRuntimeRequest }) => pendingRuntimeRequest !== null),
             replayable: Option.isSome(still) || reachable(thread),
-            ...(options.missed === undefined ? {} : { unheard: unheardOf(machine, [id, ...sessions]) }),
+            ...(options.missed === undefined ? {} : { unheard: unheardOf(machine, [id, ...sessions, ...(found.get(kept)?.all ?? [])]) }),
           } satisfies Server.Recent
         }),
       )

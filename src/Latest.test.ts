@@ -648,6 +648,28 @@ describe("Latest", () => {
     expect(result).toEqual({ counts: [["t3:Rosie:t-tezos", 1]], total: 1 })
   })
 
+  test("counts what he hasn't heard of a thread under every session of it, an older one whose row it hides too, as a catch-up of everything does", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.adjust(`${day} millis`)
+        const { latest, journal } = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] }, ":memory:", {}, true)
+        const at = (yield* Clock.currentTimeMillis) - 60_000
+        yield* journal.write({ at, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Started, in the session before.", detail: { session: "claude:s-old" } })
+        // The session before, resumed, its link timing out.
+        yield* journal.write({ at: at + 1, kind: "update", host: "Rosie", thread: "claude:s-old", said: "Older, under the session before." })
+        yield* journal.write({ at: at + 2, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Older, linked.", detail: { session: "claude:s1" } })
+        // T3 Code was restarting, so the newest is kept under its session.
+        yield* journal.write({ at: at + 3, kind: "update", host: "Rosie", thread: "claude:s1", said: "Newer, under the session." })
+        const totals: Array<number> = []
+        yield* Effect.forkScoped(Stream.runForEach(latest.unheard, (count) => Effect.sync(() => void totals.push(count))))
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { counts: (yield* latest.current).map(({ key, unheard }) => [key, unheard]), total: totals.at(-1) }
+      }),
+    )
+    expect(result).toEqual({ counts: [["t3:Rosie:t-tezos", 4]], total: 4 })
+  })
+
   test("counts what came in while yapd was off over a weekend, though it was turned off and on for a moment since", async () => {
     const result = await run(
       Effect.gen(function* () {
