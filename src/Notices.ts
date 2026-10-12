@@ -743,11 +743,14 @@ export const make = (options: {
      * What finished on `machine` while yapd was down, looked for once, the
      * first time its T3 Code has caught up, while yapd is on: runs that ended
      * between its last heartbeat and its start, in the last twelve hours, on
-     * threads at rest that nothing was kept of since. One that went well is
-     * kept, with no model, as held for later ("…finished while I was
-     * offline"), or kept quiet on a muted thread, under the key T3 Code's
-     * word would say it under, so neither ever says it twice; one that
-     * failed is said, since it needs him.
+     * threads at rest that nothing was kept of since. One that answers a
+     * message yapd sent it for him is summed up and said, as T3 Code's word
+     * would have it said; any other that went well is kept, with no model, as
+     * held for later ("…finished while I was offline"), or kept quiet on a
+     * muted thread, both under the key T3 Code's word would say it under, so
+     * neither ever says it twice; one he stopped, or so short he was likely
+     * watching it, is nothing to tell; one that failed is said, since it
+     * needs him.
      */
     const offline = (machine: string) =>
       Effect.gen(function* () {
@@ -776,11 +779,32 @@ export const make = (options: {
           // Anything kept of it since yapd was last up, like what its hook said, or T3 Code's word as yapd started, is all there is to say.
           const since = yield* journal.byThread(ref.machine, ref.id, 1)
           if (since.some((kept) => kept.at > alive)) continue
+          const actions = threads.actions(ref.machine)
+          const run = Option.isNone(actions)
+            ? Option.none<T3Actions.Ran>()
+            : yield* actions.value.ran(ref.id, runId).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), Option.none<T3Actions.Ran>())))
           if (listed.state !== "idle") {
-            const actions = threads.actions(ref.machine)
-            if (Option.isNone(actions)) continue
-            const run = yield* actions.value.ran(ref.id, runId).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), Option.none())))
             if (Option.isSome(run) && run.value.status === "failed") yield* failed(ref, run.value, thread, named(listed), project, turns, at)
+            continue
+          }
+          // One he stopped, or short enough that he was likely watching it, is nothing to tell, as when yapd is up.
+          if (Option.isSome(run) && (!["completed", "waiting"].includes(run.value.status) || quick(run.value, at, options.shortest))) continue
+          // What answers a message yapd sent it for him is his own ask: summed up and said, however he muted the thread, as when yapd is up.
+          if (Option.isSome(run) && run.value.said !== "" && Option.exists(run.value.userMessageId, (id) => id.startsWith("yapd:"))) {
+            const since = generation(ref)
+            const { status, final, others, natives, previous } = run.value
+            yield* options.finished({
+              about: ref,
+              project,
+              cwd: Option.getOrElse(listed.directory, () => ""),
+              turn: { prompt: run.value.prompt, message: run.value.said },
+              at,
+              key: key.done(ref.machine, runId),
+              turns,
+              run: { status, final, others, natives, previous, startedAt: Option.getOrElse(run.value.startedAt, () => at) },
+              current: Effect.sync(() => generation(ref) === since),
+              answering: true,
+            })
             continue
           }
           const muted = Option.isSome(yield* options.muted?.([Mutes.key.thread(ref)]) ?? Effect.succeedNone)
@@ -793,7 +817,8 @@ export const make = (options: {
             ...Option.match(listed.directory, { onNone: () => ({}), onSome: (directory) => ({ directory }) }),
             said: lines.offline(named(listed), said),
             key: key.done(ref.machine, runId),
-            detail: muted ? { muted: true } : { held: "offline" },
+            // Under the session a turn T3 Code told of is kept under, so it's shown, and muted, as its thread's.
+            detail: { session: `finished:${ref.machine}:${ref.id}`, ...(muted ? { muted: true } : { held: "offline" }) },
           })
           if (Option.isSome(kept)) yield* Effect.logInfo(`${muted ? "Kept quiet" : "Held for later"}: ${thread.title} finished while I was offline`)
         }

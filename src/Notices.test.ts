@@ -1070,7 +1070,7 @@ describe("Notices", () => {
         turnItems: [failure("run-mina", "provider_error", "API Error: 500 Internal server error")],
       },
     }
-    const held = (detail: unknown) => (detail as { held?: string; muted?: boolean } | undefined) ?? {}
+    const held = (detail: unknown) => (detail as { session?: string; held?: string; muted?: boolean } | undefined) ?? {}
 
     test("runs that finished while yapd was down are held for later, not said, under the key T3 Code's word would say them under, while failures are said", async () => {
       const result = await run(
@@ -1089,11 +1089,46 @@ describe("Notices", () => {
       )
       expect(result.told).toEqual(["Open Mina SSV2 Bug Tickets failed, sir: the model provider had an error."])
       expect(result.kept).toEqual([
-        ["tezos", "Migrate Tezos Integration finished while I was offline, sir.", "done:Rosie:run-tezos", { held: "offline" }],
-        ["noisy", "Watch the linter finished while I was offline, sir.", "done:Rosie:run-noisy", { muted: true }],
+        ["tezos", "Migrate Tezos Integration finished while I was offline, sir.", "done:Rosie:run-tezos", { session: "finished:Rosie:tezos", held: "offline" }],
+        ["noisy", "Watch the linter finished while I was offline, sir.", "done:Rosie:run-noisy", { session: "finished:Rosie:noisy", muted: true }],
         ["told", "Told work is done.", undefined, {}],
       ])
       expect(result.again).toBe(false)
+    })
+
+    test("the answer to a message he sent, finished while yapd was down, is summed up and said however he muted the thread, while a run he stopped or likely watched is nothing to tell", async () => {
+      const ended = (id: string, minutesAgo: number) => now - minutesAgo * 60_000
+      const ran = (id: string, status: string, started: number, at: number, userMessageId: string) => ({
+        runs: [{ id: `run-${id}`, status, ordinal: 1, startedAt: new Date(started).toISOString(), completedAt: new Date(at).toISOString(), userMessageId }],
+        messages: [
+          { id: userMessageId, runId: `run-${id}`, role: "user", text: "Use the fee table.", createdAt: new Date(started).toISOString() },
+          { id: `a-${id}`, runId: `run-${id}`, role: "assistant", text: "The fee table is in.", createdAt: new Date(at).toISOString() },
+        ],
+      })
+      const threads = [
+        done("answer", "Answer the fee question", ended("answer", 35)),
+        done("stopped", "Stopped work", ended("stopped", 33)),
+        done("glance", "Glanced work", ended("glance", 32)),
+        done("typed", "Typed work", ended("typed", 31)),
+      ]
+      const reads = {
+        answer: ran("answer", "completed", ended("answer", 40), ended("answer", 35), "yapd:u1:0:m"),
+        stopped: ran("stopped", "interrupted", ended("stopped", 40), ended("stopped", 33), "yapd:u2:0:m"),
+        glance: ran("glance", "completed", ended("glance", 32) - 30_000, ended("glance", 32), "m-typed"),
+        typed: ran("typed", "completed", ended("typed", 40), ended("typed", 31), "m-typed-2"),
+      }
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* notices({ view: threads, bounded: reads, offline: { alive: Option.some(alive), started }, muted: ["t3:Rosie:answer"] })
+          yield* made.reconcileOn("Rosie")
+          yield* made.flush
+          const kept = yield* made.journal.since(0, { kinds: ["update"] })
+          return { finished: [...made.finished], told: [...made.told], kept: kept.map(({ thread, key, detail }) => [thread, key, held(detail)]) }
+        }),
+      )
+      expect(result.finished).toEqual([{ key: "done:Rosie:run-answer", message: "The fee table is in.", answering: true }])
+      expect(result.told).toEqual([])
+      expect(result.kept).toEqual([["typed", "done:Rosie:run-typed", { session: "finished:Rosie:typed", held: "offline" }]])
     })
 
     test("nothing is looked for without a heartbeat, as the first time, or while yapd is off", async () => {
