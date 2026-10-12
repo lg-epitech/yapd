@@ -83,6 +83,10 @@ const notices = (
     readonly rig?: { readonly view: ReadonlyArray<T3Live.Thread>; readonly bounded: Readonly<Record<string, Bounded>> }
     /** Failures left to the Stops that told of them, with what says them, should what those told of be kept quiet. */
     readonly left?: Array<{ readonly stops: ReadonlyArray<Notices.Stop>; readonly failure: Effect.Effect<void> }>
+    /** Whether yapd is on, and how many times it was turned on or off, which the test can change. */
+    readonly power?: { on: boolean; turns: number }
+    /** What's queued is dropped unsaid as yapd is turned off, rather than said. */
+    readonly dropping?: boolean
   },
 ) =>
   Effect.gen(function* () {
@@ -146,8 +150,14 @@ const notices = (
     const finished: Array<{ readonly key: string; readonly message: string; readonly answering?: true }> = []
     /** The threads whose turn no hook told of was overtaken, by starting again or going. */
     const overtaken: Array<string> = []
+    const power = given.power ?? { on: true, turns: 1 }
     const tell = (notice: Notice) =>
       Effect.gen(function* () {
+        if (given.dropping === true) {
+          power.on = false
+          power.turns++
+          return yield* notice.gone ?? Effect.void
+        }
         if (yield* notice.stale) return
         yield* notice.saying ?? Effect.void
         told.push(notice.spoken)
@@ -157,7 +167,7 @@ const notices = (
       threads,
       journal,
       tell,
-      power: Effect.succeed({ on: true, turns: 1 }),
+      power: Effect.sync(() => ({ ...power })),
       stopped: (sessions) => Effect.sync(() => sessions.flatMap((session) => given.stops?.get(session) ?? []).toSorted((a, b) => a.at - b.at)),
       ...(given.left === undefined ? {} : { unheard: (stops, failure) => Effect.sync(() => void given.left?.push({ stops, failure })) }),
       finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message, ...(input.answering === true ? { answering: true as const } : {}) })),
@@ -1039,5 +1049,121 @@ describe("Notices", () => {
       ["ask:Rosie:r1", true],
       ["ask:rig:q9", true],
     ])
+  })
+})
+
+describe("Notices while yapd is off", () => {
+  const failed = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "provider_error" })
+  const failing = {
+    tezos: {
+      runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(5) }],
+      turnItems: [failure("run-1", "provider_error", "API Error: 500 Internal server error")],
+      sessions: ["s-tezos"],
+    },
+  }
+
+  test("a run that fails while yapd is off is kept unheard under its key, and never said, then or once it's on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const power = { on: false, turns: 2 }
+        const { hear, wait, told, journal } = yield* notices({ view: [failed], bounded: failing, power })
+        yield* hear(ended(failed, "run-1"))
+        yield* wait(10)
+        const off = (yield* journal.since(0, { kinds: ["notice"] })).map(({ key, said, heardAt }) => [key, said, heardAt])
+        // On again, and told of the same run, as after T3 Code reconnects.
+        power.on = true
+        power.turns = 3
+        yield* hear(ended(failed, "run-1"))
+        yield* wait(10)
+        return { told: [...told], off }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.off).toEqual([["fail:Rosie:run-1", "Migrate Tezos Integration failed, sir: the model provider had an error.", undefined]])
+  })
+
+  test("a limit hit while yapd is off holds its window, so another thread hitting it once it's on isn't said either", async () => {
+    const limited = (id: string, title: string, runId: string) =>
+      thread(id, title, { status: "failed", latestRunId: runId, lastErrorClass: "usage_limit", usageLimitResetAt: "2026-10-08T23:00:00.000Z" })
+    const tezos = limited("tezos", "Migrate Tezos Integration", "run-1")
+    const mina = limited("mina", "Open Mina SSV2 Bug Tickets", "run-2")
+    const limit = (runId: string) => ({
+      runs: [{ id: runId, status: "failed", ordinal: 1, startedAt: minutes(3) }],
+      turnItems: [failure(runId, "usage_limit", "Claude usage limit reached.", "2026-10-08T23:00:00.000Z")],
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const power = { on: false, turns: 2 }
+        const { hear, wait, told, journal } = yield* notices({ view: [tezos, mina], bounded: { tezos: limit("run-1"), mina: limit("run-2") }, power })
+        yield* hear(ended(tezos, "run-1"))
+        yield* wait(10)
+        power.on = true
+        power.turns = 3
+        yield* hear(ended(mina, "run-2"))
+        yield* wait(10)
+        return { told: [...told], kept: (yield* journal.since(0, { kinds: ["notice"] })).map(({ key, heardAt }) => [key, heardAt]) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.kept).toEqual([["limit:Claude:2026-10-08T23:00", undefined]])
+  })
+
+  test("a failure queued to be said and dropped as yapd is turned off is kept unheard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, told, journal } = yield* notices({ view: [failed], bounded: failing, dropping: true })
+        yield* hear(ended(failed, "run-1"))
+        yield* wait(10)
+        return { told: [...told], kept: (yield* journal.since(0, { kinds: ["notice"] })).map(({ key, heardAt }) => [key, heardAt]) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.kept).toEqual([["fail:Rosie:run-1", undefined]])
+  })
+
+  test("a turn no hook told of while yapd is off is still looked into and handed on, for the daemon to keep unheard", async () => {
+    const loader = thread("loader", "Fix the loader", { latestRunId: "run-2", modelSelection: { instanceId: "opencode", model: "kimi-k3" } })
+    const bounded = {
+      loader: {
+        runs: [{ id: "run-2", status: "waiting", ordinal: 1, startedAt: minutes(4), userMessageId: "m2" }],
+        messages: [
+          { id: "m2", runId: "run-2", role: "user", text: "Fix the loader.", createdAt: minutes(4) },
+          { id: "a2", runId: "run-2", role: "assistant", text: "The loader is fixed.", createdAt: minutes(0) },
+        ],
+        sessions: ["oc-loader"],
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const { hear, wait, finished, told } = yield* notices({ view: [loader], bounded, power: { on: false, turns: 2 } })
+        yield* hear(ended(loader, "run-2"))
+        yield* wait(20)
+        return { finished, told }
+      }),
+    )
+    expect(result.finished).toEqual([{ key: "done:Rosie:run-2", message: "The loader is fixed." }])
+    expect(result.told).toEqual([])
+  })
+
+  test("a question asked while yapd is off isn't worded then, and is asked once it's on", async () => {
+    const asking = [{ type: "user_input_request", status: "waiting", requestId: "r1", questions: [{ id: "q", question: "Which fee table?" }] }]
+    const request = { id: "r1", kind: "user_input", createdAt: minutes(1) }
+    const tezos = thread("tezos", "Migrate Tezos Integration", { activeRunId: "run-1", pendingRuntimeRequest: request })
+    const result = await run(
+      Effect.gen(function* () {
+        const power = { on: false, turns: 2 }
+        const made = yield* notices({ view: [tezos], bounded: { tezos: { turnItems: asking } }, power })
+        yield* made.hear({ _tag: "Asked", thread: tezos, request } as unknown as T3Live.Change)
+        yield* made.wait(1)
+        const off = [...made.asked]
+        power.on = true
+        power.turns = 3
+        yield* made.reconcile
+        yield* made.flush
+        return { off, on: [...made.asked] }
+      }),
+    )
+    expect(result.off).toEqual([])
+    expect(result.on).toEqual(["A question on Migrate Tezos Integration, sir: Which fee table?"])
   })
 })

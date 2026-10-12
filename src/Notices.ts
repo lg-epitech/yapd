@@ -482,7 +482,11 @@ export const make = (options: {
      * it's about to be said, unless it was ever said before or `still` says
      * it no longer holds; noted as heard once it's said to the end. `kept` is
      * the entry it was kept under already and never heard, as when yapd
-     * restarted while saying it, which it's said under again.
+     * restarted while saying it, which it's said under again. While yapd is
+     * off, or was turned off or on since `turns`, it's kept under its key
+     * unheard and nothing is said: what came in while it was off is told
+     * only in a catch-up, and its key keeps it from being said later. So
+     * is one dropped unsaid as yapd is turned off.
      */
     const notify = (
       ref: Threads.Ref,
@@ -495,30 +499,51 @@ export const make = (options: {
       kept?: number,
     ) => {
       let claimed: Option.Option<Option.Option<number>> | undefined = kept === undefined ? undefined : Option.some(Option.some(kept))
-      return options.tell(
-        {
-          id,
-          kind: "notice",
-          priority: "needs-you",
-          spoken,
-          at,
-          // Claimed once, the first time it comes up still worth saying: put back after a dictation, it's still this one's to say.
-          stale: Effect.gen(function* () {
-            if (!(yield* still)) return true
-            if (claimed === undefined) claimed = yield* journal.claim(entry)
-            return Option.isNone(claimed)
-          }),
-          saying: options.mention(ref, spoken),
-          heard: Effect.suspend(() => {
-            const row = claimed === undefined ? Option.none() : Option.flatten(claimed)
-            return Option.match(row, {
-              onNone: () => Effect.void,
-              onSome: (row) => Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard([row], now)),
-            })
-          }),
-        },
-        turns,
+      /** Kept unheard, unless it was kept already or no longer holds. */
+      const keep = Effect.suspend(() =>
+        claimed !== undefined
+          ? Effect.void
+          : Effect.flatMap(still, (holds) =>
+              holds
+                ? Effect.flatMap(journal.claim(entry), (kept) =>
+                    Effect.sync(() => {
+                      claimed = kept
+                    }),
+                  )
+                : Effect.void,
+            ),
       )
+      return Effect.flatMap(options.power, (power) => {
+        if (!power.on || power.turns !== turns) {
+          return Effect.zipRight(keep, Effect.logInfo(`Kept unheard, since yapd is off: ${spoken}`))
+        }
+        return options.tell(
+          {
+            id,
+            kind: "notice",
+            priority: "needs-you",
+            spoken,
+            at,
+            // Claimed once, the first time it comes up still worth saying: put back after a dictation, it's still this one's to say.
+            stale: Effect.gen(function* () {
+              if (!(yield* still)) return true
+              if (claimed === undefined) claimed = yield* journal.claim(entry)
+              return Option.isNone(claimed)
+            }),
+            saying: options.mention(ref, spoken),
+            heard: Effect.suspend(() => {
+              const row = claimed === undefined ? Option.none() : Option.flatten(claimed)
+              return Option.match(row, {
+                onNone: () => Effect.void,
+                onSome: (row) => Effect.flatMap(Clock.currentTimeMillis, (now) => journal.markHeard([row], now)),
+              })
+            }),
+            // Dropped before it was ever said, as when yapd is turned off, it's kept unheard for catching up.
+            gone: Effect.flatMap(options.power, (now) => (now.on && now.turns === turns ? Effect.void : keep)),
+          },
+          turns,
+        )
+      })
     }
 
     /**
@@ -690,9 +715,9 @@ export const make = (options: {
         }
         // An approval is never brought up, however it comes.
         if (news.value._tag === "Asked" && news.value.kind !== "user_input") return yield* Effect.logInfo(`Not announcing an approval: ${news.value.kind}`)
-        // Off, nothing is said later of what happened meanwhile; what still waits on him is said once it's on.
+        // Off, what still waits on him is said once it's on, but how a run went is still looked into, to be kept unheard for catching up.
         const { on, turns } = yield* options.power
-        if (!on) return
+        if (!on && news.value._tag === "Asked") return
         const at = yield* Clock.currentTimeMillis
         const ref = { machine, id: news.value.thread.id }
         // The thread's run as it is now, which it no longer is once it starts again or goes.
