@@ -2,6 +2,7 @@ import { Clock, Context, Effect, Option, type Scope, Stream, SubscriptionRef } f
 import * as Brain from "./Brain.ts"
 import { english } from "./Condenser.ts"
 import type { Kept } from "./Journal.ts"
+import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import * as Process from "./Process.ts"
@@ -592,18 +593,21 @@ export const usage = (usage: Option.Option<Threads.Usage>, now: number): Draft =
 })
 
 /**
- * What he hasn't heard, newest last, as the journal has it, then what was
- * kept quiet as he muted its thread, a line for each such thread, with how
- * many and the latest, so a noisy thread takes one line however much it said.
+ * What he hasn't heard, a line a thread, what needs him first, as a catch-up
+ * groups it: how many, how many need him, how many came in while yapd was
+ * off, and the latest, so a noisy thread takes one line however much it said.
  */
-export const missed = (unheard: ReadonlyArray<Kept>, now: number, quieted: ReadonlyArray<Kept> = []): Draft => {
-  const where = (kept: Kept) => (kept.project === undefined ? "" : ` · ${plainly(kept.project)}`)
-  const lines = [
-    ...unheard.map((kept) => `- **${ago(kept.at, now)}**${where(kept)}: ${plainly(kept.said ?? kept.text ?? "")}`),
-    ...Brain.grouped(quieted).map(
-      ({ latest, count }) => `- **${ago(latest.at, now)}**${where(latest)} · muted, ${count} ${count === 1 ? "update" : "updates"}: ${plainly(latest.said ?? latest.text ?? "")}`,
-    ),
-  ]
+export const missed = (groups: ReadonlyArray<Missed.Group>, now: number): Draft => {
+  const lines = groups.map((group) => {
+    const name = plainly(Brain.missedName(group))
+    const counts = [
+      `${group.rows.length} unheard`,
+      ...(group.needs === 0 ? [] : [`${group.needs} ${group.needs === 1 ? "needs" : "need"} you`]),
+      ...(group.off === 0 ? [] : [`${group.off} while off`]),
+      ...(Missed.quiet(group) ? ["muted"] : []),
+    ]
+    return `- **${ago(group.newest, now)}** · ${name} · ${counts.join(", ")}: ${plainly(group.latest)}`
+  })
   return { kind: "list", title: "What you missed", markdown: lines.length === 0 ? "Nothing you haven't heard." : lines.join("\n") }
 }
 
@@ -863,10 +867,11 @@ export const make = (read: Threads.Threads["Type"]["detail"], open: Opener = bro
           }
           case "missed": {
             // A muted thread's counts as one, however much it said.
-            const count = situation.unheard.length + Brain.grouped(situation.quieted).length
+            const { groups } = situation.missed
+            const count = groups.reduce((sum, group) => sum + (Missed.quiet(group) ? 1 : group.rows.length), 0)
             const gist = (address: string) =>
               count === 0 ? `You haven't missed anything${address}.` : `${Brain.capital(Brain.count(count))} ${count === 1 ? "thing" : "things"} you haven't heard${address}.`
-            return yield* shown(gist, missed(situation.unheard, now, situation.quieted), lines)
+            return yield* shown(gist, missed(groups, now), lines)
           }
           case "said": {
             const line = Option.filter(Option.map(lastSaid(situation), (line) => offScreen(line, lines)), (line) => line !== "")

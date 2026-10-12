@@ -4,6 +4,7 @@ import type * as Brain from "./Brain.ts"
 import type { Kept } from "./Journal.ts"
 import * as Persona from "./Persona.ts"
 import * as Server from "./Server.ts"
+import * as Missed from "./Missed.ts"
 import * as Show from "./Show.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
@@ -106,12 +107,11 @@ const situation = (threads: ReadonlyArray<Threads.Listed>, away: Threads.Desk["a
   open: Option.none(),
   desk: { threads, away },
   lately: [],
-  unheard: [],
+  missed: { since: now - 24 * 60 * 60_000, spoke: now - 24 * 60 * 60_000, groups: [] },
   usage: Option.none(),
   second: Option.none(),
   asked: [],
   acted: Option.none(),
-  quieted: [],
   mutes: [],
   muteChange: Option.none(),
   now,
@@ -245,10 +245,13 @@ describe("Show", () => {
       Show.thread(listed, Option.some({ ...detail("Clean the build"), plan: Option.some(`1. ${hostile}\n2. Read [the notes](https://ok.example/notes)`) }), now),
       Show.overview({ threads: [titled], away: [{ machine: "rig", reason: hostile }] }, now),
       Show.missed(
-        [
-          { id: 1, at: now, kind: "update", project: "[p](javascript:1)", said: hostile },
-          { id: 2, at: now, kind: "notice", text: hostile },
-        ],
+        Missed.group(
+          [
+            { id: 1, at: now, kind: "update", project: "[p](javascript:1)", said: hostile },
+            { id: 2, at: now, kind: "notice", thread: "t2", said: hostile },
+          ],
+          { threads: [], away: [] },
+        ),
         now,
       ),
       Show.said(hostile, Option.some("Show me [that](javascript:alert(1)) <file:///etc/passwd>")),

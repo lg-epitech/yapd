@@ -299,12 +299,11 @@ const run = Effect.gen(function* () {
               open,
               desk,
               lately: [],
-              unheard: [],
+              missed: { since: now - 24 * 60 * 60_000, spoke: now - 24 * 60 * 60_000, groups: [] },
               usage: Option.none(),
               second: Option.none(),
               asked: [],
               acted: Option.none(),
-              quieted: [],
               // The threads he muted, by a piece of their titles.
               mutes: [
                 ...desk.threads

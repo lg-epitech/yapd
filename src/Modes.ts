@@ -172,15 +172,16 @@ export const run = (modes: Modes, running: Running, look: Duration.DurationInput
 
     /**
      * A mode ended other than by "I'm back": the rundown is offered, once,
-     * when anything was held since it began and yapd is on. Off, it ends
-     * without a word, and what was held waits for "what did I miss?".
+     * when anything was held since it began and yapd is on, never counting
+     * what came in while it was off. Off, it ends without a word, and what
+     * was held waits for a catch-up.
      */
     const leave = (was: Mode) =>
       Effect.gen(function* () {
         if (was.mode === "normal") return
         const { on } = yield* running.power
         if (!on) return
-        const held = yield* journal.held(was.since ?? 0)
+        const held = yield* journal.held(was.since ?? 0, 200, { except: ["off"] })
         if (held.length === 0) return
         // What he's offered isn't brought up by the digest as well.
         yield* modes.briefed()
@@ -207,7 +208,11 @@ export const run = (modes: Modes, running: Running, look: Duration.DurationInput
         yield* FiberHandle.run(expiry, Effect.zipRight(Effect.sleep(left), Effect.forkIn(expire(mode), scope)))
       })
 
-    /** Brings up what was held, once it's been quiet a minute and enough waits, at most every twenty minutes, never in focus or quiet. */
+    /**
+     * Brings up what was held, once it's been quiet a minute and enough waits,
+     * at most every twenty minutes, never in focus or quiet, and never what
+     * came in while yapd was off, which is for a catch-up.
+     */
     const digest = Effect.gen(function* () {
       if (!(yield* running.power).on) return
       const { mode } = yield* modes.current
@@ -217,7 +222,7 @@ export const run = (modes: Modes, running: Running, look: Duration.DurationInput
       if (now - Math.max(briefedAt, tried) < digesting.every) return
       const idle = yield* running.idle
       if (Option.isNone(idle) || idle.value < digesting.quiet) return
-      const held = yield* journal.held(Math.max(briefedAt, now - digesting.window))
+      const held = yield* journal.held(Math.max(briefedAt, now - digesting.window), 200, { except: ["off"] })
       const oldest = held[0]
       if (oldest === undefined || (held.length < digesting.enough && now - oldest.at < digesting.oldest)) return
       // Spaced from now, whether or not it's said; but what it covers counts as told only once it is, so what a digest that failed, or

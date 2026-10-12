@@ -8,6 +8,7 @@ import * as Hands from "./Hands.ts"
 import * as Notices from "./Notices.ts"
 import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
+import * as Missed from "./Missed.ts"
 import * as Persona from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import * as Research from "./Research.ts"
@@ -69,12 +70,11 @@ const situation = (heard: string, overrides: Partial<Brain.Situation> = {}): Bra
   open: Option.none(),
   desk: desk(),
   lately: [],
-  unheard: [],
+  missed: { since: now - 24 * 60 * 60_000, spoke: now - 24 * 60 * 60_000, groups: [] },
   usage: Option.none(),
   second: Option.none(),
   asked: [],
   acted: Option.none(),
-  quieted: [],
   mutes: [],
   muteChange: Option.none(),
   now,
@@ -659,7 +659,6 @@ describe("Brain", () => {
         `- 1 min ago, he asked you: «${heard}»\n`,
       ].join("\n"),
     )
-    expect(shown({ unheard: [replied] })).toContain(`UNHEARD, what he hasn't heard yet:\n- 1 min ago, he said over it (integration): «${heard}» ${paused}`)
 
     // THREADS, what he said to start one.
     const started = (more: Threads.Overheard) =>
@@ -1625,12 +1624,19 @@ describe("Brain", () => {
     test("the model sees which threads are muted, what was kept quiet as said in LATELY, and what he missed of a muted thread as one line", () => {
       const tezosKey = `t3:Rosie:${tezos.id}`
       const quiet = (id: number, at: number, said: string): Kept => ({ id, at, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said, detail: { priority: "done", muted: true } })
+      const on = desk()
+      const handle = (thread: T3Live.Thread) => on.threads.find(({ ref }) => ref.id === thread.id)!.handle
+      const rows = [
+        quiet(2, now - 20 * 60_000, "integration. Compiling."),
+        quiet(3, now - 5 * 60_000, "integration. Tests running."),
+        { id: 4, at: now - 3 * 60_000, kind: "update", machine: "Rosie", thread: mina.id, project: "integration-connectors", said: "The tickets are open." } satisfies Kept,
+      ]
       const told = Brain.prompt(
         situation("What did I miss?", {
+          desk: on,
           mutes: [{ key: tezosKey, at: now - 60 * 60_000 }],
           lately: [quiet(1, now - 30 * 60_000, "integration. Still going.")],
-          quieted: [quiet(2, now - 20 * 60_000, "integration. Compiling."), quiet(3, now - 5 * 60_000, "integration. Tests running.")],
-          unheard: [{ id: 4, at: now - 3 * 60_000, kind: "update", machine: "Rosie", thread: mina.id, project: "integration-connectors", said: "The tickets are open." }],
+          missed: { since: now - 24 * 60 * 60_000, spoke: now - 10 * 60_000, groups: Missed.group(rows, on) },
         }),
         Option.none(),
       )
@@ -1638,8 +1644,8 @@ describe("Brain", () => {
       expect(told).toMatch(/«Migrate Tezos Integration» · integration · Rosie · running [^\n]* · muted\n/)
       expect(told).toContain(`MUTED, threads whose progress and finished work you keep to yourself, though what needs him still comes through: «Migrate Tezos Integration»`)
       expect(told).toContain(`you kept quiet about it, since he muted it (integration, `)
-      expect(told).toContain(`- from muted integration (2 updates, latest 5 min ago): «integration. Tests running.»`)
-      expect(told).toContain(`you told him (integration-connectors, `)
+      expect(told).toContain(`- ${handle(tezos)} muted «Migrate Tezos Integration» · integration · Rosie: 2 unheard (2 kept quiet as he muted it), 20 min to 5 min ago; latest: «integration. Tests running.»`)
+      expect(told).toContain(`- ${handle(mina)} «Open Mina SSV2 Bug Tickets» · integration-connectors · Rosie: 1 unheard (1 cut off), 3 min ago; latest: «The tickets are open.»`)
       expect(Brain.prompt(situation("What's going on?"), Option.none())).not.toContain("MUTED,")
     })
   })
@@ -1722,17 +1728,19 @@ describe("Brain", () => {
 
     test("the prompt shows the mode, and what was held as held for later, never as told", () => {
       const heldRow: Kept = { id: 7, at: now - 5 * 60_000, kind: "update", project: "integration", machine: "Rosie", thread: tezos.id, said: "integration's review pass 7 is running.", detail: { held: "progress" } }
+      const on = desk()
       const prompt = Brain.prompt(
         situation("What did I miss?", {
+          desk: on,
           mode: { mode: { mode: "focus", until: now + 60 * 60_000, since: now - 60_000 }, detail: "full" },
-          held: [heldRow],
+          missed: { since: now - 24 * 60 * 60_000, spoke: now, groups: Missed.group([heldRow], on) },
           lately: [heldRow],
         }),
         Option.none(),
       )
       expect(prompt).toContain(`MODE: focus until ${Brain.until(now + 60 * 60_000, now)}: you only tell him what needs him, and hold the rest for later`)
       expect(prompt).toContain("You tell him every update in full, as he asked.")
-      expect(prompt).toContain("- held for later from integration (1 update, latest 5 min ago): «integration's review pass 7 is running.»")
+      expect(prompt).toContain(`«Migrate Tezos Integration» · integration · Rosie: 1 unheard (1 held for later), 5 min ago; latest: «integration's review pass 7 is running.»`)
       expect(prompt).toContain("you held it for later, so he hasn't heard it")
       expect(prompt).not.toContain("you told him (integration")
       // "mode" is something yapd does now, not something it can't do yet.
@@ -1767,13 +1775,120 @@ describe("Brain", () => {
         { id: 2, at: now - 10 * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "Pass 7 is running.", detail: { held: "progress" } },
         { id: 3, at: now - 5 * 60_000, kind: "update", machine: "Rosie", thread: mina.id, project: "integration-connectors", said: "The tickets are filed.", detail: { held: "focus" } },
       ]
-      const prompt = Brain.briefPrompt(held, desk(), now, Option.some("Call me sir."))
+      const on = desk()
+      const prompt = Brain.briefPrompt({ kind: "digest", groups: Missed.group(held, on), left: { threads: 0, rows: 0 } }, on, now, Option.some("Call me sir."))
+      expect(prompt).toContain("While he wasn't listening, you held some updates about the work for later.")
       expect(prompt).toContain("At most 60 words. First anything in WAITING ON YOU")
       expect(prompt).toContain("Call me sir.")
       expect(prompt).toContain(`WAITING ON YOU:\n- «Fix the transcription upload»: waiting for your approval (command)`)
       expect(prompt).toContain(`- «Migrate Tezos Integration», 2 updates, the latest 10 min ago:\n  - «Pass 6 found nothing new.»\n  - «Pass 7 is running.»`)
       expect(prompt).toContain(`- «Open Mina SSV2 Bug Tickets», 1 update, the latest 5 min ago:\n  - «The tickets are filed.»`)
-      expect(prompt.indexOf("WAITING ON YOU")).toBeLessThan(prompt.indexOf("HELD FOR LATER"))
+      expect(prompt.indexOf("WAITING ON YOU")).toBeLessThan(prompt.indexOf("THREADS, oldest first"))
+      expect(prompt).toContain("NEEDS YOU:\nNothing.")
+      expect(prompt).toContain("LEFT OUT: Nothing.")
     })
+  })
+})
+
+describe("catching up", () => {
+  const on = desk()
+  const handle = (thread: T3Live.Thread) => on.threads.find(({ ref }) => ref.id === thread.id)!.handle
+  const row = (id: number, minutesAgo: number, said: string, overrides: Partial<Kept> = {}): Kept => ({
+    id,
+    at: now - minutesAgo * 60_000,
+    kind: "update",
+    machine: "Rosie",
+    thread: tezos.id,
+    project: "integration",
+    said,
+    detail: { priority: "done", held: "off" },
+    ...overrides,
+  })
+  const rows: ReadonlyArray<Kept> = [
+    row(1, 7 * 60, "The Distribox schema is migrated."),
+    row(2, 25, "The Distribox deploy failed.", { detail: { priority: "needs-you", held: "off" } }),
+    // A terminal session's, not on the desk.
+    row(3, 40, "The importer compiles.", { machine: "rig", thread: "claude:s-importer", project: "importer", detail: { priority: "done" } }),
+    row(4, 5, "Docs swept.", { thread: mina.id, project: "integration-connectors", detail: { priority: "done", muted: true } }),
+  ]
+  const missed: Missed.Missed = { since: now - 24 * 60 * 60_000, spoke: now - 60 * 60_000, off: { from: now - 10 * 60 * 60_000, to: now - 60 * 60_000 }, groups: Missed.group(rows, on) }
+
+  test("UNHEARD has what he missed a thread at a time, by the desk's handle or one of its own, with what needs him first, and no catch-up hint", () => {
+    const prompt = Brain.prompt(situation("What did I miss on Distribox?", { desk: on, missed, mutes: [{ key: `t3:Rosie:${mina.id}`, at: now - 60 * 60_000 }] }), Option.none())
+    expect(prompt).toContain(`UNHEARD, what he hasn't heard yet, since ${Brain.past(now - 24 * 60 * 60_000, now)}: 4 updates from 3 threads, 2 while he had you off (${Brain.past(now - 10 * 60 * 60_000, now)} to ${Brain.past(now - 60 * 60_000, now)}).`)
+    const lines = prompt.slice(prompt.indexOf("UNHEARD, what he")).split("\n").slice(1, 4)
+    expect(lines).toEqual([
+      `- ${handle(tezos)} «Migrate Tezos Integration» · integration · Rosie: 2 unheard (1 needs him, 2 while he had you off), 7 h to 25 min ago; latest: «The Distribox deploy failed.»`,
+      `- ${handle(mina)} muted «Open Mina SSV2 Bug Tickets» · integration-connectors · Rosie: 1 unheard (1 kept quiet as he muted it), 5 min ago; latest: «Docs swept.»`,
+      `- u1 «importer» · rig: 1 unheard (1 cut off), 40 min ago; latest: «The importer compiles.»`,
+    ])
+    expect(prompt).not.toContain("He's asking what he missed")
+    expect(Brain.prompt(situation("What's going on?"), Option.none())).toContain("UNHEARD, what he hasn't heard yet: Nothing.")
+  })
+
+  test("UNHEARD lists fifteen threads at most, and counts the rest", () => {
+    const many = Array.from({ length: 18 }, (_, index) => row(index + 1, index + 1, `Thread ${index} is done.`, { thread: `claude:s-${index}`, project: `p${index}` }))
+    const prompt = Brain.prompt(situation("Catch me up.", { missed: { ...missed, off: undefined as never, groups: Missed.group(many, on) } }), Option.none())
+    const listed = prompt.slice(prompt.indexOf("UNHEARD, what he")).split("\n\n")[0]!.split("\n").slice(1)
+    expect(listed).toHaveLength(16)
+    expect(listed.at(-1)).toBe("- and 3 more threads, 3 updates.")
+  })
+
+  test("the contract has catchup, and the answer no longer has its own way of telling what he missed", () => {
+    const prompt = Brain.prompt(situation("Catch me up."), Option.none())
+    expect(prompt).toContain(`- "catchup": he wants to hear what he hasn't heard, or what came in while he was away or had you off, about everything or part of it, however he puts it.`)
+    expect(prompt).toContain(`A question about it that isn't asking to be caught up, like "did the Distribox one finish?" or "how much did I miss?", is "answer" from UNHEARD.`)
+    expect(prompt).toContain(`"normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up`)
+    expect(prompt).not.toContain(`"how" is "missed"`)
+    expect(Brain.enabled.has("catchup")).toBe(true)
+  })
+
+  test("nothing he says catches him up without the model: no phrase decides it", () => {
+    for (const heard of ["Catch me up.", "What did I miss?", "What have I missed?", "Brief me.", "Fill me in.", "What did I miss while I was away?"]) {
+      expect(Brain.fast(situation(heard, { desk: on, missed }), lines)).toBeUndefined()
+    }
+  })
+
+  test("a catch-up goes ahead for a thread on the desk, one only in UNHEARD, or everything, even of a machine that's away, and not for a handle that's nowhere", () => {
+    const checked = (decided: Partial<Brain.Decision>) => Brain.check(Brain.decision({ act: "catchup", ...decided }), situation("Catch me up.", { desk: on, missed }), lines)
+    const onDesk = checked({ target: handle(tezos) })
+    expect(onDesk._tag === "Do" ? Option.map(onDesk.plan.target, ({ ref }) => ref.id) : onDesk).toEqual(Option.some(tezos.id))
+    expect(checked({ target: "u1" })._tag).toBe("Do")
+    expect(checked({})._tag).toBe("Do")
+    // Rig is away, but what it kept of rig is still there to catch up on.
+    expect(checked({ machine: "rig" })._tag).toBe("Do")
+    expect(checked({ target: "u7" })).toEqual({ _tag: "Say", spoken: lines.cantTell })
+  })
+
+  test("the brief of a catch-up has its scope, what needs him first, what it left out and its word budget; its detail has what was kept for more", () => {
+    const groups = Missed.group(rows.slice(0, 3), on)
+    const prompt = Brain.briefPrompt({ kind: "catchup", groups, left: { threads: 4, rows: 19 }, scope: "Distribox", off: { from: now - 10 * 60 * 60_000 } }, on, now, Option.none())
+    expect(prompt).toContain("He asked you to catch him up on what he hasn't heard.")
+    expect(prompt).toContain(`At most ${Brain.catchupWords} words.`)
+    expect(prompt).toContain(`SCOPE: what he asked about: «Distribox»\nHe had you off from ${Brain.past(now - 10 * 60 * 60_000, now)}.`)
+    expect(prompt).toContain(`NEEDS YOU:\n- «Migrate Tezos Integration», 25 min ago: «The Distribox deploy failed.»`)
+    expect(prompt).toContain(`- «Migrate Tezos Integration», 2 updates (2 while he had you off), the latest 25 min ago:`)
+    expect(prompt).toContain("LEFT OUT: 4 threads, 19 updates.")
+    expect(prompt.indexOf("NEEDS YOU")).toBeLessThan(prompt.indexOf("THREADS, oldest first"))
+    // Oldest first: the importer, whose only update came before Distribox's latest.
+    const threads = prompt.slice(prompt.indexOf("THREADS, oldest first"))
+    expect(threads.indexOf("«Migrate Tezos Integration»")).toBeLessThan(threads.indexOf("«importer»"))
+    const detail = Brain.briefPrompt(
+      { kind: "detail", groups: Missed.group([row(5, 3, "The loader is fixed.", { detail: { more: "Retries back off now." } })], on), left: { threads: 0, rows: 0 } },
+      on,
+      now,
+      Option.none(),
+    )
+    expect(detail).toContain("He asked for more of the catch-up you just gave him")
+    expect(detail).toContain("  - «The loader is fixed.» More: «Retries back off now.»")
+    expect(detail).toContain("SCOPE: everything he hasn't heard")
+  })
+
+  test("what's said of catching up without the model, and the catch-up offered as yapd is turned on", () => {
+    const said = Brain.catchupLines(lines)
+    expect(said.caughtUp).toBe("You're all caught up, sir.")
+    expect(said.nothingFrom("Distribox")).toBe("Nothing new from Distribox, sir.")
+    expect(said.unbriefed).toBe("I couldn't sum that up just now, sir. Ask me again in a moment.")
+    expect(said.offer(5)).toEqual({ news: "You missed five, sir.", question: "Want the rundown?" })
   })
 })

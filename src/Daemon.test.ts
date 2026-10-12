@@ -575,7 +575,8 @@ const assisted = (
                 asked.push(situation)
                 return model(situation)
               }).pipe(Effect.zipLeft(deciding(situation))),
-            brief: () => Effect.fail(new Brain.BrainError({ cause: "Not asked here." })),
+            // As the model is asked to: what he missed, from what it's given.
+            brief: (brief) => Effect.succeed(`You missed this: ${brief.groups.flatMap(({ rows }) => rows.map(({ said }) => said)).join(" ")}`),
           }),
           Persona.Plain,
         ),
@@ -2388,11 +2389,7 @@ describe("Daemon", () => {
   test("what he missed leaves out the updates waiting to be read, like the one his asking cut off, which he's told are coming up", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { finish, wait, toggle, dictating, played, asked, journal } = yield* assisted((situation) => {
-          // As the model is asked to: what he missed, from what he hasn't heard.
-          const told = situation.unheard.map(({ said }) => said).join(" ")
-          return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
-        })
+        const { finish, wait, toggle, dictating, played, asked, journal } = yield* assisted(() => Brain.decision({ act: "catchup" }))
         yield* finish("a", "The loader fix is ready.")
         yield* wait(2)
         // Turned off and on before it's read to the end, so he missed it.
@@ -2402,7 +2399,7 @@ describe("Daemon", () => {
         yield* wait(2)
         yield* dictating("What did I miss?")
         for (let i = 0; i < 4; i++) yield* wait(11)
-        return { told: asked.at(-1)?.unheard.map(({ said }) => said), played: [...played], unheard: (yield* journal.unheard(0, 12)).length }
+        return { told: asked.at(-1)?.missed.groups.flatMap(({ rows }) => rows.map(({ said }) => said)), played: [...played], unheard: (yield* journal.unheard(0, 12)).length }
       }),
     )
     expect(result.told).toEqual(["yapd. The loader fix is ready."])
@@ -2943,9 +2940,7 @@ describe("Daemon", () => {
         const { finish, wait, toggle, dictating, speak, played, journal } = yield* assisted(
           (situation) => {
             if (situation.utterance.via === "reply") return Brain.decision({ act: "answer", spoken: "A review, sir." })
-            // As the model is asked to: what he missed, from what he hasn't heard.
-            const told = situation.unheard.map(({ said }) => said).join(" ")
-            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+            return Brain.decision({ act: "catchup" })
           },
           { microphone: true, transcripts: [said] },
         )
@@ -2974,7 +2969,7 @@ describe("Daemon", () => {
     ])
     expect(result.unheard).toEqual(when === "over" ? ["yapd. The loader fix is ready."] : [])
     // Heard to the end, it's never told twice.
-    expect(result.again).toEqual([when === "over" ? "You missed this: yapd. The loader fix is ready." : "Nothing else."])
+    expect(result.again).toEqual([when === "over" ? "You missed this: yapd. The loader fix is ready." : "You're all caught up."])
   })
 
   test("thanks after the answer to a follow-up said over a catch-up answer still leaves what he missed to be told", async () => {
@@ -2983,8 +2978,7 @@ describe("Daemon", () => {
         const { finish, wait, toggle, dictating, speak, played } = yield* assisted(
           (situation) => {
             if (situation.utterance.via === "reply") return Brain.decision({ act: "answer", spoken: "A review, sir." })
-            const told = situation.unheard.map(({ said }) => said).join(" ")
-            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+            return Brain.decision({ act: "catchup" })
           },
           { microphone: true, transcripts: ["What's it waiting on?", "Thanks."] },
         )
@@ -3016,8 +3010,7 @@ describe("Daemon", () => {
         const { finish, wait, toggle, dictating, speak, played, show } = yield* assisted(
           (situation) => {
             if (situation.utterance.via === "reply") return Brain.decision({ act: "show", how: "thread", target: situation.desk.threads[0]?.handle ?? "" })
-            const told = situation.unheard.map(({ said }) => said).join(" ")
-            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+            return Brain.decision({ act: "catchup" })
           },
           { microphone: true, transcripts: ["Show me that.", "Thanks."] },
           [loader],
@@ -3055,8 +3048,7 @@ describe("Daemon", () => {
             if (via === "reply" && heard === asked) return Brain.decision({ act: "answer", spoken: "A review, sir.", rest: "the tests, then the docs" })
             if (via === "reply" && heard === "the tests, then the docs") return Brain.decision({ act: "answer", spoken: "They pass, sir.", rest: "the docs" })
             if (via === "reply") return Brain.decision({ act: "answer", spoken: "They're done, sir." })
-            const told = situation.unheard.map(({ said }) => said).join(" ")
-            return Brain.decision({ act: "answer", how: "missed", spoken: told === "" ? "Nothing else." : `You missed this: ${told}` })
+            return Brain.decision({ act: "catchup" })
           },
           { microphone: true, transcripts: [asked, "Thanks."] },
           [],
@@ -3091,12 +3083,12 @@ describe("Daemon", () => {
   })
 
   test.each([
-    ["What did I miss?", "Nothing else.", "catch-up"],
-    ["What's going on?", "Two things are running, sir.", undefined],
-  ])("thanks said to the answer to %s is noted as catching up only when that was", async (asked, spoken, over) => {
+    ["What did I miss?", Brain.decision({ act: "catchup" }), "catch-up"],
+    ["What's going on?", Brain.decision({ act: "answer", spoken: "Two things are running, sir." }), undefined],
+  ])("thanks said to the answer to %s is noted as catching up only when the model took it for that", async (asked, decided, over) => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictating, wait, speak, journal } = yield* assisted(() => Brain.decision({ act: "answer", spoken }), {
+        const { dictating, wait, speak, journal } = yield* assisted(() => decided, {
           microphone: true,
           transcripts: ["Thanks."],
         })

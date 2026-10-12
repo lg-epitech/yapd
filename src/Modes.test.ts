@@ -256,4 +256,24 @@ describe("Modes", () => {
     expect(result.quiet).toBe(day)
     expect(result.offered).toEqual([[1, "quiet"]])
   })
+
+  test("what came in while yapd was off is never in the digest, nor counted in the rundown a mode offers as it ends", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(day)
+        const database = yield* kept
+        const { modes, runner, offered, digests } = yield* running(database, { look: "15 seconds" })
+        for (const said of ["One.", "Two.", "Three."]) yield* holding(database.journal, day, said, "off")
+        yield* wait("30 minutes")
+        const digested = [...digests]
+        yield* modes.set("focus")
+        yield* holding(database.journal, day + 31 * minute, "Pass 7 is running.", "focus")
+        yield* holding(database.journal, day + 32 * minute, "Kept while off.", "off")
+        yield* runner.leave((yield* modes.set("normal")).was)
+        return { digested, offered: [...offered] }
+      }),
+    )
+    expect(result.digested).toEqual([])
+    expect(result.offered).toEqual([[1, "focus"]])
+  })
 })

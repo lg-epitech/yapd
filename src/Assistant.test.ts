@@ -281,8 +281,8 @@ const assistant = (
     readonly muting?: boolean
     /** Whether how yapd talks can be changed, kept in the same database. */
     readonly modes?: boolean
-    /** What the model briefs him with on what was held, from what it's given, or none when it can't be asked. */
-    readonly briefs?: (held: ReadonlyArray<Journal.Kept>) => string | undefined
+    /** What the model briefs him with on what was held or what he missed, from what it's given, or none when it can't be asked. */
+    readonly briefs?: (held: ReadonlyArray<Journal.Kept>, brief: Brain.Brief) => string | undefined
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -467,8 +467,9 @@ const assistant = (
     const mutes = given.muting === true ? yield* Mutes.make(store) : undefined
     const controls = mutes === undefined ? undefined : Mutes.controls({ mutes, journal, silence: (keys) => Effect.sync(() => void silenced.push(keys)) })
     const modes = given.modes === true ? yield* Modes.make({ settings: Settings.fromStore(store), journal }) : undefined
-    /** What each brief was asked to sum up. */
+    /** What each brief was asked to sum up, and each brief as it was asked. */
     const briefed: Array<ReadonlyArray<string>> = []
+    const briefings: Array<Brain.Brief> = []
     const made = yield* Assistant.make({
       ...(modes === undefined ? {} : { modes }),
       // This Mac is Rosie.
@@ -515,10 +516,13 @@ const assistant = (
                   decided === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(decided),
                 )
               }).pipe(Effect.delay(`${given.thinking ?? 0} seconds`)),
-            brief: (held) =>
+            brief: (brief) =>
               Effect.suspend(() => {
+                briefings.push(brief)
+                // What it tells of, oldest first, as it was held.
+                const held = brief.groups.flatMap(({ rows }) => rows).toSorted((one, other) => one.at - other.at || one.id - other.id)
                 briefed.push(held.map(({ said }) => said ?? ""))
-                const spoken = given.briefs?.(held)
+                const spoken = given.briefs?.(held, brief)
                 return spoken === undefined ? Effect.fail(new Brain.BrainError({ cause: "The model is down." })) : Effect.succeed(spoken)
               }),
           }),
@@ -540,6 +544,7 @@ const assistant = (
       silenced,
       modes,
       briefed,
+      briefings,
       told: said,
       noted,
       started,
@@ -5210,12 +5215,10 @@ describe("Assistant", () => {
   test("what he missed counts as heard once he's heard the catch-up to the end, so one cut off leaves it for the next", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(
-          (situation) =>
-            Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
-          undefined,
-          { waiting: true },
-        )
+        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, {
+          waiting: true,
+          briefs: () => "The loader fix is ready, sir.",
+        })
         const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
         yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
         // Asked while something else is being said, so the answer waits its turn...
@@ -5225,7 +5228,7 @@ describe("Assistant", () => {
         yield* cut()
         const cutOff = yield* unheard
         yield* dictate("What did I miss?")
-        const told = seen[1]!.unheard.map(({ said }) => said)
+        const told = seen[1]!.missed.groups.flatMap(({ rows }) => rows.map(({ said }) => said))
         yield* play()
         return { waiting, cutOff, told, after: yield* unheard, spoken: spoken() }
       }),
@@ -5240,13 +5243,11 @@ describe("Assistant", () => {
   test("a cough taken for \"Thank you.\" doesn't count as him speaking, so it hides nothing from what he missed", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { heard, dictate, seen, journal } = yield* assistant((situation) =>
-          Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
-        )
+        const { heard, dictate, seen, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, { briefs: () => "The loader fix is ready, sir." })
         yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
         yield* heard({ heard: "Thank you.", via: "shortcut", at: now, voiced: 0.2, turns: 1 })
         yield* dictate("What did I miss?")
-        return seen.at(-1)!.unheard.map(({ said }) => said)
+        return seen.at(-1)!.missed.groups.flatMap(({ rows }) => rows.map(({ said }) => said))
       }),
     )
     expect(result).toEqual(["yapd. The loader fix is ready."])
@@ -5311,44 +5312,41 @@ describe("Assistant", () => {
     ])
   })
 
-  test("a catch-up told on a second look is one too: cut off, what it told him is told again, and heard once it's heard to the end", async () => {
+  test("an answer telling him of what he missed, at once or on a second look, isn't catching up: heard to the end, it leaves what it told of for a catch-up", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(
+        const { dictate, play, spoken, seen, journal } = yield* assistant(
           (situation) =>
-            Option.isNone(situation.second)
-              ? Brain.decision({ act: "find", how: "journal", text: "loader" })
-              : Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
+            situation.utterance.heard.startsWith("Did")
+              ? Brain.decision({ act: "answer", spoken: "It did, sir: the loader fix is ready." })
+              : Option.isNone(situation.second)
+                ? Brain.decision({ act: "find", how: "journal", text: "loader" })
+                : Brain.decision({ act: "answer", spoken: "The loader fix is ready, sir." }),
           undefined,
           { waiting: true },
         )
         const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
-        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
-        // Put the way the model has to look up, so it's told on a second look, and cut off as it starts.
-        yield* dictate("Anything happen to the loader while I was out?")
-        yield* cut()
-        const cutOff = yield* unheard
-        yield* dictate("Anything happen to the loader while I was out?")
-        const told = seen[2]!.unheard.map(({ said }) => said)
+        yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready.", detail: { held: "off" } })
+        yield* dictate("Did the loader one finish?")
         yield* play()
-        return { cutOff, told, after: yield* unheard, spoken: spoken() }
+        yield* dictate("Anything happen to the loader while I was out?")
+        const told = seen[2]!.missed.groups.flatMap(({ rows }) => rows.map(({ said }) => said))
+        yield* play()
+        return { told, after: yield* unheard, spoken: spoken() }
       }),
     )
-    expect(result.cutOff).toEqual(["yapd. The loader fix is ready."])
     expect(result.told).toEqual(["yapd. The loader fix is ready."])
-    expect(result.after).toEqual([])
-    expect(result.spoken).toEqual(["The loader fix is ready, sir.", "The loader fix is ready, sir."])
+    expect(result.after).toEqual(["yapd. The loader fix is ready."])
+    expect(result.spoken).toEqual(["It did, sir: the loader fix is ready.", "The loader fix is ready, sir."])
   })
 
   test("a catch-up said again is one too: cut off, what it told him is told again, and heard once he's heard it again to the end", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(
-          (situation) =>
-            Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
-          undefined,
-          { waiting: true },
-        )
+        const { dictate, play, cut, spoken, seen, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, {
+          waiting: true,
+          briefs: () => "The loader fix is ready, sir.",
+        })
         const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
         yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
         // The catch-up is cut off as it starts, and so is hearing it again.
@@ -5358,7 +5356,7 @@ describe("Assistant", () => {
         yield* cut()
         const cutOff = yield* unheard
         yield* dictate("What did I miss?")
-        const told = seen.at(-1)!.unheard.map(({ said }) => said)
+        const told = seen.at(-1)!.missed.groups.flatMap(({ rows }) => rows.map(({ said }) => said))
         // Cut off too, then heard again to the end.
         yield* cut()
         yield* dictate("Say that again.")
@@ -5377,18 +5375,16 @@ describe("Assistant", () => {
     ])
   })
 
-  test("a catch-up said in one breath with the rest of the request is one too: what it told him is heard once he's heard the lot, and one told on a second look is noted as such", async () => {
+  test("a catch-up said in one breath with the rest of the request is one too: what it told him is heard once he's heard the lot, and it's noted as catching up", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { dictate, play, spoken, journal } = yield* assistant(
           (situation) =>
             situation.utterance.heard.startsWith("tell")
               ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
-              : Option.isNone(situation.second)
-                ? Brain.decision({ act: "find", how: "journal", text: "loader", rest: "tell the Mina one to use its fee table" })
-                : Brain.decision({ act: "answer", how: "missed", spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir." }),
+              : Brain.decision({ act: "catchup", rest: "tell the Mina one to use its fee table" }),
           undefined,
-          { waiting: true },
+          { waiting: true, briefs: () => "The loader fix is ready, sir." },
         )
         const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
         yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
@@ -5401,14 +5397,14 @@ describe("Assistant", () => {
           waiting,
           after: yield* unheard,
           spoken: spoken(),
-          second: noted.map(({ detail }) => (detail as { second?: Brain.Decision }).second?.how),
+          acts: noted.map(({ detail }) => (detail as { decision?: Brain.Decision }).decision?.act),
         }
       }),
     )
     expect(result.spoken).toEqual(["The loader fix is ready, sir. On it: Open Mina SSV2 Bug Tickets."])
     expect(result.waiting).toEqual(["yapd. The loader fix is ready."])
     expect(result.after).toEqual([])
-    expect(result.second).toEqual(["missed"])
+    expect(result.acts).toEqual(["catchup"])
   })
 
   test("a catch-up said in one breath with the rest of the request, cut off, is heard once he's heard the lot said again to the end", async () => {
@@ -5418,14 +5414,9 @@ describe("Assistant", () => {
           (situation) =>
             situation.utterance.heard.startsWith("tell")
               ? Brain.decision({ act: "send", target: handle(situation, mina), text: "Use your fee table.", how: "now" })
-              : Brain.decision({
-                  act: "answer",
-                  how: "missed",
-                  spoken: situation.unheard.length === 0 ? "Nothing new, sir." : "The loader fix is ready, sir.",
-                  rest: "tell the Mina one to use its fee table",
-                }),
+              : Brain.decision({ act: "catchup", rest: "tell the Mina one to use its fee table" }),
           undefined,
-          { waiting: true },
+          { waiting: true, briefs: () => "The loader fix is ready, sir." },
         )
         const unheard = Effect.map(journal.unheard(0, 12), (missed) => missed.map(({ said }) => said))
         yield* journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
@@ -9956,10 +9947,10 @@ describe("Assistant", () => {
         const made = yield* assistant(
           (situation) =>
             situation.utterance.heard.startsWith("What did I miss")
-              ? Brain.decision({ act: "answer", how: "missed", spoken: "The loader fix is ready, sir.", rest: "What's the Cloud one asking?" })
+              ? Brain.decision({ act: "catchup", rest: "What's the Cloud one asking?" })
               : Brain.decision({ act: "reply", target: handle(situation, cloud) }),
           undefined,
-          { others: [cloud], items: card("q1", [colour]), waiting: true },
+          { others: [cloud], items: card("q1", [colour]), waiting: true, briefs: () => "The loader fix is ready, sir." },
         )
         const unheard = Effect.map(made.journal.unheard(0, 12), (missed) => missed.flatMap(({ kind, said }) => (kind === "update" ? [said] : [])))
         yield* made.journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
@@ -9982,10 +9973,10 @@ describe("Assistant", () => {
         const made = yield* assistant(
           (situation) =>
             situation.utterance.via === "shortcut"
-              ? Brain.decision({ act: "answer", how: "missed", spoken: "The loader fix is ready, sir." })
+              ? Brain.decision({ act: "catchup" })
               : Brain.decision({ act: "reply", target: handle(situation, cloud) }),
           undefined,
-          { others: [cloud], items: card("q1", [colour]) },
+          { others: [cloud], items: card("q1", [colour]), briefs: () => "The loader fix is ready, sir." },
         )
         yield* made.journal.write({ at: now - 60_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
         yield* made.dictate("What did I miss?")
@@ -10172,13 +10163,16 @@ describe("Assistant muting", () => {
     expect(result.messages).toBe(1)
   })
 
-  test("what he missed of a muted thread is told a thread at a time, after the rest, and all of it counts as heard once he's heard the catch-up", async () => {
+  test("what he missed of a muted thread is one line for the model, left out of a catch-up of everything and left unheard, and told when he asks about it by name", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, seen, journal } = yield* assistant(
-          (situation) => Brain.decision({ act: "answer", how: "missed", spoken: `${situation.unheard.length} and ${situation.quieted.length}, sir.` }),
+        const { dictate, seen, journal, briefed, spoken } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "What did I miss?"
+              ? Brain.decision({ act: "catchup" })
+              : Brain.decision({ act: "catchup", target: handle(situation, tezos) }),
           undefined,
-          { muting: true },
+          { muting: true, briefs: (rows) => `${rows.length} things, sir.` },
         )
         // A noisy thread he muted said more than would fit, before and after the one update he wasn't kept from.
         for (let index = 0; index < 14; index++) {
@@ -10187,14 +10181,20 @@ describe("Assistant muting", () => {
         yield* journal.write({ at: now - 30_000, kind: "update", project: "yapd", said: "yapd. The loader fix is ready." })
         yield* dictate("What did I miss?")
         const told = seen.at(-1)!
-        const card = Show.missed(told.unheard, now, told.quieted)
-        return { unheard: told.unheard.map(({ said }) => said), quieted: told.quieted.length, card: card.markdown, left: yield* journal.unheard(0, 50) }
+        const card = Show.missed(told.missed.groups, now)
+        const left = (yield* journal.unheard(0, 50)).length
+        yield* dictate("What did the Tezos one say?")
+        return { groups: told.missed.groups.map(({ rows }) => rows.length), card: card.markdown, left, briefed: [...briefed].map((rows) => rows.length), spoken: spoken(), after: (yield* journal.unheard(0, 50)).length }
       }),
     )
-    expect(result.unheard).toEqual(["yapd. The loader fix is ready."])
-    expect(result.quieted).toBe(14)
-    expect(result.card).toBe("- **1 min ago** · yapd: yapd. The loader fix is ready.\n- **1 min ago** · integration · muted, 14 updates: integration. Step 13.")
-    expect(result.left).toEqual([])
+    // What needs him first, then the newest: the loader's, then the muted thread's, one line however much it said.
+    expect(result.groups).toEqual([1, 14])
+    expect(result.card).toBe("- **1 min ago** · yapd · 1 unheard: yapd. The loader fix is ready.\n- **1 min ago** · Migrate Tezos Integration · 14 unheard, muted: integration. Step 13.")
+    // The catch-up of everything left the muted thread out, unheard; asked about by name, it's told.
+    expect(result.briefed).toEqual([1, 14])
+    expect(result.spoken).toEqual(["1 things, sir.", "14 things, sir."])
+    expect(result.left).toBe(14)
+    expect(result.after).toBe(0)
   })
 })
 
@@ -10368,22 +10368,18 @@ describe("Assistant modes", () => {
     expect(result.after).toEqual([])
   })
 
-  test("'what did I miss?' covers what was held, even from before he last spoke, which counts as heard once he's heard it", async () => {
+  test("a catch-up covers what was held, even from before he last spoke, which counts as heard once he's heard it, but not what was cut off before then", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { dictate, seen, journal } = yield* assistant(
-          (situation) => Brain.decision({ act: "answer", how: "missed", spoken: `${situation.held?.length ?? 0} held, sir.` }),
-          undefined,
-          { modes: true },
-        )
+        const { dictate, seen, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, { modes: true, briefs: (rows) => `${rows.length} held, sir.` })
         yield* held(journal, now - 2 * 60 * 60_000, "integration's review pass 6 is running.", "progress")
+        yield* journal.write({ at: now - 90 * 60_000, kind: "update", project: "std", said: "std's cache is fixed." })
         yield* journal.write({ at: now - 60 * 60_000, kind: "dictation", text: "How's std?" })
         yield* dictate("What did I miss?")
-        return { held: seen.at(-1)!.held?.map(({ said }) => said), unheard: seen.at(-1)!.unheard.map(({ said }) => said), after: yield* unheard(journal) }
+        return { told: seen.at(-1)!.missed.groups.flatMap(({ rows }) => rows.map(({ said }) => said)), after: yield* unheard(journal) }
       }),
     )
-    expect(result.held).toEqual(["integration's review pass 6 is running."])
-    expect(result.unheard).toEqual([])
+    expect(result.told).toEqual(["integration's review pass 6 is running."])
     expect(result.after).toEqual([])
   })
 
@@ -10463,3 +10459,156 @@ describe("Assistant modes", () => {
     expect(result.unheard).toEqual(["integration's review pass 7 is running."])
   })
 })
+
+describe("Assistant catching up", () => {
+  /** An update yapd kept but didn't read out, as the daemon keeps one: while it was off unless `detail` says otherwise. */
+  const kept = (journal: Journal.Journal["Type"], minutesAgo: number, thread: string, said: string, detail: Record<string, unknown> = { priority: "done", held: "off" }, machine = "Rosie", project = "integration") =>
+    Effect.map(journal.write({ at: now - minutesAgo * 60_000, kind: "update", machine, thread, project, said, detail }), Option.getOrThrow)
+  const unheard = (journal: Journal.Journal["Type"]) => Effect.map(journal.unheard(0, 100), (rows) => rows.map(({ said }) => said))
+  /** What each brief told of, a thread at a time, by what it said last. */
+  const told = (briefings: ReadonlyArray<Brain.Brief>) => briefings.map(({ kind, groups, left }) => ({ kind, latest: groups.map(({ latest }) => latest), left }))
+
+  test("a catch-up of everything tells what needs him first, leaves muted threads out, and counts as heard only once he's heard it to the end", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, cut, play, spoken, journal, briefings, dispatched } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, {
+          waiting: true,
+          briefs: () => "Distribox failed its deploy, sir, and the Mina tickets are filed.",
+        })
+        yield* kept(journal, 120, mina.id, "The Mina tickets are filed.", { priority: "done", held: "focus" })
+        yield* kept(journal, 90, tezos.id, "The Distribox deploy failed.", { priority: "needs-you", held: "off" })
+        yield* journal.write({ at: now - 60 * 60_000, kind: "notice", machine: "Rosie", thread: distractors[0]!.id, key: "fail:Rosie:r1", said: "The loader failed.", detail: { failure: "provider_error" } })
+        yield* kept(journal, 30, distractors[1]!.id, "Docs swept.", { priority: "done", muted: true })
+        yield* dictate("Catch me up.")
+        yield* cut()
+        const cutOff = yield* unheard(journal)
+        yield* dictate("Catch me up.")
+        yield* play()
+        return { told: told(briefings), cutOff, after: yield* unheard(journal), spoken: spoken(), dispatched: dispatched.length }
+      }),
+    )
+    expect(result.told[0]).toEqual({ kind: "catchup", latest: ["The loader failed.", "The Distribox deploy failed.", "The Mina tickets are filed."], left: { threads: 0, rows: 0 } })
+    expect(result.cutOff).toHaveLength(4)
+    // The muted thread's is still his to hear, when he asks about it.
+    expect(result.after).toEqual(["Docs swept."])
+    expect(result.spoken).toEqual(["Distribox failed its deploy, sir, and the Mina tickets are filed.", "Distribox failed its deploy, sir, and the Mina tickets are filed."])
+    expect(result.dispatched).toBe(0)
+  })
+
+  test("a catch-up the model scoped to a thread, a project, a machine or since when tells only of that, and one with nothing in it says so with no brief", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const scopes: Record<string, (situation: Brain.Situation) => Brain.Decision> = {
+          "What did I miss on the Tezos one?": (situation) => Brain.decision({ act: "catchup", target: handle(situation, tezos) }),
+          "Anything from connectors?": () => Brain.decision({ act: "catchup", text: "connectors" }),
+          "Anything from rig?": () => Brain.decision({ act: "catchup", machine: "rig" }),
+          "What came in since midnight?": () => Brain.decision({ act: "catchup", when: new Date(now - 60 * 60_000).toISOString() }),
+          "What did I miss on the importer?": (situation) => Brain.decision({ act: "catchup", target: situation.missed.groups.find(({ project }) => project === "importer")?.handle ?? "" }),
+          "Anything from foo?": () => Brain.decision({ act: "catchup", text: "foo" }),
+        }
+        const { dictate, play, spoken, journal, briefings, notices } = yield* assistant((situation) => scopes[situation.utterance.heard]!(situation), undefined, {
+          waiting: true,
+          briefs: (rows) => rows.map(({ said }) => said).join(" "),
+        })
+        yield* kept(journal, 120, tezos.id, "Tezos pass 7 is running.")
+        yield* kept(journal, 90, mina.id, "The Mina tickets are filed.", undefined, "Rosie", "connectors")
+        yield* kept(journal, 30, "claude:s-importer", "The importer compiles.", undefined, "rig", "importer")
+        for (const heard of Object.keys(scopes)) yield* dictate(heard)
+        const scoped = spoken()
+        // Heard to the end, one covers what it told of, and none of the rest.
+        yield* play(notices()[2])
+        return { scoped, briefs: briefings.length, after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.scoped).toEqual([
+      "Tezos pass 7 is running.",
+      "The Mina tickets are filed.",
+      "The importer compiles.",
+      "The importer compiles.",
+      "The importer compiles.",
+      "Nothing new from foo, sir.",
+    ])
+    expect(result.briefs).toBe(5)
+    expect(result.after).toEqual(["Tezos pass 7 is running.", "The Mina tickets are filed."])
+  })
+
+  test("with nothing he hasn't heard, he's told he's caught up, with no brief", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, briefings } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, { briefs: () => "Something, sir." })
+        yield* dictate("Catch me up.")
+        return { spoken: spoken(), briefs: briefings.length }
+      }),
+    )
+    expect(result).toEqual({ spoken: ["You're all caught up, sir."], briefs: 0 })
+  })
+
+  test("with twelve threads it tells of eight, what's left is told next for more, and more with nothing left gives what it told in detail", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, spoken, journal, briefings } = yield* assistant(
+          (situation) => Brain.decision({ act: "catchup", how: situation.utterance.heard === "More." ? "more" : "" }),
+          undefined,
+          { waiting: true, briefs: (rows, brief) => `${brief.kind}: ${rows.length}, sir.` },
+        )
+        for (let index = 0; index < 12; index++) yield* kept(journal, 100 - index, `claude:s-${index}`, `Thread ${index} is done.`, { priority: "done", held: "off", more: `More of ${index}.` }, "Rosie", `p${index}`)
+        yield* dictate("Catch me up.")
+        yield* play()
+        const first = (yield* unheard(journal)).length
+        yield* dictate("More.")
+        yield* play()
+        yield* dictate("More.")
+        yield* play()
+        return { told: told(briefings), spoken: spoken(), first, after: (yield* unheard(journal)).length }
+      }),
+    )
+    expect(result.told.map(({ kind, latest, left }) => [kind, latest.length, left])).toEqual([
+      ["catchup", 8, { threads: 4, rows: 4 }],
+      ["catchup", 4, { threads: 0, rows: 0 }],
+      ["detail", 4, { threads: 0, rows: 0 }],
+    ])
+    // The newest first, so the oldest four are what's left.
+    expect(result.told[1]!.latest).toEqual(["Thread 3 is done.", "Thread 2 is done.", "Thread 1 is done.", "Thread 0 is done."])
+    expect(result.first).toBe(4)
+    expect(result.after).toBe(0)
+    expect(result.spoken).toEqual(["catchup: 8, sir.", "catchup: 4, sir.", "detail: 4, sir."])
+  })
+
+  test("after a catch-up, telling the thread it told of to do something goes to that thread by the model's pick, and the catch-up itself sends nothing", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, journal, dispatched, seen } = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "Catch me up."
+              ? Brain.decision({ act: "catchup" })
+              : Brain.decision({ act: "send", target: handle(situation, tezos), text: "Use the fee table.", how: "now" }),
+          undefined,
+          { waiting: true, briefs: () => "The Tezos migration finished pass 7, sir." },
+        )
+        yield* kept(journal, 30, tezos.id, "Tezos pass 7 is done.")
+        yield* dictate("Catch me up.")
+        yield* play()
+        const before = dispatched.length
+        yield* dictate("Tell it to use the fee table.")
+        const focus = seen.at(-1)!.subject
+        return { before, sent: dispatched.length, focus: focus._tag === "Answer" ? [Option.map(focus.about, ({ id }) => id), focus.catchup?.told.map(({ name }) => name)] : focus._tag }
+      }),
+    )
+    expect(result.before).toBe(0)
+    expect(result.sent).toBe(1)
+    expect(result.focus).toEqual([Option.some(tezos.id), ["Migrate Tezos Integration"]])
+  })
+
+  test("a brief the model can't give says so, and marks nothing heard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }))
+        yield* kept(journal, 30, tezos.id, "Tezos pass 7 is done.")
+        yield* dictate("Catch me up.")
+        return { spoken: spoken(), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result).toEqual({ spoken: ["I couldn't sum that up just now, sir. Ask me again in a moment."], after: ["Tezos pass 7 is done."] })
+  })
+})
+
