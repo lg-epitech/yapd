@@ -2,7 +2,7 @@
 
 A short list of what this branch changed and what yapd can do now. The commit log has the detail, including every fix that came out of review.
 
-Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite`, `yapd.before-interrupt.sqlite`, `yapd.before-interrupt-v5.sqlite`, `yapd.before-thread-menu.sqlite`, `yapd.before-m5-off.sqlite` and `yapd.before-thread-panel.sqlite`.
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite`, `yapd.before-interrupt.sqlite`, `yapd.before-interrupt-v5.sqlite`, `yapd.before-thread-menu.sqlite`, `yapd.before-m5-off.sqlite`, `yapd.before-thread-panel.sqlite` and `yapd.before-question-heard.sqlite`.
 
 Live on `dev` now: everything below, headline first, focus and quiet, off keeping everything with catching up, and the thread panels beside the menu's recent threads included, with the menu bar app installed. Talking over yapd's first seconds stopping it at once, muting threads, headline first and modes, off and catching up, rig's threads, and agents' questions read out and answered by voice are waiting on their first checks with you.
 
@@ -81,10 +81,13 @@ Live on `dev` now: everything below, headline first, focus and quiet, off keepin
 - Groundwork, not switched on yet: streaming plus first-sentence playback for faster speech.
 - `scripts/brain-eval.ts` replays real phrases against the live model to check it picks the right thread.
 - yapd's local API turns away anything a web page sends, so no site you visit can have it start work or talk to your threads.
+- The audio helper no longer crashes when macOS wakes the speaker and microphone without them actually playing, as it did every day or two: it checks the engine plays before each line, and plays that line the plain way instead, with the microphone told off until the next one. Rebuilding it asked once more for microphone access.
 
 ## Known, left for now
 
 - A held update from a terminal session can't be heard again from the menu.
+- The audio helper's one other crash, on 2026-10-05, was memory corruption inside macOS's own voice processing, seen once: nothing in yapd changes it.
+- A yes said over a thread's question before yapd's pick rests on the model judging that the part you hadn't heard only adds detail; it was checked against the live model on the cases that came up, not on every kind of question.
 - Return on a thread in the menu opens its panel rather than saying it again: Hear Again in the panel does that.
 - A thread pushed out of Recent while its panel is open keeps that panel's Mute or Unmute as it was until the menu opens again.
 - A digest played to an empty room counts as heard.
