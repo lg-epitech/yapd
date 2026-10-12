@@ -540,6 +540,7 @@ export const make = (options: {
             }),
             // Dropped before it was ever said, as when yapd is turned off, it's kept unheard for catching up.
             gone: Effect.flatMap(options.power, (now) => (now.on && now.turns === turns ? Effect.void : keep)),
+            kept: Effect.sync(() => (claimed === undefined ? Option.none<number>() : Option.flatten(claimed))),
           },
           turns,
         )

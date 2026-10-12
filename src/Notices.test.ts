@@ -138,6 +138,8 @@ const notices = (
       store,
     })
     const told: Array<string> = []
+    /** The entries what was told was kept under, as it was being said. */
+    const beingSaid: Array<string> = []
     /** What was asked as the one question open, as the assistant asks it: kept under its key, or the entry it was kept under before, and heard to the end. */
     const asked: Array<string> = []
     /** And how it was worded, every part of it. */
@@ -161,6 +163,9 @@ const notices = (
         if (yield* notice.stale) return
         yield* notice.saying ?? Effect.void
         told.push(notice.spoken)
+        // What it's kept under as it's said, which isn't missed meanwhile, and is unheard till it's said to the end.
+        const row = yield* notice.kept ?? Effect.succeedNone
+        if (Option.isSome(row)) beingSaid.push(...(yield* journal.rows([row.value])).map(({ said, heardAt }) => `${said}${heardAt === undefined ? "" : " (heard)"}`))
         yield* notice.heard ?? Effect.void
       })
     const made = yield* Notices.make({
@@ -192,6 +197,7 @@ const notices = (
       store,
       journal,
       told,
+      beingSaid,
       asked,
       worded,
       rewritten,
@@ -247,11 +253,12 @@ describe("Notices", () => {
         const second = yield* notices({ view: [tezos], bounded, store: first.store })
         yield* second.hear(ended(tezos, "run-1"))
         yield* second.wait(10)
-        return { early, told: first.told, again: second.told }
+        return { early, told: first.told, again: second.told, beingSaid: first.beingSaid }
       }),
     )
     expect(result.early).toEqual([])
     expect(result.told).toEqual(["Migrate Tezos Integration failed, sir: the model provider had an error."])
+    expect(result.beingSaid).toEqual(result.told)
     expect(result.again).toEqual([])
   })
 

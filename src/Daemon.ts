@@ -1741,6 +1741,9 @@ export const make = (
     return Option.some((yield* Clock.currentTimeMillis) - lastEnded)
   })
 
+  /** What's being said now, until it's heard, put back or done with. */
+  let saying: Inbox.Entry | undefined
+
   const speakNext = Effect.gen(function* () {
     const queued = yield* STM.commit(
       takeNext.pipe(
@@ -1763,6 +1766,7 @@ export const make = (
       yield* STM.commit(TRef.set(floor.reading, false))
       return yield* Effect.logInfo("Not saying a turn no hook told of, since its hook came or its thread started again")
     }
+    saying = ready
     if ("update" in ready) {
       readSince.set(ready.update, turns)
       yield* hear(ready.update)
@@ -1863,6 +1867,7 @@ export const make = (
       Effect.ensuring(Effect.suspend(() => (fallback === undefined || through ? Effect.void : unheard(fallback)))),
       Effect.ensuring(
         Effect.gen(function* () {
+          if (saying === ready) saying = undefined
           const at = yield* Clock.currentTimeMillis
           lastEnded = at
           if (!("update" in ready)) return
@@ -2027,6 +2032,13 @@ export const make = (
         return row === undefined ? [] : [row]
       }),
     ),
+    /** What's being said now, an update or a notice, by its entry in the journal: being told him, so not missed. */
+    speaking: Effect.suspend((): Effect.Effect<ReadonlyArray<number>> => {
+      const entry = saying
+      if (entry === undefined) return Effect.succeed([])
+      if ("update" in entry) return Effect.succeed(Option.toArray(Option.fromNullable(rows.get(entry.update))))
+      return Effect.map(entry.notice.kept ?? Effect.succeedNone, (row): ReadonlyArray<number> => Option.toArray(row))
+    }),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),
     /** The Stop hooks of these sessions in the last hour, when they came and what they said last, oldest first, by the agent's own ids for them, whether their updates were said or not. */

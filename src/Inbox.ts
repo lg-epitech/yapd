@@ -1,4 +1,4 @@
-import type { Effect } from "effect"
+import type { Effect, Option } from "effect"
 import type { Ticket } from "./ClaudeCode.ts"
 import type { Priority } from "./Condenser.ts"
 import type { Answer, Question, Update } from "./Conversation.ts"
@@ -66,6 +66,8 @@ export interface Notice {
    * queued as yapd was off: never while it's put back to be said again.
    */
   readonly gone?: Effect.Effect<void>
+  /** The entry it's kept under in the journal, once it is, so it isn't counted as missed while it's being said. */
+  readonly kept?: Effect.Effect<Option.Option<number>>
   /**
    * For a question: what to do with the answer, and when there's none; and
    * when it can't be asked in full, like when the audio helper quits midway,

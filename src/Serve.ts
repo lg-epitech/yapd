@@ -219,6 +219,7 @@ export const serve = Effect.gen(function* () {
     queued: daemon.queued,
     skip: daemon.skip,
     upcoming: daemon.upcoming,
+    speaking: daemon.speaking,
     // What a thread waits on him for, worded as notices word it, to read back what he answers before he's heard it asked.
     compose: yield* Notices.composer(threads),
     mutes,

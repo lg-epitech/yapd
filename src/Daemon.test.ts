@@ -565,6 +565,7 @@ const assisted = (
       queued: made.queued,
       skip: made.skip,
       upcoming: made.upcoming,
+      speaking: made.speaking,
       compose: () => Effect.succeedNone,
     }).pipe(
       Effect.provide(
@@ -2410,6 +2411,27 @@ describe("Daemon", () => {
       "yapd. The tests pass.",
     ])
     expect(result.unheard).toBe(0)
+  })
+
+  test("what's being read isn't missed while it's read: a catch-up typed meanwhile doesn't tell it again, nor is it counted, an update or a notice", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, made, assistant, played, journal, asked } = yield* assisted(() => Brain.decision({ act: "catchup" }))
+        yield* finish("a", "The Tezos importer tests pass.")
+        yield* wait(2)
+        const counted = yield* assistant.missed
+        const { turns } = yield* made.power
+        yield* assistant.heard({ heard: "Catch me up.", via: "typed", at: yield* Clock.currentTimeMillis, voiced: Number.POSITIVE_INFINITY, turns })
+        for (let i = 0; i < 2; i++) yield* wait(11)
+        // A failure being said, kept under its entry as it's said.
+        const failure = Option.getOrThrow(yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "notice", thread: "t-loader", key: "fail:r1", said: "The loader failed.", detail: { failure: "provider_error" } }))
+        yield* made.tell({ id: "n1", kind: "notice", priority: "needs-you", spoken: "The loader failed.", at: yield* Clock.currentTimeMillis, stale: Effect.succeed(false), kept: Effect.succeed(Option.some(failure)) }, turns)
+        yield* wait(1)
+        const notice = yield* assistant.missed
+        return { counted: counted.groups.length, told: asked.at(-1)?.missed.groups.length, played: [...played], notice: notice.groups.length }
+      }),
+    )
+    expect(result).toEqual({ counted: 0, told: 0, played: ["yapd. The Tezos importer tests pass.", "You're all caught up.", "The loader failed."], notice: 0 })
   })
 
   test("an answer said to be on his screen, which waits its turn while the app that would show its card goes away, is said without that", async () => {
