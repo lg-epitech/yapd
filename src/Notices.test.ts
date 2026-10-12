@@ -1151,6 +1151,32 @@ describe("Notices", () => {
       ])
     })
 
+    test("a run whose hook update was kept under its session since yapd was last up, its thread not told in time, isn't held again", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const made = yield* notices({
+            view: [done("tezos", "Migrate Tezos Integration", now - 30 * 60_000), done("mina", "Open Mina SSV2 Bug Tickets", now - 20 * 60_000)],
+            bounded: {
+              tezos: { runs: [{ id: "run-tezos", status: "completed", ordinal: 1, startedAt: minutes(45), completedAt: minutes(30) }], sessions: ["native-tezos"] },
+              mina: { runs: [{ id: "run-mina", status: "completed", ordinal: 1, startedAt: minutes(45), completedAt: minutes(20) }], sessions: ["native-mina"] },
+            },
+            offline: { alive: Option.some(alive), started },
+          })
+          yield* made.journal.write({ at: now - 30 * 60_000, kind: "update", thread: "claude:native-tezos", said: "Tezos is migrated." })
+          // Before yapd was last up, it's no word on this run.
+          yield* made.journal.write({ at: alive - 60_000, kind: "update", thread: "claude:native-mina", said: "Mina's tickets are half done." })
+          yield* made.reconcileOn("Rosie")
+          yield* made.flush
+          return (yield* made.journal.since(0, { kinds: ["update"] })).map(({ thread, key }) => [thread, key])
+        }),
+      )
+      expect(result).toEqual([
+        ["claude:native-mina", undefined],
+        ["claude:native-tezos", undefined],
+        ["mina", "done:Rosie:run-mina"],
+      ])
+    })
+
     test("nothing is looked for without a heartbeat, as the first time, or while yapd is off", async () => {
       const result = await run(
         Effect.gen(function* () {

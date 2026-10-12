@@ -763,6 +763,16 @@ export const make = (options: {
      * watching it, is nothing to tell; one that failed is said, since it
      * needs him.
      */
+    /** Whether anything was kept since `at` under one of these sessions of the agent's own, by either agent's hooks. */
+    const keptUnder = (natives: ReadonlyArray<string>, at: number) =>
+      Effect.map(
+        Effect.forEach(
+          natives.flatMap((native) => [`claude:${native}`, `codex:${native}`]),
+          (session) => journal.previous(at + 1, session),
+        ),
+        (found) => found.some(Option.isSome),
+      )
+
     const offline = (machine: string) =>
       Effect.gen(function* () {
         if (caughtUp.has(machine)) return
@@ -794,6 +804,8 @@ export const make = (options: {
           const run = Option.isNone(actions)
             ? Option.none<T3Actions.Ran>()
             : yield* actions.value.ran(ref.id, runId).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how a run went", error), Option.none<T3Actions.Ran>())))
+          // Or what its hook said kept under its session, as when its thread couldn't be told in time as it came.
+          if (Option.isSome(run) && (yield* keptUnder(run.value.natives, alive))) continue
           if (listed.state !== "idle") {
             if (Option.isSome(run) && run.value.status === "failed") yield* failed(ref, run.value, thread, named(listed), project, turns, at)
             continue
