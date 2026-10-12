@@ -110,7 +110,7 @@ Updates that only say how running work is going, like another review round, are 
 
 ## Catching up
 
-yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on Distribox?" or "anything from rig since lunch?", and the model decides that's what you want and what about; yapd briefs you on what you haven't heard, what needs you first, in about ninety words and eight threads at most. "More" gets the threads it left out, or the detail of the ones it told you of. What it told you counts as heard only once you've heard it to the end. Muted threads are left out unless you ask about one. Nothing it does reaches an agent. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
+yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on Distribox?" or "anything from rig since lunch?", and the model decides that's what you want and what about; yapd first reads you what needs you as it was kept, a failure or an agent's question with its options, then briefs you on the rest in about ninety words and eight threads at most. "More" gets the threads it left out, or the detail of the ones it told you of. What it told you counts as heard only once you've heard it to the end. Muted threads are left out unless you ask about one. Nothing it does reaches an agent. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
 
 ## Dictating
 
