@@ -118,7 +118,9 @@ const notices = (
             projection: { runs: read.runs ?? [], messages: read.messages ?? [], turnItems: read.turnItems ?? [], providerThreads, runtimeRequests: read.runtimeRequests ?? [] },
           }).pipe(Effect.orDie)
         }) as Server.Transport["api"],
-        call: (() => Effect.die("not expected")) as Server.Transport["call"],
+        // With no scratch project to tell of.
+        call: (<A, I>(method: string, _: unknown, schema: Schema.Schema<A, I>) =>
+          method === "server.getConfig" ? Schema.decodeUnknown(schema)({}).pipe(Effect.orDie) : Effect.die("not expected")) as Server.Transport["call"],
         asset: () => Effect.die("not expected"),
       })
     /** Whether rig's threads can be seen, and what its T3 Code tells of. */

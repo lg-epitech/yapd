@@ -30,6 +30,7 @@ const listed: Threads.Listed = {
   here: true,
   called: "the build cleanup",
   project: "yapd",
+  scratch: false,
   directory: Option.none(),
   thread: waiting,
   state: "approval",

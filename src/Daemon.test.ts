@@ -4609,9 +4609,11 @@ describe("Daemon with threads muted", () => {
         yield* wait(20)
         const skipped = [...played]
         // T3 Code's word that it finished, with the id of the message yapd started it with.
+        // Told of outside his projects, with no project to name.
         yield* made.finished({
           ...unhooked(answer, "run-1", (yield* made.power).turns),
           about: glucose,
+          project: "",
           turn: { prompt: Option.some(asked), message: answer },
           at,
           run: { status: "completed", final: answer, others: [], natives: ["s-glucose"], previous: Option.none(), userMessageId: Option.some(start.messageId), startedAt: at - 5_000 },
@@ -4621,7 +4623,7 @@ describe("Daemon with threads muted", () => {
         return { skipped, played: [...played] }
       }),
     )
-    expect(quickly).toEqual({ skipped: [], played: [`yapd. ${answer}`] })
+    expect(quickly).toEqual({ skipped: [], played: [answer] })
     // With no prompt seen, as after a restart, only what's kept tells: its first turn is his, and the next isn't.
     const restarted = await run(
       Effect.gen(function* () {

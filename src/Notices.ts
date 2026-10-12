@@ -630,7 +630,8 @@ export const make = (options: {
         const thread = yield* threads.find(ref)
         const shown = yield* listed(ref)
         if (Option.isNone(thread) || Option.isNone(shown)) return
-        const { project } = shown.value
+        // Outside his projects, it isn't named by a project at all.
+        const project = shown.value.scratch ? "" : shown.value.project
         // Started again since, what it said then is no longer its latest, as a hook's update isn't once the next prompt comes, even when
         // that was while what's read of it here was on its way.
         const latest = thread.value.latestRunId === null || thread.value.latestRunId === runId

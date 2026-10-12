@@ -55,7 +55,9 @@ const linking = (
           const providerThreads = (sessions[id] ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
           return Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie)
         }) as Server.Transport["api"],
-        call: (() => Effect.die("not expected")) as Server.Transport["call"],
+        // With no scratch project to tell of.
+        call: (<A, I>(method: string, _: unknown, schema: Schema.Schema<A, I>) =>
+          method === "server.getConfig" ? Schema.decodeUnknown(schema)({}).pipe(Effect.orDie) : Effect.die("not expected")) as Server.Transport["call"],
         asset: () => Effect.die("not expected"),
       })
     const store = yield* Store.make(":memory:")
@@ -164,6 +166,26 @@ describe("Threads", () => {
     // The five-hour window reset at one, two hours ago.
     expect(said.dated).not.toContain("95 percent")
     expect(said.again).toStartWith("Claude is at 10 percent of its five-hour window, resetting ")
+  })
+
+  test("a thread in T3 Code's scratch project is said as scratch work, never as \"No project\", by its folder alone", () => {
+    const view: T3Live.View = {
+      projects: new Map([
+        ["s", { id: "s", title: "No project", workspaceRoot: "/t3/scratch" }],
+        ["n", { id: "n", title: "No project", workspaceRoot: "/code/no-project" }],
+      ]),
+      threads: new Map([
+        ["glucose", thread("glucose", "/tmp/a1b2c3d4e5", "2026-10-08T21:00:00.000Z", { projectId: "s" })],
+        ["other", thread("other", "Fix the loader", "2026-10-08T20:00:00.000Z", { projectId: "n" })],
+      ]),
+      sequence: 1,
+      synced: true,
+    }
+    const listed = Threads.shortlist({ machine: "Rosie", view, focus: Option.none(), pending: [], most: 5, started: new Map(), said: new Map(), scratch: "/t3/scratch", now })
+    expect(listed.map(({ ref, called, project, scratch }) => [ref.id, called, project, scratch])).toEqual([
+      ["glucose", "the scratch work from today", "scratch", true],
+      ["other", "Fix the loader", "No project", false],
+    ])
   })
 
   test("calls a thread by its title when what yapd once noted about it is too long to say", () => {
@@ -295,6 +317,7 @@ describe("Threads on several machines", () => {
     ({
       detail: (threadId: string) => Effect.sync(() => void asked.push(`${name}: detail ${threadId}`)).pipe(Effect.as({ messages: [], runs: [], request: Option.none(), plan: Option.none() })),
       search: (query: string) => Effect.zipRight(Effect.sync(() => void asked.push(`${name}: search ${query}`)), found),
+      scratchRoot: Effect.succeedNone,
     }) as unknown as T3Actions.Actions
 
   const live = (view: Option.Option<T3Live.View>): T3Live.T3Live["Type"] => ({ view: Effect.succeed(view), changes: Stream.never })

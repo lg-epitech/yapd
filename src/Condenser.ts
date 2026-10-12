@@ -89,7 +89,7 @@ Reply with only a JSON object with the keys "priority", "headline" and "more".
 "headline":
 - At most ${headlineWords} words, one sentence. The outcome first. If the agent asks a question or needs a decision, the headline carries it in full, as a question, with its choices when there are only two or three.
 - If the user's prompt is given, answer what they asked rather than recounting everything the agent did.
-- Mention the project once, as part of the sentence: its subject, a possessive, or "in" the project, like "yapd's tests pass now" or "Over in yapd, the fix is in". Never as a label before the sentence.
+- Mention the project once, as part of the sentence: its subject, a possessive, or "in" the project, like "yapd's tests pass now" or "Over in yapd, the fix is in". Never as a label before the sentence. Work outside their projects has none to mention.
 
 "more":
 - The rest worth hearing if they ask for more, at most ${moreWords} words, or "" when the headline says it all. Never repeat the headline.
@@ -113,7 +113,7 @@ export const prompt = (project: string, turn: Turn, style: Option.Option<string>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
-    `Project: ${project}`,
+    project.trim() === "" ? `Project: none, it's outside their projects` : `Project: ${project}`,
     ...Option.match(turn.prompt, { onNone: () => [], onSome: (prompt) => [`User's prompt:\n${prompt}`] }),
     ...(turn.previous === undefined || turn.previous.said.trim() === ""
       ? []
@@ -197,9 +197,9 @@ const hash = /^(?=.*\d)(?=.*[a-f])[\da-f]{6,}$/i
 export const speakable = (project: string) =>
   !/\d{4}-\d{2}-\d{2}/.test(project) && !project.split(/[^\p{L}\p{N}]+/u).some((part) => hash.test(part))
 
-/** The update as it's read out, naming the project up front if the summary left it out and its name can be said. */
+/** The update as it's read out, naming the project up front if the summary left it out and its name can be said: none outside his projects. */
 export const introduce = (project: string, spoken: string) =>
-  !speakable(project) || words(spoken).includes(words(project)) ? spoken : `${project}. ${spoken}`
+  project.trim() === "" || !speakable(project) || words(spoken).includes(words(project)) ? spoken : `${project}. ${spoken}`
 
 /** A letter English doesn't use, like é or ß, or one from another script. */
 const foreign = /(?![A-Za-z])\p{L}/u

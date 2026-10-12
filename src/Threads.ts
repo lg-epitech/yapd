@@ -33,8 +33,10 @@ export interface Listed {
   readonly here: boolean
   /** What it's called aloud. */
   readonly called: string
-  /** Its project's name, as it's said. */
+  /** Its project's name, as it's said: "scratch" for T3 Code's scratch project, outside his projects. */
   readonly project: string
+  /** Whether it's in T3 Code's scratch project, outside his projects, by that project's folder. */
+  readonly scratch: boolean
   /** Where it works: its worktree, or its project's folder. */
   readonly directory: Option.Option<string>
   readonly thread: T3Live.Thread
@@ -241,6 +243,8 @@ export interface Seen {
   readonly started: ReadonlyMap<string, Started>
   /** The latest line yapd said about each thread, by id. */
   readonly said: ReadonlyMap<string, { readonly at: number; readonly said: string }>
+  /** The folder behind its T3 Code's scratch project, once that's known. */
+  readonly scratch?: string | undefined
 }
 
 /**
@@ -267,12 +271,14 @@ export const shortlist = (input: {
   readonly started: ReadonlyMap<string, Started>
   /** The latest line yapd said about each thread, by id. */
   readonly said: ReadonlyMap<string, { readonly at: number; readonly said: string }>
+  /** The folder behind this machine's scratch project, once that's known. */
+  readonly scratch?: string | undefined
   readonly others?: ReadonlyArray<Seen>
   readonly now: number
 }): ReadonlyArray<Listed> => {
   const { focus, pending, most, now } = input
   const machines: ReadonlyArray<Seen> = [
-    { machine: input.machine, here: true, view: input.view, started: input.started, said: input.said },
+    { machine: input.machine, here: true, view: input.view, started: input.started, said: input.said, scratch: input.scratch },
     ...(input.others ?? []),
   ]
   const within = (at: number | undefined, span: number) => at !== undefined && now - at < span
@@ -309,15 +315,19 @@ export const shortlist = (input: {
     .slice(0, input.more ?? 0)
   return [...ranked.slice(0, most), ...named]
     .map(({ seen, thread, doing }, index): Listed => {
-      const { machine, here, view, started, said } = seen
+      const { machine, here, view, started, said, scratch } = seen
       const project = view.projects.get(thread.projectId)
       const own = started.get(thread.id)
+      // Never by what T3 Code calls it, "No project", but as its own folders of generated names are said.
+      const outside = project !== undefined && project.workspaceRoot === scratch
+      const name = outside ? "scratch" : (project?.title ?? "")
       return {
         handle: `t${index + 1}`,
         ref: { machine, id: thread.id },
         here,
-        called: called(thread.title, own?.description, project?.title ?? "", time(thread.createdAt) ?? now, now),
-        project: spoken(project?.title ?? ""),
+        called: called(thread.title, own?.description, name, time(thread.createdAt) ?? now, now),
+        project: spoken(name),
+        scratch: outside,
         directory: Option.fromNullable(thread.worktreePath ?? project?.workspaceRoot),
         thread,
         state: doing,
@@ -708,6 +718,31 @@ export const make = (options: {
         onSome: ({ live }) => Effect.map(live.view, Option.flatMap((view) => Option.fromNullable(view.threads.get(ref.id)))),
       })
 
+    /** The folder behind each machine's scratch project, by machine, once its T3 Code said: none where it has none. */
+    const scratches = new Map<string, Option.Option<string>>()
+    /** When each machine's T3 Code was last asked for it, while it hasn't said. */
+    const sought = new Map<string, number>()
+    /**
+     * What's known of the folder behind a machine's scratch project, its T3
+     * Code asked in the background the first time it's wanted, and at most
+     * once a minute while it doesn't say, so the desk never waits on it.
+     */
+    const scratchOf = (link: Link) =>
+      Effect.gen(function* () {
+        const known = scratches.get(link.machine)
+        const now = yield* Clock.currentTimeMillis
+        if (known !== undefined || Option.isNone(link.actions) || now - (sought.get(link.machine) ?? Number.NEGATIVE_INFINITY) < 60_000) {
+          return Option.flatten(Option.fromNullable(known))
+        }
+        sought.set(link.machine, now)
+        yield* link.actions.value.scratchRoot.pipe(
+          Effect.tap((found) => Effect.sync(() => void scratches.set(link.machine, found))),
+          Effect.catchAllCause((cause) => Effect.logWarning(`Could not ask where ${link.machine}'s T3 Code keeps work outside your projects`, cause)),
+          Effect.forkIn(scope),
+        )
+        return Option.none<string>()
+      })
+
     /** When usage was last asked for, so a T3 Code that doesn't answer isn't asked on every request. */
     let tried = Number.NEGATIVE_INFINITY
     const refresh = Option.match(options.actions, {
@@ -740,7 +775,8 @@ export const make = (options: {
           }
           if (seen.length === 0) return { threads: [], away }
           const [started, entries] = [yield* startedWork, yield* journal.since(now - days(7), { most: 500 })]
-          const noted = (name: string) => ({ started: started.get(name) ?? new Map<string, Started>(), said: latest(entries, name) })
+          const roots = new Map(yield* Effect.forEach(seen, ({ link }) => Effect.map(scratchOf(link), (root) => [link.machine, Option.getOrUndefined(root)] as const)))
+          const noted = (name: string) => ({ started: started.get(name) ?? new Map<string, Started>(), said: latest(entries, name), scratch: roots.get(name) })
           const others = seen.filter(({ link }) => !link.here).map(({ link, view }): Seen => ({ machine: link.machine, here: false, view, ...noted(link.machine) }))
           // When this machine's can't be seen, only the others' are ranked.
           const own = seen.find(({ link }) => link.here)?.view ?? T3Live.empty

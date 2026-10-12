@@ -711,6 +711,9 @@ const Limits = Schema.Struct({
   ),
 })
 
+/** Where T3 Code's scratch project is, on one that has it. */
+const Scratch = Schema.Struct({ scratchWorkspaceRoot: Schema.optional(Schema.String) })
+
 /** One of a provider's limits: "session", "weekly", "monthly" or "other", as T3 Code labels it, and how long it lasts when it says. */
 export interface Window {
   readonly kind: string
@@ -747,6 +750,9 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
 
   /** Where a message yapd sent got to in the thread, if it's there at all. */
   const message = (threadId: string, messageId: string) => Effect.map(bounded(threadId), ({ projection }) => found(projection, messageId))
+
+  /** The folder behind T3 Code's scratch project, once it said: it's the same for as long as T3 Code keeps its data where it does. */
+  let scratch: Option.Option<string> | undefined
 
   return {
     /** Where it got to. `pending` is the request the shell says it waits on, when it knows. */
@@ -839,6 +845,24 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
 
     /** The file at a path T3 Code gave, and its type. */
     asset: (path: string) => Effect.flatMap(reach, ({ asset }) => asset(path)),
+
+    /**
+     * The folder behind T3 Code's scratch project, which is how its threads,
+     * outside his projects, are told: asked once, and kept. None on a T3 Code
+     * without one.
+     */
+    scratchRoot: Effect.suspend(() =>
+      scratch !== undefined
+        ? Effect.succeed(scratch)
+        : Effect.flatMap(reach, ({ call }) => call("server.getConfig", {}, Scratch)).pipe(
+            Effect.map(({ scratchWorkspaceRoot }) => Option.fromNullable(scratchWorkspaceRoot)),
+            Effect.tap((found) =>
+              Effect.sync(() => {
+                scratch = found
+              }),
+            ),
+          ),
+    ),
 
     usage: Effect.gen(function* () {
       const { call } = yield* reach

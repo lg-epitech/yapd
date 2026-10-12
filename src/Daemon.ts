@@ -704,7 +704,7 @@ export const make = (
 
   const unsummarized = (project: string): Summary => ({
     priority: "done",
-    spoken: `${speakable(project) ? project : "One of your threads"} finished a turn, but I couldn't summarize it.`,
+    spoken: `${project.trim() !== "" && speakable(project) ? project : "One of your threads"} finished a turn, but I couldn't summarize it.`,
   })
 
   /** A turn that finished, to sum up and queue, and what it's for. */
