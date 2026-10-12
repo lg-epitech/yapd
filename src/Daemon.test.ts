@@ -565,7 +565,7 @@ const assisted = (
       queued: made.queued,
       skip: made.skip,
       upcoming: made.upcoming,
-      speaking: made.speaking,
+      telling: made.telling,
       compose: () => Effect.succeedNone,
     }).pipe(
       Effect.provide(
@@ -2425,13 +2425,37 @@ describe("Daemon", () => {
         for (let i = 0; i < 2; i++) yield* wait(11)
         // A failure being said, kept under its entry as it's said.
         const failure = Option.getOrThrow(yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "notice", thread: "t-loader", key: "fail:r1", said: "The loader failed.", detail: { failure: "provider_error" } }))
-        yield* made.tell({ id: "n1", kind: "notice", priority: "needs-you", spoken: "The loader failed.", at: yield* Clock.currentTimeMillis, stale: Effect.succeed(false), kept: Effect.succeed(Option.some(failure)) }, turns)
+        yield* made.tell({ id: "n1", kind: "notice", priority: "needs-you", spoken: "The loader failed.", at: yield* Clock.currentTimeMillis, stale: Effect.succeed(false), telling: Effect.succeed([failure]) }, turns)
         yield* wait(1)
         const notice = yield* assistant.missed
         return { counted: counted.groups.length, told: asked.at(-1)?.missed.groups.length, played: [...played], notice: notice.groups.length }
       }),
     )
     expect(result).toEqual({ counted: 0, told: 0, played: ["yapd. The Tezos importer tests pass.", "You're all caught up.", "The loader failed."], notice: 0 })
+  })
+
+  test("a catch-up waiting to be said, or being said, keeps what it tells of from a second one asked meanwhile, as from the menu's count", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, made, assistant, played, journal } = yield* assisted(() => Brain.decision({ act: "catchup" }))
+        yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "update", thread: "claude:dist", project: "yapd", said: "Distribox copied the EU bucket.", detail: { priority: "done", held: "off" } })
+        yield* finish("a", "The Tezos importer tests pass.")
+        yield* wait(2)
+        const { turns } = yield* made.power
+        const typed = Effect.flatMap(Clock.currentTimeMillis, (at) => assistant.heard({ heard: "Catch me up.", via: "typed", at, voiced: Number.POSITIVE_INFINITY, turns }))
+        // Asked twice from the menu while the update is read, the first catch-up waiting behind it.
+        yield* typed
+        const waiting = (yield* assistant.missed).groups.length
+        yield* typed
+        for (let i = 0; i < 3; i++) yield* wait(11)
+        return { waiting, played: [...played], unheard: (yield* journal.unheard(0, 12)).length }
+      }),
+    )
+    expect(result).toEqual({
+      waiting: 0,
+      played: ["yapd. The Tezos importer tests pass.", "You missed this: Distribox copied the EU bucket.", "You're all caught up."],
+      unheard: 0,
+    })
   })
 
   test("an answer said to be on his screen, which waits its turn while the app that would show its card goes away, is said without that", async () => {

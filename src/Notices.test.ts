@@ -164,8 +164,8 @@ const notices = (
         yield* notice.saying ?? Effect.void
         told.push(notice.spoken)
         // What it's kept under as it's said, which isn't missed meanwhile, and is unheard till it's said to the end.
-        const row = yield* notice.kept ?? Effect.succeedNone
-        if (Option.isSome(row)) beingSaid.push(...(yield* journal.rows([row.value])).map(({ said, heardAt }) => `${said}${heardAt === undefined ? "" : " (heard)"}`))
+        const rows = yield* notice.telling ?? Effect.succeed([])
+        beingSaid.push(...(yield* journal.rows(rows)).map(({ said, heardAt }) => `${said}${heardAt === undefined ? "" : " (heard)"}`))
         yield* notice.heard ?? Effect.void
       })
     const made = yield* Notices.make({

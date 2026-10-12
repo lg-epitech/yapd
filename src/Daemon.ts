@@ -2032,12 +2032,20 @@ export const make = (
         return row === undefined ? [] : [row]
       }),
     ),
-    /** What's being said now, an update or a notice, by its entry in the journal: being told him, so not missed. */
-    speaking: Effect.suspend((): Effect.Effect<ReadonlyArray<number>> => {
+    /**
+     * What's told him by what's being said now, an update or a notice, or by
+     * a notice waiting to be, like a failure or a catch-up, by their entries
+     * in the journal: being told him, so not missed.
+     */
+    telling: Effect.gen(function* () {
       const entry = saying
-      if (entry === undefined) return Effect.succeed([])
-      if ("update" in entry) return Effect.succeed(Option.toArray(Option.fromNullable(rows.get(entry.update))))
-      return Effect.map(entry.notice.kept ?? Effect.succeedNone, (row): ReadonlyArray<number> => Option.toArray(row))
+      const queued = [...(yield* STM.commit(TRef.get(inbox))).values()]
+      const told = yield* Effect.forEach(
+        [...(entry === undefined || "update" in entry ? [] : [entry]), ...queued].flatMap((each) => ("notice" in each ? [each.notice] : [])),
+        (notice) => notice.telling ?? Effect.succeed<ReadonlyArray<number>>([]),
+      )
+      const reading = entry !== undefined && "update" in entry ? Option.toArray(Option.fromNullable(rows.get(entry.update))) : []
+      return [...reading, ...told.flat()]
     }),
     /** Each time something said over an update is taken in, which takes the place of whatever yapd asked before. */
     replies: Stream.fromPubSub(replied),

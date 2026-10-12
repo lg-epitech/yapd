@@ -658,8 +658,8 @@ export const make = (options: {
   readonly skip: (update: Conversation.Update) => Effect.Effect<void>
   /** The updates waiting to be read, like one a dictation cut off, by their entry in the journal: coming up, so not missed. */
   readonly upcoming: Effect.Effect<ReadonlyArray<number>>
-  /** What's being said now, an update or a notice, by its entry in the journal, until it's heard or put by: being told him, so not missed. */
-  readonly speaking?: Effect.Effect<ReadonlyArray<number>>
+  /** What's told him by what's being said now, or by a notice waiting to be, by its entries in the journal, until it's heard or put by: being told him, so not missed. */
+  readonly telling?: Effect.Effect<ReadonlyArray<number>>
   /** What a thread waits on him for, read and worded now, to read back what he answers by dictation, unless he's heard it. */
   readonly compose: (ref: Threads.Ref, requestId: string) => Effect.Effect<Option.Option<Worded>>
   /** What's muted, and muting and unmuting threads, which never reaches an agent. Without them, muting is something yapd can't do yet. */
@@ -678,7 +678,7 @@ export const make = (options: {
     /** One request at a time, from working it out to what's said of it. */
     const turn = yield* Effect.makeSemaphore(1)
     /** What's waiting to be said or being said, which isn't missed: he's told of it as it is. */
-    const beingTold = Effect.map(Effect.all([options.upcoming, options.speaking ?? Effect.succeed<ReadonlyArray<number>>([])]), ([coming, saying]) => [...coming, ...saying])
+    const beingTold = Effect.map(Effect.all([options.upcoming, options.telling ?? Effect.succeed<ReadonlyArray<number>>([])]), ([coming, saying]) => [...coming, ...saying])
 
     /**
      * The open question, how many times it's been asked, its asking again
@@ -970,7 +970,7 @@ export const make = (options: {
         // like a cough taken for "Thank you.". Not what's waiting to be read, like an update his asking cut off: he's told of that as
         // it's read, not twice.
         const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
-        const missed = yield* Missed.gather(journal, { now, spoke: since, coming: [...coming, ...(yield* options.speaking ?? Effect.succeed([]))], desk: shortlist })
+        const missed = yield* Missed.gather(journal, { now, spoke: since, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk: shortlist })
         // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing.
         const done = recent.filter((kept) => kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined).slice(-lately.most)
         const seen = yield* options.show.seen
@@ -2751,7 +2751,7 @@ export const make = (options: {
         const coming = yield* options.upcoming
         // Caught up, however he asked, what came in while yapd was off isn't offered after.
         if (offered?.kind === "missed") offered = undefined
-        const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming: [...coming, ...(yield* options.speaking ?? Effect.succeed([]))], desk })
+        const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming: [...coming, ...(yield* options.telling ?? Effect.succeed([]))], desk })
         // A project he named as it's called, or else by whole words of its name, like "connectors"; one named nowhere, he's told yapd
         // couldn't tell what he meant, rather than that nothing came in.
         const { project } = scope
@@ -3367,6 +3367,8 @@ export const make = (options: {
               // Why a machine can't be reached, once he's heard it, isn't said again until it's been back and gone down again.
               Effect.zipRight(threads.heard(outcome.say)),
             ),
+            // What he missed that it tells him of isn't missed while it waits to be said or is said, nor told again by another catch-up.
+            ...(missed === undefined ? {} : { telling: Effect.succeed(missed) }),
             // What he missed that it told him, even before a question it asks, as when he asked what he missed and what a thread wants.
             ...(missed === undefined && (open === undefined || request === undefined)
               ? {}
@@ -4008,6 +4010,7 @@ export const make = (options: {
               }),
               // Cut off, what it covered is still his to catch up on.
               heard: Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard([...covered, ...Option.toArray(entry ?? Option.none())], at)),
+              telling: Effect.succeed(covered),
               followUp: followUp(subject, Effect.succeed(spoken)),
             },
             power.turns,
