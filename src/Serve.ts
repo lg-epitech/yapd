@@ -31,6 +31,7 @@ import { ProviderResponder } from "./Responder.ts"
 import * as Server from "./Server.ts"
 import * as Settings from "./Settings.ts"
 import * as Store from "./Store.ts"
+import * as Switching from "./Switching.ts"
 import { Shortcut } from "./Shortcut.ts"
 import * as Show from "./Show.ts"
 import * as T3Actions from "./T3Actions.ts"
@@ -283,12 +284,16 @@ export const serve = Effect.gen(function* () {
    * then what came in meanwhile is offered once, what a restart found while
    * it was off is said, and what waits on him that he wasn't told of. The
    * assistant drops before the daemon turns, so what it was doing for the
-   * turns before is stopped like the rest.
+   * turns before is stopped like the rest. Only when it really switches:
+   * started on, or asked for on while it is, nothing he's asking is dropped.
    */
-  const turn = (on: boolean) =>
-    on
-      ? Effect.all([dictation.drop, assistant.drop, daemon.turn(true), shortcut.toggle(true), assistant.back, notices.reconcile], { discard: true })
-      : Effect.all([shortcut.toggle(true), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
+  const turn = Switching.switcher({
+    power: daemon.power,
+    drop: Effect.all([dictation.drop, assistant.drop], { discard: true }),
+    turn: daemon.turn,
+    shortcut: shortcut.toggle(true),
+    back: Effect.all([assistant.back, notices.reconcile], { discard: true }),
+  })
   const switching = yield* Effect.makeSemaphore(1)
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
   if (yield* settings.on) yield* turn(true)
