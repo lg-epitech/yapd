@@ -263,6 +263,12 @@ final class Audio {
         engine.disconnectNodeOutput(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
       }
+      // The player waits five seconds for an engine that doesn't render, then raises an exception Swift can't catch.
+      // Voice processing sometimes starts like that, so it rests instead, to start afresh with the next update.
+      guard rendering() else {
+        rest()
+        return link.send(["type": "failed", "id": id, "message": "The audio engine started but didn't play anything"])
+      }
       let start = min(AVAudioFramePosition(max(0, from) * format.sampleRate), file.length)
       generation += 1
       let current = Playing(id: id, file: file, start: start, generation: generation, began: Date())
@@ -282,6 +288,19 @@ final class Audio {
       playing = nil
       link.send(["type": "failed", "id": id, "message": "\(error)"])
     }
+  }
+
+  /// Whether the engine renders, seen as the player's render time moving on within two seconds. It takes milliseconds when it does.
+  private func rendering() -> Bool {
+    let deadline = Date().addingTimeInterval(2)
+    var first: AVAudioFramePosition?
+    while engine.isRunning, Date() < deadline {
+      if let time = player.lastRenderTime, time.isSampleTimeValid {
+        if first == nil { first = time.sampleTime } else if time.sampleTime != first { return true }
+      }
+      Thread.sleep(forTimeInterval: 0.005)
+    }
+    return false
   }
 
   private func finish(_ id: String) {
