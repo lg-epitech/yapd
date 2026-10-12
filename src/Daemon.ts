@@ -733,6 +733,8 @@ export const make = (
     readonly over?: Fallback
     /** The Stop it's of, for a hook's. */
     readonly stop?: Notices.Stop
+    /** For a hook's, whether its turn began before yapd started, as no hook of its session came since, so its prompt isn't known. */
+    readonly unprompted?: boolean
   }
 
   /** A failure is owed once what all the Stops it was left to told of is kept quiet. */
@@ -831,6 +833,21 @@ export const make = (
       Option.isSome(mode) ? mode : priority === "progress" && !full ? Option.some("progress") : Option.none(),
     )
 
+  /**
+   * Whether a hook's turn whose prompt came before yapd started answers what
+   * he said by voice back through its hook before then: the journal has it
+   * sent to the session after the last update kept of it, within the hour.
+   */
+  const repliedBefore = (session: string, arrivedAt: number) =>
+    Effect.map(journal.since(arrivedAt - forgotten, { kinds: ["sent", "update"], most: 200 }), (kept) => {
+      const ours = kept.filter(
+        (row) =>
+          row.at <= arrivedAt &&
+          (row.thread === session || (row.kind === "update" && (row.detail as { readonly session?: unknown } | undefined)?.session === session)),
+      )
+      return ours.at(-1)?.kind === "sent"
+    })
+
   /** Whether yapd is off, or was turned off or on since `turns`, so nothing that came in by then is said. */
   const offSince = (turns: number) => Effect.map(switched, (power) => !power.on || power.turns !== turns)
 
@@ -890,8 +907,12 @@ export const make = (
       const more = full ? "" : (summary.more ?? "").trim()
       /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
       const tied = Option.orElse(about, () => owner)
-      // What answers what yapd sent its thread for him, as a message by the shortcut, is his own ask too.
-      const answering = finished.answering || (priority !== "needs-you" && Option.isSome(tied) && (yield* asked(tied.value, finished)))
+      // What answers what yapd sent its thread for him, as a message by the shortcut, is his own ask too, and so is what answers what he said
+      // back through its hook before yapd restarted, when its prompt came before then.
+      const answering =
+        finished.answering ||
+        (priority !== "needs-you" && Option.isSome(tied) && (yield* asked(tied.value, finished))) ||
+        (priority !== "needs-you" && finished.unprompted === true && (yield* repliedBefore(session, arrivedAt)))
       // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
       // summed up may be either, as far as yapd can tell, so it's said.
       const mutable = priority !== "needs-you" && !answering && summarized
@@ -1274,6 +1295,8 @@ export const make = (
     Effect.gen(function* () {
       const session = key(agent, payload.session_id)
       const arrivedAt = yield* Clock.currentTimeMillis
+      // Nothing heard of the session since yapd started, a Stop's turn began before, so what it answers can't be told.
+      const first = !activity.has(session)
       const sent = followed.get(session)?.current
       const prompt = payload.hook_event_name === "UserPromptSubmit" ? squash(payload.prompt ?? "") : undefined
       const own = sent !== undefined && (payload.hook_event_name === "Stop" || prompt === squash(sent.message) || prompt === squash(wake(sent.message)))
@@ -1359,6 +1382,7 @@ export const make = (
               ...(prompt === undefined ? {} : { prompted: prompt }),
               ...(through === undefined ? {} : { over: through }),
               stop,
+              ...(prompt === undefined && first ? { unprompted: true } : {}),
             }),
           )
           return hook

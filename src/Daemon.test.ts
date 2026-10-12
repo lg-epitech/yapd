@@ -5136,4 +5136,25 @@ describe("Daemon holding what a failure was left to", () => {
     )
     expect(result).toEqual([])
   })
+
+  test("after a restart in the middle of a turn, the answer to what he said back through its hook before then is said, never held as progress", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        // Before the restart: he said "keep going" over its update, which went back through its hook.
+        yield* journal.write({ at: 0, kind: "update", thread: "claude:review", said: "yapd. Pass 7 found two issues.", detail: { priority: "done" } })
+        yield* journal.write({ at: 5_000, kind: "sent", thread: "claude:review", text: "Keep going with the review." })
+        const { finish, wait, played } = yield* make(undefined, { journal, progressMessages: ["Pass 8 is running.", "Pass 9 is running."] })
+        yield* wait(60)
+        // Its Stop, the first of its session since the restart, with no prompt known.
+        yield* finish("review", "Pass 8 is running.")
+        yield* wait(11)
+        // Not the first of its session since the restart, the next is progress as ever.
+        yield* finish("review", "Pass 9 is running.")
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. Pass 8 is running."])
+  })
 })
