@@ -14,6 +14,7 @@ import * as Hands from "./Hands.ts"
 import { type Entry, type Held, Journal, type Kept, type Naming } from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
 import type * as Modes from "./Modes.ts"
+import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import type { Origin } from "./Origin.ts"
@@ -937,6 +938,9 @@ export const make = (
         ...Option.match(turn.prompt, { onNone: () => ({}), onSome: (prompt) => ({ prompt }) }),
         ...(Option.isSome(tied) ? { session } : {}),
         ...(more === "" ? {} : { more }),
+        // Said whatever he mutes, though it doesn't need him: the answer to what he asked its thread, or a turn yapd couldn't sum up. So
+        // held as yapd was off, it isn't kept quiet when he mutes its thread later.
+        ...(mutable || priority === "needs-you" ? {} : { audible: true }),
       }
       const entry: Entry = {
         at: arrivedAt,
@@ -1624,8 +1628,9 @@ export const make = (
     const muted = new Set(keys)
     return Effect.gen(function* () {
       yield* drop((entry) => Mutes.keysOf(entry.update, called).some((key) => muted.has(key)), { _tag: "Muted" })
-      // What of it was held for later is kept quiet too, so the digest and the rundown never bring up a thread he muted since.
-      const held = (yield* journal.held(0)).filter((kept) => Mutes.keysOfKept(kept, called).some((key) => muted.has(key)))
+      // What of it was held for later is kept quiet too, so the digest and the rundown never bring up a thread he muted since. Not what a
+      // mute never keeps quiet, held as yapd was off: what needs him, or answers what he asked, still leads a catch-up.
+      const held = (yield* journal.held(0)).filter((kept) => !Missed.audible(kept) && Mutes.keysOfKept(kept, called).some((key) => muted.has(key)))
       yield* journal.mute(held.map(({ id }) => id))
     })
   }

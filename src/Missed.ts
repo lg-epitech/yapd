@@ -38,6 +38,9 @@ const detail = (kept: Kept) => (typeof kept.detail === "object" && kept.detail !
 /** Whether a row needs him: an update that asks something of him, or a notice of a failure or a limit. */
 export const needs = (kept: Kept) => kept.kind === "notice" || detail(kept).priority === "needs-you"
 
+/** Whether a row is said whatever he muted: what needs him, the answer to what he asked its thread, or a turn yapd couldn't sum up. */
+export const audible = (kept: Kept) => needs(kept) || detail(kept).audible === true
+
 /** Whether a row came in while yapd was off. */
 export const whileOff = (kept: Kept) => detail(kept).held === "off"
 

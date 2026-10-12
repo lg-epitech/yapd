@@ -4986,6 +4986,43 @@ describe("Daemon while off", () => {
     ])
   })
 
+  test("muting a thread later keeps quiet only what a mute would have: what needs him, what couldn't be summed up and the answer to what he sent stay unmuted", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const asked = "Also run the integration tests."
+        const ledger: Array<{ readonly at: number; readonly digest: string | null }> = []
+        const mutes = yield* muting
+        const { made, handle, finish, toggle, wait, journal } = yield* make(undefined, {
+          mutes,
+          urgentMessages: ["Which network first?"],
+          unsummarizable: ["Garbled."],
+          link: (session) => Effect.succeed(session === "s-tezos" ? Option.some({ machine: "Rosie", id: "t-tezos" }) : Option.none()),
+          sent: (to, since) => Effect.succeed(to.id === "t-tezos" ? ledger.filter(({ at }) => at >= since) : []),
+        })
+        yield* toggle(false)
+        yield* finish("asks", "Which network first?")
+        yield* finish("garbled", "Garbled.")
+        yield* finish("noisy", "Still going.")
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt: asked }, { project: "yapd", host: hostname() }, false)
+        ledger.push({ at: (yield* Clock.currentTimeMillis) - 1000, digest: Ledger.digest(asked) })
+        yield* wait(120)
+        yield* stopHere(handle, "s-tezos", "Integration tests pass.")
+        yield* wait(11)
+        const keys = [sessionKey("asks"), sessionKey("garbled"), sessionKey("noisy"), Mutes.key.thread({ machine: "Rosie", id: "t-tezos" })]
+        for (const key of keys) yield* mutes.mute({ key })
+        yield* made.silence(keys)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return kept.map((row) => [row.said, heldFor(row), quieted(row)])
+      }),
+    )
+    expect(result).toEqual([
+      ["yapd. Which network first?", "off", false],
+      ["yapd finished a turn, but I couldn't summarize it.", "off", false],
+      ["yapd. Still going.", "off", true],
+      ["yapd. Integration tests pass.", "off", false],
+    ])
+  })
+
   test("a turn no hook told of while yapd is off is kept unheard under its key, and its own Stop coming once it's on isn't said", async () => {
     const result = await run(
       Effect.gen(function* () {
