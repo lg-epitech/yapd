@@ -122,6 +122,21 @@ const ending = 0.3
 const misses = 3
 /** How long to wait for the rest when the user trails off, before working out a reply. */
 const hesitation = "3 seconds"
+/** Words as they're compared, whatever their case and the punctuation at their end. */
+const plainly = (text: string) => text.trim().toLowerCase().replace(/[.!]+$/, "")
+
+/**
+ * Whether the model's answer is the rest of an update as it was left out,
+ * maybe with him addressed before or after it, like "Sir, requests back off…"
+ * or "…, sir.": then the rest rendered already says the same.
+ */
+export const restOf = (text: string, more: string) => {
+  if (more === "") return false
+  const rest = plainly(more)
+  const said = plainly(text)
+  return said === rest || said.replace(/^[a-z']+(?: [a-z']+)?, /, "") === rest || said.replace(/, [a-z']+(?: [a-z']+)?$/, "") === rest
+}
+
 /** How long the user can keep adding to what they said, since talk that goes on longer is more likely a TV. */
 const rambling = 60_000
 
@@ -841,9 +856,13 @@ export const make = (options: {
             )
             text = reply.intent === "send" ? yield* pass(update, reply) : answer
             if (text === "") return true
-            // The rest he asked for, rendered already, or still rendering, is played as it is; rendered again only if that failed.
-            const early = rest !== undefined && text === more && Exit.isSuccess(yield* Fiber.await(rest.fiber)) ? rest.path : undefined
-            if (early !== undefined) path = early
+            // The rest he asked for, rendered already, or still rendering, is played as it is, even with the model's "sir" around it;
+            // rendered again only if that failed.
+            const early = rest !== undefined && restOf(text, more) && Exit.isSuccess(yield* Fiber.await(rest.fiber)) ? rest.path : undefined
+            if (early !== undefined) {
+              path = early
+              text = more
+            }
             else {
               path = join(options.dir, `${crypto.randomUUID()}${extension}`)
               rendered.push(path)

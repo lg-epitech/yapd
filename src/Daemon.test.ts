@@ -3358,6 +3358,26 @@ describe("Daemon headline first", () => {
     expect(result.responded).toEqual(["More."])
   })
 
+  test("the rest the model gives for 'more' with him addressed is played as it was rendered as the headline began, not rendered again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, speak, wait, nextPlayback, played, renders } = yield* make("More.", {
+          quickly: true,
+          echoing: 1000,
+          answer: "Sir, retries back off now.",
+          mores: { "The loader is fixed.": "Retries back off now." },
+        })
+        yield* finish("loader", "The loader is fixed.")
+        yield* nextPlayback
+        yield* speak
+        yield* wait(14)
+        return { played: [...played], renders: renders() }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The loader is fixed.", "Retries back off now."])
+    expect(result.renders).toBe(2)
+  })
+
   test("an update he heard keeps its id across a restart, and is said again as it was, with its rest for more", async () => {
     const result = await run(
       Effect.gen(function* () {

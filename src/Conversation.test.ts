@@ -2462,3 +2462,15 @@ describe("Helper", () => {
     expect([...new Float32Array(messages[1]!.payload.buffer)]).toEqual([0.5, -0.25])
   })
 })
+
+describe("the rest of an update", () => {
+  test("is the model's answer to 'more' when that's the rest with him addressed before or after it, and nothing else", () => {
+    const more = "Requests back off from half a second up to thirty seconds."
+    expect(Conversation.restOf(more, more)).toBe(true)
+    expect(Conversation.restOf("Sir, requests back off from half a second up to thirty seconds.", more)).toBe(true)
+    expect(Conversation.restOf("Requests back off from half a second up to thirty seconds, sir.", more)).toBe(true)
+    expect(Conversation.restOf("Sir, requests back off from a second up to a minute.", more)).toBe(false)
+    expect(Conversation.restOf("Requests back off.", more)).toBe(false)
+    expect(Conversation.restOf("Sir.", "")).toBe(false)
+  })
+})
