@@ -54,7 +54,7 @@ From a clone, `bun run app` builds it with Xcode into `~/Applications` and opens
 | Arc reactor gone dark, just its casing and an empty core | Off |
 | Faded arc reactor | yapd isn't running |
 
-Off, yapd says nothing, never opens the microphone and lets go of the shortcut. Turning it off drops whatever hasn't started yet: what it was about to say, a dictation, and new work it was still writing up or asking you about. Updates that finish meanwhile aren't said later, and it stays off when it restarts, until you turn it on again. The menu also lists the threads with the latest updates, each with its project's icon as T3 Code draws it, how long ago it finished and whether it's muted: click one to hear its latest update again and reply to it, and mute a noisy one from the Mute menu, or by holding Option over it on macOS 15 and later. Muting keeps its progress and finished work quiet, but anything that needs you still comes through. With a yapd from before that, it has the last few updates to hear again instead.
+Off, yapd says nothing of its own accord and never opens the microphone to listen for a reply, but the shortcut still works: ask it something and it answers, then goes quiet again. Turning it off drops what you asked that hasn't started yet, a dictation and new work it was still writing up or asking you about, and keeps what it was about to say. Updates that finish meanwhile are still summed up and kept, unheard, never said on their own; turned back on, it offers them once ("You missed five, sir. Want the rundown?"), and asks what agents still wait on you for. It stays off when it restarts, until you turn it on again. The menu also lists the threads with the latest updates, each with its project's icon as T3 Code draws it, how long ago it finished and whether it's muted: click one to hear its latest update again and reply to it, and mute a noisy one from the Mute menu, or by holding Option over it on macOS 15 and later. Muting keeps its progress and finished work quiet, but anything that needs you still comes through. With a yapd from before that, it has the last few updates to hear again instead.
 
 The Mode menu puts yapd in focus for an hour or quiet until the morning, or back to normal, and the menu says when focus or quiet ends. While a thread waits on you, the menu says how many do: choose it and yapd tells you who, aloud.
 
@@ -67,7 +67,7 @@ The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux 
 Say anything while yapd is talking and it stops. The model that writes the summaries then works out what you meant:
 
 - "Got it", "sounds good" or "quiet" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
-- "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and "what did I miss?" sums up what it said. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
+- "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and asking what it said catches you up on it. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
 - "More" over a headline, or just after it, says the rest at once.
 - "Focus", "goodnight", "I'm back", "talk shorter" and "give me everything" change how yapd talks, as in [Focus and quiet](#focus-and-quiet). Nothing about them reaches the agent.
 - Ask something the update answers, like "which PR was that?", and it answers.
@@ -106,7 +106,11 @@ A session another app drives, like T3 Code, only gets follow-ups through that ap
 
 Updates that only say how running work is going, like another review round, are held for a digest: a short catch-up once nothing has been said for a minute, at most every twenty minutes. "Give me everything" has yapd say each update in full and hold none, and "talk shorter" goes back to headlines.
 
-"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. "I'm back" ends either and tells you what was held; one that ends on its own offers you the rundown once. Work that finished or failed while yapd was down isn't told when it starts again, though a thread's question still waiting is. Turning yapd off is still the way to hear nothing at all. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
+"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. "I'm back" ends either and catches you up; one that ends on its own offers you the rundown once. Work that finished or failed while yapd was down isn't told when it starts again, though a thread's question still waiting is. Turning yapd off is still the way to hear nothing of its own accord.
+
+## Catching up
+
+yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on Distribox?" or "anything from rig since lunch?", and the model decides that's what you want and what about; yapd briefs you on what you haven't heard, what needs you first, in about ninety words and eight threads at most. "More" gets the threads it left out, or the detail of the ones it told you of. What it told you counts as heard only once you've heard it to the end. Muted threads are left out unless you ask about one. Nothing it does reaches an agent. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
 
 ## Dictating
 
