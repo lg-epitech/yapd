@@ -2322,6 +2322,13 @@ describe("more, and how yapd talks, over an update", () => {
     expect(prompt).toContain(`Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`)
     expect(Responder.prompt(over("Thanks."), Option.none())).not.toContain("What you left out")
   })
+
+  test("catching up said over an update is never for the agent: the model is told to have him ask with the shortcut, and nothing takes it without the model", () => {
+    const prompt = Responder.prompt(over("What did I miss?"), Option.none())
+    expect(prompt).toContain(`Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it`)
+    expect(prompt).toContain(`Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`)
+    for (const heard of ["What did I miss?", "Catch me up.", "Anything else from rig?"]) expect(quickly(over(heard, "Retries back off now."))).toBeUndefined()
+  })
 })
 
 describe("quick replies", () => {
