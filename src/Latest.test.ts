@@ -413,6 +413,30 @@ describe("Latest", () => {
         return { ...listed, menu, told, replayed, mentioned, settle }
       })
 
+    test("a row kept while off, heard again from the menu, is said in full, its more too, never only its headline, before it counts as heard", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, menu, told, settle } = yield* menuOf([])
+          yield* journal.write({
+            at: 1,
+            kind: "update",
+            machine: "Rosie",
+            thread: "t-tezos",
+            said: "Tezos asks which network to deploy to first.",
+            detail: { session: "claude:s", held: "off", priority: "needs-you", more: "Mainnet costs more but has the real fees; Ghostnet is free." },
+          })
+          yield* settle
+          const replayed = yield* menu.replayThread("t3:Rosie:t-tezos")
+          return { replayed, told: [...told], after: (yield* journal.held(0)).length }
+        }),
+      )
+      expect(result).toEqual({
+        replayed: "queued",
+        told: ["Tezos asks which network to deploy to first. Mainnet costs more but has the real fees; Ghostnet is free."],
+        after: 0,
+      })
+    })
+
     test("a row held for later, heard again from the menu, counts as heard once it's said, so the digest doesn't tell of it again", async () => {
       const result = await run(
         Effect.gen(function* () {
