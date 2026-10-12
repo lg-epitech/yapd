@@ -147,8 +147,8 @@ export const serve = Effect.gen(function* () {
     detail: modes.detail,
     // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent. Back, what was
     // held is told right after, as an answer.
-    command: (heard) =>
-      Option.map(modeCommand(heard), ({ how, minutes }) =>
+    command: (heard, asks) =>
+      Option.map(modeCommand(heard, asks), ({ how, minutes }) =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis
           const told = modeLines(yield* persona.lines, now)

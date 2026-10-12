@@ -1052,6 +1052,15 @@ const shortening: ReadonlySet<string> = new Set(["talk shorter", "keep it short"
 /** Every update in full, said as a whole. */
 const everything: ReadonlySet<string> = new Set(["give me everything", "tell me everything", "full updates", "give me the full updates"])
 
+/**
+ * What can only be about how yapd talks, even said to a question an agent
+ * asked him. The rest, like "keep it short" to "should I write the guide in
+ * full or keep it short?", "tell me everything" to "want the full list?" or
+ * "normal mode" to "run it in normal or safe mode?", may be his answer, which
+ * is the model's to tell.
+ */
+const unmistakable: ReadonlySet<string> = new Set(["i'm back", "im back", "i am back", "back to normal", "go back to normal", "talk shorter", "goodnight", "good night"])
+
 /** A change to how yapd talks, as it's done: focus or quiet for how many minutes, if he said, back to normal, or short or full updates. */
 export interface ModeChange {
   readonly how: "focus" | "quiet" | "normal" | "brief" | "full"
@@ -1063,9 +1072,10 @@ export interface ModeChange {
  * said: "focus", "focus mode for an hour", "quiet for two hours",
  * "goodnight", "I'm back", "talk shorter" or "give me everything". Anything
  * else, like "let me focus till three", is the model's. A bare "quiet" or
- * "be quiet" is never one: it only stops yapd talking.
+ * "be quiet" is never one: it only stops yapd talking. Said over what `asks`
+ * him something, only what can't be an answer to it is one.
  */
-export const modeCommand = (heard: string): Option.Option<ModeChange> => {
+export const modeCommand = (heard: string, asks = false): Option.Option<ModeChange> => {
   const said = gist(heard)
   if (said === "focus" || said === "focus mode") return Option.some({ how: "focus" })
   const lasting = /^(focus|focus mode|quiet|quiet mode) for (.+)$/.exec(said)
@@ -1073,6 +1083,7 @@ export const modeCommand = (heard: string): Option.Option<ModeChange> => {
     const minutes = Mutes.lasting(lasting[2]!)
     return minutes === undefined ? Option.none() : Option.some({ how: lasting[1]!.startsWith("focus") ? "focus" : "quiet", minutes })
   }
+  if (asks && !unmistakable.has(said)) return Option.none()
   if (nightly.has(said)) return Option.some({ how: "quiet" })
   if (returning.has(said)) return Option.some({ how: "normal" })
   if (shortening.has(said)) return Option.some({ how: "brief" })
@@ -1557,7 +1568,8 @@ const glimpsed = (situation: Situation, lines: Lines): Decision | undefined => {
   }
   if (listing.has(said)) return decision({ act: "answer", spoken: mutedList(situation, lines), pending: replacing })
   // How yapd talks, in so many words: never anything for a thread.
-  const changing = modeCommand(utterance.heard)
+  // Over what asks him something, only what can't be his answer to it.
+  const changing = modeCommand(utterance.heard, Option.isSome(open) || asksHim(situation))
   if (Option.isSome(changing)) {
     const { how, minutes } = changing.value
     return decision({ act: "mode", how, when: minutes === undefined ? "" : new Date(situation.now + minutes * 60_000).toISOString(), pending: replacing })

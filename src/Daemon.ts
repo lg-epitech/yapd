@@ -141,9 +141,10 @@ export const make = (
     /**
      * When all he said over an update is to change how yapd talks, in so many
      * words, like "focus" or "talk shorter", how that's done, giving back
-     * what's said of it: never anything sent to the agent.
+     * what's said of it: never anything sent to the agent. Over an update
+     * that `asks` him something, only what can't be his answer to it.
      */
-    readonly command?: (heard: string) => Option.Option<Effect.Effect<string>>
+    readonly command?: (heard: string, asks: boolean) => Option.Option<Effect.Effect<string>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -604,7 +605,7 @@ export const make = (
       const plain = echo === undefined && voiced >= Brain.faintest
       const made = changedOver.get(update)
       // How yapd talks, like "focus" or "talk shorter", plainly his and in so many words, is changed here, and never reaches the agent.
-      const commanded = plain && options.command !== undefined ? options.command(heard) : Option.none()
+      const commanded = plain && options.command !== undefined ? options.command(heard, update.needsYou) : Option.none()
       if (Option.isSome(commanded)) {
         changedOver.delete(update)
         return commanded

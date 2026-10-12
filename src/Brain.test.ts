@@ -1694,6 +1694,24 @@ describe("Brain", () => {
       expect(Brain.modeCommand("Focus for a while.")).toEqual(Option.none())
     })
 
+    test("over what asks him something, only words that can't be his answer change how yapd talks: the rest are the model's", () => {
+      const asking = { ...loader, update: { ...(loader as Extract<Assistant.Subject, { _tag: "Session" }>).update, needsYou: true, spoken: "Should I write the migration guide in full or keep it short?" } } as Assistant.Subject
+      const open = { open: Option.some(which([ref(tezos), ref(mina)])) }
+      for (const over of [{ subject: asking }, open]) {
+        for (const heard of ["Keep it short.", "Keep it shorter.", "Short updates.", "Tell me everything.", "Give me everything.", "Full updates.", "Normal mode.", "Turn yourself off."]) {
+          expect(mode(heard, over)?.act).not.toBe("mode")
+        }
+        expect(mode("Focus.", over)).toMatchObject({ act: "mode", how: "focus" })
+        expect(mode("Quiet for an hour.", over)).toMatchObject({ act: "mode", how: "quiet" })
+        expect(mode("Goodnight.", over)).toMatchObject({ act: "mode", how: "quiet" })
+        expect(mode("I'm back.", over)).toMatchObject({ act: "mode", how: "normal" })
+        expect(mode("Back to normal.", over)).toMatchObject({ act: "mode", how: "normal" })
+        expect(mode("Talk shorter.", over)).toMatchObject({ act: "mode", how: "brief" })
+      }
+      expect(Brain.modeCommand("Keep it short.", true)).toEqual(Option.none())
+      expect(Brain.modeCommand("Keep it short.")).toEqual(Option.some({ how: "brief" }))
+    })
+
     test("'more' after an update said in its headline says the rest, with no model, only when there's more and nothing's asked", () => {
       expect(mode("More.", { subject: loader })).toMatchObject({ act: "again", how: "more", spoken: "Retries back off now, and the flaky test is gone." })
       expect(mode("Tell me more.", { subject: loader })?.spoken).toBe("Retries back off now, and the flaky test is gone.")
