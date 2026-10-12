@@ -218,14 +218,21 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(bar).toMatch(/case \.quit: NSApplication\.shared\.terminate\(nil\)/)
       // A row clicked is heard again only when it can be, and closes the menu then; otherwise the menu stays open, and its panel still opens.
       expect(bar).toMatch(/private func click\(_ key: String\) \{\s*guard let row = rows\[key\], row\.hearable else \{ return \}\s*menu\.cancelTracking\(\)\s*perform\(\.hear\(row\.recent\)\)\s*\}/)
-      // Open, the menu changes only what it shows already, in place; built again only as it opens.
-      expect(bar).toMatch(/if open \{ change\(menu\) \}/)
+      // Open, the menu changes only what it shows already, in place, what isn't offered hidden; built again as it opens, and as yapd stops or
+      // starts, which leaves nothing in common with what's shown but Quit, and no rows on one side to move.
+      expect(bar).toMatch(/guard open else \{ return \}(\s*\/\/[^\n]*)*\s*if \(state != nil\) != running \{\s*build\(\)\s*fetch\(\)\s*\} else \{\s*change\(menu\)\s*\}/)
+      expect(bar).toMatch(/let model = Menu\(yapd\.state, now: yapd\.now, last: yapd\.last != nil\)\s*running = yapd\.state != nil/)
       expect(bar).toMatch(/for item in model\.all \{\s*if let made = made\[item\.id\] \{ apply\(item, to: made\) \}\s*\}/)
+      expect(bar).toMatch(/made\.isHidden = item\.hidden/)
       expect(bar).toMatch(/func menuNeedsUpdate\(_ menu: NSMenu\) \{\s*if menu === self\.menu \{\s*build\(\)/)
       // A row follows its own click from the mouse-down, since its panel's menu takes the mouse-up, and is one menu item to VoiceOver, told by all
       // it shows, which pressing clicks.
       const row = await Bun.file(join(app, "yapd", "RecentRow.swift")).text()
       expect(row).toMatch(/override func mouseDown\(with event: NSEvent\) \{[\s\S]*window\.trackEvents\(matching: \[\.leftMouseDragged, \.leftMouseUp\]/)
+      // Let go over it after a press elsewhere, as dragging down from the icon, it's clicked too.
+      expect(row).toMatch(
+        /override func mouseUp\(with event: NSEvent\) \{\s*guard event\.type == \.leftMouseUp, bounds\.contains\(convert\(event\.locationInWindow, from: nil\)\) else \{ return super\.mouseUp\(with: event\) \}\s*clicked\(\)\s*\}/,
+      )
       expect(row).toMatch(/setAccessibilityLabel\(row\.told\)/)
       expect(row).toMatch(/accessibilityRole\(\) -> NSAccessibility\.Role\? \{\s*\.menuItem\s*\}/)
       expect(row).toMatch(/accessibilityPerformPress\(\) -> Bool \{\s*guard hearable else \{ return false \}\s*clicked\(\)/)
@@ -246,7 +253,9 @@ describe.skipIf(swiftc === undefined)("App", () => {
       expect(yapd).toMatch(/if let body = asking\.body \{\s*request\.setValue\("application\/json", forHTTPHeaderField: "Content-Type"\)\s*request\.httpBody = body/)
       const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
       expect(bar).toMatch(/func menuWillOpen\(_ menu: NSMenu\) \{\s*guard menu === self\.menu else \{ return \}\s*open = true\s*fetch\(\)/)
-      expect(bar).toMatch(/details\[key\] = await yapd\.details\(of: row\.recent\)\s*change\(panel: key\)/)
+      // Shown as they come, only the last asked for, and asked for again once anything of the row changes, as a new update coming.
+      expect(bar).toMatch(/let told = await yapd\.details\(of: row\.recent\)\s*guard asked\[key\] == asking else \{ return \}\s*details\[key\] = told\s*change\(panel: key\)/)
+      expect(bar).toMatch(/if before\[key\]\?\.recent != row\.recent \{ fetch\(key\) \}/)
       expect(bar.match(/Glance\([^)]*\)/g)).toEqual(["Glance(row.recent, details: details[key], now: yapd.now)"])
       // A pull request is opened only at an https address, as a card's links are.
       expect(bar.match(/NSWorkspace\.shared\.open\([^)]*\)/g)).toEqual(["NSWorkspace.shared.open(address)"])
@@ -254,6 +263,9 @@ describe.skipIf(swiftc === undefined)("App", () => {
       // The card only shows: nothing on it can be clicked, and none of its text is read as markdown or opened.
       const card = await Bun.file(join(app, "yapd", "GlanceCard.swift")).text()
       expect(card).not.toMatch(/Button|Link\(|openURL|onTapGesture|AttributedString/)
+      // What he selects on a card copies with ⌘C, which the app's own menus, never shown, have.
+      expect(yapd).toMatch(/NSApplication\.shared\.mainMenu = YapdApp\.editing/)
+      expect(yapd).toMatch(/addItem\(withTitle: "Copy", action: #selector\(NSText\.copy\(_:\)\), keyEquivalent: "c"\)/)
     },
     120_000,
   )

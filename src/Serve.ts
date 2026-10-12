@@ -173,6 +173,7 @@ export const serve = Effect.gen(function* () {
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
   let missing: Effect.Effect<ReadonlyArray<Missed.Group>> | undefined
+  const missed = Effect.suspend(() => missing ?? Effect.succeed([]))
   const latest = yield* Latest.make({
     here: machine,
     journal,
@@ -187,7 +188,7 @@ export const serve = Effect.gen(function* () {
     // Every thread it can see, to count those that wait on him.
     desk: threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER),
     // What he hasn't heard, to count by thread and in all.
-    missed: Effect.suspend(() => missing ?? Effect.succeed([])),
+    missed,
   })
   // Muting from the menu or by voice: never anything that reaches an agent. A thread the menu shows muted by its session is unmuted by it too.
   const controls = Mutes.widened(
@@ -360,8 +361,9 @@ export const serve = Effect.gen(function* () {
     mute,
     unmute: (key) => Effect.asVoid(controls.unmute(key)),
     replayThread,
-    // What a panel beside a row shows of its thread, what it's doing and its pull request as /threads has them.
-    details: Latest.details({ latest, threads, mutes, journal, listing: served.threads }),
+    // What a panel beside a row shows of its thread, what it's doing and its pull request as /threads has them, and what he hasn't heard as
+    // its row counts it.
+    details: Latest.details({ latest, threads, mutes, journal, listing: served.threads, missed }),
     icon: icons.image,
   })
   // Asked as the user starts talking, so it's there by the time they've finished.

@@ -331,7 +331,9 @@ extension Status {
   }
 }
 
-/// A time as the menu says it, like "3:00 PM", with "tomorrow" after it when it's on a later day than `now`.
+/// A time as the menu says it, like "3:00 PM": with "tomorrow" after it when it's the day after `now`, and its day before it on a
+/// later day, its weekday within the week, like "Fri 9:00 AM", and its date after that, like "Oct 20 at 9:00 AM", as a mute can
+/// end then.
 func clock(_ at: Date, now: Date, zone: TimeZone = .current, locale: Locale = .current) -> String {
   let format = DateFormatter()
   format.locale = locale
@@ -340,8 +342,14 @@ func clock(_ at: Date, now: Date, zone: TimeZone = .current, locale: Locale = .c
   format.timeStyle = .short
   var calendar = Calendar(identifier: .gregorian)
   calendar.timeZone = zone
-  let later = calendar.startOfDay(for: at) > calendar.startOfDay(for: now)
-  return "\(format.string(from: at))\(later ? " tomorrow" : "")"
+  let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: at)).day ?? 0
+  switch days {
+  case ..<1: return format.string(from: at)
+  case 1: return "\(format.string(from: at)) tomorrow"
+  default:
+    format.setLocalizedDateFormatFromTemplate(days < 7 ? "EEEjmm" : "MMMdjmm")
+    return format.string(from: at)
+  }
 }
 
 /// One of a list, or none when it can't be read, so the rest of the list still is.

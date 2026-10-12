@@ -229,6 +229,22 @@ final class YapdApp: NSObject, NSApplicationDelegate {
         NSLog("Could not open yapd at login: \(error)")
       }
     }
+    NSApplication.shared.mainMenu = YapdApp.editing
     bar = MenuBar(Yapd())
+  }
+
+  /// The app's own menus, never shown, as it has no menu bar of its own, but where ⌘C and ⌘A are looked for, to copy what he
+  /// selects on a card.
+  private static var editing: NSMenu {
+    let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    let main = NSMenu()
+    for submenu in [NSMenu(title: "yapd"), edit] {
+      let item = NSMenuItem(title: submenu.title, action: nil, keyEquivalent: "")
+      item.submenu = submenu
+      main.addItem(item)
+    }
+    return main
   }
 }

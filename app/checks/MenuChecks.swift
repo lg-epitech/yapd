@@ -2,9 +2,9 @@ import Foundation
 
 /// The menu as he sees it, an item a line: "---" a separator, "## " a heading, a line in brackets that's never chosen, "[off]"
 /// after an item he can't choose, "✓" after the mode yapd is in, "⌘Q" after Quit, a submenu's items after "▸", a recent row's
-/// line under it after "—", "[dimmed]" when clicking it does nothing, and its panel after "▸".
+/// line under it after "—", "[dimmed]" when clicking it does nothing, and its panel after "▸". What's hidden isn't there.
 @MainActor func drawn(_ items: [Menu.Item]) -> [String] {
-  items.map { item in
+  items.filter { !$0.hidden }.map { item in
     switch item.kind {
     case .separator: return "---"
     case .header: return "## \(item.title)"
@@ -110,6 +110,20 @@ import Foundation
   }
   let panelIds = Menu.panel(for: first, details: pr("https://github.com/lg-epitech/integration/pull/412")).map(\.id) + Menu.panel(for: second, details: nil).map(\.id)
   check(Set(panelIds).count == panelIds.count && Set(panelIds).isDisjoint(with: ids), "names each panel's items apart from the menu's and each other's")
+
+  // Its items keep their ids, muted or not, with a pull request or not, so the open panel follows a mute that ends or one set by
+  // voice, and a pull request yapd tells of, in place: Mute turns into Unmute, and what isn't offered is hidden.
+  let recent = first.recent
+  let quieted = Menu.Row(
+    Status.Recent(key: recent.key, machine: recent.machine, thread: recent.thread, title: recent.title, project: recent.project, text: recent.text, at: recent.at, muted: true),
+    on: true, now: now
+  )
+  let loud = Menu.panel(for: first, details: nil)
+  let quiet = Menu.panel(for: quieted, details: pr("https://github.com/lg-epitech/integration/pull/412"))
+  check(loud.map(\.id) == quiet.map(\.id), "keeps a panel's items by the same ids, muted or not, with a pull request or not, not \(loud.map(\.id)) and \(quiet.map(\.id))")
+  check(drawn(quiet) == ["[card Migrate the Tezos integration]", "---", "Hear Again", "Unmute", "Open Pull Request #412"], "offers to take the mute off in Mute's place, not \(drawn(quiet))")
+  check(loud.filter(\.hidden).map(\.title) == ["Open Pull Request"] && quiet.filter(\.hidden).map(\.title) == ["Mute for an Hour"], "hides only what isn't offered")
+  check(quiet.first { $0.title == "Unmute" }?.kind == .action(.unmute(quieted.recent)), "takes the mute off by the same item that muted it")
 
   // What the icon tells VoiceOver.
   let told: [(Status?, String)] = [

@@ -8,7 +8,8 @@ import AppKit
 // what the thread is doing and the latest told of it, to hear it again, mute
 // it or open its pull request. While the menu is open, what changes is
 // changed in place, and what comes or goes waits for the next time it opens,
-// so nothing moves under his pointer.
+// so nothing moves under his pointer, unless yapd stops or starts, when it's
+// built again, as there are no rows on one side to move.
 
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
@@ -17,6 +18,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
   private let menu = NSMenu()
   /// Whether the menu is open.
   private var open = false
+  /// Whether yapd was running as the menu was built.
+  private var running = false
   /// Each item made of the menu and of the panels beside it, by its id, to change in place.
   private var made: [String: NSMenuItem] = [:]
   /// Each recent row as it's shown now, by its key.
@@ -25,6 +28,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
   private var panels: [ObjectIdentifier: String] = [:]
   /// What yapd told of each row's thread, by its key, as it said last since the menu opened.
   private var details: [String: Details] = [:]
+  /// How many times what yapd tells of each row's thread was asked for, so only the last answer is shown.
+  private var asked: [String: Int] = [:]
   /// The row drawn highlighted.
   private weak var highlighted: RecentRow?
 
@@ -58,7 +63,15 @@ final class MenuBar: NSObject, NSMenuDelegate {
     let menu = Menu(state, now: yapd.now, last: yapd.last != nil)
     // Each row's icon is looked at even while the menu is closed, so one fetched while it's open is drawn once it's in.
     for row in menu.rows { _ = yapd.icons.icon(for: row.recent) }
-    if open { change(menu) }
+    guard open else { return }
+    // Stopped or started, it has nothing in common with what's shown but Quit, so it's built again, and no row moves under his
+    // pointer, as there are none on one side.
+    if (state != nil) != running {
+      build()
+      fetch()
+    } else {
+      change(menu)
+    }
   }
 
   /// yapd's own mark while it's on and quiet, with a moon in focus or quiet and a dot while a thread waits on him, off or not
@@ -111,6 +124,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
   /// The menu afresh, from yapd's state as it opens.
   private func build() {
     let model = Menu(yapd.state, now: yapd.now, last: yapd.last != nil)
+    running = yapd.state != nil
     menu.removeAllItems()
     made = [:]
     rows = [:]
@@ -167,12 +181,17 @@ final class MenuBar: NSObject, NSMenuDelegate {
     if case .separator = item.kind { return }
     made.title = item.title
     made.isEnabled = item.enabled
+    made.isHidden = item.hidden
     made.state = item.checked ? .on : .off
     switch item.kind {
     case .action(let action):
       made.target = self
       made.action = #selector(choose(_:))
       made.representedObject = action
+    case .line:
+      // What did something before, as Open Pull Request once yapd no longer tells of one, does nothing now.
+      made.action = nil
+      made.representedObject = nil
     case .row(let row):
       rows[row.recent.key] = row
       (made.view as? RecentRow)?.show(row, image: yapd.icons.icon(for: row.recent))
@@ -185,22 +204,27 @@ final class MenuBar: NSObject, NSMenuDelegate {
       } else {
         made.view = GlanceItem(card)
       }
-    case .line, .header, .separator, .submenu:
+    case .header, .separator, .submenu:
       break
     }
   }
 
-  /// Changes what's shown in place, as yapd's state has it now: every item still there, and every row's panel. What came or
-  /// went since the menu opened waits for the next time it opens.
+  /// Changes what's shown in place, as yapd's state has it now: every item still there, and every row's panel, asking yapd
+  /// again what it tells of a row's thread once anything of the row changed, as when a new update comes or a mute ends. What
+  /// came or went since the menu opened waits for the next time it opens.
   private func change(_ model: Menu) {
+    let before = rows
     for item in model.all {
       if let made = made[item.id] { apply(item, to: made) }
     }
-    for key in rows.keys { change(panel: key) }
+    for (key, row) in rows {
+      change(panel: key)
+      if before[key]?.recent != row.recent { fetch(key) }
+    }
   }
 
-  /// Changes what's shown in a row's panel in place: its card, resized to fit, and what can be done with it. An item that
-  /// comes or goes, as its pull request once yapd tells of it, waits for the next time the panel opens.
+  /// Changes what's shown in a row's panel in place: its card, resized to fit, and what can be done with it, what isn't
+  /// offered now hidden, as Mute for an Hour while it's muted.
   private func change(panel key: String) {
     guard let row = rows[key] else { return }
     for item in Menu.panel(for: row, details: details[key]) {
@@ -208,15 +232,23 @@ final class MenuBar: NSObject, NSMenuDelegate {
     }
   }
 
-  /// Asks yapd what it tells of each row's thread as the menu opens, each shown in its panel as it comes, even while that's
-  /// open. A thread yapd doesn't know, or a yapd too old to tell, or one that doesn't answer, leaves the card with what the
-  /// row has.
+  /// Asks yapd what it tells of each row's thread as the menu opens.
   private func fetch() {
-    for (key, row) in rows {
-      Task {
-        details[key] = await yapd.details(of: row.recent)
-        change(panel: key)
-      }
+    for key in rows.keys { fetch(key) }
+  }
+
+  /// Asks yapd what it tells of a row's thread, shown in its panel as it comes, even while that's open, unless it was asked
+  /// again since. A thread yapd doesn't know, or a yapd too old to tell, or one that doesn't answer, leaves the card with what
+  /// the row has.
+  private func fetch(_ key: String) {
+    guard let row = rows[key] else { return }
+    let asking = (asked[key] ?? 0) + 1
+    asked[key] = asking
+    Task {
+      let told = await yapd.details(of: row.recent)
+      guard asked[key] == asking else { return }
+      details[key] = told
+      change(panel: key)
     }
   }
 

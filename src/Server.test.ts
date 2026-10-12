@@ -554,6 +554,28 @@ describe("Server", () => {
     })))
   })
 
+  test("tells more of a thread on a machine whose name is encoded in its key, by the key encoded whole, as it's given", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      // A machine he named with a space in it, as YAPD_NAME="My Mac" does.
+      const key = "t3:My%20Mac:850299f8"
+      const asked: Array<string> = []
+      const server = yield* Server.serve(0, {
+        ...hooks(() => Effect.succeed(undefined)),
+        details: (wanted) =>
+          Effect.sync(() => {
+            asked.push(wanted)
+            return wanted === key ? Option.some({ ...detailed, key, machine: "My Mac" }) : Option.none()
+          }),
+      })
+      const call = (path: string) => Effect.promise(() => fetch(`http://127.0.0.1:${server.port}${path}`))
+      const shown = yield* call(`/threads/${encodeURIComponent(key)}`)
+      const body = (yield* Effect.promise(() => shown.json())) as Server.Details
+      // Not encoded whole, its machine's name comes out with a space, which no key yapd makes has.
+      const halfway = (yield* call(`/threads/${key}`)).status
+      expect({ status: shown.status, key: body.key, machine: body.machine, halfway, asked }).toEqual({ status: 200, key, machine: "My Mac", halfway: 400, asked: [key] })
+    })))
+  })
+
   test("says a thread's latest update again by its key only while yapd is on, and serves a project's icon by its machine and id, once until it changes", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const { api } = yield* stateful

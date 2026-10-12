@@ -78,6 +78,8 @@ const listing = (
       latest,
       journal,
       mutes,
+      /** What he hasn't heard, as a catch-up gathers it. */
+      missed,
       /** How many times a row's project was looked for, which each time the list is built does. */
       looked: () => looked,
       threads,
@@ -596,11 +598,14 @@ describe("Latest", () => {
   })
 
   describe("details", () => {
-    /** What a panel beside a row shows, over the latest threads, with `/threads` listing `machines` as what yapd can see now. */
+    /**
+     * What a panel beside a row shows, over the latest threads, with `/threads` listing `machines` as what yapd can see now, and
+     * what he hasn't heard marked as a catch-up gathers it.
+     */
     const detailsOf = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, machines: ReadonlyArray<Server.Machine>) =>
       Effect.gen(function* () {
-        const listed = yield* listing(shown)
-        const details = Latest.details({ latest: listed.latest, threads: listed.threads, mutes: listed.mutes, journal: listed.journal, listing: Effect.succeed(machines) })
+        const listed = yield* listing(shown, ":memory:", {}, true)
+        const details = Latest.details({ latest: listed.latest, threads: listed.threads, mutes: listed.mutes, journal: listed.journal, listing: Effect.succeed(machines), missed: listed.missed })
         /** What it shows of a thread by its key, if anything, and what he hasn't heard before and after, which it never changes. */
         const look = (key: string) =>
           Effect.gen(function* () {
@@ -664,12 +669,13 @@ describe("Latest", () => {
         pr: { number: 412, url: "https://github.com/lg-epitech/integration/pull/412", state: "open", checks: "passing" },
         muted: true,
         until: at(60 * 60_000),
+        // What he hasn't heard marked so, kept quiet too, as its row counts it.
         updates: [
-          { id: failed, at: at(8), kind: "notice", said: "It failed." },
-          { id: done, at: at(7), kind: "update", said: "Migrated. Two fixtures needed new rounding.", unsaid: "muted" },
+          { id: failed, at: at(8), kind: "notice", said: "It failed.", unheard: true },
+          { id: done, at: at(7), kind: "update", said: "Migrated. Two fixtures needed new rounding.", unsaid: "muted", unheard: true },
           { id: asked, at: at(5), kind: "update", said: "Which network first?", heard: at(6) },
           { id: sent, at: at(3), kind: "sent", text: "Use TzKT's rounding." },
-          { id: older, at: at(2), kind: "update", said: "Older, under the session before." },
+          { id: older, at: at(2), kind: "update", said: "Older, under the session before.", unheard: true },
         ],
       })
       expect(result.unchanged).toBe(true)
@@ -702,7 +708,7 @@ describe("Latest", () => {
       const { term, ...looked } = result
       expect(looked).toEqual({
         session: {
-          shown: { key: "session:Rosie:claude:term", machine: "Rosie", thread: null, muted: false, updates: [{ id: term, at: at(1), kind: "update", said: "The terminal one is done." }] },
+          shown: { key: "session:Rosie:claude:term", machine: "Rosie", thread: null, muted: false, updates: [{ id: term, at: at(1), kind: "update", said: "The terminal one is done.", unheard: true }] },
           unchanged: true,
         },
         archived: { shown: { key: "t3:Rosie:t-old", machine: "Rosie", thread: "t-old", muted: false, updates: [] }, unchanged: true },
@@ -710,6 +716,81 @@ describe("Latest", () => {
         unknown: { shown: undefined, unchanged: true },
         notKey: { shown: undefined, unchanged: true },
       })
+    })
+
+    test("keeps to a thread's own machine, though another has a thread and a session of the same ids, marks unheard only what its row counts, and tells of a message sent by voice with only his words", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          yield* TestClock.adjust(`${2 * day} millis`)
+          const { journal, latest, look, settle } = yield* detailsOf({ Rosie: [thread("t-x", "The Rosie work")], rig: [thread("t-x", "The rig work")] }, [
+            { machine: "Rosie", threads: [] },
+            { machine: "rig", threads: [] },
+          ])
+          const now = yield* Clock.currentTimeMillis
+          const when = now - 60_000
+          const id = (written: Option.Option<number>) => Option.getOrThrow(written)
+          // Never heard through, but from before what a catch-up looks back on.
+          const before = id(yield* journal.write({ at: now - 1.5 * day, kind: "update", machine: "Rosie", thread: "t-x", said: "Rosie, a while ago.", detail: { session: "claude:abc" } }))
+          const heard = id(yield* journal.write({ at: when, kind: "update", machine: "Rosie", thread: "t-x", said: "Rosie, heard.", heardAt: when + 1, detail: { session: "claude:abc" } }))
+          const session = id(yield* journal.write({ at: when + 2, kind: "update", host: "Rosie", thread: "claude:abc", said: "Rosie, under its session." }))
+          // Sent by voice, kept with what yapd said of sending it.
+          const sent = id(yield* journal.write({ at: when + 3, kind: "sent", machine: "Rosie", thread: "t-x", text: "Use TzKT's rounding.", said: "On it, sir. Sent it to the Rosie work." }))
+          const rig = id(yield* journal.write({ at: when + 4, kind: "update", machine: "rig", thread: "t-x", said: "rig, linked.", detail: { session: "claude:abc" } }))
+          const rigSession = id(yield* journal.write({ at: when + 5, kind: "update", host: "rig", thread: "claude:abc", said: "rig, under its session." }))
+          const rigSent = id(yield* journal.write({ at: when + 6, kind: "sent", host: "rig", thread: "claude:abc", text: "rig's reply." }))
+          yield* settle
+          return {
+            now,
+            when,
+            ids: { before, heard, session, sent, rig, rigSession, rigSent },
+            rosie: (yield* look("t3:Rosie:t-x")).shown,
+            rig: (yield* look("t3:rig:t-x")).shown,
+            counts: Object.fromEntries((yield* latest.current).map(({ key, unheard }) => [key, unheard])),
+          }
+        }),
+      )
+      const { now, when, ids } = result
+      expect(result.rosie?.updates).toEqual([
+        { id: ids.sent, at: at(when + 3), kind: "sent", text: "Use TzKT's rounding." },
+        { id: ids.session, at: at(when + 2), kind: "update", said: "Rosie, under its session.", unheard: true },
+        { id: ids.heard, at: at(when), kind: "update", said: "Rosie, heard.", heard: at(when + 1) },
+        { id: ids.before, at: at(now - 1.5 * day), kind: "update", said: "Rosie, a while ago." },
+      ])
+      expect(result.rig?.updates).toEqual([
+        { id: ids.rigSent, at: at(when + 6), kind: "sent", text: "rig's reply." },
+        { id: ids.rigSession, at: at(when + 5), kind: "update", said: "rig, under its session.", unheard: true },
+        { id: ids.rig, at: at(when + 4), kind: "update", said: "rig, linked.", unheard: true },
+      ])
+      // As many marked unheard as its row counts.
+      expect(result.counts).toEqual({ "t3:Rosie:t-x": 1, "t3:rig:t-x": 2 })
+      expect([result.rosie, result.rig].map((shown) => shown?.updates.filter(({ unheard }) => unheard === true).length)).toEqual([1, 2])
+    })
+
+    test("tells of a thread listed on a machine that's away by what's kept of it, with nothing of what it's doing", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, latest, look, settle } = yield* detailsOf({ Rosie: [] }, [
+            { machine: "Rosie", threads: [] },
+            { machine: "rig", reason: "I can't see rig's threads yet.", threads: [] },
+          ])
+          const done = Option.getOrThrow(yield* journal.write({ at: 1, kind: "update", machine: "rig", thread: "t-rig", said: "rig, done.", detail: { session: "claude:r" } }))
+          const sent = Option.getOrThrow(yield* journal.write({ at: 2, kind: "sent", machine: "rig", thread: "t-rig", text: "Ship it." }))
+          yield* settle
+          return { done, sent, listed: (yield* latest.current).map(({ key, title }) => [key, title]), ...(yield* look("t3:rig:t-rig")) }
+        }),
+      )
+      expect(result.listed).toEqual([["t3:rig:t-rig", "A thread"]])
+      expect(result.shown).toEqual({
+        key: "t3:rig:t-rig",
+        machine: "rig",
+        thread: "t-rig",
+        muted: false,
+        updates: [
+          { id: result.sent, at: at(2), kind: "sent", text: "Ship it." },
+          { id: result.done, at: at(1), kind: "update", said: "rig, done.", unheard: true },
+        ],
+      })
+      expect(result.unchanged).toBe(true)
     })
   })
 
@@ -786,6 +867,33 @@ describe("Latest", () => {
       }),
     )
     expect(result).toEqual({ counts: [["t3:Rosie:t-tezos", 4]], total: 4 })
+  })
+
+  test("counts a session listed on its own apart from the thread listed beside it, so the rows' counts add up to what a catch-up of everything tells of", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.adjust(`${day} millis`)
+        const { latest, journal } = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] }, ":memory:", {}, true)
+        const at = (yield* Clock.currentTimeMillis) - 60_000
+        yield* journal.write({ at, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Started.", detail: { session: "claude:s1" } })
+        yield* journal.write({ at: at + 1, kind: "update", host: "Rosie", thread: "claude:s1", said: "Under its session." })
+        // A terminal's, never tied to a thread.
+        yield* journal.write({ at: at + 2, kind: "update", host: "Rosie", thread: "claude:term", directory: "/tmp", said: "The terminal one is done." })
+        yield* journal.write({ at: at + 3, kind: "update", host: "Rosie", thread: "claude:term", directory: "/tmp", said: "The terminal one is done again." })
+        const totals: Array<number> = []
+        yield* Effect.forkScoped(Stream.runForEach(latest.unheard, (count) => Effect.sync(() => void totals.push(count))))
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { counts: (yield* latest.current).map(({ key, unheard }) => [key, unheard]), total: totals.at(-1) }
+      }),
+    )
+    expect(result).toEqual({
+      counts: [
+        ["session:Rosie:claude:term", 2],
+        ["t3:Rosie:t-tezos", 2],
+      ],
+      total: 4,
+    })
   })
 
   test("counts what came in while yapd was off over a weekend, though it was turned off and on for a moment since", async () => {

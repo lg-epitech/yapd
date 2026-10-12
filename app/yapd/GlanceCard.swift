@@ -87,21 +87,19 @@ struct GlanceCard: View {
             if let heard = glance.heard { Text(heard).font(.caption).foregroundStyle(.secondary) }
           }
           Text(latest.text).font(.callout).lineLimit(12).fixedSize(horizontal: false, vertical: true)
+          // What he sent it since, under what it answers.
+          if !glance.replies.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+              ForEach(glance.replies) { told in entry(told) }
+            }
+            .padding(.top, 2)
+          }
         }
       }
       if !glance.earlier.isEmpty {
         VStack(alignment: .leading, spacing: 5) {
           heading("Earlier")
-          ForEach(glance.earlier) { told in
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-              // A dot beside what he hasn't heard, as Mail has beside what he hasn't read, under the marks above.
-              Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(told.unheard == true ? Color.accentColor : .clear)
-                .frame(width: Icons.side)
-              Text(told.when).font(.caption).foregroundStyle(.secondary).frame(width: 62, alignment: .leading)
-              Text(told.text).font(.callout).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-          }
+          ForEach(glance.earlier) { told in entry(told) }
         }
       }
     }
@@ -129,6 +127,18 @@ struct GlanceCard: View {
       glance.muted.map { Fact(symbol: "bell.slash", size: 11, tint: .secondary, text: $0, lines: 2) },
       glance.unheard.map { Fact(symbol: "circle.fill", size: 7, tint: .accentColor, text: $0, lines: 2) },
     ].compactMap { $0 }
+  }
+
+  /// One of what was told of it or sent to it, in a line or two after when it came.
+  private func entry(_ told: Glance.Told) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 8) {
+      // A dot beside what he hasn't heard, as Mail has beside what he hasn't read, under the marks above.
+      Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(told.unheard == true ? Color.accentColor : .clear)
+        .frame(width: Icons.side)
+      Text(told.when).font(.caption).foregroundStyle(.secondary).frame(width: 62, alignment: .leading)
+      Text(told.text).font(.callout).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
   }
 
   private func heading(_ text: String) -> some View {

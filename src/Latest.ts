@@ -338,9 +338,14 @@ const panel = 5
 /** What a panel beside a thread's row shows of it: its updates and notices, and the messages sent to it for him. */
 const telling: ReadonlyArray<Kind> = ["update", "notice", "sent"]
 
-/** An update or notice of a thread, with all of what was kept of it, its "more" too, or a message sent to it with his words. */
-const told = (kept: Kept): Server.Told => {
-  const said = Missed.full(kept)
+/**
+ * An update or notice of a thread, with all of what was kept of it, its "more"
+ * too, and whether it's among what he hasn't heard that a catch-up would tell
+ * him of, `unheard`; or a message sent to it, with only his words: what yapd
+ * said of sending it was its own, not the thread's.
+ */
+const told = (kept: Kept, unheard: ReadonlySet<number>): Server.Told => {
+  const said = kept.kind === "sent" ? "" : Missed.full(kept)
   const unsaid = Missed.unsaid(kept)
   return {
     id: kept.id,
@@ -351,6 +356,7 @@ const told = (kept: Kept): Server.Told => {
     ...(kept.kind !== "sent" || kept.text === undefined ? {} : { text: kept.text }),
     ...(kept.heardAt === undefined ? {} : { heard: new Date(kept.heardAt).toISOString() }),
     ...(unsaid === undefined ? {} : { unsaid }),
+    ...(unheard.has(kept.id) ? { unheard: true as const } : {}),
   }
 }
 
@@ -359,8 +365,8 @@ const told = (kept: Kept): Server.Told => {
  * lists, one T3 Code has or one that's muted, as muting it knows them: what
  * it's doing, its branch and its pull request as `/threads` has them, whether
  * it's muted, and the latest of what was told of it or sent to it for him,
- * from every session of it. It only reads: nothing reaches an agent, and
- * nothing counts as heard.
+ * from every session of it, what he hasn't heard marked as its row counts
+ * it. It only reads: nothing reaches an agent, and nothing counts as heard.
  */
 export const details = (options: {
   readonly latest: Pick<Latest, "current" | "under">
@@ -369,6 +375,8 @@ export const details = (options: {
   readonly journal: Pick<Journal["Type"], "byThread">
   /** Every thread yapd can see, as `/threads` lists them. */
   readonly listing: Effect.Effect<ReadonlyArray<Server.Machine>>
+  /** What he hasn't heard, as a catch-up would gather it, which a row's count counts: none marked unheard without it. */
+  readonly missed?: Effect.Effect<ReadonlyArray<Missed.Group>>
 }) => {
   const { latest, threads, mutes, journal, listing } = options
   return (key: string) =>
@@ -393,6 +401,8 @@ export const details = (options: {
       // What it's doing, only while yapd can see it, as /threads lists it.
       const listed = ref === undefined ? undefined : (yield* listing).find((listed) => listed.machine === ref.machine)?.threads.find((thread) => thread.id === ref.id)
       const branch = listed === undefined ? undefined : Option.getOrUndefined(Option.flatMap(found, ({ branch }) => Option.fromNullable(branch)))
+      // Marked unheard as the row counts it: not what he never heard through but a catch-up no longer tells of, as an update cut off before he spoke.
+      const unheard = new Set((options.missed === undefined ? [] : yield* options.missed).flatMap(({ rows }) => rows.map(({ id }) => id)))
       return Option.some({
         key,
         machine,
@@ -402,7 +412,7 @@ export const details = (options: {
         ...(listed?.pr === undefined ? {} : { pr: listed.pr }),
         muted: mute !== undefined,
         ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
-        updates: updates.slice(0, panel).map(told),
+        updates: updates.slice(0, panel).map((kept) => told(kept, unheard)),
       } satisfies Server.Details)
     })
 }

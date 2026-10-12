@@ -147,6 +147,13 @@ final class RecentRow: NSView {
     if over { clicked() }
   }
 
+  /// Let go over it after pressing elsewhere, as on the menu bar icon and dragging down to it, it's clicked too. A press on it is
+  /// followed from its mouse-down, which takes its mouse-up, so it's never clicked twice.
+  override func mouseUp(with event: NSEvent) {
+    guard event.type == .leftMouseUp, bounds.contains(convert(event.locationInWindow, from: nil)) else { return super.mouseUp(with: event) }
+    clicked()
+  }
+
   override func isAccessibilityElement() -> Bool {
     true
   }

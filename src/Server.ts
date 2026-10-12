@@ -172,14 +172,16 @@ export interface Told {
   /** ISO 8601. */
   readonly at: string
   readonly kind: "update" | "notice" | "sent"
-  /** All of what yapd said of it, or kept, its "more" too. */
+  /** All of what yapd said of an update or notice, or kept, its "more" too. */
   readonly said?: string
-  /** What he sent. */
+  /** What he sent, all there is of a message sent. */
   readonly text?: string
   /** ISO 8601, when the user heard it through. */
   readonly heard?: string
   /** For an update yapd didn't read out, why, as `/journal` has it. */
   readonly unsaid?: Entry["unsaid"]
+  /** Only for one he hasn't heard that a catch-up would tell him of, as `unheard` in `recent` counts it. */
+  readonly unheard?: true
 }
 
 /** A journal entry, as `/journal` returns it. */

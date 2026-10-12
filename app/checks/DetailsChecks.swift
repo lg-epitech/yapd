@@ -13,7 +13,7 @@ import Foundation
       "pr": { "number": 412, "url": "https://github.com/lg-epitech/integration/pull/412", "state": "open", "checks": "passing", "review": "approved" },
       "muted": true, "until": "2026-10-02T15:00:00.000Z",
       "updates": [
-        { "id": 1872, "at": "2026-10-02T14:01:40.000Z", "kind": "update", "said": "integration. The migration is done and the tests pass.", "unsaid": "muted" },
+        { "id": 1872, "at": "2026-10-02T14:01:40.000Z", "kind": "update", "said": "integration. The migration is done and the tests pass.", "unsaid": "muted", "unheard": true },
         { "id": 1860, "at": "2026-10-02T13:52:05.000Z", "kind": "sent", "text": "Use TzKT's rounding." },
         { "id": 1851, "at": "2026-10-02T13:50:12.000Z", "kind": "notice", "said": "The Tezos migration asks which rounding to use.", "heard": "2026-10-02T13:50:20.000Z" }
       ]
@@ -26,6 +26,7 @@ import Foundation
   check(details?.muted == true && details?.until == "2026-10-02T15:00:00.000Z", "reads whether it's muted, and until when")
   check(details?.updates.map(\.id) == [1872, 1860, 1851] && details?.updates.map(\.kind) == [.update, .sent, .notice], "reads its updates, notices and what he sent it, in order")
   check(details?.updates[1].text == "Use TzKT's rounding." && details?.updates[2].heard == "2026-10-02T13:50:20.000Z", "reads what he sent, and when he heard one")
+  check(details?.updates.map(\.unheard) == [true, false, false], "reads which he hasn't heard, as the row counts them")
 
   // Only what yapd answers with them is read: not what it doesn't know, as a yapd from before them says of every thread.
   for status in [400, 404, 500] {
@@ -36,11 +37,12 @@ import Foundation
   // What it can't read of them leaves the rest.
   let odd = Details(Data(#"""
     {"key": "session:rig:claude:abc", "machine": "rig", "thread": null, "pr": {"url": "https://x"}, "muted": "yes", "updates": [
-      {"id": 1, "at": "2026-10-02T14:01:40Z", "kind": "update", "said": "Done."}, {"id": 2, "at": "2026-10-02T14:00:00Z", "kind": "action"}, {"id": "3"}
+      {"id": 1, "at": "2026-10-02T14:01:40Z", "kind": "update", "said": "Done.", "unheard": "yes"}, {"id": 2, "at": "2026-10-02T14:00:00Z", "kind": "action"}, {"id": "3"}
     ]}
     """#.utf8), ok(200))
   check(odd?.thread == nil && odd?.state == nil && odd?.pr == nil && odd?.muted == false, "reads a session's details whose pull request and mute it can't read, with none")
   check(odd?.updates.map(\.id) == [1], "leaves out only what it can't read of its updates, not \(String(describing: odd?.updates.map(\.id)))")
+  check(odd?.updates.first?.unheard == false, "takes one whose unheard it can't read as not unheard")
   check(Details(Data(#"{"key": "k", "machine": "Rosie", "muted": false}"#.utf8), ok(200))?.updates == [], "reads details with no updates")
 
   // Asked for by the thread's key, encoded whole, and only read; and its pull request opened only at an https address.
@@ -86,23 +88,43 @@ import Foundation
   check(full.latest?.text == "integration. The migration is done and the tests pass." && full.heard == "3 min ago · unheard", "shows all of its latest update and that he hasn't heard it, not \(String(describing: full.heard))")
   check(full.earlier.map(\.text) == ["You: Use TzKT's rounding.", "The Tezos migration asks which rounding to use."], "shows what came before, what he sent too, not \(full.earlier.map(\.text))")
   check(full.earlier.map(\.when) == ["12 min ago", "14 min ago"] && full.earlier.map(\.unheard) == [false, false], "tells when each came, and marks none he heard or sent")
-  check(plain(Glance(Status.Recent(key: "k", machine: "Rosie", title: "t", text: "Done.", at: row.at, muted: true, until: "2026-10-03T09:00:00Z"), details: nil, now: now, zone: utc, locale: english).muted) == "Muted until 9:00 AM tomorrow", "says a mute ends tomorrow")
+  let until = { (until: String) in plain(Glance(Status.Recent(key: "k", machine: "Rosie", title: "t", text: "Done.", at: row.at, muted: true, until: until), details: nil, now: now, zone: utc, locale: english).muted) }
+  check(until("2026-10-03T09:00:00Z") == "Muted until 9:00 AM tomorrow", "says a mute ends tomorrow")
+  // Muted on a Friday until a day after, as he can by voice, its weekday in the week ahead, its date after that.
+  for (end, said) in [("2026-10-06T09:00:00Z", "Muted until Tue 9:00 AM"), ("2026-10-08T09:00:00Z", "Muted until Thu 9:00 AM"), ("2026-10-09T09:00:00Z", "Muted until Oct 9 at 9:00 AM")] {
+    check(until(end) == said, "says \(said), not \(String(describing: until(end)))")
+  }
   check(Glance(Status.Recent(key: "k", machine: "Rosie", title: "t", text: "Done.", at: row.at, muted: true), details: nil, now: now).muted == "Muted", "says a mute with no end is on")
 
-  // The latest is the newest update or notice, after what he sent since; the rest are at most four, and what says nothing is left out.
-  let told = { (id: Int, minutes: Double, kind: Details.Told.Kind, words: String?, heard: Bool) in
-    Details.Told(id: id, at: ISO8601DateFormatter().string(from: now.addingTimeInterval(-minutes * 60)), kind: kind, said: kind == .sent ? nil : words, text: kind == .sent ? words : nil, heard: heard ? "2026-10-02T14:00:00Z" : nil)
+  // The latest is the newest update or notice, what he sent since under it, and the rest, at most four, under Earlier, all from before
+  // it; what says nothing is left out. Each heard through, unheard as the row counts it, or neither, as one cut off before he spoke.
+  let told = { (id: Int, minutes: Double, kind: Details.Told.Kind, words: String?, heard: Bool?) in
+    Details.Told(
+      id: id, at: ISO8601DateFormatter().string(from: now.addingTimeInterval(-minutes * 60)), kind: kind, said: kind == .sent ? nil : words, text: kind == .sent ? words : nil,
+      heard: heard == true ? "2026-10-02T14:00:00Z" : nil, unheard: heard == false
+    )
   }
   let many = Details(key: row.key, machine: "Rosie", updates: [
-    told(9, 1, .sent, "Ship it.", false), told(8, 2, .notice, "It asks to ship.", true), told(7, 3, .update, "", false), told(6, 4, .update, "Four.", false),
-    told(5, 5, .update, "Five.", true), told(4, 6, .sent, "Six.", false), told(3, 7, .update, "Seven.", false),
+    told(10, 0.5, .sent, "Ship it.", nil), told(9, 1, .sent, "Then merge it.", nil), told(8, 2, .notice, "It asks to ship.", true), told(7, 3, .update, "", false),
+    told(6, 4, .update, "Four.", false), told(5, 5, .update, "Five.", true), told(4, 6, .sent, "Six.", nil), told(3, 7, .update, "Seven.", nil), told(2, 8, .update, "Eight.", false),
   ])
   let latest = Glance(row, details: many, now: now)
   check(latest.latest?.text == "It asks to ship." && latest.heard == "2 min ago · heard", "shows the newest update or notice as the latest, not \(String(describing: latest.latest?.text))")
-  check(latest.earlier.map(\.text) == ["You: Ship it.", "Four.", "Five.", "You: Six."], "shows at most four others, newest first, none that says nothing, not \(latest.earlier.map(\.text))")
-  check(latest.earlier.map(\.unheard) == [false, true, false, false], "marks only the updates he hasn't heard")
-  let sentOnly = Glance(row, details: Details(key: row.key, machine: "Rosie", updates: [told(1, 1, .sent, "Hi.", false)]), now: now)
-  check(sentOnly.latest?.text == row.text && sentOnly.earlier.map(\.text) == ["You: Hi."], "shows the row's latest update when yapd has only what he sent")
+  check(latest.replies.map(\.text) == ["You: Then merge it.", "You: Ship it."] && latest.replies.map(\.when) == ["1 min ago", "now"], "shows what he sent since under the latest, oldest first, not \(latest.replies.map(\.text))")
+  check(latest.earlier.map(\.text) == ["Four.", "Five.", "You: Six.", "Seven."], "shows at most four from before it, newest first, none that says nothing, not \(latest.earlier.map(\.text))")
+  check(latest.earlier.map(\.unheard) == [true, false, false, nil], "marks only the updates he hasn't heard as the row counts them, not \(latest.earlier.map(\.unheard))")
+  let cut = Glance(row, details: Details(key: row.key, machine: "Rosie", updates: [told(1, 2, .update, "Cut off.", nil)]), now: now)
+  check(cut.latest?.text == "Cut off." && cut.heard == "2 min ago", "says neither heard nor unheard of one a catch-up no longer tells of, not \(String(describing: cut.heard))")
+  let sentOnly = Glance(row, details: Details(key: row.key, machine: "Rosie", updates: [told(2, 1, .sent, "Hi.", nil), told(1, 10, .sent, "Before.", nil)]), now: now)
+  check(sentOnly.latest?.text == row.text && sentOnly.replies.map(\.text) == ["You: Hi."] && sentOnly.earlier.map(\.text) == ["You: Before."], "shows the row's latest update when yapd has only what he sent, what he sent since under it, not \(sentOnly.replies.map(\.text)) and \(sentOnly.earlier.map(\.text))")
+  check(alone.replies.isEmpty && full.replies.isEmpty, "shows nothing under the latest when he sent nothing since")
+
+  // Waiting on him, the row says so until yapd tells more, or when it can't; what yapd tells of it comes first.
+  let waiting = Status.Recent(key: row.key, machine: "Rosie", thread: "850299f8", title: row.title, project: row.project, text: row.text, at: row.at, waiting: true)
+  check(Glance(waiting, details: nil, now: now).doing == Glance.Doing(line: "Waiting on you", tone: .waiting), "says a thread waits on him from its row alone")
+  check(Glance(waiting, details: Details(key: row.key, machine: "Rosie"), now: now).doing == Glance.Doing(line: "Waiting on you", tone: .waiting), "says so when yapd can't see what it's doing")
+  check(Glance(waiting, details: Details(key: row.key, machine: "Rosie", state: "question"), now: now).doing == Glance.Doing(line: "Waiting on you · a question", tone: .waiting), "says what it waits on when yapd tells")
+  check(alone.doing == nil, "says nothing of what a thread is doing from a row that doesn't wait")
 
   // What a thread is doing, in a few words, with a colour.
   let start = now.addingTimeInterval(-(2 * 3600 + 5 * 60))

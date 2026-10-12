@@ -58,14 +58,31 @@ struct Details: Decodable, Equatable {
     let text: String?
     /// ISO 8601, when he heard it through.
     let heard: String?
+    /// Whether it's among what he hasn't heard that a catch-up would tell him of, which the row's count counts. One he never
+    /// heard through but a catch-up no longer tells of, as an update cut off before he spoke, is neither heard nor unheard.
+    let unheard: Bool
 
-    init(id: Int, at: String, kind: Kind, said: String? = nil, text: String? = nil, heard: String? = nil) {
+    private enum CodingKeys: String, CodingKey { case id, at, kind, said, text, heard, unheard }
+
+    init(id: Int, at: String, kind: Kind, said: String? = nil, text: String? = nil, heard: String? = nil, unheard: Bool = false) {
       self.id = id
       self.at = at
       self.kind = kind
       self.said = said
       self.text = text
       self.heard = heard
+      self.unheard = unheard
+    }
+
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      id = try container.decode(Int.self, forKey: .id)
+      at = try container.decode(String.self, forKey: .at)
+      kind = try container.decode(Kind.self, forKey: .kind)
+      said = try container.decodeIfPresent(String.self, forKey: .said)
+      text = try container.decodeIfPresent(String.self, forKey: .text)
+      heard = try container.decodeIfPresent(String.self, forKey: .heard)
+      unheard = (try? container.decodeIfPresent(Bool.self, forKey: .unheard)) ?? false
     }
   }
 
@@ -147,14 +164,16 @@ struct Glance: Equatable {
     /// How long ago, like "3 min ago".
     let when: String
     let text: String
-    /// Whether it's an update or notice he hasn't heard through, unknown for what the row has of it.
+    /// Whether it's an update or notice he hasn't heard, as the row counts it, or heard through. Unknown for what the row has of
+    /// it, and neither for one a catch-up no longer tells of, though he never heard it through.
     let unheard: Bool?
   }
 
   let title: String
   /// Its project and its machine.
   let place: String
-  /// None while yapd can't see it in T3 Code, and for a session.
+  /// What yapd says it's doing, else, while it waits on him, what the row says. None while yapd can't see it in T3 Code, and for
+  /// a session.
   let doing: Doing?
   let branch: String?
   /// Its pull request, like "#412 · open · checks passing · approved".
@@ -165,6 +184,8 @@ struct Glance: Equatable {
   let unheard: String?
   /// Its latest update or notice, all of it.
   let latest: Told?
+  /// What he sent it since the latest, shown under it, oldest first, as a conversation reads.
+  let replies: [Told]
   /// Up to four of what came before it, updates, notices and what he sent it, newest first.
   let earlier: [Told]
 
@@ -172,21 +193,32 @@ struct Glance: Equatable {
   init(_ row: Status.Recent, details: Details?, now: Date, zone: TimeZone = .current, locale: Locale = .current) {
     title = row.title
     place = [row.project?.name, row.machine].compactMap { $0 }.joined(separator: " · ")
-    doing = details.flatMap { details in details.state.map { Glance.doing($0, since: details.since.flatMap(Status.date), now: now) } }
+    // Until yapd tells more, or when it can't, the row still says whether it waits on him.
+    doing =
+      details.flatMap { details in details.state.map { Glance.doing($0, since: details.since.flatMap(Status.date), now: now) } }
+      ?? (row.waiting ? Doing(line: "Waiting on you", tone: .waiting) : nil)
     branch = details?.branch.flatMap { $0.isEmpty ? nil : $0 }
     pr = details?.pr.map(Glance.pr)
     // The row's, which the state keeps up to date while the menu is open.
     muted = row.muted ? row.until.flatMap(Status.date).map { "Muted until \(clock($0, now: now, zone: zone, locale: locale))" } ?? "Muted" : nil
     unheard = row.unheard > 0 && !row.muted ? "\(row.unheard) unheard" : nil
     let told = (details?.updates ?? []).compactMap { Glance.told($0, now: now) }
-    // The latest update or notice, else what the row says of it, with nothing on whether he heard it.
+    // The latest update or notice, else what the row says of it, with nothing on whether he heard it. What he sent it since is
+    // under it, so Earlier only ever has what came before it.
     if let latest = told.firstIndex(where: { $0.said }) {
       self.latest = told[latest].told
-      earlier = Array(told.enumerated().filter { $0.offset != latest }.map(\.element.told).prefix(4))
+      replies = told[..<latest].reversed().map(\.told)
+      earlier = Array(told[(latest + 1)...].map(\.told).prefix(4))
     } else {
       let when = row.ended.map { ago($0, now: now) } ?? ""
       latest = row.text.isEmpty ? nil : Told(id: "row", when: when, text: row.text, unheard: nil)
-      earlier = Array(told.map(\.told).prefix(4))
+      // Only what he sent is left: what came after the row's update goes under it, and the rest under Earlier.
+      let since = { (told: (told: Told, said: Bool, at: Date?)) -> Bool in
+        guard !row.text.isEmpty, let ended = row.ended, let at = told.at else { return false }
+        return at > ended
+      }
+      replies = told.filter(since).reversed().map(\.told)
+      earlier = Array(told.filter { !since($0) }.map(\.told).prefix(4))
     }
   }
 
@@ -198,16 +230,19 @@ struct Glance: Equatable {
     return parts.isEmpty ? nil : parts.joined(separator: " · ")
   }
 
-  /// One of what was told of it, with whether it was said, rather than sent, or none with nothing to show.
-  private static func told(_ told: Details.Told, now: Date) -> (told: Told, said: Bool)? {
-    let when = Status.date(told.at).map { ago($0, now: now) } ?? ""
+  /// One of what was told of it, with whether it was said, rather than sent, and when, or none with nothing to show.
+  private static func told(_ told: Details.Told, now: Date) -> (told: Told, said: Bool, at: Date?)? {
+    let at = Status.date(told.at)
+    let when = at.map { ago($0, now: now) } ?? ""
     switch told.kind {
     case .update, .notice:
       guard let said = told.said, !said.isEmpty else { return nil }
-      return (Told(id: String(told.id), when: when, text: said, unheard: told.heard == nil), true)
+      // Unheard only as the row counts it, so the card never marks more than the count says.
+      let unheard: Bool? = told.unheard ? true : told.heard == nil ? nil : false
+      return (Told(id: String(told.id), when: when, text: said, unheard: unheard), true, at)
     case .sent:
       guard let text = told.text, !text.isEmpty else { return nil }
-      return (Told(id: String(told.id), when: when, text: "You: \(text)", unheard: false), false)
+      return (Told(id: String(told.id), when: when, text: "You: \(text)", unheard: false), false, at)
     }
   }
 

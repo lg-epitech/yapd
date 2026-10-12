@@ -53,6 +53,8 @@ struct Menu: Equatable {
     var checked = false
     /// The key that chooses it with ⌘.
     var key: String?
+    /// Not shown, as Mute for an Hour while the thread is muted, but kept, so the open panel shows it again in place.
+    var hidden = false
 
     fileprivate static func line(_ id: String, _ title: String) -> Item {
       Item(id: id, kind: .line, title: title, enabled: false)
@@ -154,23 +156,23 @@ struct Menu: Equatable {
 
   /// What the panel beside a recent row offers: its card, then hearing it again, the same as clicking the row, muting it until
   /// he takes it off or for an hour, or taking the mute off, and opening its pull request, when yapd's `details` of it have one
-  /// with an https address. Muting it works while yapd is off, and for a row it can't say again.
+  /// with an https address. Muting it works while yapd is off, and for a row it can't say again. The same items whether it's
+  /// muted or not, and has a pull request or not, what isn't offered hidden, so the open panel follows a mute that ends, one
+  /// set by voice, or a pull request yapd tells of, in place.
   static func panel(for row: Row, details: Details?) -> [Item] {
     let key = row.recent.key
-    var items = [
+    let muted = row.recent.muted
+    let pr = details?.pr.flatMap { pr in pr.address.map { (number: pr.number, address: $0) } }
+    return [
       Item(id: "\(key) card", kind: .card(row), title: row.recent.title, enabled: false),
       .separator(key),
       Item(id: "\(key) hear", kind: .action(.hear(row.recent)), title: "Hear Again", enabled: row.hearable),
+      Item(id: "\(key) mute", kind: .action(muted ? .unmute(row.recent) : .mute(row.recent, forAnHour: false)), title: muted ? "Unmute" : "Mute", enabled: true),
+      Item(id: "\(key) mute for an hour", kind: .action(.mute(row.recent, forAnHour: true)), title: "Mute for an Hour", enabled: true, hidden: muted),
+      Item(
+        id: "\(key) pull request", kind: pr.map { .action(.open($0.address)) } ?? .line, title: pr.map { "Open Pull Request #\($0.number)" } ?? "Open Pull Request",
+        enabled: pr != nil, hidden: pr == nil
+      ),
     ]
-    if row.recent.muted {
-      items.append(Item(id: "\(key) unmute", kind: .action(.unmute(row.recent)), title: "Unmute", enabled: true))
-    } else {
-      items.append(Item(id: "\(key) mute", kind: .action(.mute(row.recent, forAnHour: false)), title: "Mute", enabled: true))
-      items.append(Item(id: "\(key) mute for an hour", kind: .action(.mute(row.recent, forAnHour: true)), title: "Mute for an Hour", enabled: true))
-    }
-    if let pr = details?.pr, let address = pr.address {
-      items.append(Item(id: "\(key) pull request", kind: .action(.open(address)), title: "Open Pull Request #\(pr.number)", enabled: true))
-    }
-    return items
   }
 }
