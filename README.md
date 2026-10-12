@@ -106,7 +106,7 @@ A session another app drives, like T3 Code, only gets follow-ups through that ap
 
 Updates that only say how running work is going, like another review round, are held for a digest: a short catch-up once nothing has been said for a minute, at most every twenty minutes. "Give me everything" has yapd say each update in full and hold none, and "talk shorter" goes back to headlines.
 
-"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. "I'm back" ends either and catches you up; one that ends on its own offers you the rundown once. Work that finished or failed while yapd was down isn't told when it starts again, though a thread's question still waiting is. Turning yapd off is still the way to hear nothing of its own accord. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
+"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. So does the answer to something you asked yapd to [find out](#finding-things-out) in focus; in quiet it waits for the morning's rundown. "I'm back" ends either and catches you up; one that ends on its own offers you the rundown once. Work that finished or failed while yapd was down isn't told when it starts again, though a thread's question still waiting is. Turning yapd off is still the way to hear nothing of its own accord. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
 
 ## Catching up
 
@@ -137,6 +137,14 @@ Where the work goes is settled by the first of these that says:
 The one thing yapd won't guess is the project. It goes by a project you named, earlier work you pointed at, like "the same in std", or a subject only one project has. That a request looks like your last one isn't enough. When it can't tell, it asks, and you answer by talking right after the question, as you would after an update. Say "never mind" to drop it. If you don't answer, it asks once more a minute later, then drops the request and says so. What you dictated is in the log either way, along with what yapd decided, why, and the prompt as it wrote it.
 
 Nothing waits on this. Updates keep being read while a prompt is written, and you can dictate the next request before the last one has started. The shortcut only ever starts a new request, so answer questions by talking.
+
+### Finding things out
+
+"Find out whether Apple shipped an API for third-party glucose sensors on the Watch" or "look into why rig's tunnel drops overnight" is new work too: an agent finds out and tells you. One about a project starts there, like any other. One about none of them, like something on the web, starts in T3 Code's scratch project, in a folder of its own, with the agent told to report back and change nothing on your machine. yapd then says "Looking into it, on Sol." rather than "Started in yapd…", so you hear which it was. Anything about code, a build, tests, a branch or a pull request is never taken for that: with no project named, yapd asks which, and when a request could go either way it asks too, like "For the glucose question, is that for yapd, or shall I just look into it?"
+
+Its first answer, as with any work yapd starts, is read to you as the answer to what you asked, headline first, then "more": however quick or slight, whatever you muted, and even after yapd restarted in between. In focus it's said at once; in quiet it waits for the morning's rundown; with yapd off it's kept for your catch-up.
+
+Work outside your projects needs a [T3 Code token](#where-follow-ups-go) and a T3 Code with a scratch project. Asked for on another machine, like "on rig", that machine's yapd has to be new enough to say it has one; otherwise yapd asks which project it's for.
 
 ### Your rules
 
