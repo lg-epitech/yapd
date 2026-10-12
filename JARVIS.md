@@ -96,7 +96,7 @@ Live on `dev` now: everything below but headline first, focus and quiet, which a
 - The rundown offered as focus or quiet ends counts what was held since it began, including what was waiting to be said as it did; a yes gives the whole catch-up, so it can tell of more than the number said.
 - A catch-up's brief can run a little past its ninety words; only what doesn't need you is ever in it, so nothing that needs you is shortened.
 - A catch-up's brief is given the last three updates of each thread, and only counts the older ones: once you've heard it, they count as heard too. What needs you, the answer to what you asked and a turn it couldn't sum up are always read to you on their own first, so none of those is among them.
-- A turn T3 Code told of before its own Stop came can be told twice, the second time often in a catch-up: when the Stop comes after a restart, as yapd can't tell then whether it's that turn or a newer one, or when the Stop doesn't end in the turn's words, so it may be another. It's never dropped instead.
+- A turn T3 Code told of before its own Stop came can be told twice, the second time often in a catch-up: when the Stop comes after a restart, as yapd can't tell then whether it's that turn or a newer one, or when the Stop doesn't end in the turn's words, so it may be another, or when what the two say isn't word for word the same, as when the turn asked two things and its Stop only the last. It's never dropped or hidden instead.
 
 - With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
 - After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.

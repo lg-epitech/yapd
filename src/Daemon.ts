@@ -887,13 +887,20 @@ export const make = (
    * and what he heard didn't, which asked him nothing, nor when it was held
    * as progress, which is put aside unheard once newer work is heard.
    */
-  const heardSince = (row: number, priority: Summary["priority"]) =>
+  const heardSince = (row: number, priority: Summary["priority"], all: string) =>
     Effect.map(journal.rows([row]), (kept) =>
-      kept.some(({ heardAt, detail }) => {
+      kept.some((entry) => {
+        const { heardAt, detail } = entry
         const { held, priority: was } = (typeof detail === "object" && detail !== null ? detail : {}) as { readonly held?: unknown; readonly priority?: unknown }
-        return heardAt !== undefined && held !== "progress" && (priority !== "needs-you" || was === "needs-you")
+        return heardAt !== undefined && held !== "progress" && (priority !== "needs-you" || was === "needs-you") && sameWords(Missed.full(entry), all)
       }),
     )
+
+  /** Whether two lines say the same, word for word, whatever their case, spacing or punctuation: only then is one surely all of the other. */
+  const sameWords = (one: string, other: string) => {
+    const words = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+    return words(one) !== "" && words(one) === words(other)
+  }
 
   /**
    * Whether a Stop come late, of `priority`, summed up or not, tells at least
@@ -902,13 +909,19 @@ export const make = (
    * whatever he mutes when that was. Otherwise both are kept, told twice at
    * worst, never one hidden behind a line that says less.
    */
-  const outranks = (row: number, priority: Summary["priority"], summarized: boolean, mutable: boolean) =>
+  const outranks = (row: number, priority: Summary["priority"], summarized: boolean, mutable: boolean, all: string) =>
     summarized
-      ? Effect.map(journal.rows([row]), (kept) =>
-          kept.every(({ detail }) => {
-            const { priority: was, audible } = (typeof detail === "object" && detail !== null ? detail : {}) as { readonly priority?: unknown; readonly audible?: unknown }
-            return (was !== "needs-you" || priority === "needs-you") && (audible !== true || !mutable)
-          }),
+      ? Effect.map(
+          journal.rows([row]),
+          (kept) =>
+            kept.length > 0 &&
+            kept.every((entry) => {
+              const { priority: was, audible } = (typeof entry.detail === "object" && entry.detail !== null ? entry.detail : {}) as {
+                readonly priority?: unknown
+                readonly audible?: unknown
+              }
+              return (was !== "needs-you" || priority === "needs-you") && (audible !== true || !mutable) && sameWords(Missed.full(entry), all)
+            }),
         )
       : Effect.succeed(false)
 
@@ -951,9 +964,12 @@ export const make = (
       // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
       // summed up may be either, as far as yapd can tell, so it's said.
       const mutable = priority !== "needs-you" && !answering && summarized
+      const spoken = introduce(project, full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken)
+      // All it would tell, its rest too, as what was kept of its turn is weighed against it word for word.
+      const all = Missed.whole(spoken, more)
       // Its turn was kept quiet in its hook's place, then heard since, as in a catch-up, from the menu or in a digest: it's said already.
-      // Only by its own words: one that can't be told may be another turn, which is said.
-      if (finished.over !== undefined && finished.replaced?.row !== undefined && (yield* heardSince(finished.replaced.row, priority))) {
+      // Only by its own words, and only when what he heard was word for word what it tells: anything more, or else, is said.
+      if (finished.over !== undefined && finished.replaced?.row !== undefined && (yield* heardSince(finished.replaced.row, priority, all))) {
         yield* release(hook)
         yield* passedThrough(arrivedAt, thread, project, finished.over, session)
         return yield* Effect.logInfo("Skipped update, heard already from T3 Code's word that it finished")
@@ -971,8 +987,10 @@ export const make = (
         return yield* Effect.logInfo("Skipped trivial update")
       }
 
-      const spoken = introduce(project, full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken)
-      const replaces = finished.replaced?.row !== undefined && (yield* outranks(finished.replaced.row, priority, summarized, mutable)) ? finished.replaced.row : undefined
+      // It takes the place of what was kept of its turn only when it tells word for word the same: otherwise both are kept, told twice at
+      // worst, never one hidden behind the other, which may have told more, like a question asked before the last.
+      const replaces =
+        finished.replaced?.row !== undefined && (yield* outranks(finished.replaced.row, priority, summarized, mutable, all)) ? finished.replaced.row : undefined
       // Kept under the thread T3 Code knows it by, when it's linked, so what was said of it is found with the thread. What's said for more is
       // kept with it, so it's there once yapd restarts.
       const detail = {

@@ -1518,7 +1518,8 @@ describe("Daemon", () => {
         const kept = yield* journal.since(0, { kinds: ["action"] })
         return { played: [...played], through: kept.map(({ detail }) => (detail as { through?: string }).through), missed: (yield* journal.unheard(0, 60)).map(({ said }) => said) }
       })
-    const said = { played: [fallback, "yapd. The loader is fixed."], through: [], missed: [] }
+    // Its Stop tells less than it did, so it isn't taken for all of it: what he didn't hear of it is still his to catch up on, told twice at worst.
+    const said = { played: [fallback, "yapd. The loader is fixed."], through: [], missed: [fallback] }
     // Its playback broke off, as when the audio helper quits.
     expect(
       await run(
@@ -5425,6 +5426,25 @@ describe("Daemon, one turn kept twice", () => {
     // The Stop's is what's told, and hearing it hears the one it took the place of.
     expect(result.newest).toBe(true)
     expect(result.heard).toEqual([true, true])
+  })
+
+  test("a turn of two questions kept unheard in its hook's place while yapd is off, whose Stop come late asks only the last, is told of with both, and neither is heard before it's told", async () => {
+    const both = "Which network, mainnet or testnet? Which deployment, staging or production?"
+    const last = "Which deployment, staging or production?"
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, journal } = yield* make(undefined, { ...loader, urgentMessages: [both, last] })
+        yield* toggle(false)
+        yield* made.finished(unhooked(both, "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        yield* handle("claude", stop(last, true), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        const told = yield* catchingUp(journal)
+        return { told: told.map(({ said }) => said).toSorted() }
+      }),
+    )
+    // Its Stop tells less than it did, so it doesn't take its place: the question asked first is never hidden behind the last.
+    expect(result.told).toEqual([`yapd. ${both}`, `yapd. ${last}`].toSorted())
   })
 
   for (const [how, options] of [
