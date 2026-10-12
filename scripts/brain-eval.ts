@@ -72,7 +72,9 @@ const logged = [
   { heard: "The most recent one with Mina.", thread: "Mina SSV2", open: mina, via: "reply" },
   { heard: "Migrate Tezos.", thread: "Tezos", open: tezos },
   { heard: "What's going on?", thread: "", act: "answer" },
-  { heard: "What did I miss?", thread: "", act: "answer" },
+  { heard: "What did I miss?", thread: "", act: "catchup" },
+  // Catching a thread up is telling it something: sent, never a catch-up for him.
+  { heard: "Catch the Tezos one up: we're going with TzKT's rounding.", thread: "Tezos", act: "send" },
   { heard: "How's the yapd review going?", thread: "yapd" },
   // 21:39: new work that names an existing thread, which is to be started, not sent to it.
   {

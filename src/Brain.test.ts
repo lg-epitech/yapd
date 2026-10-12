@@ -1839,6 +1839,7 @@ describe("catching up", () => {
     const prompt = Brain.prompt(situation("Catch me up."), Option.none())
     expect(prompt).toContain(`- "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it.`)
     expect(prompt).toContain(`A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD.`)
+    expect(prompt).toContain(`Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.`)
     expect(prompt).toContain(`"normal" when he's back, like "I'm back" or "you can talk normally again", which gives him the catch-up`)
     expect(prompt).not.toContain(`"how" is "missed"`)
     expect(Brain.enabled.has("catchup")).toBe(true)
