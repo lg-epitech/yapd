@@ -283,26 +283,6 @@ const asked = (part: Said) => {
   return `${[question, options].filter((text) => text !== "").join(" ")}${leaning(part)}`
 }
 
-/** The words of `text`, one after another, as they're said. */
-const wordsIn = (text: string) => text.split(/\s+/).filter((word) => word !== "")
-
-/**
- * Whether he spoke over a part as it was asked in `line` once all of its
- * question had been said, and nothing of yapd's pick, as `unsaid`, what it
- * hadn't said of the line yet, tells: some or all of the options read after
- * the question, and all of the pick. Never for a line that doesn't end on
- * the part as it's asked, like which one then or what the options mean, nor
- * for a part with no question of its own.
- */
-export const overOptions = (part: Said, line: string, unsaid: string) => {
-  if (part.question === "" || !line.endsWith(asked(part))) return false
-  const all = wordsIn(asked(part))
-  const question = wordsIn(asked({ ...part, read: false, recommended: Option.none() })).length
-  const pick = wordsIn(leaning(part)).length
-  const left = wordsIn(unsaid)
-  return left.length > 0 && left.length >= pick && left.length <= all.length - question && all.slice(-left.length).join(" ") === left.join(" ")
-}
-
 /** "Which one" or, when several can be picked, "Which of them". */
 const which = (part: Said) => (part.several ? "Which of them" : "Which one")
 

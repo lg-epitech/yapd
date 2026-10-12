@@ -2659,7 +2659,7 @@ describe("Assistant", () => {
     expect(await answering("Testnet, and devnet too I guess.", true)).toEqual(both)
   })
 
-  test("a plain yes said over a yes-or-no question's options, once he'd heard all of its question and none of yapd's pick, goes as the option the model takes it for, told what yapd hadn't said yet", async () => {
+  test("a plain yes said over a yes-or-no question, over the rest of its question as on 2026-10-12, its options or its pick, goes as the option the model takes it for, told what yapd hadn't said yet", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (unsaid: string) =>
       run(
@@ -2681,8 +2681,14 @@ describe("Assistant", () => {
           return { spoken: made.spoken(), answers: answered(made.dispatched), open: Option.isSome(yield* made.open), closed, told }
         }),
       )
-    // Said over all of its options, or the last of them, his yes goes to the thread.
-    for (const unsaid of ["Install it now or Not yet? I'd go with Install it now.", "Not yet? I'd go with Install it now."]) {
+    // Said over the rest of its question, as on 2026-10-12, when he said it each time as soon as he'd heard "shall I install and relaunch the
+    // redesigned Yapd menu bar app", over all of its options, the last of them, or yapd's pick, his yes goes to the thread.
+    for (const unsaid of [
+      "app now, knowing you may need to reposition its icon? Install it now or Not yet? I'd go with Install it now.",
+      "Install it now or Not yet? I'd go with Install it now.",
+      "Not yet? I'd go with Install it now.",
+      "it now.",
+    ]) {
       expect([unsaid, await answering(unsaid)]).toEqual([
         unsaid,
         { spoken: [`A question on Cloud deployment discovery, sir: ${installing}`, "Install it now it is, sir."], answers: [{ install: "Install it now (Recommended)" }], open: false, closed: ["answered"], told: [true] },
@@ -2690,7 +2696,7 @@ describe("Assistant", () => {
     }
   })
 
-  test("a plain yes said over a question's own words, as on 2026-10-12, over yapd's pick, over its own voice, or with no telling how far it had got, sends nothing however the model takes it: it's asked again in full", async () => {
+  test("a plain yes said over a question's first seconds, where its own voice may be in it, or with no telling how far it had got, sends nothing however the model takes it: it's asked again in full", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const answering = (unsaid?: string, echo?: string) =>
       run(
@@ -2709,28 +2715,26 @@ describe("Assistant", () => {
         }),
       )
     const again = { spoken: [`Again, sir: ${installing}`], answers: [], open: true, told: [true] }
-    // As on 2026-10-12, when, going by when he was heard, he said it each time as soon as he'd heard "shall I install and relaunch the
-    // redesigned Yapd menu bar app", before the rest of the question, which may change what a yes is to.
-    expect(await answering("app now, knowing you may need to reposition its icon? Install it now or Not yet? I'd go with Install it now.")).toEqual(again)
-    // Over yapd's pick, which a yes may be to.
-    expect(await answering("it now.")).toEqual(again)
     // Begun while its own voice could still get into the microphone, which some of his words may be.
     expect(await answering("Install it now or Not yet? I'd go with Install it now.", "Sir, shall I install and relaunch the redesigned Yapd menu bar app now")).toEqual(again)
     // Not known, as when he cut it off by dictating.
     expect(await answering()).toEqual(again)
   })
 
-  test("a plain yes said over 'which one' once yapd had read what each option means and its pick, which it may be to, never goes as the option the model takes it for, even the one meaning yes: it's asked again in full", async () => {
+  test("a plain yes said over 'which one' once yapd had read what each option means and its pick, which it may be to, is the model's to judge, told the pick: it's asked again in full when the model says so", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const force = { id: "force", header: "History", question: "Shall I force-push to fix the history?", options: [{ label: "Force-push" }, { label: "Leave it (Recommended)" }] }
     const result = await run(
       Effect.gen(function* () {
-        // A model that takes his yes for the option that says yes to the question, though he may have meant yapd's pick.
-        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Force-push", pending: "answers" }), undefined, {
-          others: [cloud],
-          items: card("q1", [force]),
-          waiting: true,
-        })
+        // A model that asks it again, as it's told to, when his yes may be to yapd's pick he'd heard rather than to the question.
+        const made = yield* assistant(
+          (situation) =>
+            Brain.prompt(situation, Option.none()).includes("you hadn't yet said «Which one, sir?». Your pick was «Leave it (Recommended)».")
+              ? Brain.decision({ act: "again", how: "same", target: handle(situation, cloud), pending: "answers" })
+              : Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Force-push", pending: "answers" }),
+          undefined,
+          { others: [cloud], items: card("q1", [force]), waiting: true },
+        )
         yield* asked(made, cloud)
         yield* made.play()
         yield* made.answer("What are the options?")

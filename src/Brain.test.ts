@@ -237,7 +237,7 @@ describe("Brain", () => {
     expect(looked).toContain("Asking him: «Which colour should the test use?» Its options: «Red», «Blue».")
   })
 
-  test("said over a thread's question's options, once he'd heard all of its question and none of yapd's pick, the model is told what yapd hadn't said yet, and that a plain yes or no is the option it means; otherwise, or for an approval, it's told as ever", () => {
+  test("spoken over, a thread's question is told to the model with what yapd hadn't said yet and its pick, to judge what he'd heard; begun over its own voice, not knowing how far it got, or for an approval, it's told as ever", () => {
     const { open } = questionOpen(1)
     const unheard: Assistant.Open = { ...open, ...(open.asks?._tag === "Question" ? { asks: { ...open.asks, inFull: false } } : {}) }
     /** The prompt for a yes said back to `asking`, with what yapd hadn't said yet when he began, if that's known, and what it was saying then, if it was over its own voice. */
@@ -246,21 +246,22 @@ describe("Brain", () => {
       return Brain.prompt({ ...said, utterance: { ...said.utterance, via: "reply", ...(unsaid === undefined ? {} : { unsaid }), ...(echo === undefined ? {} : { echo }) } }, Option.none())
     }
     const conservative = `He stopped you before the end, so he may not have heard every option, nor that you'd go with «Gamma (Recommended)»: what doesn't name an option`
-    // Over its options, all of them or the last few, the pick unsaid.
-    for (const unsaid of ["Any of Alpha, Beta and Gamma? I'd go with Gamma.", "and Gamma? I'd go with Gamma."]) {
+    // Over its options, over its pick, or over the rest of its question, as on 2026-10-12: the model judges what he'd heard.
+    for (const unsaid of ["Any of Alpha, Beta and Gamma? I'd go with Gamma.", "go with Gamma.", "extras should run? Any of Alpha, Beta and Gamma? I'd go with Gamma."]) {
       const told = over(unheard, unsaid)
-      expect(told).toContain(`He spoke over you once he'd heard all of the question, before your pick: you hadn't yet said «${unsaid}».`)
-      expect(told).toContain(`A plain yes or no, like "yes", "approved", "go ahead", "no" or "no thanks", to a yes-or-no question, where just one option means that yes, or that no, is that option.`)
-      expect(told).toContain(`What may be about options he hadn't heard yet, like "the last one", "the second", "that one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`)
+      expect(told).toContain(`He spoke over you, so he'd heard only what you'd said by then: you hadn't yet said «${unsaid}». Your pick was «Gamma (Recommended)». Judge his words by what he'd heard.`)
+      expect(told).toContain(
+        `A plain yes or no, like "yes", "approved", "go ahead", "no" or "no thanks", to a yes-or-no question is the one option that means that yes, or that no, even said before the end of the question, when what he hadn't heard of it only adds detail`,
+      )
+      expect(told).toContain(`When what he hadn't heard could change what a yes agrees to, like another step, a condition or a choice between things, or when more than one option could be that yes or that no, it's "again" with "how" "same"`)
+      expect(told).toContain(`Once he'd heard any of your pick, a yes may be to it: take it only when your pick is the option that yes means.`)
+      expect(told).toContain(`What may be about options he hadn't heard yet, like "the last one", "the second", "that one" or "yeah, that works", is "again" with "how" "same".`)
       expect(told).not.toContain("He stopped you before the end")
       expect(told).not.toContain("You said you'd go with")
     }
-    // Some of yapd's pick said, which his yes may be to, or some of the question unsaid, or begun over its own voice, which his words may be,
-    // or not known how far it had got, as when he dictated over it: nothing that doesn't name an option is one, as before.
+    // Begun over its own voice, which his words may be, or not known how far it had got, as when he dictated over it: nothing that doesn't
+    // name an option is one, as before.
     for (const [unsaid, echo] of [
-      ["Gamma.", undefined],
-      ["go with Gamma.", undefined],
-      ["extras should run? Any of Alpha, Beta and Gamma? I'd go with Gamma.", undefined],
       ["Any of Alpha, Beta and Gamma? I'd go with Gamma.", "Which test extras should run? Any of Alpha"],
       [undefined, undefined],
     ] as const) {

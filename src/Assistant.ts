@@ -3108,13 +3108,13 @@ export const make = (options: {
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
           // Said before he heard it all, what doesn't name an option, like "the last one" or a plain yes, may be to one he's yet to hear, or
           // to yapd's pick he never heard, however the model took it, alone or with others he named: it's asked again in full. Not when he
-          // said it over its options, once he'd heard all of its question and none of the pick, as what it hadn't said yet tells: the model
-          // was told so, and a plain yes then can only be to the question itself. Asked which one then, the pick is the one option left, as
-          // `leaning` has it.
+          // spoke over it and yapd knows what it hadn't said yet, which the model was told, to judge what he'd heard, as he asked on
+          // 2026-10-12, when his "Yes." to "shall I install … now" was asked again till it was let go. Asked which one then, the pick is the
+          // one option left, as `leaning` has it.
           if (
             decided.source === "model" &&
             part !== undefined &&
-            !Brain.pastQuestion({ ...open, ...leaning(open) }, utterance) &&
+            !Brain.spokeOver(utterance) &&
             !heardBy(utterance, opened.whole) &&
             answer?._tag === "Picked" &&
             answer.options.some((index) => !Questions.mentions(part, index, utterance.heard))

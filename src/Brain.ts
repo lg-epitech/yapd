@@ -2332,15 +2332,12 @@ const usageLines = (usage: Option.Option<Threads.Usage>, now: number) =>
   })
 
 /**
- * Whether what he said to a thread's question came over its options, once
- * he'd heard all of the part's question but nothing of yapd's pick, as what it
- * hadn't said yet when he began, `unsaid`, tells: a plain yes or no can only
- * be to the question itself then. Never when that isn't known, as for what he
- * dictates, nor when he began over yapd's own voice, which some of his words
- * may be.
+ * Whether the model judges what he'd heard of a thread's question he spoke
+ * over, told what yapd hadn't said of it yet when he began, `unsaid`: whenever
+ * that's known, and he didn't begin over yapd's own voice, which some of his
+ * words may be. Never for what he dictates over it, which doesn't tell.
  */
-export const pastQuestion = (open: Pick<Assistant.Open, "asked" | "wording">, utterance: Pick<Assistant.Utterance, "unsaid" | "echo">) =>
-  open.wording !== undefined && utterance.unsaid !== undefined && utterance.echo === undefined && Questions.overOptions(open.wording.part, open.asked, utterance.unsaid)
+export const spokeOver = (utterance: Pick<Assistant.Utterance, "unsaid" | "echo">) => utterance.unsaid !== undefined && utterance.echo === undefined
 
 /**
  * What a yes, a no or an answer does to what a thread waits on him for, which
@@ -2348,7 +2345,7 @@ export const pastQuestion = (open: Pick<Assistant.Open, "asked" | "wording">, ut
  * answered of it before, its options and what they mean, and yapd's pick;
  * and when he spoke over its options, what it hadn't said yet.
  */
-const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording" | "asked">, utterance: Pick<Assistant.Utterance, "unsaid" | "echo">) => {
+const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording">, utterance: Pick<Assistant.Utterance, "unsaid" | "echo">) => {
   const { asks } = open
   switch (asks?._tag) {
     case "Approval":
@@ -2367,7 +2364,7 @@ const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording" | "asked">, utt
         return [`${fenced(asked, 80)} → ${fenced(given, 80)}`]
       })
       const pick = Option.flatMap(part?.recommended ?? Option.none<number>(), (index) => Option.fromNullable(question.options[index]?.label))
-      const unsaid = pastQuestion(open, utterance) ? utterance.unsaid : undefined
+      const unsaid = spokeOver(utterance) ? utterance.unsaid : undefined
       return [
         `\nIt asks the thread's question for it${asks.questions.length === 1 ? "" : `, part ${asks.part + 1} of ${asks.questions.length}`}.`,
         ...(answered.length === 0 ? [] : [`He answered already: ${answered.join("; ")}.`]),
@@ -2378,13 +2375,14 @@ const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording" | "asked">, utt
               `Its options: ${question.options.map(({ label, description }) => `${fenced(label, 80)}${description.trim() === "" ? "" : ` (${fenced(description, 80)})`}`).join(", ")}.`,
               ...(question.multiSelect ? ["Several can be picked."] : []),
             ]),
-        // Cut off before the end, he may not have heard every option, nor yapd's pick, however his words sound. Said over its options, once
-        // he'd heard all of its question and none of the pick, a plain yes or no can only be to the question, which can be its answer.
+        // Cut off before the end, he may not have heard every option, nor yapd's pick, however his words sound. Spoken over, the model is told
+        // what he hadn't heard yet, and judges whether his words answer what he had: a yes to a question whose rest only adds detail is its
+        // yes, as he'd mean it, while one the rest could change, or that may be to options or a pick he hadn't heard, is asked again.
         ...(asks.inFull
           ? Option.match(pick, { onNone: () => [], onSome: (label) => [`You said you'd go with ${fenced(label, 80)}.`] })
           : unsaid !== undefined
             ? [
-                `He spoke over you once he'd heard all of the question, before your pick: you hadn't yet said ${fenced(unsaid, 400)}. His words are an option only when they answer what he'd heard. A plain yes or no, like "yes", "approved", "go ahead", "no" or "no thanks", to a yes-or-no question, where just one option means that yes, or that no, is that option. What may be about options he hadn't heard yet, like "the last one", "the second", "that one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`,
+                `He spoke over you, so he'd heard only what you'd said by then: you hadn't yet said ${fenced(unsaid, 400)}.${Option.match(pick, { onNone: () => "", onSome: (label) => ` Your pick was ${fenced(label, 80)}.` })} Judge his words by what he'd heard. A plain yes or no, like "yes", "approved", "go ahead", "no" or "no thanks", to a yes-or-no question is the one option that means that yes, or that no, even said before the end of the question, when what he hadn't heard of it only adds detail, like a note on what comes after. When what he hadn't heard could change what a yes agrees to, like another step, a condition or a choice between things, or when more than one option could be that yes or that no, it's "again" with "how" "same", to ask it in full. Once he'd heard any of your pick, a yes may be to it: take it only when your pick is the option that yes means. What may be about options he hadn't heard yet, like "the last one", "the second", "that one" or "yeah, that works", is "again" with "how" "same".`,
               ]
             : [
                 `He stopped you before the end, so he may not have heard every option${Option.match(pick, { onNone: () => "", onSome: (label) => `, nor that you'd go with ${fenced(label, 80)}` })}: what doesn't name an option, like "the last one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`,
