@@ -317,6 +317,8 @@ const make = (says?: string, options: {
       readonly terms?: ReadonlyArray<string>
       /** Where the question takes whatever's said over it or right after for its answer, noted, rather than leaving it unanswered. */
       readonly answers?: Array<string>
+      /** What of the question it hadn't said yet, each time it's given what was said to it, as it's told that. */
+      readonly unheard?: Array<string | undefined>
       readonly gone?: Array<string>
       readonly followUp?: Array<string>
     } = {},
@@ -342,8 +344,11 @@ const make = (says?: string, options: {
         ? {}
         : {
             question: {
-              answer: (heard: string) =>
-                Effect.succeed(options.answers === undefined ? Option.none() : Option.some(Effect.sync(() => void options.answers?.push(`${id}: ${heard}`)))),
+              answer: (heard: string, _voiced: number, _echo?: string, _afterPause?: string, unsaid?: string) =>
+                Effect.sync(() => {
+                  options.unheard?.push(unsaid)
+                  return options.answers === undefined ? Option.none() : Option.some(Effect.sync(() => void options.answers?.push(`${id}: ${heard}`)))
+                }),
               ...(options.terms === undefined ? {} : { terms: options.terms }),
               unanswered: Effect.sync(() => void options.question?.push(`${id} unanswered`)),
               unsaid: Effect.sync(() => {
@@ -1667,6 +1672,27 @@ describe("Daemon", () => {
       }),
     )
     expect(result).toEqual([["Mainnet", "Ghostnet"]])
+  })
+
+  test("what he says over a question goes to it with what it hadn't said yet a moment before he began, and nothing of that once all of it was said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, speak, wait } = yield* make("Ghostnet.")
+        const answers: Array<string> = []
+        const unheard: Array<string | undefined> = []
+        // Over it three seconds in, which stops it at two of its ten; then after another, once it's been said to the end.
+        yield* notice("over", "Which network first? Mainnet or Ghostnet?", { question: [], answers, unheard })
+        yield* wait(3)
+        yield* speak
+        yield* wait(11)
+        yield* notice("after", "Which network first? Mainnet or Ghostnet?", { question: [], answers, unheard })
+        yield* wait(11)
+        yield* speak
+        yield* wait(11)
+        return { answers, unheard }
+      }),
+    )
+    expect(result).toEqual({ answers: ["over: Ghostnet.", "after: Ghostnet."], unheard: ["network first? Mainnet or Ghostnet?", undefined] })
   })
 
   test("what yapd says is done with once it's said, gone stale, cut off and not put back, dropped or never queued, but not while it's put back", async () => {

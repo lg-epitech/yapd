@@ -46,10 +46,10 @@ export interface Utterance {
   /** With `echo`, what he said once he carried on after a pause, which is surely his, as yapd had stopped by then. */
   readonly afterPause?: string
   /**
-   * Said over a question yapd was asking, what it hadn't said of it yet when
-   * it stopped, as far as where it had got to tells, like its options and its
-   * pick: none when all of it was said, or when that isn't known, as for what
-   * he dictates.
+   * Said over a question yapd was asking, what it hadn't said of it yet a
+   * moment before he began, as far as where it had got to tells, like its
+   * options and its pick: none when all of it was said, or when that isn't
+   * known, as for what he dictates.
    */
   readonly unsaid?: string
 }
@@ -3108,13 +3108,13 @@ export const make = (options: {
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
           // Said before he heard it all, what doesn't name an option, like "the last one" or a plain yes, may be to one he's yet to hear, or
           // to yapd's pick he never heard, however the model took it, alone or with others he named: it's asked again in full. Not when he
-          // said it over the question, which tells how far it had got: the model was told what it hadn't said yet, and took his words only
-          // for what he'd heard by then, as a plain yes to the question itself. Asked which one then, the pick is the one option left, as
+          // said it over its options, once he'd heard all of its question and none of the pick, as what it hadn't said yet tells: the model
+          // was told so, and a plain yes then can only be to the question itself. Asked which one then, the pick is the one option left, as
           // `leaning` has it.
           if (
             decided.source === "model" &&
             part !== undefined &&
-            utterance.unsaid === undefined &&
+            !Brain.pastQuestion({ ...open, ...leaning(open) }, utterance) &&
             !heardBy(utterance, opened.whole) &&
             answer?._tag === "Picked" &&
             answer.options.some((index) => !Questions.mentions(part, index, utterance.heard))

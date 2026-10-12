@@ -264,6 +264,32 @@ describe("Questions", () => {
     expect(wording(part("Which library?", ["`date-fns`", "Day.js"]))[0]!.terms).toEqual(["date-fns", "Day.js"])
   })
 
+  test("he spoke over a part's options only when all of its question had been said and none of yapd's pick, as what wasn't said yet tells, in a line that asks it", () => {
+    const force = part("Shall I force-push to fix the history?", ["Force-push", "Leave it (Recommended)"])
+    const asking = wording(force)[0]!
+    expect(asking.first).toBe("A question on the Tezos migration, sir: Shall I force-push to fix the history? Force-push or Leave it? I'd go with Leave it.")
+    const over = (unsaid: string, line = asking.first) => Questions.overOptions(force, line, unsaid)
+    // Over all of its options, some of them, or none of them but before the pick.
+    expect(over("Force-push or Leave it? I'd go with Leave it.")).toBe(true)
+    expect(over("Leave it? I'd go with Leave it.")).toBe(true)
+    expect(over("I'd go with Leave it.")).toBe(true)
+    expect(over("Force-push or Leave it? I'd go with Leave it.", asking.again[0])).toBe(true)
+    // Some of its question unsaid, some of the pick said, nothing unsaid, or words the line doesn't end on.
+    expect(over("history? Force-push or Leave it? I'd go with Leave it.")).toBe(false)
+    expect(over("go with Leave it.")).toBe(false)
+    expect(over("it.")).toBe(false)
+    expect(over("")).toBe(false)
+    expect(over("Force-push or Leave it? I'd go with Force-push.")).toBe(false)
+    // Asked what the options mean, or which one, the line holds no question of its own to say yes to.
+    expect(over("Which one, sir?", asking.more)).toBe(false)
+    expect(over("Leave it? I'd go with Leave it.", asking.which)).toBe(false)
+    // Nor is there one in a part read only by its options.
+    const shade = Questions.said(question("", ["Red", "Blue"]), Option.none())
+    const shading = wording(shade)[0]!.first
+    expect(shading).toBe("A question on the Tezos migration, sir: Red or Blue?")
+    expect(Questions.overOptions(shade, shading, "Blue?")).toBe(false)
+  })
+
   test("a question with too many options or parts to take in is only told, with what it asks", () => {
     expect(told(part("Which network first?", ["Mainnet", "Ghostnet", "Shadownet", "Weeklynet", "Localnet"]))).toEqual(
       Option.some("A question on the Tezos migration, sir: Which network first? It has five options, so it's waiting for you in T3 Code."),

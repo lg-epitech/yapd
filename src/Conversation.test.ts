@@ -637,9 +637,54 @@ describe("Questions", () => {
           return told
         }),
       )
-    // A fifth of "Which project is it for?" was said.
+    // Only its first word was said by a moment before he began.
     expect(await told(true)).toEqual(["project is it for?"])
     expect(await told(false)).toEqual([undefined])
+  })
+
+  /** A line of twenty words, read out over ten seconds: one every half second. */
+  const counting = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"
+
+  test("tells the answer what of the question yapd hadn't said yet a moment before the user began, never from where it stopped once what they said was clearly speech", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Yes."]], { spoken: counting, ask: true, live: true })
+        yield* helper.wait(6)
+        // A halting start, clearly speech only most of a second after he began.
+        yield* helper.talk(0.9, 1)
+        for (let sound = 1; sound < defaults.confirm; sound++) {
+          yield* helper.talk(0, defaults.abandon - 2)
+          yield* helper.talk(0.9, 1)
+        }
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { stopped: helper.timeline.find(({ type }) => type === "stop")?.at ?? 0, unheard: helper.unheard }
+      }),
+    )
+    // Begun six seconds in, after its twelfth word, of which he's taken to have heard eleven; it stopped near seven, after its thirteenth.
+    expect(result.stopped).toBeGreaterThan(6.6)
+    expect(result.unheard).toEqual(["twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"])
+  })
+
+  test("tells the answer what of the question yapd hadn't said yet by where it had got to in all of it, once it picked up again after its own voice stopped it over its first seconds", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.9, "Yes."]], { spoken: counting, ask: true, live: true })
+        // Only its own voice, which Whisper hears nothing in, two and a half seconds in.
+        yield* helper.wait(2.5)
+        yield* helper.talk(0.8, defaults.wary)
+        yield* helper.quiet
+        // Him, three seconds after it picked up again.
+        yield* helper.wait(3)
+        yield* helper.talk(0.9, 10)
+        yield* helper.quiet
+        yield* helper.wait(1)
+        return { plays: helper.plays.map(seconds), unheard: helper.unheard }
+      }),
+    )
+    // Begun five seconds into the line, after its tenth word, of which he's taken to have heard nine: not three seconds in, from where it picked up.
+    expect(result).toEqual({ plays: [0, 1.892], unheard: ["ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"] })
   })
 
   test("leaves a question unanswered when nothing is said, or nothing meant for it", async () => {
@@ -769,7 +814,8 @@ const first = "Over in yapd, the tests pass now and the pull request is ready"
  * says back in `rendered`. With `answer`, it says an answer of yapd's in the
  * same words instead, which takes anything said for a follow-up, kept in
  * `followed`, unless `follow` says otherwise, and all it's offered, with
- * what yapd was saying around then when it's told that, in `offered`. Its
+ * what yapd was saying around then when it's told that, in `offered`, and
+ * what it hadn't said yet then, when it's told that, in `unheard`. Its
  * fiber ends with whether the update was heard, or the answer followed up.
  */
 const overHelper = (
@@ -808,6 +854,7 @@ const overHelper = (
     const rendered: Array<string> = []
     const followed: Array<string> = []
     const offered: Array<{ readonly heard: string; readonly echo?: string; readonly afterPause?: string }> = []
+    const unheard: Array<string | undefined> = []
     let first: number | undefined
     let connection: Socket<Helper.Decoder> | undefined
     let running = false
@@ -944,8 +991,11 @@ const overHelper = (
           )
         : frames(value, count)
     const spoken = options.spoken ?? long.spoken
-    const respond = (heard: string, _: number, echo?: string, afterPause?: string) =>
-      Effect.sync(() => void offered.push({ heard, ...(echo === undefined ? {} : { echo }), ...(afterPause === undefined ? {} : { afterPause }) })).pipe(
+    const respond = (heard: string, _: number, echo?: string, afterPause?: string, unsaid?: string) =>
+      Effect.sync(() => {
+        offered.push({ heard, ...(echo === undefined ? {} : { echo }), ...(afterPause === undefined ? {} : { afterPause }) })
+        unheard.push(unsaid)
+      }).pipe(
         Effect.zipRight(Effect.sleep(`${options.responding ?? 0} seconds`)),
         Effect.as((options.follow?.(heard, echo, afterPause) ?? true) ? Option.some(Effect.sync(() => void followed.push(heard))) : Option.none()),
       )
@@ -969,6 +1019,7 @@ const overHelper = (
       rendered,
       followed,
       offered,
+      unheard,
       talk,
       quiet: talk(0, defaults.silence),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),

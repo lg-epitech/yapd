@@ -714,6 +714,17 @@ const extras = {
   multiSelect: true,
 }
 
+/** A yes-or-no part, as a thread asked it on 2026-10-12, when he said "Yes." to it before he'd heard it all and it was asked again till it was let go. */
+const install = {
+  id: "install",
+  header: "Install",
+  question: "Sir, shall I install and relaunch the redesigned Yapd menu bar app now, knowing you may need to reposition its icon?",
+  options: [{ label: "Install it now (Recommended)" }, { label: "Not yet" }],
+}
+
+/** It, as it's asked. */
+const installing = "Sir, shall I install and relaunch the redesigned Yapd menu bar app now, knowing you may need to reposition its icon? Install it now or Not yet? I'd go with Install it now."
+
 /** What's sent in answer to the questions threads asked. */
 const answered = (dispatched: ReadonlyArray<Record<string, unknown>>) => dispatched.filter(({ type }) => type === "runtime-request.respond").map(({ answers }) => answers)
 
@@ -2648,17 +2659,9 @@ describe("Assistant", () => {
     expect(await answering("Testnet, and devnet too I guess.", true)).toEqual(both)
   })
 
-  test("a plain yes said over a yes-or-no question once he'd heard it, before its options, goes as the option the model takes it for; with no telling how far it had got, it's asked again in full", async () => {
+  test("a plain yes said over a yes-or-no question's options, once he'd heard all of its question and none of yapd's pick, goes as the option the model takes it for, told what yapd hadn't said yet", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
-    // As a thread asked it on 2026-10-12, when he said "Yes." as soon as he'd heard the question, and was asked it again till it was let go.
-    const install = {
-      id: "install",
-      header: "Install",
-      question: "Sir, shall I install and relaunch the redesigned Yapd menu bar app now, knowing you may need to reposition its icon?",
-      options: [{ label: "Install it now (Recommended)" }, { label: "Not yet" }],
-    }
-    const line = "Sir, shall I install and relaunch the redesigned Yapd menu bar app now, knowing you may need to reposition its icon? Install it now or Not yet? I'd go with Install it now."
-    const answering = (unsaid?: string) =>
+    const answering = (unsaid: string) =>
       run(
         Effect.gen(function* () {
           // A model that takes his yes for the option that means it, as the real one did.
@@ -2674,23 +2677,73 @@ describe("Assistant", () => {
             const open = (detail as { readonly open?: unknown }).open
             return typeof open === "string" ? [open] : []
           })
-          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()).includes(`you hadn't yet said «${unsaid}»`))
           return { spoken: made.spoken(), answers: answered(made.dispatched), open: Option.isSome(yield* made.open), closed, told }
         }),
       )
-    // Said over its options: the model's told what he hadn't heard yet, and his yes goes to the thread.
-    const over = await answering("Install it now or Not yet? I'd go with Install it now.")
-    expect(over.told.map((prompt) => prompt.includes("you hadn't yet said «Install it now or Not yet? I'd go with Install it now.»"))).toEqual([true])
-    expect(over.spoken).toEqual([`A question on Cloud deployment discovery, sir: ${line}`, "Install it now it is, sir."])
-    expect(over.answers).toEqual([{ install: "Install it now (Recommended)" }])
-    expect(over.open).toBe(false)
-    expect(over.closed).toEqual(["answered"])
-    // Not known, as when he cut it off by dictating, the yes may be to yapd's pick he never heard: nothing goes, and it's asked again in full.
-    const unknown = await answering()
-    expect(unknown.spoken).toEqual([`A question on Cloud deployment discovery, sir: ${line}`, `Again, sir: ${line}`])
-    expect(unknown.answers).toEqual([])
-    expect(unknown.open).toBe(true)
-    expect(unknown.closed).toEqual([])
+    // Said over all of its options, or the last of them, his yes goes to the thread.
+    for (const unsaid of ["Install it now or Not yet? I'd go with Install it now.", "Not yet? I'd go with Install it now."]) {
+      expect([unsaid, await answering(unsaid)]).toEqual([
+        unsaid,
+        { spoken: [`A question on Cloud deployment discovery, sir: ${installing}`, "Install it now it is, sir."], answers: [{ install: "Install it now (Recommended)" }], open: false, closed: ["answered"], told: [true] },
+      ])
+    }
+  })
+
+  test("a plain yes said over a question's own words, as on 2026-10-12, over yapd's pick, over its own voice, or with no telling how far it had got, sends nothing however the model takes it: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const answering = (unsaid?: string, echo?: string) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes his yes for the option that means it.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Install it now (Recommended)", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [install]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* made.cut()
+          yield* made.answer("Yes.", undefined, echo, undefined, unsaid)
+          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()).includes("He stopped you before the end, so he may not have heard every option"))
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open), told }
+        }),
+      )
+    const again = { spoken: [`Again, sir: ${installing}`], answers: [], open: true, told: [true] }
+    // As on 2026-10-12, when, going by when he was heard, he said it each time as soon as he'd heard "shall I install and relaunch the
+    // redesigned Yapd menu bar app", before the rest of the question, which may change what a yes is to.
+    expect(await answering("app now, knowing you may need to reposition its icon? Install it now or Not yet? I'd go with Install it now.")).toEqual(again)
+    // Over yapd's pick, which a yes may be to.
+    expect(await answering("it now.")).toEqual(again)
+    // Begun while its own voice could still get into the microphone, which some of his words may be.
+    expect(await answering("Install it now or Not yet? I'd go with Install it now.", "Sir, shall I install and relaunch the redesigned Yapd menu bar app now")).toEqual(again)
+    // Not known, as when he cut it off by dictating.
+    expect(await answering()).toEqual(again)
+  })
+
+  test("a plain yes said over 'which one' once yapd had read what each option means and its pick, which it may be to, never goes as the option the model takes it for, even the one meaning yes: it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const force = { id: "force", header: "History", question: "Shall I force-push to fix the history?", options: [{ label: "Force-push" }, { label: "Leave it (Recommended)" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        // A model that takes his yes for the option that says yes to the question, though he may have meant yapd's pick.
+        const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Force-push", pending: "answers" }), undefined, {
+          others: [cloud],
+          items: card("q1", [force]),
+          waiting: true,
+        })
+        yield* asked(made, cloud)
+        yield* made.play()
+        yield* made.answer("What are the options?")
+        yield* made.cut()
+        yield* made.answer("Yes.", undefined, undefined, undefined, "Which one, sir?")
+        return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    expect(result).toEqual({
+      spoken: ["Force-push. Leave it. I'd go with Leave it. Which one, sir?", "Again, sir: Shall I force-push to fix the history? Force-push or Leave it? I'd go with Leave it."],
+      answers: [],
+      open: true,
+    })
   })
 
   test("an option picked by where it came, said over the question before he'd heard them all, is asked again in full when the model says so, told what he hadn't heard", async () => {

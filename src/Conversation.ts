@@ -80,8 +80,8 @@ type Outcome =
        * some of that, or his first word lost under it.
        */
       readonly echo?: string
-      /** How far into the line he began, then. */
-      readonly onset?: number
+      /** How far into the line he began, which is no further than where it stopped: what he'd heard of it when he spoke. */
+      readonly onset: number
     }
 
 /** How long the microphone stays open after yapd stops, for a reply to what it just said. */
@@ -118,6 +118,13 @@ export const ownVoice = "Stopped for its own voice over its first seconds, so it
 export const notMeant = "Picked up again over its first seconds after talk not meant for it"
 /** How near its end a line can be stopped and still count as said, with nothing of it left to go back to. */
 const ending = 0.3
+/**
+ * How long before he began talking over a question the words yapd was saying
+ * may not have been taken in, as he was about to speak by then: what he'd
+ * heard of it is reckoned to that moment, so it errs towards his having heard
+ * less, never more.
+ */
+const reaction = 0.3
 /** Talk that wasn't meant for yapd, after which the rest of an update plays without listening, say for a TV. */
 const misses = 3
 /** How long to wait for the rest when the user trails off, before working out a reply. */
@@ -218,9 +225,9 @@ export interface Question {
    * first words heard may be some of it, or their first word lost under it.
    * With it, `afterPause` is what they said once they carried on after a
    * pause, when they did, which is surely theirs, as yapd had stopped by then.
-   * Said over it, `unsaid` is what yapd hadn't said of it yet when it
-   * stopped, as far as where it had got to tells, like its options: none
-   * when all of it was said.
+   * Said over it, `unsaid` is what yapd hadn't said of it yet a moment
+   * before they began, as far as where it had got to tells, like its
+   * options: none when all of it was said.
    */
   readonly answer: (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
@@ -397,8 +404,9 @@ export const make = (options: {
         /** Played to the end, even with a stop for him to speak still being answered. */
         let completed = false
         let stoppedAt: number | undefined
-        /** How far into the line he began what he's saying, when that was while yapd's own voice could still get into the microphone. */
-        let echoing: number | undefined
+        /** How far into the line he began what he's saying, and whether that was while yapd's own voice could still get into the microphone. */
+        let onset: number | undefined
+        let echoing = false
         let lingering: { readonly id: number; readonly fiber: Fiber.RuntimeFiber<void> } | undefined
         const stopLingering = Effect.suspend(() => {
           const fiber = lingering?.fiber
@@ -431,7 +439,8 @@ export const make = (options: {
           switch (signal._tag) {
             case "Onset":
               speaking = true
-              echoing = signal.echo ? yield* position : undefined
+              onset = yield* position
+              echoing = signal.echo
               yield* stopLingering
               if (playing) yield* playback.volume(ducked)
               break
@@ -450,6 +459,7 @@ export const make = (options: {
               break
             case "Utterance": {
               const at = stoppedAt ?? playback.duration
+              const begun = onset ?? at
               return {
                 _tag: "Interrupted",
                 at,
@@ -457,9 +467,8 @@ export const make = (options: {
                 audio: signal.audio,
                 ear,
                 // To where it stopped, or where he began, should the helper put that a moment before.
-                ...(echoing === undefined
-                  ? {}
-                  : { echo: between(text, playback.duration, echoing - reach, Math.max(at, echoing) + reach), onset: Math.min(at, echoing) }),
+                onset: Math.min(at, begun),
+                ...(echoing ? { echo: between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) } : {}),
               } satisfies Outcome
             }
             case "Finished":
@@ -680,7 +689,7 @@ export const make = (options: {
      * all of it may yet have been its own voice, `unsure`.
      */
     const whose = (outcome: Extract<Outcome, { readonly _tag: "Interrupted" }>, first: string) => {
-      const { echo, onset = outcome.at } = outcome
+      const { echo, onset } = outcome
       if (echo === undefined) return { itself: false, unsure: false }
       if (first === "") return { itself: true, unsure: true }
       const past = voiced(outcome.audio) - Math.max(0, outcome.at - onset) > overhang
@@ -949,8 +958,9 @@ export const make = (options: {
           const first = yield* hear(outcome.audio)
           // Nothing heard over its first seconds is its own voice, no answer, nor talk that wasn't meant for yapd.
           const { itself, echo, unsure } = whose(outcome, first)
-          // What it hadn't said yet, as for an update, so what he could have heard of it is known, like a question's options.
-          const left = unsaid(said.spoken, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
+          // What it hadn't said yet when he began, a moment before, so what he could have heard of it is known, like a question's options:
+          // never from where it stopped, which takes him for having heard what it said as he was already talking. Nothing once all of it was.
+          const left = outcome.at < outcome.duration ? unsaid(said.spoken, Math.max(0, outcome.onset - reaction) / outcome.duration) : ""
           const reply =
             itself || first === ""
               ? Option.none()
