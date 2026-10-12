@@ -93,8 +93,8 @@ export interface Modes {
   readonly setDetail: (detail: Detail) => Effect.Effect<void>
   /** When he was last briefed on what was held, which the digest counts from. */
   readonly briefedAt: Effect.Effect<number>
-  /** He was briefed on what was held, or offered it, just now. */
-  readonly briefed: Effect.Effect<void>
+  /** He was briefed on what was held until `at`, or offered it, just now when not said: never earlier than before. */
+  readonly briefed: (at?: number) => Effect.Effect<void>
 }
 
 /** The modes, as `settings` kept them, each change noted in `journal`. */
@@ -137,14 +137,17 @@ export const make = (options: { readonly settings: Settings.Settings["Type"]; re
           yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "action", detail: { detail } })
         }),
       briefedAt: Effect.sync(() => briefedAt),
-      briefed: Effect.flatMap(Clock.currentTimeMillis, (now) =>
-        Effect.zipRight(
-          Effect.sync(() => {
-            briefedAt = now
-          }),
-          keep("briefedAt", String(now)),
+      briefed: (at) =>
+        Effect.flatMap(at === undefined ? Clock.currentTimeMillis : Effect.succeed(at), (at) =>
+          at <= briefedAt
+            ? Effect.void
+            : Effect.zipRight(
+                Effect.sync(() => {
+                  briefedAt = at
+                }),
+                keep("briefedAt", String(at)),
+              ),
         ),
-      ),
     }
     return modes
   })
@@ -158,8 +161,8 @@ export interface Running {
   readonly idle: Effect.Effect<Option.Option<number>>
   /** Holds what waits to be said that a mute could keep quiet, as focus or quiet begins. */
   readonly hold: (why: Hold) => Effect.Effect<void>
-  /** Briefs him on what was held, as a digest. */
-  readonly digest: (rows: ReadonlyArray<Kept>) => Effect.Effect<void>
+  /** Briefs him on what was held, as a digest, of what was held until `at`: once it's said, through `briefed`, as it may never be. */
+  readonly digest: (rows: ReadonlyArray<Kept>, at: number) => Effect.Effect<void>
   /** Offers him the rundown of what was held while focus or quiet was on, once. */
   readonly rundown: (count: number, was: Hold) => Effect.Effect<void>
 }
@@ -175,6 +178,8 @@ export const run = (modes: Modes, running: Running, look: Duration.DurationInput
     const { journal } = running
     const scope = yield* Effect.scope
     const expiry = yield* FiberHandle.make()
+    /** When a digest was last brought up, said or not, so a model that's down isn't asked every few seconds. */
+    let tried = 0
 
     /**
      * A mode ended other than by "I'm back": the rundown is offered, once,
@@ -189,7 +194,7 @@ export const run = (modes: Modes, running: Running, look: Duration.DurationInput
         const held = yield* journal.held(was.since ?? 0)
         if (held.length === 0) return
         // What he's offered isn't brought up by the digest as well.
-        yield* modes.briefed
+        yield* modes.briefed()
         yield* running.rundown(held.length, was.mode)
       })
 
@@ -220,15 +225,16 @@ export const run = (modes: Modes, running: Running, look: Duration.DurationInput
       if (mode.mode !== "normal") return
       const now = yield* Clock.currentTimeMillis
       const briefedAt = yield* modes.briefedAt
-      if (now - briefedAt < digesting.every) return
+      if (now - Math.max(briefedAt, tried) < digesting.every) return
       const idle = yield* running.idle
       if (Option.isNone(idle) || idle.value < digesting.quiet) return
       const held = yield* journal.held(Math.max(briefedAt, now - digesting.window))
       const oldest = held[0]
       if (oldest === undefined || (held.length < digesting.enough && now - oldest.at < digesting.oldest)) return
-      // Counted from now, whether or not it could be said, so a model that's down isn't asked every few seconds.
-      yield* modes.briefed
-      yield* running.digest(held)
+      // Spaced from now, whether or not it's said; but what it covers counts as told only once it is, so what a digest that failed, or
+      // that focus began ahead of, would have said comes up in the next.
+      tried = now
+      yield* running.digest(held, now)
     })
 
     yield* Effect.forkScoped(Stream.runForEach(Stream.changesWith(Stream.map(modes.changes, ({ mode }) => mode), (one, other) => one === other), follow))

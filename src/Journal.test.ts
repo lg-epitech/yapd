@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Option, Stream } from "effect"
+import { Clock, Effect, Fiber, Option, Stream } from "effect"
 import * as Journal from "./Journal.ts"
 
 describe("Journal", () => {
@@ -221,6 +221,25 @@ describe("Journal", () => {
     ])
     expect(kept.lately).toEqual([kept.ids.said])
     expect(kept.unheard).toEqual([kept.ids.said])
+  })
+
+  test("news of the same work leaves only progress held for later out of date, never what focus held of it, and what's held late counts from then", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const progress = Option.getOrThrow(yield* journal.write({ at: 10, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Pass 7 is running.", detail: { held: "progress" } }))
+        const done = Option.getOrThrow(yield* journal.write({ at: 20, kind: "update", machine: "Rosie", thread: "t-tezos", said: "The fee table is in.", detail: { held: "focus" } }))
+        const newer = Option.getOrThrow(yield* journal.write({ at: 30, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Should I merge it?" }))
+        yield* journal.outdated(newer, "claude:s-tezos", { machine: "Rosie", id: "t-tezos" }, 40)
+        // Waiting to be said as focus began, long after it came.
+        const waiting = Option.getOrThrow(yield* journal.write({ at: 50, kind: "update", thread: "t-mina", said: "Mina's tickets are open." }))
+        const since = (yield* Clock.currentTimeMillis) - 1
+        yield* journal.hold([waiting], "focus")
+        return { held: (yield* journal.held(0)).map(({ id }) => id), late: (yield* journal.held(since)).map(({ id }) => id), ids: { progress, done, waiting } }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept.held).toEqual([kept.ids.done, kept.ids.waiting])
+    expect(kept.late).toEqual([kept.ids.waiting])
   })
 
   test("what was last said or held of the same work is found by its session, the session it was tied under, or its thread", async () => {

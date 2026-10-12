@@ -10288,8 +10288,10 @@ describe("Assistant modes", () => {
         yield* held(journal, now + 120_000, "integration's review pass 7 is running.")
         yield* dictate("I'm back.")
         const before = yield* unheard(journal)
+        // Briefed already, so cut off, what it told isn't brought up again by the digest.
+        const briefedAt = yield* modes!.briefedAt
         yield* play()
-        return { quiet, spoken: spoken(), before, after: yield* unheard(journal), mode: (yield* modes!.current).mode, briefed: [...briefed], model: seen.length, dispatched: dispatched.length }
+        return { quiet, spoken: spoken(), before, briefedAt, after: yield* unheard(journal), mode: (yield* modes!.current).mode, briefed: [...briefed], model: seen.length, dispatched: dispatched.length }
       }),
     )
     const told = Brain.modeLines(lines, now)
@@ -10298,6 +10300,7 @@ describe("Assistant modes", () => {
     expect(result.briefed).toEqual([["integration's review pass 6 is running.", "integration's review pass 7 is running."]])
     // Covered once he's heard it to the end, not before.
     expect(result.before).toHaveLength(2)
+    expect(result.briefedAt).toBeGreaterThanOrEqual(now)
     expect(result.after).toEqual([])
     expect(result.mode).toEqual({ mode: "normal" })
     expect(result.model).toBe(0)
@@ -10367,17 +10370,19 @@ describe("Assistant modes", () => {
   test("the digest is told as yapd's own line he can follow up, kept as a brief, covering what was held once he's heard it, and stale once all of it was heard elsewhere", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { digest, notices, play, journal } = yield* assistant(() => undefined, undefined, {
+        const { digest, notices, play, journal, modes } = yield* assistant(() => undefined, undefined, {
           modes: true,
           waiting: true,
           briefs: () => "The Tezos review is on pass 7, sir, and Mina's tickets are filed.",
         })
         const first = yield* held(journal, now - 30 * 60_000, "integration's review pass 7 is running.", "progress")
         const second = yield* held(journal, now - 10 * 60_000, "Mina's tickets are filed.", "progress")
-        yield* digest(yield* journal.held(0))
+        yield* digest(yield* journal.held(0), now - 1_000)
         const told = notices().at(-1)!
         const fresh = yield* told.stale
+        const unbriefed = yield* modes!.briefedAt
         yield* play(told)
+        const briefedAt = yield* modes!.briefedAt
         const covered = yield* unheard(journal)
         const kept = yield* journal.since(0, { kinds: ["brief"] })
         // Another, whose rows he heard of from the menu meanwhile.
@@ -10388,6 +10393,7 @@ describe("Assistant modes", () => {
         return {
           told: { kind: told.kind, priority: told.priority, spoken: told.spoken, followUp: told.followUp !== undefined },
           fresh,
+          briefed: [unbriefed, briefedAt],
           covered,
           kept: kept.map(({ said, detail, heardAt }) => [said, detail, heardAt !== undefined]),
           ids: [first, second],
@@ -10397,6 +10403,8 @@ describe("Assistant modes", () => {
     )
     expect(result.told).toEqual({ kind: "notice", priority: "done", spoken: "The Tezos review is on pass 7, sir, and Mina's tickets are filed.", followUp: true })
     expect(result.fresh).toBe(false)
+    // Briefed on what was held until it was read, once it's said.
+    expect(result.briefed).toEqual([0, now - 1_000])
     expect(result.covered).toEqual([])
     expect(result.kept).toEqual([["The Tezos review is on pass 7, sir, and Mina's tickets are filed.", { covered: result.ids }, true]])
     expect(result.stale).toBe(true)
@@ -10415,10 +10423,11 @@ describe("Assistant modes", () => {
         const told = notices().at(-1)!
         const fresh = yield* told.stale
         yield* modes!.set("focus")
-        return { fresh, focused: yield* told.stale, kept: (yield* journal.since(0, { kinds: ["brief"] })).length, unheard: yield* unheard(journal) }
+        return { fresh, focused: yield* told.stale, kept: (yield* journal.since(0, { kinds: ["brief"] })).length, unheard: yield* unheard(journal), briefedAt: yield* modes!.briefedAt }
       }),
     )
-    expect(result).toEqual({ fresh: false, focused: true, kept: 0, unheard: ["integration's review pass 7 is running."] })
+    // Never said, he's not briefed on it, so the next digest brings it up.
+    expect(result).toEqual({ fresh: false, focused: true, kept: 0, unheard: ["integration's review pass 7 is running."], briefedAt: 0 })
   })
 
   test("a digest the model can't sum up says nothing, and leaves what was held unheard", async () => {

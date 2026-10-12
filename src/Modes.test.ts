@@ -23,7 +23,10 @@ const kept = Effect.map(Store.make(":memory:"), (store) => ({ settings: Settings
  * it offered: looked at every minute unless said, since every step of the
  * test clock takes a little real time.
  */
-const running = (database: Effect.Effect.Success<typeof kept>, given: { on?: () => boolean; idle?: () => Option.Option<number>; look?: Duration.DurationInput } = {}) =>
+const running = (
+  database: Effect.Effect.Success<typeof kept>,
+  given: { on?: () => boolean; idle?: () => Option.Option<number>; look?: Duration.DurationInput; unsaid?: () => boolean } = {},
+) =>
   Effect.gen(function* () {
     const modes = yield* Modes.make(database)
     const held: Array<Modes.Hold> = []
@@ -34,7 +37,9 @@ const running = (database: Effect.Effect.Success<typeof kept>, given: { on?: () 
       power: Effect.sync(() => ({ on: given.on?.() ?? true, turns: 0 })),
       idle: Effect.sync(() => given.idle?.() ?? Option.some(10 * minute)),
       hold: (why) => Effect.sync(() => void held.push(why)),
-      digest: (rows) => Effect.sync(() => void digests.push(rows.map(({ said }) => said ?? ""))),
+      // Said, unless it's never to be, as when the model can't sum it up: only then is he briefed on what it covers, as the assistant does.
+      digest: (rows, at) =>
+        given.unsaid?.() === true ? Effect.sync(() => void digests.push([])) : Effect.zipRight(Effect.sync(() => void digests.push(rows.map(({ said }) => said ?? ""))), modes.briefed(at)),
       rundown: (count, was) => Effect.sync(() => void offered.push([count, was])),
     }, given.look ?? "1 minute")
     yield* flush
@@ -176,6 +181,80 @@ describe("Modes", () => {
     expect(result.focused).toBe(2)
     expect(result.last).toEqual(["Seven."])
     expect(result.count).toBe(3)
+  })
+
+  test("what a digest that was never said would have covered comes up in the next, twenty minutes on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(day)
+        const database = yield* kept
+        let unsaid = true
+        const { digests } = yield* running(database, { unsaid: () => unsaid, look: "15 seconds" })
+        for (const said of ["One.", "Two.", "Three."]) yield* holding(database.journal, day, said)
+        yield* wait("15 seconds")
+        const failed = [...digests]
+        unsaid = false
+        yield* wait("10 minutes")
+        const soon = digests.length
+        yield* wait("10 minutes")
+        return { failed, soon, next: digests.at(-1), count: digests.length }
+      }),
+    )
+    expect(result.failed).toEqual([[]])
+    expect(result.soon).toBe(1)
+    expect(result.next).toEqual(["One.", "Two.", "Three."])
+    expect(result.count).toBe(2)
+  })
+
+  test("ended from the menu, focus offers the rundown once, of all it held, and the digest leaves alone what was offered; off, nothing is offered", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(day)
+        const database = yield* kept
+        let on = true
+        const { modes, runner, offered, digests } = yield* running(database, { on: () => on, look: "15 seconds" })
+        // Waiting to be said as focus begins, it's held then, though it came before.
+        const waiting = Option.getOrThrow(yield* database.journal.write({ at: day, kind: "update", thread: "t-mina", said: "The Mina tickets are open." }))
+        yield* wait("5 seconds")
+        yield* modes.set("focus")
+        yield* database.journal.hold([waiting], "focus")
+        yield* holding(database.journal, day + 10 * minute, "Pass 7 is running.", "focus")
+        yield* holding(database.journal, day + 11 * minute, "Pass 8 is running.", "focus")
+        yield* wait("20 minutes")
+        yield* runner.leave((yield* modes.set("normal")).was)
+        const ended = [...offered]
+        yield* wait("45 minutes")
+        // Off as it ends, it ends without a word.
+        on = false
+        yield* modes.set("focus")
+        yield* holding(database.journal, day + 70 * minute, "std's cache is fixed.", "focus")
+        yield* runner.leave((yield* modes.set("normal")).was)
+        return { ended, offered: [...offered], digests: [...digests] }
+      }),
+    )
+    expect(result.ended).toEqual([[3, "focus"]])
+    expect(result.offered).toEqual([[3, "focus"]])
+    expect(result.digests).toEqual([])
+  })
+
+  test("going quiet from focus counts what's held from when focus began, as the rundown offered when it ends does", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(day)
+        const database = yield* kept
+        const { modes, runner, offered } = yield* running(database)
+        yield* modes.set("focus")
+        yield* holding(database.journal, day + 10 * minute, "Pass 7 is running.", "focus")
+        yield* wait("20 minutes")
+        yield* modes.set("quiet")
+        const quiet = (yield* modes.current).mode.since
+        yield* wait("5 minutes")
+        yield* runner.leave((yield* modes.set("normal")).was)
+        return { quiet, offered: [...offered] }
+      }),
+    )
+    expect(result.quiet).toBe(day)
+    expect(result.offered).toEqual([[1, "quiet"]])
   })
 
   test("the heartbeat is written as it starts and every minute, and read once, before that, for what finished while yapd was down", async () => {

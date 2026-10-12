@@ -292,8 +292,10 @@ export class Assistant extends Context.Tag("yapd/Assistant")<
      * Briefs him on what was held for later, `held`, as yapd's own notice,
      * which he can follow up as he can an answer: heard to the end, what it
      * covered counts as heard. Nothing is said when it can't be summed up.
+     * Once it starts being said, he counts as briefed on what was held until
+     * `until`, or until then.
      */
-    readonly digest: (held: ReadonlyArray<Kept>) => Effect.Effect<void>
+    readonly digest: (held: ReadonlyArray<Kept>, until?: number) => Effect.Effect<void>
     /** Focus or quiet ended other than by his word, with `count` held meanwhile: the rundown is offered once, in its turn. */
     readonly rundown: (count: number, was: Modes.Hold) => Effect.Effect<void>
     /** He said he's back over an update: the rundown of what was held is said, in its turn, as an answer, without the model working out what he meant. */
@@ -2602,7 +2604,7 @@ export const make = (options: {
           return { say: told.unbriefed, subject: { _tag: "Answer", said: told.unbriefed, about: Option.none() }, kind: "answer" } satisfies Outcome
         }
         // So the digest doesn't bring it up again.
-        yield* options.modes?.briefed ?? Effect.void
+        yield* options.modes?.briefed() ?? Effect.void
         const missed = held.map(({ id }) => id)
         return { say: brief.right, subject: { _tag: "Answer", said: brief.right, about: Option.none(), missed }, kind: "answer", missed } satisfies Outcome
       })
@@ -3664,7 +3666,7 @@ export const make = (options: {
         Effect.suspend(() =>
           asked.some(({ asking: waiting }) => waiting.ref.machine === machine) ? Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)) : Effect.void,
         ),
-      digest: (held) =>
+      digest: (held: ReadonlyArray<Kept>, until?: number) =>
         Effect.gen(function* () {
           const power = yield* options.power
           if (!power.on || held.length === 0) return
@@ -3691,6 +3693,8 @@ export const make = (options: {
               // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell.
               stale: Effect.zipWith(holding, journal.held(oldest), (mode, still) => Option.isSome(mode) || !still.some(({ id }) => covered.includes(id))),
               saying: Effect.gen(function* () {
+                // Only now, so what one that's never said would have covered comes up in the next.
+                yield* options.modes?.briefed(until) ?? Effect.void
                 answered = { subject, at: now, turns: power.turns }
                 if (entry === undefined) entry = yield* journal.write({ at: yield* Clock.currentTimeMillis, kind: "brief", said: spoken, detail: { covered } })
               }),

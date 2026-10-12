@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite"
-import { Context, Effect, Layer, Option, PubSub, Stream } from "effect"
+import { Clock, Context, Effect, Layer, Option, PubSub, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Config from "./Config.ts"
 import * as Store from "./Store.ts"
@@ -109,11 +109,13 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly latest: (at: number, most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Notes that these were kept quiet because he muted their thread, like updates dropped as he did. */
     readonly mute: (ids: ReadonlyArray<number>) => Effect.Effect<void>
-    /** Notes that these were held for later, and why, like updates dropped as focus began. */
+    /** Notes that these were held for later, and why, like updates dropped as focus began, and when they were. */
     readonly hold: (ids: ReadonlyArray<number>, why: Held) => Effect.Effect<void>
     /**
      * The updates held for later since `at` that he hasn't heard, and that
-     * aren't muted, oldest first, the latest `most` of them.
+     * aren't muted, oldest first, the latest `most` of them. One that came
+     * before `at`, but was only held since, like one waiting to be said as
+     * focus began, counts as held since.
      */
     readonly held: (at: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /**
@@ -387,21 +389,22 @@ export const fromStore = (
     hold: (ids, why) =>
       ids.length === 0
         ? Effect.void
-        : store
-            .transaction((database: Database) => {
+        : Effect.flatMap(Clock.currentTimeMillis, (now) =>
+            store.transaction((database: Database) => {
               database
                 .query<never, Array<string | number>>(
-                  `update journal set detail = json_set(coalesce(detail, '{}'), '$.held', ?) where id in (${ids.map(() => "?").join(", ")})`,
+                  `update journal set detail = json_set(coalesce(detail, '{}'), '$.held', ?, '$.heldAt', ?) where id in (${ids.map(() => "?").join(", ")})`,
                 )
-                .run(why, ...ids)
-            })
-            .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what I held for later in my journal", error))),
+                .run(why, now, ...ids)
+            }),
+          ).pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what I held for later in my journal", error))),
     held: (at, most = 200) =>
       reading(
         store.transaction((database: Database) =>
           database
             .query<Row, [number, number]>(
-              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0 and at >= ? order by at desc, id desc limit ?`,
+              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0 and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
+               order by at desc, id desc limit ?`,
             )
             .all(at, most)
             .reverse()
