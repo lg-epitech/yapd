@@ -2657,7 +2657,9 @@ export const make = (options: {
       })
       const project = decision.text.trim()
       const machine = decision.machine.trim()
-      const since = decision.when.trim() === "" ? Number.NaN : Date.parse(decision.when)
+      // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
+      const at = decision.when.trim() === "" ? Number.NaN : Date.parse(decision.when)
+      const since = at > situation.now ? Number.NaN : at
       const named =
         Option.getOrUndefined(Option.map(target, ({ called }) => called)) ??
         (group === undefined ? undefined : Brain.missedName(group)) ??

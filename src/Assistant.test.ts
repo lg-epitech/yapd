@@ -10536,6 +10536,20 @@ describe("Assistant catching up", () => {
     expect(result.after).toEqual(["Tezos pass 7 is running.", "The Mina tickets are filed."])
   })
 
+  test("a since the model put in the future, as when it took his clock for another's, gathers everything rather than nothing", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, journal } = yield* assistant(() => Brain.decision({ act: "catchup", when: new Date(now + 3 * 60 * 60_000).toISOString() }), undefined, {
+          briefs: (rows) => rows.map(({ said }) => said).join(" "),
+        })
+        yield* kept(journal, 30, tezos.id, "Tezos pass 7 is done.")
+        yield* dictate("Anything since lunch?")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["Tezos pass 7 is done."])
+  })
+
   test("with nothing he hasn't heard, he's told he's caught up, with no brief", async () => {
     const result = await run(
       Effect.gen(function* () {
