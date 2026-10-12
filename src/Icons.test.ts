@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Logger, Option, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
+import { Effect, Logger, Option, Redacted, Schema, type Scope, Stream, TestClock, TestContext } from "effect"
 import * as Icons from "./Icons.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Server from "./T3CodeServer.ts"
+import * as Tunnel from "./Tunnel.ts"
 import type * as T3Live from "./T3Live.ts"
 
 const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>) => Effect.runPromise(effect.pipe(Effect.scoped, Effect.provide(TestContext.TestContext)))
@@ -16,7 +17,7 @@ const project = (overrides: Partial<T3Live.Project> = {}): T3Live.Project => ({ 
  * A machine's T3 Code that serves a project's icon under `file`, or none,
  * keeping what it was asked: by which folder, and which files were fetched.
  */
-const serving = (name: string, given: { file: string; bytes?: Uint8Array; type?: string; large?: boolean }) => {
+const serving = (name: string, given: { file: string; bytes?: Uint8Array; type?: string; large?: boolean }, reword: (error: Server.Trouble) => Server.Trouble = (error) => error) => {
   const asked: Array<string> = []
   const reach: Effect.Effect<Server.Transport, Server.Trouble> = Effect.succeed({
     api: (() => Effect.die("not expected")) as Server.Transport["api"],
@@ -30,7 +31,7 @@ const serving = (name: string, given: { file: string; bytes?: Uint8Array; type?:
       Effect.suspend(() => {
         asked.push(`${name} fetch ${decodeURIComponent(path.split("/").at(-1) ?? "")}`)
         return given.large === true
-          ? Effect.fail(new Server.Trouble({ reason: Server.tooLarge }))
+          ? Effect.fail(reword(new Server.Trouble({ reason: Server.tooLarge, tooLarge: true })))
           : Effect.succeed({ bytes: given.bytes ?? new Uint8Array([137, 80, 78, 71]), type: given.type ?? "image/png" })
       }),
   })
@@ -188,6 +189,23 @@ describe("Icons", () => {
     expect(warnings).toEqual(["Could not fetch integration's icon: T3 Code sent a file too large to be an icon.", "Could not fetch integration's icon: T3 Code sent a file too large to be an icon."])
     expect(t3.asked.filter((line) => line.includes("fetch"))).toEqual(["Rosie fetch v1-favicon.png", "Rosie fetch v2-favicon.png", "Rosie fetch v4-favicon.png", "Rosie fetch v3-favicon.png"])
     expect(result.icon.kind).toBe("image")
+  })
+
+  test("an icon too large to fetch on rig, which its tunnel words as rig's, is logged and fetched once too", async () => {
+    const rig = serving("rig", { file: "v1-favicon.png", large: true }, Tunnel.reworded("rig", Redacted.make("token")))
+    const warnings: Array<string> = []
+    const logger = Logger.make(({ message }) => void warnings.push([message].flat().join(" ")))
+    await run(
+      Effect.gen(function* () {
+        const icons = yield* Icons.make({ actions: (machine) => (machine === "rig" ? Option.some(rig.actions) : Option.none()) })
+        for (let round = 0; round < 4; round++) {
+          yield* Effect.zipLeft(icons.icon("rig", project()), flush)
+          yield* TestClock.adjust("10 minutes")
+        }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(warnings).toEqual(["Could not fetch integration's icon: rig's T3 Code sent a file too large to be an icon."])
+    expect(rig.asked.filter((line) => line.includes("fetch"))).toEqual(["rig fetch v1-favicon.png"])
   })
 
   test("what T3 Code sends that isn't an image is never served as one", async () => {

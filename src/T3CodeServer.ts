@@ -20,6 +20,8 @@ export class Trouble extends Data.TaggedError("Trouble")<{
   readonly cause?: unknown
   /** The request went out before it went wrong, so T3 Code may have done it. */
   readonly sent?: boolean
+  /** The file it sent was too large to be an icon: kept however the reason is worded, as for another machine. */
+  readonly tooLarge?: boolean
 }> {}
 
 /** T3 Code was asked and said no, in its own words. */
@@ -254,7 +256,7 @@ const capped = async (response: Response, most: number) => {
     size += value.byteLength
     if (size > most) {
       await reader.cancel().catch(() => {})
-      throw new Trouble({ reason: tooLarge })
+      throw new Trouble({ reason: tooLarge, tooLarge: true })
     }
     chunks.push(value)
   }
@@ -293,7 +295,7 @@ export const asset =
           }
           if (Number(response.headers.get("content-length") ?? 0) > largest) {
             await response.body?.cancel().catch(() => {})
-            throw new Trouble({ reason: tooLarge })
+            throw new Trouble({ reason: tooLarge, tooLarge: true })
           }
           const bytes = await capped(response, largest).catch((error) => {
             throw error instanceof Trouble ? error : new Trouble({ reason: "T3 Code stopped sending the file." })

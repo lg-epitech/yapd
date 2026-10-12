@@ -46,6 +46,18 @@ export const serve = (token: Option.Option<Redacted.Redacted>, locate: Effect.Ef
 export type Located = Server.Located
 
 /**
+ * What went wrong with `machine`'s T3 Code, said as that machine's, like
+ * "rig's T3 Code isn't answering.", with what it was said as kept as its
+ * cause and the token taken out. Whatever else it tells, like that a file
+ * was too large, it still does.
+ */
+export const reworded = (machine: string, token: Redacted.Redacted) => (error: Server.Trouble) =>
+  // Spreading an error leaves its cause behind, so that's always named.
+  error.reason.startsWith("T3 Code ")
+    ? new Server.Trouble({ ...error, reason: `${machine}'s ${error.reason}`, cause: Server.harmless(error, token) })
+    : new Server.Trouble({ ...error, cause: Server.harmless(error.cause, token) })
+
+/**
  * What `machine`'s T3 Code is reached through, from wherever `locate` finds
  * it, as T3Actions takes it. What goes wrong there is said as that machine's,
  * like "rig's T3 Code isn't answering.", so it's never taken for this one's,
@@ -57,11 +69,7 @@ export const transport = (locate: Effect.Effect<Located, Server.Trouble>, machin
   Effect.map(locate, ({ server, token }) => {
     const api = Server.api(server, token)
     const call = Server.call(server, token)
-    // Spreading an error leaves its cause behind, so that's always named.
-    const trouble = (error: Server.Trouble) =>
-      error.reason.startsWith("T3 Code ")
-        ? new Server.Trouble({ ...error, reason: `${machine}'s ${error.reason}`, cause: Server.harmless(error, token) })
-        : new Server.Trouble({ ...error, cause: Server.harmless(error.cause, token) })
+    const trouble = reworded(machine, token)
     const theirs = (error: Server.Trouble | Server.Refusal) =>
       error._tag === "Refusal" ? new Server.Refusal({ tag: error.tag, message: Server.withheld(error.message, token) }) : trouble(error)
     const asset = Server.asset(server)

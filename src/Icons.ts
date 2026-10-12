@@ -150,7 +150,8 @@ export const make = (options: { readonly actions: (machine: string) => Option.Op
           return
         }
         const fetched = yield* Effect.either(actions.value.asset(relativeUrl))
-        if (Either.isLeft(fetched) && T3Actions.reason(fetched.left) === Server.tooLarge) {
+        // However it's worded, as for another machine, which says it's that machine's T3 Code that sent it.
+        if (Either.isLeft(fetched) && fetched.left._tag === "Trouble" && fetched.left.tooLarge === true) {
           const faviconPath = project.faviconPath ?? null
           const logged = before?.tooLarge !== undefined && before.tooLarge.faviconPath === faviconPath
           known.set(key, {
@@ -160,7 +161,7 @@ export const make = (options: { readonly actions: (machine: string) => Option.Op
             asking: false,
             tooLarge: { file, faviconPath },
           })
-          if (!logged) yield* Effect.logWarning(`Could not fetch ${project.title}'s icon: ${Server.tooLarge}`)
+          if (!logged) yield* Effect.logWarning(`Could not fetch ${project.title}'s icon: ${T3Actions.reason(fetched.left)}`)
           return
         }
         const { bytes, type } = yield* fetched
