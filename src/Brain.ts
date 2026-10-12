@@ -2084,7 +2084,7 @@ export const ownVoice = (said: Overheard) => {
 /** Whether a journal entry was kept quiet, as he muted its thread. */
 export const quiet = (kept: Pick<Kept, "detail">) => (kept.detail as { readonly muted?: unknown } | null | undefined)?.muted === true
 
-/** Whether a journal entry was held for later, by focus or quiet, as progress for the digest, or as it finished while yapd was offline. */
+/** Whether a journal entry was held for later, by focus or quiet, or as progress for the digest. */
 export const held = (kept: Pick<Kept, "detail">) => typeof (kept.detail as { readonly held?: unknown } | null | undefined)?.held === "string"
 
 /**

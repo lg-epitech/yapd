@@ -4390,64 +4390,6 @@ describe("Daemon with threads muted", () => {
     expect(result).toEqual(["yapd. The loader is halfway.", "yapd. Which network first?"])
   })
 
-  test("a run that finished while yapd was down is held for the briefing, once, while what needs him, couldn't be summed up, or answers him is said in full, however he muted the thread", async () => {
-    const question = "Should I keep the historical rounding or recompute?"
-    const result = await run(
-      Effect.gen(function* () {
-        const mutes = yield* muting
-        const { made, wait, played, journal } = yield* make(undefined, {
-          mutes,
-          urgentMessages: [question, "Which network first?"],
-          unsummarizable: ["Garbled."],
-          progressMessages: ["Pass 7 is running."],
-          mores: { [question]: "The two differ by a cent on old invoices.", "The fee table is in.": "Its tests pass." },
-        })
-        for (const id of ["t-muted", "t-muted-ask", "t-muted-answer"]) yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id }) })
-        const turns = (yield* made.power).turns
-        const offline = (message: string, id: string, extra: { readonly answering?: boolean } = {}) =>
-          made.finished({ ...unhooked(message, `run-${id}`, turns), about: { machine: "Rosie", id }, offline: true, ...extra })
-        yield* offline("The fee table is in.", "t-fees")
-        yield* offline("Pass 7 is running.", "t-progress")
-        yield* offline("Muted news.", "t-muted")
-        yield* offline(question, "t-question")
-        yield* offline("Garbled.", "t-garbled")
-        yield* offline("Which network first?", "t-muted-ask")
-        yield* offline("The loader is fixed.", "t-muted-answer", { answering: true })
-        for (let index = 0; index < 5; index++) yield* wait(11)
-        // Heard of again, as after another restart, it's neither said nor held twice.
-        yield* offline("The fee table is in.", "t-fees")
-        yield* offline(question, "t-question")
-        for (let index = 0; index < 2; index++) yield* wait(11)
-        const updates = yield* journal.since(0, { kinds: ["update"] })
-        return {
-          played: [...played],
-          kept: updates.map((kept) => [kept.thread, kept.key, (kept.detail as { held?: string }).held, quieted(kept)]),
-          held: (yield* journal.held(0)).map(({ said, detail }) => [said, (detail as { more?: string }).more]),
-        }
-      }),
-    )
-    expect(result.played).toEqual([
-      `yapd. ${question} The two differ by a cent on old invoices.`,
-      "yapd. Which network first?",
-      "yapd finished a turn, but I couldn't summarize it.",
-      "yapd. The loader is fixed.",
-    ])
-    expect(result.kept).toEqual([
-      ["t-fees", "done:Rosie:run-t-fees", "offline", false],
-      ["t-progress", "done:Rosie:run-t-progress", "offline", false],
-      ["t-muted", "done:Rosie:run-t-muted", undefined, true],
-      ["t-question", "done:Rosie:run-t-question", undefined, false],
-      ["t-garbled", "done:Rosie:run-t-garbled", undefined, false],
-      ["t-muted-ask", "done:Rosie:run-t-muted-ask", undefined, false],
-      ["t-muted-answer", "done:Rosie:run-t-muted-answer", undefined, false],
-    ])
-    // Held with what it said, and more of it for when he asks, rather than only that it finished.
-    expect(result.held).toEqual([
-      ["yapd. The fee table is in.", "Its tests pass."],
-      ["yapd. Pass 7 is running.", undefined],
-    ])
-  })
-
   test("a turn no hook told of that a message of yapd's started is said, though he muted its thread", async () => {
     const result = await run(
       Effect.gen(function* () {

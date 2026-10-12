@@ -83,16 +83,6 @@ const notices = (
     readonly rig?: { readonly view: ReadonlyArray<T3Live.Thread>; readonly bounded: Readonly<Record<string, Bounded>> }
     /** Failures left to the Stops that told of them, with what says them, should what those told of be kept quiet. */
     readonly left?: Array<{ readonly stops: ReadonlyArray<Notices.Stop>; readonly failure: Effect.Effect<void> }>
-    /** When yapd was last up before it started, and when it started, for what finished meanwhile. */
-    readonly offline?: { readonly alive: Option.Option<number>; readonly started: number }
-    /** Whether yapd is on, as it is unless said. */
-    readonly on?: boolean
-    /** The threads he muted, by key. */
-    readonly muted?: ReadonlyArray<string>
-    /** What yapd sent each thread for him, by its id, when and how T3 Code took it. */
-    readonly sent?: Readonly<Record<string, ReadonlyArray<{ readonly at: number; readonly how: string }>>>
-    /** Whether a finished turn handed on is kept under its key as held, as the daemon keeps what it holds of one, rather than only noted. */
-    readonly holds?: boolean
   },
 ) =>
   Effect.gen(function* () {
@@ -153,7 +143,7 @@ const notices = (
     const settled: Array<string> = []
     /** The machines whose T3 Code caught up again, in turn. */
     const returned: Array<string> = []
-    const finished: Array<{ readonly key: string; readonly message: string; readonly answering?: true; readonly offline?: true }> = []
+    const finished: Array<{ readonly key: string; readonly message: string; readonly answering?: true }> = []
     /** The threads whose turn no hook told of was overtaken, by starting again or going. */
     const overtaken: Array<string> = []
     const tell = (notice: Notice) =>
@@ -167,21 +157,10 @@ const notices = (
       threads,
       journal,
       tell,
-      power: Effect.succeed({ on: given.on ?? true, turns: 1 }),
+      power: Effect.succeed({ on: true, turns: 1 }),
       stopped: (sessions) => Effect.sync(() => sessions.flatMap((session) => given.stops?.get(session) ?? []).toSorted((a, b) => a.at - b.at)),
       ...(given.left === undefined ? {} : { unheard: (stops, failure) => Effect.sync(() => void given.left?.push({ stops, failure })) }),
-      finished: (input) =>
-        Effect.gen(function* () {
-          finished.push({
-            key: input.key,
-            message: input.turn.message,
-            ...(input.answering === true ? { answering: true as const } : {}),
-            ...(input.offline === true ? { offline: true as const } : {}),
-          })
-          if (given.holds === true) {
-            yield* journal.claim({ at: input.at, kind: "update", machine: input.about.machine, thread: input.about.id, said: input.turn.message, key: input.key, detail: { held: "offline" } })
-          }
-        }),
+      finished: (input) => Effect.sync(() => void finished.push({ key: input.key, message: input.turn.message, ...(input.answering === true ? { answering: true as const } : {}) })),
       overtaken: (ref) => Effect.sync(() => void overtaken.push(ref.id)),
       mention: () => Effect.void,
       ask: (asking) =>
@@ -195,9 +174,6 @@ const notices = (
       settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
       returned: (machine) => Effect.sync(() => void returned.push(machine)),
       shortest: 60_000,
-      ...(given.offline === undefined ? {} : given.offline),
-      muted: (keys) => Effect.succeed(Option.fromNullable(keys.find((key) => given.muted?.includes(key))).pipe(Option.map((key) => ({ key, at: 0 })))),
-      sent: (to, since) => Effect.succeed((given.sent?.[to.id] ?? []).filter(({ at }) => at >= since)),
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -1063,269 +1039,5 @@ describe("Notices", () => {
       ["ask:Rosie:r1", true],
       ["ask:rig:q9", true],
     ])
-  })
-
-  describe("while yapd was offline", () => {
-    const alive = now - 60 * 60_000
-    const started = now - 60_000
-    const ago = (count: number) => now - count * 60_000
-    const done = (id: string, title: string, at: number, overrides: Record<string, unknown> = {}) =>
-      thread(id, title, { latestRunId: `run-${id}`, latestRunCompletedAt: new Date(at).toISOString(), ...overrides })
-    /** A thread's run, begun and ended then, saying `said`, under its agent's session `native-<id>`, with the runs before it. */
-    const ran = (
-      id: string,
-      from: number,
-      to: number,
-      said: string,
-      extra: { readonly status?: string; readonly userMessageId?: string; readonly kind?: string; readonly before?: ReadonlyArray<{ readonly id: string; readonly said: string; readonly from: number; readonly to: number }> } = {},
-    ): Bounded => {
-      const before = extra.before ?? []
-      const status = extra.status ?? "completed"
-      return {
-        runs: [
-          ...before.map((run, index) => ({ id: run.id, status: "completed", ordinal: index + 1, startedAt: new Date(run.from).toISOString(), completedAt: new Date(run.to).toISOString() })),
-          {
-            id: `run-${id}`,
-            status,
-            ordinal: before.length + 1,
-            startedAt: new Date(from).toISOString(),
-            completedAt: new Date(to).toISOString(),
-            userMessageId: extra.userMessageId ?? `m-${id}`,
-          },
-        ],
-        messages: [
-          ...before.map((run) => ({ id: `a-${run.id}`, runId: run.id, role: "assistant", text: run.said, createdAt: new Date(run.to).toISOString() })),
-          { id: extra.userMessageId ?? `m-${id}`, runId: `run-${id}`, role: "user", text: "Go on.", createdAt: new Date(from).toISOString() },
-          ...(said === "" ? [] : [{ id: `a-${id}`, runId: `run-${id}`, role: "assistant", text: said, createdAt: new Date(to).toISOString() }]),
-        ],
-        turnItems: status === "failed" ? [failure(`run-${id}`, extra.kind ?? "provider_error", "API Error: 500 Internal server error")] : [],
-        sessions: [`native-${id}`],
-      }
-    }
-    const failedThread = { status: "failed", lastErrorClass: "provider_error" }
-    const held = (detail: unknown) => (detail as { session?: string; held?: string; muted?: boolean } | undefined) ?? {}
-
-    test("each run that finished while yapd was down goes the way T3 Code's word goes, a question in full, failures said, and nothing of what began before or after", async () => {
-      const question = "The dry run is done. Should I keep the historical rounding or recompute?"
-      const view = [
-        done("tezos", "Migrate Tezos Integration", ago(30)),
-        done("fees", "Fee choice", ago(28)),
-        done("mina", "Open Mina SSV2 Bug Tickets", ago(20), failedThread),
-        done("noisy", "Watch the linter", ago(25)),
-        // Before it went down, after it started, or still running: none of these.
-        done("old", "Old work", ago(90)),
-        done("live", "Live work", now - 30_000),
-        done("busy", "Busy work", ago(40), { activeRunId: "run-2", activityRunStatus: "running" }),
-      ]
-      const bounded = {
-        tezos: ran("tezos", ago(45), ago(30), "Tezos is migrated."),
-        fees: ran("fees", ago(45), ago(28), question),
-        mina: ran("mina", ago(25), ago(20), "", { status: "failed" }),
-        noisy: ran("noisy", ago(45), ago(25), "The linter is clean."),
-        old: ran("old", ago(100), ago(90), "Old news."),
-        live: ran("live", ago(10), now - 30_000, "Live news."),
-        busy: ran("busy", ago(45), ago(40), "Busy news."),
-      }
-      const result = await run(
-        Effect.gen(function* () {
-          const made = yield* notices({ view, bounded, offline: { alive: Option.some(alive), started }, muted: ["t3:Rosie:noisy"] })
-          yield* made.reconcileOn("Rosie")
-          yield* made.flush
-          // Its T3 Code catching up again says nothing more.
-          yield* made.reconcileOn("Rosie")
-          yield* made.flush
-          return { told: [...made.told], finished: [...made.finished], kept: (yield* made.journal.since(0, { kinds: ["update"] })).length }
-        }),
-      )
-      expect(result.told).toEqual(["Open Mina SSV2 Bug Tickets failed, sir: the model provider had an error."])
-      // The question goes with all it said, to be summed up and said as it needs him; the mute is the daemon's, by the same rule as ever.
-      expect(result.finished).toEqual([
-        { key: "done:Rosie:run-noisy", message: "The linter is clean.", offline: true },
-        { key: "done:Rosie:run-fees", message: question, offline: true },
-        { key: "done:Rosie:run-tezos", message: "Tezos is migrated.", offline: true },
-      ])
-      // Nothing is held here with only that it finished.
-      expect(result.kept).toBe(0)
-    })
-
-    test("the answer to a message he sent just before yapd went down is said, though what yapd sent is kept since its last heartbeat", async () => {
-      const result = await run(
-        Effect.gen(function* () {
-          const made = yield* notices({
-            view: [done("fees", "Answer the fee question", ago(30))],
-            bounded: { fees: ran("fees", alive + 30_000, ago(30), "The fee table is in.", { userMessageId: "yapd:u1:0:m" }) },
-            offline: { alive: Option.some(alive), started },
-            muted: ["t3:Rosie:fees"],
-          })
-          yield* made.journal.write({ at: alive + 30_000, kind: "sent", machine: "Rosie", thread: "fees", text: "Use the fee table." })
-          yield* made.journal.write({ at: alive + 31_000, kind: "reply", machine: "Rosie", thread: "fees", said: "Passed on." })
-          // And what it asked him as it ran, which isn't what it finished with.
-          yield* made.journal.write({ at: alive + 60_000, kind: "notice", machine: "Rosie", thread: "fees", said: "A question on it, sir: which table?", key: "ask:Rosie:r1" })
-          yield* made.reconcileOn("Rosie")
-          yield* made.flush
-          return [...made.finished]
-        }),
-      )
-      expect(result).toEqual([{ key: "done:Rosie:run-fees", message: "The fee table is in.", answering: true, offline: true }])
-    })
-
-    test("a run that failed or finished while yapd was down is told of, though an earlier run of its thread or session was told of since its last heartbeat", async () => {
-      const result = await run(
-        Effect.gen(function* () {
-          const made = yield* notices({
-            view: [done("mina", "Open Mina SSV2 Bug Tickets", ago(20), failedThread), done("tezos", "Migrate Tezos Integration", ago(15)), done("fees", "Fee table checks", ago(10), failedThread)],
-            bounded: {
-              mina: ran("mina", ago(40), ago(20), "", { status: "failed", before: [{ id: "run-mina-1", said: "The tickets are drafted.", from: ago(58), to: ago(50) }] }),
-              tezos: ran("tezos", ago(40), ago(15), "Tezos is migrated.", { before: [{ id: "run-tezos-1", said: "The schema is in.", from: ago(58), to: ago(50) }] }),
-              fees: ran("fees", ago(40), ago(10), "", { status: "failed", before: [{ id: "run-fees-1", said: "The fees are read.", from: ago(58), to: ago(50) }] }),
-            },
-            offline: { alive: Option.some(alive), started },
-          })
-          // The earlier runs' updates, under the thread, and under the agent's sessions when the thread couldn't be told in time, told
-          // apart by when they came, as what they said may be gone from what T3 Code reads back.
-          yield* made.journal.write({ at: ago(50), kind: "update", machine: "Rosie", thread: "mina", said: "The tickets are drafted." })
-          yield* made.journal.write({ at: ago(50), kind: "update", thread: "claude:native-tezos", said: "The schema is in." })
-          yield* made.journal.write({ at: ago(50), kind: "update", thread: "claude:native-fees", said: "The fees are read." })
-          yield* made.reconcileOn("Rosie")
-          yield* made.flush
-          return { told: [...made.told], finished: [...made.finished] }
-        }),
-      )
-      expect(result.told).toEqual([
-        "Fee table checks failed, sir: the model provider had an error.",
-        "Open Mina SSV2 Bug Tickets failed, sir: the model provider had an error.",
-      ])
-      expect(result.finished).toEqual([{ key: "done:Rosie:run-tezos", message: "Tezos is migrated.", offline: true }])
-    })
-
-    test("a run whose own hook update was kept before yapd went down isn't told of again, unless it failed and that update was kept quiet", async () => {
-      const result = await run(
-        Effect.gen(function* () {
-          const made = yield* notices({
-            view: [
-              done("tezos", "Migrate Tezos Integration", ago(30)),
-              done("mina", "Open Mina SSV2 Bug Tickets", ago(20)),
-              done("fees", "Fee table checks", ago(10), failedThread),
-              done("loader", "Fix the loader", ago(12), failedThread),
-              done("late", "Late work", ago(14)),
-            ],
-            bounded: {
-              tezos: ran("tezos", ago(45), ago(30), "Tezos is migrated."),
-              mina: ran("mina", ago(45), ago(20), "Mina's tickets are open."),
-              fees: ran("fees", ago(40), ago(10), "The fees are half read.", { status: "failed" }),
-              loader: ran("loader", ago(40), ago(12), "The loader is half fixed.", { status: "failed" }),
-              late: ran("late", ago(40), ago(14), "Late news.", { before: [{ id: "run-late-1", said: "Early news.", from: ago(58), to: ago(50) }] }),
-            },
-            offline: { alive: Option.some(alive), started },
-          })
-          // Its hook told of each as it ended, kept under the thread or, as its thread couldn't be told in time, its session.
-          yield* made.journal.write({ at: ago(30), kind: "update", thread: "claude:native-tezos", said: "Tezos is migrated.", text: "Tezos is migrated." })
-          yield* made.journal.write({ at: ago(20), kind: "update", machine: "Rosie", thread: "mina", said: "Mina's tickets are open.", text: "Mina's tickets are open." })
-          yield* made.journal.write({ at: ago(10), kind: "update", machine: "Rosie", thread: "fees", said: "The fees are half read.", text: "The fees are half read." })
-          yield* made.journal.write({ at: ago(12), kind: "update", machine: "Rosie", thread: "loader", said: "The loader is half fixed.", detail: { muted: true } })
-          // The run before's Stop, come late, isn't this run's.
-          yield* made.journal.write({ at: ago(35), kind: "update", machine: "Rosie", thread: "late", said: "Early news.", text: "Early news." })
-          yield* made.reconcileOn("Rosie")
-          yield* made.flush
-          return { told: [...made.told], finished: [...made.finished] }
-        }),
-      )
-      expect(result.told).toEqual(["Fix the loader failed, sir: the model provider had an error."])
-      expect(result.finished).toEqual([{ key: "done:Rosie:run-late", message: "Late news.", offline: true }])
-    })
-
-    test("nothing is said or held twice across two restarts, and past the newest ten only that it finished is held, but for the answer to his own message", async () => {
-      const many = Array.from({ length: 12 }, (_, index) => `t${index}`)
-      const view = [
-        ...many.map((id, index) => done(id, `Work ${index}`, ago(30 + index))),
-        done("mina", "Open Mina SSV2 Bug Tickets", ago(20), failedThread),
-        done("lost", "Lost work", ago(25)),
-        done("asked", "His question", ago(50)),
-      ]
-      const bounded: Record<string, Bounded> = {
-        ...Object.fromEntries(many.map((id, index) => [id, ran(id, ago(50), ago(30 + index), `Work ${index} is done.`)])),
-        mina: ran("mina", ago(40), ago(20), "", { status: "failed" }),
-        asked: ran("asked", ago(55), ago(50), "The fee table is in.", { userMessageId: "yapd:u1:0:m" }),
-      }
-      const result = await run(
-        Effect.gen(function* () {
-          const first = yield* notices({ view, bounded, offline: { alive: Option.some(alive), started }, holds: true, muted: ["t3:Rosie:t11"] })
-          yield* first.reconcileOn("Rosie")
-          yield* first.flush
-          // Down again before its next heartbeat, so the same runs ended since it was last up.
-          const second = yield* notices({ view, bounded, offline: { alive: Option.some(alive), started }, holds: true, store: first.store })
-          yield* second.reconcileOn("Rosie")
-          yield* second.flush
-          const kept = yield* second.journal.since(0, { kinds: ["update"] })
-          return {
-            first: { told: [...first.told], finished: first.finished.map(({ key }) => key) },
-            second: { told: [...second.told], finished: [...second.finished] },
-            generic: kept.filter(({ said }) => said?.includes("offline") === true).map(({ thread, said, detail }) => [thread, said, held(detail)]),
-          }
-        }),
-      )
-      expect(result.first.told).toEqual([
-        "Open Mina SSV2 Bug Tickets failed, sir: the model provider had an error.",
-        "Lost work finished while I was offline, sir, but I couldn't read what it said.",
-      ])
-      expect(result.first.finished).toEqual([...many.slice(0, 10).map((id) => `done:Rosie:run-${id}`), "done:Rosie:run-asked"])
-      expect(result.generic).toEqual([
-        ["t11", "Work 11 finished while I was offline, sir.", { session: "finished:Rosie:t11", muted: true }],
-        ["t10", "Work 10 finished while I was offline, sir.", { session: "finished:Rosie:t10", held: "offline" }],
-      ])
-      expect(result.second).toEqual({ told: [], finished: [] })
-    })
-
-    test("a run he stopped, or likely watched, or that said nothing is nothing to tell, and one he queued behind isn't his answer", async () => {
-      const result = await run(
-        Effect.gen(function* () {
-          const made = yield* notices({
-            view: [
-              done("stopped", "Stopped work", ago(33)),
-              done("glance", "Glanced work", ago(32)),
-              done("empty", "Empty work", ago(31)),
-              done("steered", "Steered work", ago(34)),
-              done("behind", "Work he queued behind", ago(36)),
-            ],
-            bounded: {
-              stopped: ran("stopped", ago(40), ago(33), "Half done.", { status: "interrupted", userMessageId: "yapd:u2:0:m" }),
-              glance: ran("glance", ago(32) - 30_000, ago(32), "Glanced."),
-              empty: ran("empty", ago(40), ago(31), ""),
-              steered: ran("steered", ago(40), ago(34), "The fee table is in."),
-              behind: ran("behind", ago(40), ago(36), "The fee table is in."),
-            },
-            offline: { alive: Option.some(alive), started },
-            sent: { steered: [{ at: ago(38), how: "steered" }], behind: [{ at: ago(38), how: "queued" }] },
-          })
-          yield* made.reconcileOn("Rosie")
-          yield* made.flush
-          return { told: [...made.told], finished: [...made.finished] }
-        }),
-      )
-      expect(result.told).toEqual([])
-      expect(result.finished).toEqual([
-        { key: "done:Rosie:run-steered", message: "The fee table is in.", answering: true, offline: true },
-        { key: "done:Rosie:run-behind", message: "The fee table is in.", offline: true },
-      ])
-    })
-
-    test("nothing is looked for without a heartbeat, as the first time, or while yapd is off", async () => {
-      const view = [done("tezos", "Migrate Tezos Integration", ago(30)), done("mina", "Open Mina SSV2 Bug Tickets", ago(20), failedThread)]
-      const bounded = { tezos: ran("tezos", ago(45), ago(30), "Tezos is migrated."), mina: ran("mina", ago(25), ago(20), "", { status: "failed" }) }
-      const result = await run(
-        Effect.gen(function* () {
-          const first = yield* notices({ view, bounded, offline: { alive: Option.none(), started } })
-          yield* first.reconcileOn("Rosie")
-          const off = yield* notices({ view, bounded, offline: { alive: Option.some(alive), started }, on: false })
-          yield* off.reconcileOn("Rosie")
-          yield* off.flush
-          return {
-            first: [...first.told, ...first.finished, ...(yield* first.journal.since(0, { kinds: ["update"] }))],
-            off: [...off.told, ...off.finished, ...(yield* off.journal.since(0, { kinds: ["update"] }))],
-          }
-        }),
-      )
-      expect(result).toEqual({ first: [], off: [] })
-    })
   })
 })

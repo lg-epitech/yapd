@@ -132,9 +132,6 @@ export const serve = Effect.gen(function* () {
   const welcome = yield* Deferred.make<Effect.Effect<void>>()
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
   // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
-  /** What yapd sent each thread for him since then, by when, in what words and how T3 Code took it. */
-  const sent = (to: Threads.Ref, since: number) =>
-    ledger.steps(since, { kinds: ["message", "reply", "start"], states: ["prepared", "sent", "unknown"], machine: to.machine, thread: to.id })
   const daemon = yield* Daemon.make({
     link: (session, cwd) => threads.link(machine, session, cwd),
     owner: (host, session, cwd) => threads.link(naming(host), session, cwd),
@@ -142,7 +139,7 @@ export const serve = Effect.gen(function* () {
     mutes,
     naming,
     // What went to a thread for him and may have got there: what answers it is his to hear, however he muted the thread.
-    sent,
+    sent: (to, since) => ledger.steps(since, { kinds: ["message", "reply", "start"], states: ["prepared", "sent", "unknown"], machine: to.machine, thread: to.id }),
     holding: modes.holding,
     detail: modes.detail,
     // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent. Back, what was
@@ -239,11 +236,6 @@ export const serve = Effect.gen(function* () {
     settled: assistant.settled,
     returned: assistant.returned,
     shortest: (yield* Config.minSeconds) * 1000,
-    // What finished while yapd was down is held for later, between its last heartbeat and now it's started.
-    alive: modes.alive,
-    started,
-    muted: mutes.muted,
-    sent,
   })
   yield* Effect.forkScoped(notices.follow)
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.

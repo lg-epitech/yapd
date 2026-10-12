@@ -34,10 +34,9 @@ export const kinds = ["update", "reply", "sent", "dictation", "started", "action
 
 /**
  * Why an update was held for later rather than said: focus or quiet was on,
- * it only said how work that carries on was going, or it finished while yapd
- * was offline.
+ * or it only said how work that carries on was going.
  */
-export type Held = "focus" | "quiet" | "progress" | "offline"
+export type Held = "focus" | "quiet" | "progress"
 
 export interface Entry {
   readonly at: number
