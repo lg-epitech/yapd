@@ -1977,9 +1977,11 @@ export const make = (
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)
       if (hooked.has(found.update)) hooked.add(update)
-      // And its entry in the journal, so heard to the end this time, it's noted as heard.
+      // And its entry in the journal, so heard to the end this time, it's noted as heard, with the one it took the place of, as said the first time.
       const row = rows.get(found.update)
       if (row !== undefined) rows.set(update, row)
+      const over = supersedes.get(found.update)
+      if (over !== undefined) supersedes.set(update, over)
       const arrivedAt = yield* Clock.currentTimeMillis
       const session = `replay:${found.id}`
       if (yield* enqueue({ session, priority: "needs-you", arrivedAt, update, replay: asked }, asked.turns)) return "queued" as const

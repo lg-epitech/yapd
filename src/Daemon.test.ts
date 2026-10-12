@@ -1858,6 +1858,43 @@ describe("Daemon", () => {
     expect(result.more).toEqual(Option.some(undefined))
   })
 
+  test("a question kept unheard in its hook's place as yapd was off, then asked by its Stop come late and cut off by turning yapd off, is heard once that's said again from the menu, so catching up never asks it again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, played, heard, replay, journal, nextPlayback } = yield* make(undefined, {
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }),
+        })
+        // T3 Code tells of the loader's turn, which asks him something, while yapd is off: it's kept for him to catch up on.
+        yield* toggle(false)
+        yield* made.finished(unhooked("Which network first?", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        const kept = (yield* journal.unheard(0, 60)).map(({ said }) => said)
+        // On again, its own Stop comes late with the same question, which is asked, and turning yapd off cuts it off.
+        yield* toggle(true)
+        yield* handle(
+          "claude",
+          { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: "Which network first?", needs_you: true },
+          { project: "yapd", host: hostname() },
+          false,
+        )
+        yield* nextPlayback
+        yield* toggle(false)
+        yield* toggle(true)
+        // Asked for again from the menu, it's said to the end.
+        const [id] = yield* heard
+        const queued = yield* replay(id!, "t3:Rosie:t-loader")
+        yield* wait(0)
+        yield* wait(11)
+        return { kept, queued, played: [...played], missed: (yield* journal.unheard(0, 60)).map(({ said }) => said) }
+      }),
+    )
+    expect(result.kept).toEqual(["yapd. Which network first?"])
+    expect(result.queued).toBe("queued")
+    expect(result.played).toEqual(["yapd. Which network first?", "yapd. Which network first?"])
+    // So catching up doesn't ask it again, as what T3 Code told of it.
+    expect(result.missed).toEqual([])
+  })
+
   test("sends no reply to an update heard again once its session has moved on", async () => {
     let deliveries = 0
     const result = await run(
