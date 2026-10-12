@@ -696,6 +696,8 @@ export const make = (
     readonly fallback?: Fallback
     /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
     readonly answering: boolean
+    /** Whether it finished while yapd was down: what a mute could keep quiet is then held for the "while I was offline" briefing, not said. */
+    readonly offline?: boolean
     /** The prompt its turn began with, through the hooks or as T3 Code has its run, and when, to tell whether it's one yapd sent its thread. */
     readonly prompted?: { readonly text: string | undefined; readonly at: number }
     /**
@@ -801,12 +803,13 @@ export const make = (
 
   /**
    * Why an update a mute could keep quiet is held for later instead, if it
-   * is: focus or quiet, or, said only in its headline, that it's progress,
-   * for the digest. Never what a mute couldn't keep quiet.
+   * is: it finished while yapd was down, for the "while I was offline"
+   * briefing, or focus or quiet is on, or, said only in its headline, it's
+   * progress, for the digest. Never what a mute couldn't keep quiet.
    */
-  const holds = (priority: Inbox.Ready["priority"], full: boolean) =>
+  const holds = (priority: Inbox.Ready["priority"], full: boolean, offline: boolean) =>
     Effect.map(holdingNow, (mode): Option.Option<Held> =>
-      Option.isSome(mode) ? mode : priority === "progress" && !full ? Option.some("progress") : Option.none(),
+      offline ? Option.some("offline") : Option.isSome(mode) ? mode : priority === "progress" && !full ? Option.some("progress") : Option.none(),
     )
 
   /** How long before a turn's prompt came what yapd sent its thread still counts as what began it, as it's kept before it goes out. */
@@ -910,7 +913,7 @@ export const make = (
       const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: muted.value })
       // Muted first, then held by the mode, then held as progress: kept the same way, by the same rule, and never rendered.
-      const held = mutable ? yield* holds(priority, full) : Option.none<Held>()
+      const held = mutable ? yield* holds(priority, full, finished.offline === true) : Option.none<Held>()
       if (Option.isSome(held)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: held.value })
 
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
@@ -969,7 +972,7 @@ export const make = (
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
-      const lateHeld = mutable ? yield* holds(priority, full) : Option.none<Held>()
+      const lateHeld = mutable ? yield* holds(priority, full, finished.offline === true) : Option.none<Held>()
       if (Option.isSome(lateHeld)) {
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
@@ -1215,6 +1218,7 @@ export const make = (
           known: input.about,
           fallback,
           answering: input.answering === true || followedUp,
+          offline: input.offline === true,
           // Its run's prompt and start, so a message yapd sent the thread for him, steered into it or begun in its words, is told as a hook's is.
           prompted: { text: Option.getOrUndefined(input.turn.prompt), at: input.run.startedAt },
         }),
