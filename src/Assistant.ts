@@ -855,6 +855,17 @@ export const make = (options: {
     const heardBy = (utterance: Pick<Utterance, "at">, at: number | undefined) => at !== undefined && at <= utterance.at
 
     /**
+     * What he'd heard of a line he spoke over, as what it hadn't said yet
+     * tells, marked cut short, so the exchange the model reads holds only
+     * that: all of it when that isn't known, or isn't the end of this line.
+     */
+    const heardOf = (line: string, unsaid: string | undefined) => {
+      if (unsaid === undefined || !line.endsWith(unsaid)) return line
+      const heard = line.slice(0, line.length - unsaid.length).trimEnd()
+      return heard === "" ? line : `${heard}…`
+    }
+
+    /**
      * The open question, unless it's been open so long it no longer counts:
      * for an approval or a thread's question, with whether he'd heard all of
      * it as it was last asked by the time he said what's answering it, `by`,
@@ -3233,7 +3244,7 @@ export const make = (options: {
           yield* deliver(regarding(Brain.dealtWith(yield* persona.lines), askedAbout(open)), utterance)
         })
         if (gone.has(open.id)) return Option.some(late)
-        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open }, [{ speaker: "yapd", text: open.asked }])
+        const thought = yield* think(utterance, { _tag: "Answer", said: open.asked, about: askedAbout(open), question: open }, [{ speaker: "yapd", text: heardOf(open.asked, utterance.unsaid) }])
         // Taken by the model for yapd's own voice, over its first seconds, it's asked on from just before, as when only that was heard.
         if ((thought.source === "fast" || echo !== undefined) && thought.decision.act === "resume") return Option.none()
         // Too little speech to be his, a yes or a pick that would change a thread isn't taken: the question stays open, as if unanswered.

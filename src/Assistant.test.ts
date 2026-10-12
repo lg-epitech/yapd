@@ -2677,7 +2677,13 @@ describe("Assistant", () => {
             const open = (detail as { readonly open?: unknown }).open
             return typeof open === "string" ? [open] : []
           })
-          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()).includes(`you hadn't yet said «${unsaid}»`))
+          // Told what yapd hadn't said yet, and shown only what he'd heard of the line, cut short.
+          const line = `A question on Cloud deployment discovery, sir: ${installing}`
+          const heard = `${line.slice(0, line.length - unsaid.length).trimEnd()}…`
+          const told = made.seen.map((situation) => {
+            const prompt = Brain.prompt(situation, Option.none())
+            return prompt.includes(`you hadn't yet said «${unsaid}»`) && prompt.includes(heard)
+          })
           return { spoken: made.spoken(), answers: answered(made.dispatched), open: Option.isSome(yield* made.open), closed, told }
         }),
       )

@@ -254,7 +254,9 @@ describe("Brain", () => {
         `A plain yes or no, like "yes", "approved", "go ahead", "no" or "no thanks", to a yes-or-no question is the one option that means that yes, or that no, even said before the end of the question, when what he hadn't heard of it only adds detail`,
       )
       expect(told).toContain(`When what he hadn't heard could change what a yes agrees to, like another step, a condition or a choice between things, or when more than one option could be that yes or that no, it's "again" with "how" "same"`)
-      expect(told).toContain(`Once he'd heard any of your pick, a yes may be to it: take it only when your pick is the option that yes means.`)
+      expect(told).toContain(
+        `Once he'd heard any of your pick, a yes may be to it rather than to the question: when your pick is the option a yes to the question means, it's that option; when it isn't, a plain yes is "again" with "how" "same", whatever the question's yes would be.`,
+      )
       expect(told).toContain(`What may be about options he hadn't heard yet, like "the last one", "the second", "that one" or "yeah, that works", is "again" with "how" "same".`)
       expect(told).not.toContain("He stopped you before the end")
       expect(told).not.toContain("You said you'd go with")
