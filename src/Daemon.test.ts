@@ -5652,4 +5652,133 @@ describe("Daemon, one turn kept twice", () => {
     )
     expect(result).toEqual(["yapd. The tests are green.", "yapd finished a turn, but I couldn't summarize it."])
   })
+
+  // The question T3 Code's word told of, and its own Stop come late in the same words, which the model fails on.
+  const question = "Which network should the bridge use first?"
+  const garbled = "Then: which network should the bridge use first?"
+  const couldnt = "yapd finished a turn, but I couldn't summarize it."
+
+  test("a question kept unheard in its hook's place while yapd is off, whose Stop come late couldn't be summed up, is told of beside it in a catch-up, and heard only once it is", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, journal } = yield* make(undefined, { ...loader, urgentMessages: [question], unsummarizable: [garbled] })
+        yield* toggle(false)
+        yield* made.finished(unhooked(question, "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        yield* handle("claude", stop(garbled), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        const told = yield* catchingUp(journal)
+        // He hears the line that couldn't sum it up, and only then the question.
+        yield* journal.markHeard(told.filter(({ said }) => said === couldnt).map(({ id }) => id), yield* Clock.currentTimeMillis)
+        const first = (yield* journal.since(0, { kinds: ["update"] })).map((row) => [row.said, row.heardAt !== undefined])
+        yield* journal.markHeard(told.filter(({ said }) => said !== couldnt).map(({ id }) => id), yield* Clock.currentTimeMillis)
+        const then = (yield* journal.since(0, { kinds: ["update"] })).map((row) => [row.said, row.heardAt !== undefined])
+        return { told: told.map(({ said }) => said).toSorted(), first, then }
+      }),
+    )
+    expect(result.told).toEqual([`yapd. ${question}`, couldnt].toSorted())
+    expect(result.first).toEqual([
+      [`yapd. ${question}`, false],
+      [couldnt, true],
+    ])
+    expect(result.then).toEqual([
+      [`yapd. ${question}`, true],
+      [couldnt, true],
+    ])
+  })
+
+  test("a question kept unheard in its hook's place while yapd is off, whose Stop come late once it's on couldn't be summed up, is still his to hear once that's said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, played, journal } = yield* make(undefined, { ...loader, urgentMessages: [question], unsummarizable: [garbled] })
+        yield* toggle(false)
+        yield* made.finished(unhooked(question, "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        yield* toggle(true)
+        yield* handle("claude", stop(garbled), { project: "yapd", host: hostname() }, false)
+        for (let index = 0; index < 3; index++) yield* wait(11)
+        return {
+          played: [...played],
+          kept: (yield* journal.since(0, { kinds: ["update"] })).map((row) => [row.said, row.heardAt !== undefined]),
+          told: (yield* catchingUp(journal)).map(({ said }) => said),
+        }
+      }),
+    )
+    expect(result.played).toEqual([couldnt])
+    expect(result.kept).toEqual([
+      [`yapd. ${question}`, false],
+      [couldnt, true],
+    ])
+    expect(result.told).toEqual([`yapd. ${question}`])
+  })
+
+  test("a question waiting to be said in its hook's place, whose Stop couldn't be summed up and is said instead, is still his to hear", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, finish, handle, wait, played, nextEvent, journal } = yield* make(undefined, { ...loader, urgentMessages: [question], unsummarizable: [garbled] })
+        yield* finish("playing", "Something long.")
+        yield* made.finished(unhooked(question, "run-1", (yield* made.power).turns))
+        yield* nextEvent("Ready: yapd. Which network")
+        yield* handle("claude", stop(garbled), { project: "yapd", host: hostname() }, false)
+        for (let index = 0; index < 4; index++) yield* wait(11)
+        return {
+          played: [...played],
+          kept: (yield* journal.since(0, { kinds: ["update"] })).map((row) => [row.said, row.heardAt !== undefined]),
+          unheard: (yield* journal.unheard(0, 10)).map(({ said }) => said),
+        }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Something long.", couldnt])
+    expect(result.kept).toEqual([
+      ["yapd. Something long.", true],
+      [`yapd. ${question}`, false],
+      [couldnt, true],
+    ])
+    expect(result.unheard).toEqual([`yapd. ${question}`])
+  })
+
+  test("the answer to what he sent a thread, kept unheard in its hook's place while yapd is off, whose Stop come late couldn't be summed up, is told of beside it in a catch-up", async () => {
+    const answer = "The bridge uses the testnet first, as you asked."
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, journal } = yield* make(undefined, { ...loader, unsummarizable: [`Done. ${answer}`] })
+        yield* toggle(false)
+        yield* made.finished({ ...unhooked(answer, "run-1", (yield* made.power).turns), answering: true })
+        yield* wait(11)
+        yield* handle("claude", stop(`Done. ${answer}`), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        const told = yield* catchingUp(journal)
+        yield* journal.markHeard(told.filter(({ said }) => said === couldnt).map(({ id }) => id), yield* Clock.currentTimeMillis)
+        return {
+          told: told.map(({ said }) => said).toSorted(),
+          kept: (yield* journal.since(0, { kinds: ["update"] })).map((row) => [row.said, row.heardAt !== undefined]),
+        }
+      }),
+    )
+    expect(result.told).toEqual([`yapd. ${answer}`, couldnt].toSorted())
+    expect(result.kept).toEqual([
+      [`yapd. ${answer}`, false],
+      [couldnt, true],
+    ])
+  })
+
+  test("a late Stop in words that can't be told, which couldn't be summed up, is said though the next run's turn kept quiet in its hook's place was heard since", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, handle, wait, played, logged, nextEvent, journal } = yield* make(undefined, { ...loader, mutes, unsummarizable: ["I need the staging password."] })
+        yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+        yield* made.finished(unhooked("The docs are swept.", "run-2", (yield* made.power).turns))
+        yield* nextEvent("Muted update for yapd")
+        // He hears it, as in a catch-up.
+        yield* journal.markHeard((yield* journal.since(0, { kinds: ["update"] })).map(({ id }) => id), yield* Clock.currentTimeMillis)
+        // The run before's Stop, late, in words neither run's are known by.
+        yield* handle("claude", stop("I need the staging password."), { project: "yapd", host: hostname() }, false)
+        for (let index = 0; index < 3; index++) yield* wait(11)
+        return { played: [...played], skipped: logged.some((line) => line.startsWith("Skipped update, heard already")) }
+      }),
+    )
+    expect(result.played).toEqual([couldnt])
+    expect(result.skipped).toBe(false)
+  })
 })
