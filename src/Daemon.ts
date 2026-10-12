@@ -981,6 +981,8 @@ export const make = (
       }
       const row = claimed === undefined ? yield* journal.write(entry) : Option.flatten(claimed)
       if (Option.isSome(row)) rows.set(update, row.value)
+      // What was held as progress of the same work is out of date once he's told how it went, so the digest never brings it up after.
+      if (Option.isSome(row)) yield* journal.outdated(row.value, session, Option.getOrUndefined(tied) ?? finished.known, arrivedAt)
       // What was kept quiet of its turn in its hook's place is told now, so it isn't what he missed as well.
       if (finished.over?.row !== undefined) yield* journal.markHeard([finished.over.row], arrivedAt)
       yield* Effect.logInfo(`Ready: ${spoken}`)

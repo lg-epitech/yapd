@@ -3431,6 +3431,23 @@ describe("Daemon headline first", () => {
     ])
   })
 
+  test("progress held of work he's since been told the outcome of is out of date, and never comes up in the digest", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, journal, played } = yield* make(undefined, { progressMessages: ["Pass 7 is running.", "The Mina checks are running."] })
+        yield* finish("review", "Pass 7 is running.")
+        yield* wait(11)
+        yield* finish("mina", "The Mina checks are running.")
+        yield* wait(11)
+        yield* finish("review", "The review is clean and merged.")
+        yield* wait(11)
+        return { played: [...played], held: (yield* journal.held(0)).map(({ said }) => said) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The review is clean and merged."])
+    expect(result.held).toEqual(["yapd. The Mina checks are running."])
+  })
+
   test("a reply to an update heard before a restart, tied to its thread, reaches that thread through T3 Code", async () => {
     const result = await run(
       Effect.gen(function* () {

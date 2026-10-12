@@ -122,6 +122,13 @@ export class Journal extends Context.Tag("yapd/Journal")<
      */
     readonly previous: (at: number, session: string, ref?: { readonly machine: string; readonly id: string }) => Effect.Effect<Option.Option<Kept>>
     /**
+     * Something newer about the same work was kept as said, the entry
+     * `newer`: what was held as progress of it before, by the same match as
+     * `previous`, is out of date, so it's noted as dealt with at `at`, never
+     * to come up in a digest after he heard how the work went.
+     */
+    readonly outdated: (newer: number, session: string, ref: { readonly machine: string; readonly id: string } | undefined, at: number) => Effect.Effect<void>
+    /**
      * The updates he heard, newest kept first, `most` of them: never one kept
      * quiet or held for later, which he never heard said, however many of
      * those came since.
@@ -417,6 +424,17 @@ export const fromStore = (
           ),
         )
         .pipe(Effect.catchAll((error) => Effect.logWarning("Could not read my journal", error).pipe(Effect.as(Option.none<Kept>())))),
+    outdated: (newer, session, ref, at) =>
+      store
+        .transaction((database: Database) => {
+          database
+            .query<never, [number, number, string, string, string | null, string | null]>(
+              `update journal set heard_at = ? where kind = 'update' and heard_at is null and id < ? and json_extract(detail, '$.held') = 'progress'
+               and (thread = ? or json_extract(detail, '$.session') = ? or (machine = ? and thread = ?))`,
+            )
+            .run(at, newer, session, session, ref?.machine ?? null, ref?.id ?? null)
+        })
+        .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what's out of date in my journal", error))),
     heard: (most) =>
       reading(
         store.transaction((database: Database) =>
