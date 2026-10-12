@@ -31,6 +31,8 @@ const rosie: Catalog = {
     project("yapd", "/code/yapd", "claude-fable-5-1", "2026-09-29T10:00:00.000Z"),
     project("std", "/code/std", "claude-opus-5-5", "2026-09-28T10:00:00.000Z"),
     { ...project("notes", "/code/notes", "gpt-6-sol", "2026-09-20T10:00:00.000Z"), repository: false, worktree: false },
+    // T3 Code's scratch project, as it calls it.
+    { ...project("No project", "/t3/scratch", "gpt-6-sol", "2026-09-29T11:00:00.000Z"), repository: false, worktree: false, scratch: true },
   ],
   models,
 }
@@ -280,6 +282,30 @@ describe("Drafts", () => {
       { speaker: "yapd", text: "For the loader fix, is that yapd or std?" },
       { speaker: "user", text: "Std." },
     ])
+  })
+
+  test("a research request starts in the scratch project", async () => {
+    const research = { about: "the glucose question", settled: "outside", evidence: "", project: "", model: "gpt-6-sol", effort: "", worktree: true, prompt: "Find out whether Apple shipped an API for third-party glucose sensors on the Watch, and tell me." } as const
+    const asked = (overrides: Partial<Decision>) =>
+      run(
+        Effect.gen(function* () {
+          const { dictate, started, spoken } = yield* drafts(() => decision({ ...research, ...overrides }), { lines: { ...Persona.plain, onIt: "Right away, sir.", address: "sir" } })
+          yield* dictate("Find out whether Apple shipped an API for third-party glucose sensors on the Watch.")
+          return { started, spoken: spoken() }
+        }),
+      )
+    expect(await asked({ machine: "", spoken: "Looking into it, on Sol." })).toEqual({
+      started: [{ machine: "rosie", request: { project: "/t3/scratch", prompt: research.prompt, model: "gpt-6-sol", effort: "high", worktree: false } }],
+      spoken: ["Right away, sir. Looking into it, on Sol."],
+    })
+    // In its plain words, with no worktree to tell of.
+    expect((await asked({ machine: "", spoken: "" })).spoken).toEqual(["Looking into it, on GPT-6-Sol."])
+    // Not on a machine without one, nor as a project he named.
+    expect(await asked({ machine: "rig", spoken: "Looking into it on rig, on Sol." })).toEqual({
+      started: [],
+      spoken: ["I can't start work outside your projects on rig. Which project is the glucose question for?"],
+    })
+    expect(await asked({ settled: "named", evidence: "Apple", project: "No project", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
   })
 
   test("says what really started when that's not what was asked", () => {

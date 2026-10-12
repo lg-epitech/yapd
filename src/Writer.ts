@@ -16,9 +16,10 @@ export type Action = typeof Action.Type
 /**
  * What settled the project: they named it, they referred to earlier work that
  * was in it, or what the request is about is only found in it. Anything else is
- * a guess, however likely.
+ * a guess, however likely. Or that it belongs to no project, which starts it
+ * outside them all, in T3 Code's scratch project.
  */
-export const Settled = Schema.Literal("named", "referred", "subject", "unclear")
+export const Settled = Schema.Literal("named", "referred", "subject", "outside", "unclear")
 export type Settled = typeof Settled.Type
 
 /** What settled whether there's a worktree. Unclear when they said something about one that could be heard either way. */
@@ -104,6 +105,7 @@ const prompting = `"prompt": what the agent is given. You're its author, and you
 - Add nothing they didn't ask for. No tests, documentation, commit, pull request, clean-up or "also check" of your own, no steps, approach or acceptance criteria they didn't give. What they left open stays open: the agent can read the project and decide.
 - Never state what you don't know. Name a file, a function or a cause only if they did or if what's below shows it. If a word looks misheard and you can't tell what it was, keep it as heard and say it was dictated.
 - A question stays a question, as they asked it, with nothing telling the agent what to do about it. Asking to look into something, or for a plan, isn't asking for the change.
+- For work outside their projects, the agent finds out and reports back, and changes no project or repository on the machine: say so. It's the one thing you add that they didn't say.
 - As long as what they said needs, which is often a sentence or two. Plain prose: no headings, no bullets unless they listed things, no "Your task is", no closing line.
 - Leave out what was meant for you: the machine, the model, the effort, whether to use a worktree. The project only where the sentence needs it.
 - In the language they spoke.`
@@ -113,6 +115,7 @@ const speaking = (actions: ReadonlyArray<Action>) =>
     `"spoken": what you say aloud. They're listening, not reading, so keep it short.`,
     aloud,
     `- For "start", what you say once the session has started, which comes after your usual line that it's in hand, so leave that out: the project, the model, and whether it's in a worktree, like "In yapd, on Fable, in a worktree." or "In yapd, on Fable, without a worktree." Always say which, in those words, since it's how they catch you having misheard. Most times that's all of it. The machine is only named when it isn't this one, and the effort only when they asked for one. If you filled in or corrected something that changes what the agent will do, add it in a few words, like "I took the std thing to mean the Redis investigation." Never how you decided, and don't repeat the request back.`,
+    `- For "start" outside their projects, that you're looking into it, and the model, like "Looking into it, on Sol." Nothing about a worktree. The machine only when it isn't this one.`,
     `- For "ask", the question, in one sentence. They may have dictated other things since, so it says which request it's about, and offers the candidates when two or three projects really fit, like "For the retry fix, is that cryptio saas or integration connectors?" When they named a project you don't know, say so rather than offer ones they didn't name, like "I don't know a project called billing. Which one is the retry fix for?"`,
     ...(actions.includes("none") ? [`- For "none", a few words on why nothing started, like "That didn't sound like work to start, so I left it."`] : []),
     ...(actions.includes("drop") ? [`- For "drop", that it's dropped, in a word or two. Empty for "wait".`] : []),
@@ -127,9 +130,9 @@ const deciding = (answering: boolean) =>
     reading,
     [
       `"action":`,
-      `- "start" when you know which project it's for and can write the prompt from what's below. That's most requests.`,
-      `- "ask" when you can't tell which project they mean. Never guess a project: work started in the wrong one is the costly mistake, and a question costs them a few seconds. Also when the request can be read two ways that would send the agent in different directions. Nothing else is worth a question: not the model, the effort or the worktree, and not a detail the agent can find out in the project.`,
-      `- "none" when there's nothing in it for an agent to do: they were trying the microphone, like "testing, one two", talking to someone else, asking you something, or it makes no sense. Anything an agent could carry out is work, however small, and even when they call it a test: "this is a test, reply with the word OK" is a prompt like any other, and needs a project like any other.`,
+      `- "start" when you know which project it's for, or that it's for none, and can write the prompt from what's below. That's most requests.`,
+      `- "ask" when you can't tell which project they mean. Never guess a project: work started in the wrong one is the costly mistake, and a question costs them a few seconds. That's also when it fits a project and none about as well, like "For the glucose question, is that for yapd, or shall I just look into it?" Also when the request can be read two ways that would send the agent in different directions. Nothing else is worth a question: not the model, the effort or the worktree, and not a detail the agent can find out in the project.`,
+      `- "none" when there's nothing in it for an agent to do: they were trying the microphone, like "testing, one two", talking to someone else, or it makes no sense. Anything an agent could carry out is work, however small, and even when they call it a test: "this is a test, reply with the word OK" is a prompt like any other, and needs a project like any other. A question to find out or look into is work too: an agent finds out and tells them.`,
       ...(answering
         ? [
             `- "drop" when they call the request off in answer to your question, like "never mind" or "forget it".`,
@@ -145,14 +148,15 @@ const deciding = (answering: boolean) =>
       `3. What the project last used, below.`,
     ].join("\n"),
     [
-      `"settled": what settles the project, which is only ever one of three things.`,
+      `"settled": what settles the project, which is only ever one of three things, or that it's for none.`,
       `- "named": they named it in this dictation or in an answer to you. Dictation mangles names, like "yap D" for yapd or "crypto sources" for cryptio-sources, so take the listed project it sounds like. A name that sounds like nothing listed is a project you don't know: that's "unclear", and you never make one up or fall back on another.`,
       `- "referred": they pointed at earlier work in so many words, like "the same", "that one", "as before", "then do it in", or "follow up on what the std agent just finished", and that work was in the project. What you read out lately and what they dictated before are there to work out what such words point at, and for nothing else.`,
       `- "subject": what the request is about exists in exactly one project, like shower timing statistics, which only nowish has. It has to be about what the project is or contains. A request that would make sense in any project, like a test, a question about git or "fix the failing build", is about none of them.`,
+      `- "outside": they named no project, and it's about nothing in any of them, like something on the web or in the world. It starts outside their projects. Anything about code, a build, tests, a branch or a pull request is never "outside": with no project named or settled, it's "unclear", and you ask.`,
       `- "unclear": anything else, and then you ask. That a request resembles one they made before, was dictated soon after it, or would most likely go where the last one went is not a reason: it's a guess, and they expect to be asked. So is two projects fitting about as well.`,
-      `"evidence": their words that settle it, copied from what they said exactly as transcribed, mistakes included: the name they said, the words that point at earlier work, or the words that name the subject. Empty when unclear.`,
-      `"project": its name exactly as listed. Empty when unclear.`,
-      `"machine": as listed, the one the project is on. When it's on several and nothing says which, the one where it was worked on last. Only where they say to run it counts as said, like "on rig": a machine that's part of what the work is about, like "why is the rig relay slow", says nothing about where it goes.`,
+      `"evidence": their words that settle it, copied from what they said exactly as transcribed, mistakes included: the name they said, the words that point at earlier work, or the words that name the subject. Empty when unclear or outside.`,
+      `"project": its name exactly as listed. Empty when unclear or outside.`,
+      `"machine": as listed, the one the project is on. When it's on several and nothing says which, the one where it was worked on last. Outside their projects, only the one they said, or else empty. Only where they say to run it counts as said, like "on rig": a machine that's part of what the work is about, like "why is the rig relay slow", says nothing about where it goes.`,
       `"model": a model's name as listed. They name models loosely, like "Fable", "opus five five" or "the big GPT": take the listed model it means, the newest when several fit.`,
       `"effort": one of that model's efforts, or empty when it has none. Heard loosely too: "extra high" is xhigh.`,
       `"worktreeFrom": what settles the worktree: "said", "rule", "last used", or "unclear" when they said something about a worktree and you can't tell which way. People ask for one with "in a worktree" and decline with "no worktree", which sound nearly alike and get transcribed as each other, or as "on a work tree", "know work tree", "no work three" and the like. Judge by how people talk: a bare tag at the end of a sentence, right after they've told you to do nothing else or keep it small, is someone declining. If it could be either, it's "unclear", never "said".`,
@@ -182,7 +186,7 @@ export const vocabulary = (listings: ReadonlyArray<Listing>, titles: ReadonlyArr
   return [
     ...new Set([
       ...listings.map(({ machine }) => machine),
-      ...catalogs.flatMap(({ projects }) => projects.map(({ name }) => name)),
+      ...catalogs.flatMap(({ projects }) => projects.filter(({ scratch }) => scratch !== true).map(({ name }) => name)),
       ...called,
       ...named,
     ]),
@@ -205,6 +209,12 @@ export const ago = (at: number, now: number) => {
   const days = Math.round(minutes / (24 * 60))
   return days === 1 ? "yesterday" : `${days} days ago`
 }
+
+/** Where work outside their projects starts, on a machine where it can. */
+const outside = (listed: Catalog["projects"][number]) =>
+  `Outside their projects (scratch): work that belongs to no project starts here, in a folder of its own${
+    listed.model === undefined ? "" : `, last used ${[listed.model.name, listed.model.effort].filter(Boolean).join(" ")}`
+  }.`
 
 /** Recent work listed per project. More would crowd out the rest. */
 const titles = 3
@@ -242,9 +252,11 @@ export const listed = (listings: ReadonlyArray<Listing>, now: number) => {
       const offered = catalog.value.models.map(model).join("\n")
       const same = models.get(offered)
       if (same === undefined) models.set(offered, machine)
+      const scratch = catalog.value.projects.find(({ scratch }) => scratch === true)
       return [
         `On ${name}, the projects:`,
-        catalog.value.projects.map(project(now)).join("\n"),
+        catalog.value.projects.filter(({ scratch }) => scratch !== true).map(project(now)).join("\n"),
+        ...(scratch === undefined ? [] : [outside(scratch)]),
         same === undefined ? `and the models, each with its other names and its efforts:\n${offered}` : `and the same models as on ${same}.`,
       ].join("\n")
     })

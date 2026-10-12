@@ -23,6 +23,7 @@ const catalog: Catalog = {
       ],
     },
     { name: "notes", path: "/code/notes", repository: false, branch: null, worktree: false, recent: [] },
+    { name: "No project", path: "/t3/scratch", repository: false, branch: null, worktree: false, model: { name: "claude-fable-5-1", effort: "high" }, recent: [], scratch: true },
   ],
   models: [
     { name: "claude-fable-5-1", title: "Claude Fable 5.1", aliases: ["fable"], efforts: ["low", "high"] },
@@ -60,6 +61,10 @@ describe("Writer", () => {
     expect(prompt).toContain(`"Reduce Yapd Response Latency" (2 h ago), "Explore iPhone App Options" (yesterday), "Run Kokoro on the GPU" (9 days ago)`)
     expect(prompt).not.toContain("Something From Long Ago")
     expect(prompt).toContain("- notes (/code/notes), no model yet, not a repository, so no worktree")
+    // T3 Code's scratch project apart from the projects, never as one he could name.
+    expect(prompt).toContain("Outside their projects (scratch): work that belongs to no project starts here, in a folder of its own, last used claude-fable-5-1 high.")
+    expect(prompt).not.toContain("- No project")
+    expect(Writer.vocabulary(material().listings)).not.toContain("No project")
     expect(prompt).toContain("On box: nothing can start there right now. I can't reach box.")
     expect(prompt).toContain("Never guess a project")
     expect(prompt.endsWith("What they dictated:\nIn yap D, fix the loader.")).toBe(true)

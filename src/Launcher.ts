@@ -59,6 +59,11 @@ export const Catalog = Schema.Struct({
       model: Schema.optional(Schema.Struct({ name: Schema.String, effort: Schema.optional(Schema.String) })),
       /** The latest work there, newest first, since the user refers to it: "the latency thing from yesterday". */
       recent: Schema.Array(Schema.Struct({ title: Schema.String, date: Schema.String })),
+      /**
+       * Whether it's T3 Code's scratch project, where work that belongs to no
+       * project starts, each thread in a folder of its own. An older yapd never says.
+       */
+      scratch: Schema.optional(Schema.Boolean),
     }),
   ),
   /** The models that are ready to use. A request can name one by any of its names. */

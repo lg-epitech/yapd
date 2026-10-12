@@ -11,7 +11,10 @@ import type * as T3Live from "./T3Live.ts"
 // message of a new one: a single launch that creates the thread and has the
 // server prepare its workspace, a worktree or the checkout, before the first
 // turn. What the request leaves out follows the app's defaults, which the app
-// works out itself, so they are worked out again here.
+// works out itself, so they are worked out again here. Work that belongs to no
+// project starts in T3 Code's scratch project, told by its folder alone, which
+// T3 Code makes the first time it's asked for and gives each thread a folder of
+// its own in.
 
 const Selection = Schema.Struct({
   instanceId: Schema.String,
@@ -345,7 +348,7 @@ export const readied = (look: Effect.Effect<Option.Option<T3Live.Thread>>, asked
   })
 
 /** Why new work T3 Code made a thread for didn't start: it couldn't get its workspace ready. */
-export const unready = (worktree: boolean, project = "the project") =>
+export const unready = (worktree: boolean, project = "it") =>
   `T3 Code ${worktree ? "couldn't make the worktree" : `couldn't get ${project} ready`}, so the thread it made didn't start.`
 
 /**
@@ -398,6 +401,16 @@ const repository = (cwd: string) =>
 /** How many of a project's threads the catalog names. */
 const few = 5
 
+/** The folder behind T3 Code's scratch project, and the path a folder really is, which tells that project by it. */
+interface Scratch {
+  readonly root: string
+  readonly resolve: (path: string) => string
+}
+
+/** Whether a project is T3 Code's scratch project, by its folder alone. */
+const outside = (scratch: Scratch | undefined, project: Project) =>
+  scratch !== undefined && scratch.resolve(project.workspaceRoot) === scratch.resolve(scratch.root)
+
 export const catalog = (input: {
   readonly shell: Shell
   readonly settings: Settings
@@ -405,8 +418,10 @@ export const catalog = (input: {
   /** By project id. */
   readonly files: ReadonlyMap<string, "local" | "worktree" | undefined>
   readonly repositories: ReadonlyMap<string, Repository>
+  /** When T3 Code has a scratch project. */
+  readonly scratch?: Scratch
 }): Catalog => ({
-  projects: input.shell.projects.map((project) => {
+  projects: [...input.shell.projects.map((project) => {
     const usual = defaults(input.settings, project, input.files.get(project.id))
     const threads = newest(input.shell, project)
     // One that has since gone would be refused at the start, so whoever writes the request has to pick.
@@ -423,8 +438,14 @@ export const catalog = (input: {
       worktree: repository && usual.worktree,
       ...(selection === undefined ? {} : { model: { name: selection.model, ...(level === undefined ? {} : { effort: level }) } }),
       recent: threads.slice(0, few).map(({ title, updatedAt }) => ({ title, date: updatedAt })),
+      ...(outside(input.scratch, project) ? { scratch: true } : {}),
     }
   }),
+  // Never used yet, it's made the first time work starts there, and called what T3 Code calls it.
+  ...(input.scratch === undefined || input.shell.projects.some((project) => outside(input.scratch, project))
+    ? []
+    : [{ name: "No project", path: input.scratch.root, repository: false, branch: null, worktree: false, recent: [], scratch: true }]),
+  ],
   models: input.providers.flatMap((provider) =>
     provider.enabled && provider.status === "ready"
       ? provider.models.map((model) => ({
@@ -446,7 +467,24 @@ const file = (project: Project) =>
     Effect.orElseSucceed(() => undefined),
   )
 
-const Providers = Schema.Struct({ providers: Schema.Array(Provider) })
+const Providers = Schema.Struct({
+  providers: Schema.Array(Provider),
+  /** The folder behind its scratch project, on a T3 Code that has one. */
+  scratchWorkspaceRoot: Schema.optional(Schema.String),
+})
+
+/** The scratch project, made if it wasn't yet. */
+const Scratched = Schema.Struct({ projectId: Schema.String })
+
+/** What T3 Code calls each folder, as it really is, links followed: what tells two paths to the same folder. */
+const resolving = (paths: ReadonlyArray<string>) =>
+  Effect.map(
+    Effect.promise(() => Promise.all(paths.map(async (path) => [path, await canonical(path)] as const))),
+    (found) => {
+      const resolved = new Map(found)
+      return (path: string) => resolved.get(path) ?? path
+    },
+  )
 
 const heard = <A, R>(effect: Effect.Effect<A, LaunchError | Server.Trouble | Server.Refusal, R>) =>
   effect.pipe(
@@ -467,16 +505,29 @@ export const launcher = (
       const refuse = (reason: string) => new LaunchError({ reason })
       const { api, call } = yield* reach
 
-      const shell = yield* api("/api/orchestration/shell", Shell)
-      const paths = [home(request.project.trim()), ...shell.projects.map(({ workspaceRoot }) => workspaceRoot)]
-      const resolved = new Map(yield* Effect.promise(() => Promise.all(paths.map(async (path) => [path, await canonical(path)] as const))))
-      const project = yield* Either.mapLeft(find(shell.projects, request.project, (path) => resolved.get(path) ?? path), refuse)
+      const [shell, { providers, scratchWorkspaceRoot: root }] = yield* Effect.all(
+        [api("/api/orchestration/shell", Shell), call("server.getConfig", {}, Providers)],
+        { concurrency: "unbounded" },
+      )
+      const wanted = home(request.project.trim())
+      const resolve = yield* resolving([wanted, ...shell.projects.map(({ workspaceRoot }) => workspaceRoot), ...(root === undefined ? [] : [root])])
+      // Asked for by its folder, the scratch project is made if it wasn't yet, which T3 Code does once however often it's asked.
+      const scratch = root !== undefined && resolve(wanted) === resolve(root)
+      const unable = "This T3 Code can't start work outside a project."
+      const made = Effect.gen(function* () {
+        // T3 Code says why only in words of its own, wrapped in another error, so all that's told is that it can't.
+        const { projectId } = yield* call("projects.ensureScratch", {}, Scratched).pipe(
+          Effect.mapError((error) => (error._tag === "Refusal" && error.tag !== "EnvironmentAuthorizationError" ? refuse(unable) : error)),
+        )
+        const found = (yield* api("/api/orchestration/shell", Shell)).projects.find(({ id }) => id === projectId)
+        return found ?? (yield* refuse(unable))
+      })
+      const project = scratch ? yield* made : yield* Either.mapLeft(find(shell.projects, request.project, resolve), refuse)
 
       const base = request.baseBranch?.trim() || undefined
-      const [settings, { providers }, refs, named, mode] = yield* Effect.all(
+      const [settings, refs, named, mode] = yield* Effect.all(
         [
           call("server.getSettings", {}, Settings),
-          call("server.getConfig", {}, Providers),
           call("vcs.listRefs", { cwd: project.workspaceRoot, refKind: "local", limit: 200 }, Refs),
           base === undefined
             ? Effect.succeed([])
@@ -517,23 +568,25 @@ export const launcher = (
                 : error,
         ),
       )
-      if (short(first(prepared))) return yield* new LaunchError({ reason: unready(decided.worktree, project.title) })
+      // Not named for the scratch project, whose name T3 Code gives as "No project".
+      if (short(first(prepared))) return yield* new LaunchError({ reason: unready(decided.worktree, scratch ? undefined : project.title) })
       const { thread } = prepared.projection
       const level = effort(thread.modelSelection)
       return {
         thread: started.thread,
-        project: project.title,
+        project: scratch ? "scratch" : project.title,
         directory: thread.worktreePath ?? project.workspaceRoot,
         branch: thread.branch,
         model: thread.modelSelection.model,
         ...(level === undefined ? {} : { effort: level }),
-        worktree: thread.worktreePath !== null,
+        // T3 Code gives each scratch thread a folder of its own, as it would a worktree, which it isn't.
+        worktree: !scratch && thread.worktreePath !== null,
       } satisfies Started
     }).pipe(heard),
 
   catalog: Effect.gen(function* () {
     const { api, call } = yield* reach
-    const [shell, settings, { providers }] = yield* Effect.all(
+    const [shell, settings, { providers, scratchWorkspaceRoot: root }] = yield* Effect.all(
       [
         api("/api/orchestration/shell", Shell),
         call("server.getSettings", {}, Settings),
@@ -545,9 +598,14 @@ export const launcher = (
       Effect.forEach(shell.projects, (project) => Effect.map(look(project), (found) => [project.id, found] as const), {
         concurrency: "unbounded",
       }).pipe(Effect.map((found) => new Map(found)))
-    const [files, repositories] = yield* Effect.all([each(file), each(({ workspaceRoot }) => repository(workspaceRoot))], {
-      concurrency: "unbounded",
-    })
-    return catalog({ shell, settings, providers, files, repositories })
+    const [files, repositories, resolve] = yield* Effect.all(
+      [
+        each(file),
+        each(({ workspaceRoot }) => repository(workspaceRoot)),
+        root === undefined ? Effect.succeed(undefined) : resolving([root, ...shell.projects.map(({ workspaceRoot }) => workspaceRoot)]),
+      ],
+      { concurrency: "unbounded" },
+    )
+    return catalog({ shell, settings, providers, files, repositories, ...(root === undefined || resolve === undefined ? {} : { scratch: { root, resolve } }) })
   }).pipe(heard),
 })

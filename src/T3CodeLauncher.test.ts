@@ -168,8 +168,17 @@ describe("T3CodeLauncher's start", () => {
   const thread = (worktreePath: string | null, status: string) => ({
     projection: { thread: { branch: worktreePath === null ? "main" : "t3code/0a1b2c3d", worktreePath, modelSelection: fable }, runs: [{ status }] },
   })
-  /** T3 Code as the launcher reaches it, answering a launch and then each look at the thread in turn. */
-  const reached = (launched: unknown, looks: Array<unknown>, calls: Array<{ method: string; payload: unknown }> = []) => {
+  /**
+   * T3 Code as the launcher reaches it, answering a launch and then each look
+   * at the thread in turn, and anything `others` answers otherwise: by what it
+   * comes to, read as it's asked.
+   */
+  const reached = (
+    launched: unknown,
+    looks: Array<unknown>,
+    calls: Array<{ method: string; payload: unknown }> = [],
+    others: Record<string, () => Effect.Effect<unknown, Server.Refusal>> = {},
+  ) => {
     const answers: Record<string, unknown> = {
       "/api/orchestration/shell": { projects: [project()], threads: [] },
       "server.getSettings": { defaultThreadEnvMode: "worktree" },
@@ -177,12 +186,13 @@ describe("T3CodeLauncher's start", () => {
       "vcs.listRefs": refs,
       "orchestration.launchThread": launched,
     }
-    const answer = <A, I>(value: unknown, schema: Schema.Schema<A, I>) => Effect.orDie(Schema.decodeUnknown(schema)(value))
+    const answer = <A, I>(name: string, value: unknown, schema: Schema.Schema<A, I>) =>
+      Effect.flatMap(others[name]?.() ?? Effect.succeed(value), (value) => Effect.orDie(Schema.decodeUnknown(schema)(value)))
     const transport: Server.Transport = {
-      api: (path, schema) => answer(path === "/api/orchestration/threads/thread-1/bounded" ? looks.shift() : answers[path], schema),
+      api: (path, schema) => Effect.orDie(answer(path, path === "/api/orchestration/threads/thread-1/bounded" ? looks.shift() : answers[path], schema)),
       call: (method, payload, schema) => {
         calls.push({ method, payload })
-        return answer(answers[method], schema)
+        return answer(method, answers[method], schema)
       },
       asset: () => Effect.die("not expected"),
     }
@@ -236,6 +246,28 @@ describe("T3CodeLauncher's start", () => {
     const failed = await start(reached(thread(null, "preparing"), [thread(null, "failed")]))
     expect(failed).toEqual(Either.left(new Launcher.LaunchError({ reason: "T3 Code couldn't make the worktree, so the thread it made didn't start." })))
   })
+
+  test("starts work outside a project in T3 Code's scratch project, made the first time, in a folder of its own that isn't a worktree", async () => {
+    const calls: Array<{ method: string; payload: unknown }> = []
+    const scratch = project({ id: "scratch-1", title: "No project", workspaceRoot: "/t3/scratch" })
+    const projects = [project()]
+    const outside = (ensured: () => Effect.Effect<unknown, Server.Refusal>) => ({
+      "server.getConfig": () => Effect.succeed({ providers, scratchWorkspaceRoot: "/t3/scratch" }),
+      "/api/orchestration/shell": () => Effect.succeed({ projects, threads: [] }),
+      "projects.ensureScratch": ensured,
+      "vcs.listRefs": () => Effect.succeed({ isRepo: false, refs: [] }),
+    })
+    const made = () => Effect.sync(() => (projects.push(scratch), { projectId: "scratch-1" }))
+    const research = { project: "/t3/scratch", prompt: "Find out whether Apple shipped a glucose API.", model: "fable", worktree: false }
+    const started = await start(reached(thread("/t3/scratch/2026-10-12-find-out-whether-apple-0a1b2c3d", "running"), [], calls, outside(made)), research)
+    expect(Either.getOrThrow(started)).toMatchObject({ project: "scratch", directory: "/t3/scratch/2026-10-12-find-out-whether-apple-0a1b2c3d", worktree: false })
+    expect(calls.find(({ method }) => method === "orchestration.launchThread")?.payload).toMatchObject({ projectId: "scratch-1", workspaceStrategy: { type: "root" } })
+    // Refused, it's said without T3 Code's own words.
+    const refused = () => Effect.fail(new Server.Refusal({ tag: "OrchestrationDispatchCommandError", message: "Threads without a project are not available on this environment." }))
+    expect(await start(reached(undefined, [], [], outside(refused)), research)).toEqual(
+      Either.left(new Launcher.LaunchError({ reason: "This T3 Code can't start work outside a project." })),
+    )
+  })
 })
 
 describe("T3CodeLauncher's catalog", () => {
@@ -256,6 +288,22 @@ describe("T3CodeLauncher's catalog", () => {
       repositories: new Map([["project-1", { repository: true, branch: "main" }]]),
       ...overrides,
     })
+
+  test("marks T3 Code's scratch project by its folder alone, and lists it before it's made", () => {
+    const scratch = { root: "/t3/scratch", resolve: (path: string) => path.replace(/\/$/, "") }
+    const shell = { projects: [project(), project({ id: "project-2", title: "No project", workspaceRoot: "/code/no-project" })], threads: [] }
+    const marked = (shell: T3CodeLauncher.Shell) => listed({ shell, scratch }).projects.map(({ name, path, scratch }) => [name, path, scratch === true])
+    expect(marked(shell)).toEqual([
+      ["free-sound", "/code/free-sound", false],
+      ["No project", "/code/no-project", false],
+      ["No project", "/t3/scratch", true],
+    ])
+    expect(marked({ ...shell, projects: [...shell.projects, project({ id: "scratch-1", title: "No project", workspaceRoot: "/t3/scratch/" })] })).toEqual([
+      ["free-sound", "/code/free-sound", false],
+      ["No project", "/code/no-project", false],
+      ["No project", "/t3/scratch/", true],
+    ])
+  })
 
   test("says where each project's work would start, and with what", () => {
     expect(listed()).toEqual({
