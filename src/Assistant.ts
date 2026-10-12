@@ -778,8 +778,12 @@ export const make = (options: {
 
     const mint = (at: number, prefix: string) => `${prefix}${at.toString(36)}${crypto.randomUUID().slice(0, 4)}`
 
-    /** Whether yapd is off, or was turned off since it had been turned on or off `turns` times, so nothing is done now for what was said by then. */
-    const outdated = (turns: number) => Effect.map(options.power, (power) => !power.on || power.turns !== turns)
+    /**
+     * Whether yapd was turned off or on since it had been turned on or off
+     * `turns` times, so nothing is done now for what was said by then. What he
+     * asks by the shortcut while it's off is still answered.
+     */
+    const outdated = (turns: number) => Effect.map(options.power, (power) => power.turns !== turns)
 
     /**
      * Under way for a request heard when yapd had been turned on or off
@@ -1266,8 +1270,10 @@ export const make = (options: {
      */
     const unanswered = (id: string): Effect.Effect<void> =>
       Effect.gen(function* () {
-        // Not while something's being said that may answer it, nor twice over.
+        // Not while something's being said that may answer it, nor twice over, nor while yapd is off, when he answers it with the shortcut,
+        // and it isn't asked again of yapd's own accord.
         if (asking?.open.id !== id || asking.held.size > 0 || asking.repeat !== undefined) return
+        if (!(yield* options.power).on) return
         if (asking.asks >= asks) return yield* letGo(asking.open)
         const now = yield* Clock.currentTimeMillis
         const { open, from, asks: count } = asking
@@ -3181,9 +3187,11 @@ export const make = (options: {
       Effect.gen(function* () {
         const utterance = "utterance" in of ? of.utterance : of
         if (outcome.say === "") return
-        // Turned off since, nothing about it is said, so nothing is noted as said.
+        // Turned off or on since, nothing about it is said, so nothing is noted as said. Off, only what answers what he asked by the
+        // shortcut is said, never anything yapd would bring up of its own accord.
         const power = yield* options.power
-        if (!power.on || power.turns !== utterance.turns) return yield* Effect.logInfo(`Not saying "${outcome.say}", since yapd was turned off`)
+        if (power.turns !== utterance.turns) return yield* Effect.logInfo(`Not saying "${outcome.say}", since yapd was turned off`)
+        if (!power.on && !("utterance" in of || "heard" in of)) return yield* Effect.logInfo(`Not saying "${outcome.say}", since yapd is off`)
         const at = yield* Clock.currentTimeMillis
         const open = outcome.kind === "question" && asking !== undefined ? asking.open : undefined
         const about = outcome.subject._tag === "Answer" ? outcome.subject.about : Option.none<Threads.Ref>()
@@ -3633,6 +3641,19 @@ export const make = (options: {
       yield* wake(yield* Clock.currentTimeMillis)
     }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not say what I found after restarting, or ask what waits on you", cause)))
 
+    /**
+     * How much came in while yapd was off that he hasn't heard, as it's
+     * turned on again: updates kept then, and failures and limits, but not
+     * what was kept quiet as he muted its thread.
+     */
+    const keptWhileOff = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const off = Missed.off(yield* journal.switched(now - Missed.week))
+      if (off === undefined || off.to !== undefined) return 0
+      const rows = yield* journal.missed(off.from, Number.MAX_SAFE_INTEGER)
+      return rows.filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || (kept.kind === "notice" && kept.at >= off.from))).length
+    })
+
     /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
     const respond = (utterance: Utterance, pressed: Subject | undefined) => {
       /** The prompt being written in case it's new work, if it is being. */
@@ -3811,8 +3832,12 @@ export const make = (options: {
           restarted.push(...rows.map((row) => ({ row, offer: false })))
           yield* turn.withPermits(1)(offering)
         }),
-      // In its turn, so turning yapd on never waits for it.
-      back: Effect.asVoid(Effect.forkIn(turn.withPermits(1)(offering), scope)),
+      // In its turn, so turning yapd on never waits for it. What came in while it was off is offered once, first.
+      back: Effect.gen(function* () {
+        const count = yield* keptWhileOff
+        if (count > 0) offered = { kind: "missed", count }
+        yield* Effect.forkIn(turn.withPermits(1)(offering), scope)
+      }).pipe(Effect.catchAllCause((cause) => Effect.logWarning("Could not look at what came in while I was off", cause))),
       mention: (ref, said) =>
         Effect.flatMap(Effect.all([Clock.currentTimeMillis, options.power]), ([at, { turns }]) =>
           Effect.sync(() => {

@@ -270,16 +270,19 @@ export const serve = Effect.gen(function* () {
   )
 
   /**
-   * Off, whatever hasn't started yet is dropped, from a dictation to what was
-   * waiting to be said. The keys go before the dictations, so none starts in
-   * between, and all of it before the daemon waits on anything. On, what a
-   * restart found while it was off is said, and what waits on him that he
-   * wasn't told of.
+   * Off, what he asked that hasn't started yet is dropped, a dictation too,
+   * and what was waiting to be said is kept unheard. The shortcut stays: what
+   * he asks while it's off is answered, then it's quiet again. On, what was
+   * under way for what he asked while it was off is dropped the same way;
+   * then what came in meanwhile is offered once, what a restart found while
+   * it was off is said, and what waits on him that he wasn't told of. The
+   * assistant drops before the daemon turns, so what it was doing for the
+   * turns before is stopped like the rest.
    */
   const turn = (on: boolean) =>
     on
-      ? Effect.all([daemon.turn(true), shortcut.toggle(true), assistant.back, notices.reconcile], { discard: true })
-      : Effect.all([shortcut.toggle(false), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
+      ? Effect.all([dictation.drop, assistant.drop, daemon.turn(true), shortcut.toggle(true), assistant.back, notices.reconcile], { discard: true })
+      : Effect.all([shortcut.toggle(true), dictation.drop, assistant.drop, daemon.turn(false)], { discard: true })
   const switching = yield* Effect.makeSemaphore(1)
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
   if (yield* settings.on) yield* turn(true)

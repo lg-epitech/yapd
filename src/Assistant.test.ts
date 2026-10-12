@@ -598,12 +598,16 @@ const assistant = (
       /** Its turn came, and a dictation cut it off before the end. */
       cut: (notice = said.at(-1)) => voice(notice).pipe(Effect.zipRight(notice?.saying ?? Effect.void), Effect.zipRight(flush)),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
-      /** Turned on or off from the menu bar, which drops what's under way when it's off. */
+      /** Turned on or off from the menu bar, which drops what's under way for what he asked before, as yapd serves it. */
       toggle: (on: boolean) =>
-        Effect.suspend(() => {
-          power = { on, turns: power.turns + 1 }
-          return on ? Effect.void : made.drop
-        }).pipe(Effect.zipRight(flush)),
+        made.drop.pipe(
+          Effect.zipRight(
+            Effect.sync(() => {
+              power = { on, turns: power.turns + 1 }
+            }),
+          ),
+          Effect.zipRight(flush),
+        ),
       /** The thread T3 Code made for new work it never answered for comes to look like this. */
       launched: (looks: Record<string, unknown>) =>
         Effect.sync(() => {
@@ -10609,6 +10613,88 @@ describe("Assistant catching up", () => {
       }),
     )
     expect(result).toEqual({ spoken: ["I couldn't sum that up just now, sir. Ask me again in a moment."], after: ["Tezos pass 7 is done."] })
+  })
+})
+
+describe("Assistant turned off and on", () => {
+  const kept = (journal: Journal.Journal["Type"], minutesAgo: number, said: string, detail: Record<string, unknown> = { priority: "done", held: "off" }) =>
+    journal.write({ at: now - minutesAgo * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said, detail })
+  const unheard = (journal: Journal.Journal["Type"]) => Effect.map(journal.unheard(0, 100), (rows) => rows.map(({ said }) => said))
+
+  test("turned on with what came in while it was off, it offers the catch-up once, and a yes gives it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, answer, play, spoken, questions, journal, flush } = yield* assistant(() => undefined, undefined, { briefs: () => "Distribox migrated, sir." })
+        yield* journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 90, "Distribox migrated.")
+        yield* kept(journal, 60, "Distribox deployed.")
+        // Kept quiet as he muted it: not counted.
+        yield* kept(journal, 50, "Docs swept.", { priority: "done", muted: true })
+        yield* back
+        yield* flush
+        const asked = questions().map(({ spoken }) => spoken)
+        yield* answer("Yes.")
+        yield* play()
+        return { asked, spoken: spoken(), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.asked).toEqual(["You missed two, sir. Want the rundown?"])
+    expect(result.spoken).toEqual(["You missed two, sir. Want the rundown?", "Distribox migrated, sir."])
+    expect(result.after).toEqual(["Docs swept."])
+  })
+
+  test("anything else said to the offer lets it go, nothing marked heard, and it isn't offered again; with nothing kept while off, none is offered", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, answer, spoken, journal, flush, wait } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "Two running, sir." }), undefined, { briefs: () => "Distribox migrated, sir." })
+        yield* back
+        yield* flush
+        const none = spoken().length
+        yield* journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 90, "Distribox migrated.")
+        yield* back
+        yield* flush
+        yield* answer("What's going on?")
+        yield* wait(180)
+        return { none, spoken: spoken(), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.none).toBe(0)
+    expect(result.spoken).toEqual(["You missed one, sir. Want the rundown?", "Two running, sir."])
+    expect(result.after).toEqual(["Distribox migrated."])
+  })
+
+  test("what he asks by the shortcut while yapd is off is answered, but nothing of its own accord: its own question isn't asked again, and a thread's waits for it to be on", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "What's going on?"
+              ? Brain.decision({ act: "answer", spoken: "Two running, sir." })
+              : Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          undefined,
+          { others: [cloud], items: card("q1", [colour]) },
+        )
+        yield* made.toggle(false)
+        const say = (heard: string) => Effect.flatMap(TestClock.currentTimeMillis, (at) => made.heard({ heard, via: "shortcut", at, voiced: 3, turns: 2 }))
+        yield* say("What's going on?")
+        yield* made.flush
+        yield* say("What's the migration one doing?")
+        yield* made.flush
+        yield* made.unanswered()
+        // A thread asks meanwhile.
+        yield* asked(made, cloud)
+        yield* made.wait(180)
+        const off = made.spoken()
+        yield* made.toggle(true)
+        yield* made.back
+        yield* made.flush
+        return { off, on: made.spoken().slice(off.length) }
+      }),
+    )
+    expect(result.off).toEqual(["Two running, sir.", "Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?"])
+    expect(result.on).toEqual(["A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."])
   })
 })
 
