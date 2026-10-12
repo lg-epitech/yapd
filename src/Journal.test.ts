@@ -326,6 +326,37 @@ describe("Journal", () => {
     })
   })
 
+  test("an update that takes the place of another about the same turn is the one read and counted, and hearing it hears that one too, never the other way round", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const write = (at: number, said: string, detail: Record<string, unknown>) =>
+          Effect.map(journal.write({ at, kind: "update", machine: "Rosie", thread: "t-tezos", said, detail }), Option.getOrThrow)
+        // Held for focus in its hook's place, then its Stop, come late, held as yapd was off.
+        const first = yield* write(10, "Pass 7 is done.", { priority: "done", held: "focus" })
+        const second = yield* write(20, "Pass 7 is done.", { priority: "done", held: "off", replaces: first })
+        // Another turn, kept before the field was, reads as it always did.
+        const other = yield* write(30, "The docs are swept.", { priority: "done", held: "off" })
+        const said = (rows: ReadonlyArray<Journal.Kept>) => rows.map(({ id }) => id)
+        const read = {
+          unheard: said(yield* journal.unheard(0, 10)),
+          held: said(yield* journal.held(0)),
+          digest: said(yield* journal.held(0, 200, { except: ["off"] })),
+          missed: said(yield* journal.missed(0, 0)),
+        }
+        // Hearing the one it replaced alone leaves the newer unheard.
+        yield* journal.markHeard([first], 40)
+        const alone = (yield* journal.rows([second])).map(({ heardAt }) => heardAt)
+        yield* journal.markUnheard([first])
+        yield* journal.markHeard([second], 50)
+        return { first, second, other, read, alone, heard: (yield* journal.rows([first, second, other])).map(({ heardAt }) => heardAt) }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept.read).toEqual({ unheard: [kept.second, kept.other], held: [kept.second, kept.other], digest: [], missed: [kept.second, kept.other] })
+    expect(kept.alone).toEqual([undefined])
+    expect(kept.heard).toEqual([50, 50, undefined])
+  })
+
   test("tells each time what he heard, or what was held or muted, changes, and reads entries back by id and when yapd was turned on or off", async () => {
     const kept = await Effect.runPromise(
       Effect.gen(function* () {

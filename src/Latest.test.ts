@@ -628,6 +628,26 @@ describe("Latest", () => {
     expect(result.totals).toEqual([0, 2, 0])
   })
 
+  test("counts a turn kept twice, as T3 Code told of it while yapd was off and its Stop came late, once on its row and in all", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* TestClock.adjust(`${day} millis`)
+        const { latest, journal } = yield* listing({ Rosie: [thread("t-tezos", "Migrate the Tezos integration")] }, ":memory:", {}, true)
+        const at = (yield* Clock.currentTimeMillis) - 60_000
+        const first = Option.getOrThrow(
+          yield* journal.write({ at, kind: "update", machine: "Rosie", thread: "t-tezos", key: "done:Rosie:r1", said: "Which network first?", detail: { session: "finished:Rosie:t-tezos", priority: "needs-you", held: "off" } }),
+        )
+        yield* journal.write({ at: at + 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Which network first?", detail: { session: "claude:s", priority: "needs-you", held: "off", replaces: first } })
+        const totals: Array<number> = []
+        yield* Effect.forkScoped(Stream.runForEach(latest.unheard, (count) => Effect.sync(() => void totals.push(count))))
+        yield* TestClock.adjust("250 millis")
+        yield* flush
+        return { counts: (yield* latest.current).map(({ key, unheard }) => [key, unheard]), total: totals.at(-1) }
+      }),
+    )
+    expect(result).toEqual({ counts: [["t3:Rosie:t-tezos", 1]], total: 1 })
+  })
+
   test("counts what came in while yapd was off over a weekend, though it was turned off and on for a moment since", async () => {
     const result = await run(
       Effect.gen(function* () {

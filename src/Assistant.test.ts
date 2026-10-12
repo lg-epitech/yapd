@@ -10804,6 +10804,35 @@ describe("Assistant catching up", () => {
     )
     expect(result).toEqual({ spoken: ["I couldn't sum that up just now, sir. Ask me again in a moment."], after: ["Tezos pass 7 is done."] })
   })
+  test("a turn kept twice, as T3 Code told of it while yapd was off and its Stop came late asking the same, is read once, and both count as heard once he's heard the catch-up to the end", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, spoken, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, { waiting: true, briefs: () => "Nothing else, sir." })
+        const first = yield* kept(journal, 90, tezos.id, "Which network first?", { priority: "needs-you", held: "off" })
+        const second = yield* kept(journal, 89, tezos.id, "Which network first?", { priority: "needs-you", held: "off", replaces: first })
+        yield* dictate("Catch me up.")
+        yield* play()
+        return { spoken: spoken(), heard: (yield* journal.rows([first, second])).map(({ heardAt }) => heardAt !== undefined) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Which network first?"])
+    expect(result.heard).toEqual([true, true])
+  })
+
+  test("a turn kept twice, as T3 Code told of it while yapd was off and its Stop came late asking the same, read in a catch-up cut short, leaves both unheard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, cut, spoken, journal } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, { waiting: true, briefs: () => "Nothing else, sir." })
+        const first = yield* kept(journal, 90, tezos.id, "Which network first?", { priority: "needs-you", held: "off" })
+        const second = yield* kept(journal, 89, tezos.id, "Which network first?", { priority: "needs-you", held: "off", replaces: first })
+        yield* dictate("Catch me up.")
+        yield* cut()
+        return { spoken: spoken(), heard: (yield* journal.rows([first, second])).map(({ heardAt }) => heardAt !== undefined) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Which network first?"])
+    expect(result.heard).toEqual([false, false])
+  })
 })
 
 describe("Assistant turned off and on", () => {
@@ -10852,6 +10881,21 @@ describe("Assistant turned off and on", () => {
     expect(result.none).toBe(0)
     expect(result.spoken).toEqual(["You missed one, sir. Want the rundown?", "Two running, sir."])
     expect(result.after).toEqual(["Distribox migrated."])
+  })
+
+  test("a turn kept twice while it was off, as T3 Code told of it and its Stop came late, counts once in the offer", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, spoken, journal, flush } = yield* assistant(unasked, undefined, { briefs: () => "Distribox migrated, sir." })
+        yield* journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        const first = Option.getOrThrow(yield* kept(journal, 90, "Distribox migrated."))
+        yield* kept(journal, 89, "Distribox migrated.", { priority: "done", held: "off", replaces: first })
+        yield* back
+        yield* flush
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["You missed one, sir. Want the rundown?"])
   })
 
   test("what was waiting or being summed up as he turned it off counts in the offer, and so does what was kept while it was off before and he hasn't heard", async () => {

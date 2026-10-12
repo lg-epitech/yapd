@@ -85,7 +85,11 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * new entry's id, when the journal could keep it, to note when it's heard.
      */
     readonly claim: (entry: Entry & { readonly key: string }) => Effect.Effect<Option.Option<Option.Option<number>>>
-    /** Notes that the user heard these through, answered them or was briefed on them, unless they had already. */
+    /**
+     * Notes that the user heard these through, answered them or was briefed
+     * on them, unless they had already, and with each the entry it took the
+     * place of, if any, as what he heard told him of that too.
+     */
     readonly markHeard: (ids: ReadonlyArray<number>, at: number) => Effect.Effect<void>
     /** Notes that the user is still to hear these, like a question put by to be asked again, whatever they heard of them before. */
     readonly markUnheard: (ids: ReadonlyArray<number>) => Effect.Effect<void>
@@ -108,7 +112,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * Updates and notices since `at` the user hasn't heard, oldest first, the
      * latest `most` of them: with `muted`, only those kept quiet because he
      * muted their thread, or only the others; with `held`, only those held
-     * for later, or only the others.
+     * for later, or only the others. Never one a newer entry about the same
+     * turn took the place of, as with all that reads what he hasn't heard.
      */
     readonly unheard: (at: number, most: number, muted?: boolean, held?: boolean) => Effect.Effect<ReadonlyArray<Kept>>
     /** Each thread's newest update or notice since `at`, newest first, `most` threads at most. */
@@ -122,7 +127,7 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * aren't muted, oldest first, the latest `most` of them, held for the
      * reasons `which` counts, or for any. One that came before `at`, but was
      * only held since, like one waiting to be said as focus began, counts as
-     * held since.
+     * held since. Never one a newer entry about the same turn took the place of.
      */
     readonly held: (at: number, most?: number, which?: Holding) => Effect.Effect<ReadonlyArray<Kept>>
     /**
@@ -133,7 +138,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * an update cut off counts only since he last `spoke`. What came in while
      * yapd was off, what needs him and what he can't be kept from hearing
      * count from `whenever` on, however long before `at` that is, like from a
-     * night off before the one just gone.
+     * night off before the one just gone. Never one a newer entry about the
+     * same turn took the place of: the turn is told of once, by that one.
      */
     readonly missed: (at: number, spoke: number, most?: number, whenever?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** These entries, by id, oldest first, heard or not, like the ones a catch-up told him of. */
@@ -294,6 +300,19 @@ const unmissable =
  */
 const telling = "json_extract(detail, '$.request') is null"
 
+const hour = 60 * 60_000
+const day = 24 * hour
+
+/**
+ * Whether a row still tells of its turn: not one a newer row about the same
+ * turn took the place of, like T3 Code's word that a thread finished, kept
+ * quiet, whose own Stop came late. The newer one names it in its detail, as
+ * `replaces`, and only it is read and counted, and heard with it. A row
+ * without the field takes no other's place.
+ */
+const standing = `not exists (select 1 from journal as newer where newer.kind = 'update' and newer.at between journal.at - ${hour} and journal.at + ${day}
+  and json_extract(newer.detail, '$.replaces') = journal.id)`
+
 /**
  * The journal in `store`, naming machines by `called`, and telling `written`
  * of each update and notice as it's kept, when there's one to tell.
@@ -347,8 +366,11 @@ export const fromStore = (
         : store
             .transaction((database: Database) => {
               database
-                .query<never, Array<number>>(`update journal set heard_at = ? where heard_at is null and id in (${ids.map(() => "?").join(", ")})`)
-                .run(at, ...ids)
+                .query<never, Array<number>>(
+                  `update journal set heard_at = ? where heard_at is null and (id in (${ids.map(() => "?").join(", ")})
+                   or id in (select json_extract(detail, '$.replaces') from journal where id in (${ids.map(() => "?").join(", ")})))`,
+                )
+                .run(at, ...ids, ...ids)
             })
             .pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what you heard in my journal", error))),
     markUnheard: (ids) =>
@@ -404,7 +426,7 @@ export const fromStore = (
         store.transaction((database: Database) =>
           database
             .query<Row, Array<number>>(
-              `select * from journal where heard_at is null and kind in ('update', 'notice') and at >= ?${muted === undefined ? "" : ` and ${quiet} = ?`}${
+              `select * from journal where heard_at is null and kind in ('update', 'notice') and at >= ? and ${standing}${muted === undefined ? "" : ` and ${quiet} = ?`}${
                 held === undefined ? "" : ` and ${heldBack} = ${held ? 1 : 0}`
               } order by at desc, id desc limit ?`,
             )
@@ -458,7 +480,7 @@ export const fromStore = (
           const reasons = holding(which)
           return database
             .query<Row, Array<string | number>>(
-              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0${reasons.sql} and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
+              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0 and ${standing}${reasons.sql} and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
                order by at desc, id desc limit ?`,
             )
             .all(...reasons.values, at, most)
@@ -475,7 +497,7 @@ export const fromStore = (
             .query<Row, [number, number, number, number]>(
               `select * from journal where heard_at is null and kind in ('update', 'notice') and ${telling}
                and (max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ? or (at >= ? and ${unmissable}))
-               and (${heldBack} or ${quiet} = 1 or kind = 'notice' or at >= ?)
+               and (${heldBack} or ${quiet} = 1 or kind = 'notice' or at >= ?) and ${standing}
                order by at desc, id desc limit ?`,
             )
             .all(at, Math.min(at, whenever), spoke, most)
