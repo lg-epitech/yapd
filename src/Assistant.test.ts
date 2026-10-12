@@ -10725,6 +10725,24 @@ describe("Assistant turned off and on", () => {
     expect(result.after).toEqual(["Distribox migrated."])
   })
 
+  test("what was waiting or being summed up as he turned it off counts in the offer, but not what was kept while it was off before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, spoken, journal, flush } = yield* assistant(unasked, undefined, { briefs: () => "Distribox migrated, sir." })
+        yield* journal.write({ at: now - 300 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 250, "Kept the time before.")
+        yield* journal.write({ at: now - 200 * 60_000, kind: "action", detail: { on: true } })
+        // Waiting to be said as he turned it off, so it came in a moment before.
+        yield* kept(journal, 121, "Distribox migrated.")
+        yield* journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* back
+        yield* flush
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["You missed one, sir. Want the rundown?"])
+  })
+
   test("the offer left unanswered is let go without a word, never asked again, and nothing is marked heard", async () => {
     const result = await run(
       Effect.gen(function* () {

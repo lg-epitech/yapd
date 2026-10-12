@@ -3720,9 +3720,12 @@ export const make = (options: {
      */
     const keptWhileOff = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
-      const off = Missed.off(yield* journal.switched(now - Missed.week))
+      const switched = yield* journal.switched(now - Missed.week, 3)
+      const off = Missed.off(switched)
       if (off === undefined || off.to !== undefined) return 0
-      const rows = yield* journal.missed(off.from, Number.MAX_SAFE_INTEGER)
+      // Since it was last on: what was waiting, being read or being summed up as he turned it off came in before, and is kept as off too.
+      const on = switched.slice(switched.findIndex((kept) => (kept.detail as { readonly on?: unknown } | undefined)?.on === false) + 1)[0]?.at ?? now - Missed.week
+      const rows = yield* journal.missed(on, Number.MAX_SAFE_INTEGER)
       return rows.filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || (kept.kind === "notice" && kept.at >= off.from))).length
     })
 
