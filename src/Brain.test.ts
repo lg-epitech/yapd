@@ -1883,6 +1883,10 @@ describe("catching up", () => {
     expect(detail).toContain("He asked for more of the catch-up you just gave him")
     expect(detail).toContain("  - «The loader is fixed.» More: «Retries back off now.»")
     expect(detail).toContain("SCOPE: everything he hasn't heard")
+    expect(detail).not.toContain("word for word")
+    // What needs him, read to him in full just before, is left out of it.
+    const after = Brain.briefPrompt({ kind: "catchup", groups, left: { threads: 0, rows: 0 }, read: 3 }, on, now, Option.none())
+    expect(after).toContain("SCOPE: everything he hasn't heard\nYou just read him three things that need him, word for word: leave them out.")
   })
 
   test("what's said of catching up without the model, and the catch-up offered as yapd is turned on", () => {
@@ -1890,6 +1894,8 @@ describe("catching up", () => {
     expect(said.caughtUp).toBe("You're all caught up, sir.")
     expect(said.nothingFrom("Distribox")).toBe("Nothing new from Distribox, sir.")
     expect(said.unbriefed).toBe("I couldn't sum that up just now, sir. Ask me again in a moment.")
+    expect(said.unbriefedRest).toBe("I couldn't sum up the rest just now, sir. Ask me again in a moment.")
+    expect(said.more).toBe("There's more, sir. Ask me for more when you're ready.")
     expect(said.offer(5)).toEqual({ news: "You missed five, sir.", question: "Want the rundown?" })
   })
 })

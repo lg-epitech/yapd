@@ -156,6 +156,8 @@ export interface Brief {
   readonly scope?: string
   /** When he last had yapd off, when some of it came in then. */
   readonly off?: Missed.Off
+  /** How many things that need him were read to him in full just before, which the brief leaves alone. */
+  readonly read?: number
 }
 
 /** What to do, once it's checked: the decision, and the thread it's about if any. */
@@ -1074,6 +1076,10 @@ export const catchupLines = (lines: Lines) => {
     caughtUp: `You're all caught up${sir}.`,
     nothingFrom: (named: string) => `Nothing new from ${named}${sir}.`,
     unbriefed: `I couldn't sum that up just now${sir}. Ask me again in a moment.`,
+    /** After what needs him, read in full: the rest couldn't be summed up. */
+    unbriefedRest: `I couldn't sum up the rest just now${sir}. Ask me again in a moment.`,
+    /** After what needs him, read in full, with more of it left for later. */
+    more: `There's more${sir}. Ask me for more when you're ready.`,
     /** Turned on with `missed` kept while it was off: the news, then the question. */
     offer: (missed: number) => ({ news: `You missed ${count(missed)}${sir}.`, question: "Want the rundown?" }),
   }
@@ -2509,7 +2515,7 @@ export const briefPrompt = (brief: Brief, desk: Threads.Desk, now: number, style
     ...Option.toArray(Option.map(style, styled)),
     `SCOPE: ${brief.scope === undefined ? "everything he hasn't heard" : `what he asked about: ${fenced(brief.scope, 90)}`}${
       brief.off === undefined ? "" : `\nHe had you off from ${past(brief.off.from, now)}${brief.off.to === undefined ? "" : ` to ${past(brief.off.to, now)}`}.`
-    }`,
+    }${brief.read === undefined || brief.read === 0 ? "" : `\nYou just read him ${brief.read === 1 ? "one thing" : `${count(brief.read)} things`} that need him, word for word: leave them out.`}`,
     `WAITING ON YOU:\n${waiting.length === 0 ? "Nothing." : waiting.map((listed) => `- ${fenced(listed.called, 90)}: ${doing(listed, now)}`).join("\n")}`,
     `NEEDS YOU:\n${needing.length === 0 ? "Nothing." : needing.join("\n")}`,
     `THREADS, oldest first:\n${threads

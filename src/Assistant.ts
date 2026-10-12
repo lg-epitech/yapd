@@ -348,6 +348,8 @@ const fresh = 10 * 60_000
 const lately = { span: 3 * 60 * 60_000, most: 8 }
 /** How many threads a catch-up tells of at most: the rest are left for "more". */
 const briefed = 8
+/** How many of what needs him a catch-up reads first in full at most: the rest are left for "more". */
+const inFull = 4
 /** Threads on the desk: fewer for a reply, which is about what he just heard. */
 /** Threads the model sees in full, for a dictation and for a reply, then how many more by name only; and how many give Whisper their words. */
 const desk = { asked: 30, reply: 12, named: 120, vocabulary: 15 }
@@ -2716,38 +2718,65 @@ export const make = (options: {
         }
         const plain = (line: string): Outcome => ({ say: line, subject: { _tag: "Answer", said: line, about: Option.none(), catchingUp: true }, kind: "answer" })
         if (groups.length === 0) return plain(scope.named === undefined ? (given.nothing ?? lines.caughtUp) : lines.nothingFrom(scope.named))
-        const shown = groups.slice(0, briefed)
-        const rest = groups.slice(briefed)
         const ids = (all: ReadonlyArray<Missed.Group>) => all.flatMap(({ rows }) => rows.map(({ id }) => id))
+        // What needs him, a question in an agent's last words, a failure or a limit, is read to him first as it was kept, question, options and
+        // all, never summed up: a few at most, the rest left for more, unheard.
+        const needing = groups
+          .flatMap(({ rows }) => rows.filter((kept) => Missed.needs(kept) && (kept.said ?? "").trim() !== ""))
+          .toSorted((one, other) => one.at - other.at || one.id - other.id)
+        const read = needing.slice(0, inFull)
+        const unread = new Set(needing.slice(inFull).map(({ id }) => id))
+        const reading = new Set(read.map(({ id }) => id))
+        const others = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => !reading.has(id) && !unread.has(id)))))
+        const shown = others.slice(0, briefed)
+        const rest = [...others.slice(briefed), ...groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => unread.has(id)))))]
+        const leftOut = ids(rest)
+        const left = { threads: new Set(rest.map(({ machine, thread }) => `${machine ?? ""}\n${thread ?? ""}`)).size, rows: leftOut.length }
         const off = shown.some((group) => group.off > 0) ? missed.off : undefined
-        const brief = yield* brain
-          .brief({ kind, groups: shown, left: Missed.counted(rest), ...(scope.named === undefined ? {} : { scope: scope.named }), ...(off === undefined ? {} : { off }) }, desk, now)
-          .pipe(Effect.either)
+        const brief =
+          shown.length === 0
+            ? Either.right(left.rows === 0 ? "" : lines.more)
+            : yield* brain
+                .brief(
+                  {
+                    kind,
+                    groups: shown,
+                    left,
+                    ...(read.length === 0 ? {} : { read: read.length }),
+                    ...(scope.named === undefined ? {} : { scope: scope.named }),
+                    ...(off === undefined ? {} : { off }),
+                  },
+                  desk,
+                  now,
+                )
+                .pipe(Effect.either)
         if (Either.isLeft(brief)) {
           yield* Effect.logWarning("Could not sum up what you missed", brief.left)
-          return plain(lines.unbriefed)
+          if (read.length === 0) return plain(lines.unbriefed)
         }
         // Told everything, the digest doesn't bring it up again.
-        if (whole(scope)) yield* options.modes?.briefed() ?? Effect.void
-        const covered = ids(shown)
-        const say = `${brief.right.trim()}${comingUp(coming.length, said)}`
+        if (whole(scope) && Either.isRight(brief)) yield* options.modes?.briefed() ?? Effect.void
+        const told = Either.isRight(brief) ? [...read.map(({ id }) => id), ...ids(shown)] : read.map(({ id }) => id)
+        const covered = new Set(told)
+        const coveredGroups = groups.flatMap((group) => Option.toArray(Option.fromNullable(Missed.only(group, ({ id }) => covered.has(id)))))
+        const say = `${[...read.map(({ said }) => (said ?? "").trim()), Either.isRight(brief) ? brief.right.trim() : lines.unbriefedRest].filter((part) => part !== "").join(" ")}${comingUp(coming.length, said)}`
         // "It" is the thread it told of, when it told of one the desk has.
-        const [only] = shown
+        const [only] = coveredGroups
         const about =
-          shown.length === 1 && only !== undefined && only.called !== undefined && only.machine !== undefined && only.thread !== undefined
+          coveredGroups.length === 1 && only !== undefined && only.called !== undefined && only.machine !== undefined && only.thread !== undefined
             ? Option.some({ machine: only.machine, id: only.thread })
             : Option.none<Threads.Ref>()
         const catchup: Catchup = {
           scope,
-          covered,
-          leftOut: ids(rest),
-          left: rest.length,
-          told: shown.map((group) => ({
+          covered: told,
+          leftOut: Either.isRight(brief) ? leftOut : [...leftOut, ...ids(shown)],
+          left: left.threads,
+          told: coveredGroups.map((group) => ({
             name: Brain.missedName(group),
             ...(group.machine === undefined || group.thread === undefined ? {} : { ref: { machine: group.machine, id: group.thread } }),
           })),
         }
-        return { say, subject: { _tag: "Answer", said: say, about, missed: covered, catchingUp: true, catchup }, kind: "answer", missed: covered } satisfies Outcome
+        return { say, subject: { _tag: "Answer", said: say, about, missed: told, catchingUp: true, catchup }, kind: "answer", missed: told } satisfies Outcome
       })
 
     /** What the model decided he wants to catch up on, more of the catch-up he just heard when that's what it said, or else what it named. */

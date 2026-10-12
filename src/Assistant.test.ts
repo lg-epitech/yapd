@@ -10477,7 +10477,7 @@ describe("Assistant catching up", () => {
       Effect.gen(function* () {
         const { dictate, cut, play, spoken, journal, briefings, dispatched } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, {
           waiting: true,
-          briefs: () => "Distribox failed its deploy, sir, and the Mina tickets are filed.",
+          briefs: () => "The Mina tickets are filed, sir.",
         })
         yield* kept(journal, 120, mina.id, "The Mina tickets are filed.", { priority: "done", held: "focus" })
         yield* kept(journal, 90, tezos.id, "The Distribox deploy failed.", { priority: "needs-you", held: "off" })
@@ -10491,12 +10491,55 @@ describe("Assistant catching up", () => {
         return { told: told(briefings), cutOff, after: yield* unheard(journal), spoken: spoken(), dispatched: dispatched.length }
       }),
     )
-    expect(result.told[0]).toEqual({ kind: "catchup", latest: ["The loader failed.", "The Distribox deploy failed.", "The Mina tickets are filed."], left: { threads: 0, rows: 0 } })
+    // What needs him is read as it was kept, oldest first, never summed up: the brief only tells of the rest.
+    expect(result.told[0]).toEqual({ kind: "catchup", latest: ["The Mina tickets are filed."], left: { threads: 0, rows: 0 } })
     expect(result.cutOff).toHaveLength(4)
     // The muted thread's is still his to hear, when he asks about it.
     expect(result.after).toEqual(["Docs swept."])
-    expect(result.spoken).toEqual(["Distribox failed its deploy, sir, and the Mina tickets are filed.", "Distribox failed its deploy, sir, and the Mina tickets are filed."])
+    const said = "The Distribox deploy failed. The loader failed. The Mina tickets are filed, sir."
+    expect(result.spoken).toEqual([said, said])
     expect(result.dispatched).toBe(0)
+  })
+
+  test("what needs him is read in full ahead of the brief, four at most, the rest left unheard for more; with the brief down, it's still read, and only it counts as heard", async () => {
+    const questions = [
+      "Mina: is it fee rounding or a nonce gap, and should the fix go in the same PR as the tests?",
+      "Tezos: TzKT's rounding or the node's, and should I backfill ninety days?",
+      "Cloudmate: staging or shared dev, and do I keep the old Lambda for a week?",
+      "Distribox: the US copy or the EU one first?",
+      "Loader: retry now or wait for the provider?",
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        let down = false
+        const { dictate, play, spoken, journal, briefings } = yield* assistant(
+          (situation) => Brain.decision({ act: "catchup", how: situation.utterance.heard === "More." ? "more" : "" }),
+          undefined,
+          { waiting: true, briefs: (rows) => (down ? undefined : `${rows.length} more, sir.`) },
+        )
+        for (const [index, question] of questions.entries()) yield* kept(journal, 100 - index, `claude:s-${index}`, question, { priority: "needs-you", held: "off" }, "Rosie", `p${index}`)
+        yield* kept(journal, 50, tezos.id, "Tezos pass 7 is running.")
+        yield* dictate("Catch me up.")
+        yield* play()
+        const first = { spoken: spoken().at(-1), briefs: briefings.map(({ groups, read, left }) => [groups.map(({ latest }) => latest), read, left]), unheard: yield* unheard(journal) }
+        yield* dictate("More.")
+        yield* play()
+        const more = spoken().at(-1)
+        // The model can't brief: what needs him is still read, and only it is marked heard.
+        yield* kept(journal, 20, "claude:s-late", "Late: ship it tonight or tomorrow?", { priority: "needs-you", held: "off" }, "Rosie", "late")
+        yield* kept(journal, 10, mina.id, "The Mina tickets are filed.")
+        down = true
+        yield* dictate("Catch me up.")
+        yield* play()
+        return { first, more, down: spoken().at(-1), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.first.spoken).toBe(`${questions.slice(0, 4).join(" ")} 1 more, sir.`)
+    expect(result.first.briefs).toEqual([[["Tezos pass 7 is running."], 4, { threads: 1, rows: 1 }]])
+    expect(result.first.unheard).toEqual([questions[4]])
+    expect(result.more).toBe(questions[4])
+    expect(result.down).toBe("Late: ship it tonight or tomorrow? I couldn't sum up the rest just now, sir. Ask me again in a moment.")
+    expect(result.after).toEqual(["The Mina tickets are filed."])
   })
 
   test("a catch-up the model scoped to a thread, a project, a machine or since when tells only of that, and one with nothing in it says so with no brief", async () => {
