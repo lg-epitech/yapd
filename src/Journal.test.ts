@@ -263,4 +263,75 @@ describe("Journal", () => {
     expect(found).toEqual({ session: "Untied, from its session.", tied: "Tied to its thread.", thread: "Held for later.", tooOld: undefined, other: undefined })
   })
 
+
+  test("what he missed keeps what was never read out whatever he said since, what was cut off only since he spoke, and never an agent's question or what he heard", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const id = (written: Option.Option<number>) => Option.getOrThrow(written)
+        const off = id(yield* journal.write({ at: 10, kind: "update", thread: "t-dist", said: "Distribox migrated.", detail: { held: "off" } }))
+        const muted = id(yield* journal.write({ at: 11, kind: "update", thread: "t-docs", said: "Docs swept.", detail: { muted: true } }))
+        const failed = id(yield* journal.write({ at: 12, kind: "notice", thread: "t-dist", key: "fail:Rosie:r1", said: "Distribox failed.", detail: { failure: "provider_error" } }))
+        // An agent's question waits on him in T3 Code, and is asked, never caught up on.
+        yield* journal.write({ at: 13, kind: "notice", thread: "t-dist", key: "ask:Rosie:q1", said: "Distribox asks which table.", detail: { request: "Question" } })
+        // Cut off before he last spoke, and after.
+        yield* journal.write({ at: 14, kind: "update", thread: "t-tez", said: "Tezos cut off early." })
+        const late = id(yield* journal.write({ at: 30, kind: "update", thread: "t-tez", said: "Tezos cut off late." }))
+        const heard = id(yield* journal.write({ at: 31, kind: "update", thread: "t-tez", said: "Tezos heard." }))
+        yield* journal.markHeard([heard], 32)
+        // Too old for the window.
+        yield* journal.write({ at: 5, kind: "update", thread: "t-old", said: "Long ago.", detail: { held: "off" } })
+        return { missed: (yield* journal.missed(10, 20)).map(({ id }) => id), ids: [off, muted, failed, late] }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept.missed).toEqual(kept.ids)
+  })
+
+  test("what was held is read for some reasons only, like all but what came in while yapd was off", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        yield* journal.write({ at: 10, kind: "update", thread: "t-tez", said: "Pass 7.", detail: { held: "progress" } })
+        yield* journal.write({ at: 20, kind: "update", thread: "t-dist", said: "Distribox migrated.", detail: { held: "off" } })
+        yield* journal.write({ at: 30, kind: "update", thread: "t-mina", said: "Mina's tickets.", detail: { held: "focus" } })
+        const said = (rows: ReadonlyArray<Journal.Kept>) => rows.map(({ said }) => said)
+        return {
+          all: said(yield* journal.held(0)),
+          notOff: said(yield* journal.held(0, 200, { except: ["off"] })),
+          off: said(yield* journal.held(0, 200, { only: ["off"] })),
+        }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept).toEqual({
+      all: ["Pass 7.", "Distribox migrated.", "Mina's tickets."],
+      notOff: ["Pass 7.", "Mina's tickets."],
+      off: ["Distribox migrated."],
+    })
+  })
+
+  test("tells each time what he heard, or what was held or muted, changes, and reads entries back by id and when yapd was turned on or off", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const marks = yield* Effect.fork(Stream.runCollect(Stream.take(journal.marked, 4)))
+        yield* Effect.sleep("20 millis")
+        const one = Option.getOrThrow(yield* journal.write({ at: 10, kind: "update", said: "One." }))
+        const two = Option.getOrThrow(yield* journal.write({ at: 20, kind: "update", said: "Two." }))
+        yield* journal.markHeard([one], 11)
+        yield* journal.hold([two], "off")
+        yield* journal.mute([two])
+        yield* journal.markUnheard([one])
+        const told = yield* Fiber.join(marks)
+        yield* journal.write({ at: 30, kind: "action", detail: { on: false } })
+        yield* journal.write({ at: 31, kind: "action", detail: { mode: "focus" } })
+        yield* journal.write({ at: 40, kind: "action", detail: { on: true } })
+        return {
+          told: told.length,
+          rows: (yield* journal.rows([two, one])).map(({ said }) => said),
+          switched: (yield* journal.switched(0)).map(({ at }) => at),
+        }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept).toEqual({ told: 4, rows: ["One.", "Two."], switched: [40, 30] })
+  })
 })

@@ -34,9 +34,16 @@ export const kinds = ["update", "reply", "sent", "dictation", "started", "action
 
 /**
  * Why an update was held for later rather than said: focus or quiet was on,
- * or it only said how work that carries on was going.
+ * it only said how work that carries on was going, or yapd was off, which
+ * keeps everything that comes in unheard and says none of it.
  */
-export type Held = "focus" | "quiet" | "progress"
+export type Held = "focus" | "quiet" | "progress" | "off"
+
+/** Which reasons for holding an update count: only some of them, or all but some. */
+export interface Holding {
+  readonly only?: ReadonlyArray<Held>
+  readonly except?: ReadonlyArray<Held>
+}
 
 export interface Entry {
   readonly at: number
@@ -112,11 +119,24 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly hold: (ids: ReadonlyArray<number>, why: Held) => Effect.Effect<void>
     /**
      * The updates held for later since `at` that he hasn't heard, and that
-     * aren't muted, oldest first, the latest `most` of them. One that came
-     * before `at`, but was only held since, like one waiting to be said as
-     * focus began, counts as held since.
+     * aren't muted, oldest first, the latest `most` of them, held for the
+     * reasons `which` counts, or for any. One that came before `at`, but was
+     * only held since, like one waiting to be said as focus began, counts as
+     * held since.
      */
-    readonly held: (at: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
+    readonly held: (at: number, most?: number, which?: Holding) => Effect.Effect<ReadonlyArray<Kept>>
+    /**
+     * What he missed since `at`, oldest first, the latest `most` of them:
+     * updates and notices he hasn't heard, but never an agent's question,
+     * which waits on him in T3 Code. What was never read out, held or kept
+     * quiet, and a notice of a failure or a limit, count whenever they came;
+     * an update cut off counts only since he last `spoke`.
+     */
+    readonly missed: (at: number, spoke: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
+    /** These entries, by id, oldest first, heard or not, like the ones a catch-up told him of. */
+    readonly rows: (ids: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<Kept>>
+    /** The times yapd was turned on or off since `at`, newest first, the latest `most` of them, as the entries kept as it was. */
+    readonly switched: (at: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /**
      * What yapd last said, or held, about the same work since `at`: the newest
      * update kept under the session, tied to it, or kept under the thread.
@@ -137,6 +157,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly heard: (most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Each update and notice as it's kept. */
     readonly kept: Stream.Stream<Kept>
+    /** Each time entries are noted as heard or unheard, held or muted, so what counts what he missed counts again. */
+    readonly marked: Stream.Stream<void>
     /** The latest thing the user heard. */
     readonly lastHeard: Effect.Effect<Option.Option<Kept>>
     /** Forgets what's older than `before`. */
@@ -242,6 +264,25 @@ const quiet = "coalesce(json_extract(detail, '$.muted'), 0)"
 /** Whether a row was held for later, as SQLite reads its detail. */
 const heldBack = "(json_extract(detail, '$.held') is not null)"
 
+/** The reasons for holding a row `which` counts, as SQL and what goes in its places. */
+const holding = (which: Holding = {}) => {
+  const only = which.only ?? []
+  const except = which.except ?? []
+  return {
+    sql: `${only.length === 0 ? "" : ` and json_extract(detail, '$.held') in (${only.map(() => "?").join(", ")})`}${
+      except.length === 0 ? "" : ` and json_extract(detail, '$.held') not in (${except.map(() => "?").join(", ")})`
+    }`,
+    values: [...only, ...except],
+  }
+}
+
+/**
+ * Whether a row tells him something he still has to hear: never one asking
+ * him something, like an agent's question, which waits on him in T3 Code and
+ * is asked; a notice that tells of a failure or a limit does.
+ */
+const telling = "json_extract(detail, '$.request') is null"
+
 /**
  * The journal in `store`, naming machines by `called`, and telling `written`
  * of each update and notice as it's kept, when there's one to tell.
@@ -250,7 +291,10 @@ export const fromStore = (
   store: Store.Store["Type"],
   called: Naming = (host) => host.split(".")[0] ?? host,
   written?: PubSub.PubSub<Kept>,
+  marks?: PubSub.PubSub<void>,
 ): Journal["Type"] => {
+  /** Tells whoever counts what he missed that it changed. */
+  const mark = <A, E>(effect: Effect.Effect<A, E>) => (marks === undefined ? effect : Effect.tap(effect, () => PubSub.publish(marks, undefined)))
   /** The row just kept, as it reads back, for whoever follows what's kept. */
   const reread = (database: Database, id: number, entry: Entry) => {
     if (written === undefined || !told.has(entry.kind)) return undefined
@@ -295,7 +339,7 @@ export const fromStore = (
                 .query<never, Array<number>>(`update journal set heard_at = ? where heard_at is null and id in (${ids.map(() => "?").join(", ")})`)
                 .run(at, ...ids)
             })
-            .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what you heard in my journal", error))),
+            .pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what you heard in my journal", error))),
     markUnheard: (ids) =>
       ids.length === 0
         ? Effect.void
@@ -303,7 +347,7 @@ export const fromStore = (
             .transaction((database: Database) => {
               database.query<never, Array<number>>(`update journal set heard_at = null where id in (${ids.map(() => "?").join(", ")})`).run(...ids)
             })
-            .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what you've still to hear in my journal", error))),
+            .pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what you've still to hear in my journal", error))),
     reword: (id, said) =>
       store
         .transaction((database: Database) => {
@@ -384,7 +428,7 @@ export const fromStore = (
                 )
                 .run(...ids)
             })
-            .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what I kept quiet in my journal", error))),
+            .pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what I kept quiet in my journal", error))),
     hold: (ids, why) =>
       ids.length === 0
         ? Effect.void
@@ -396,17 +440,57 @@ export const fromStore = (
                 )
                 .run(why, now, ...ids)
             }),
-          ).pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what I held for later in my journal", error))),
-    held: (at, most = 200) =>
+          ).pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what I held for later in my journal", error))),
+    held: (at, most = 200, which) =>
+      reading(
+        store.transaction((database: Database) => {
+          const reasons = holding(which)
+          return database
+            .query<Row, Array<string | number>>(
+              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0${reasons.sql} and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
+               order by at desc, id desc limit ?`,
+            )
+            .all(...reasons.values, at, most)
+            .reverse()
+            .map(kept)
+        }),
+      ),
+    missed: (at, spoke, most = 500) =>
+      reading(
+        store.transaction((database: Database) =>
+          database
+            // Through the index of what's unheard. A held row that came before `at` but was only held since, as it waited to be said as yapd was
+            // turned off, counts as held since.
+            .query<Row, [number, number, number]>(
+              `select * from journal where heard_at is null and kind in ('update', 'notice') and ${telling}
+               and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
+               and (${heldBack} or ${quiet} = 1 or kind = 'notice' or at >= ?)
+               order by at desc, id desc limit ?`,
+            )
+            .all(at, spoke, most)
+            .reverse()
+            .map(kept),
+        ),
+      ),
+    rows: (ids) =>
+      ids.length === 0
+        ? Effect.succeed([])
+        : reading(
+            store.transaction((database: Database) =>
+              database
+                .query<Row, Array<number>>(`select * from journal where id in (${ids.map(() => "?").join(", ")}) order by at, id`)
+                .all(...ids)
+                .map(kept),
+            ),
+          ),
+    switched: (at, most = 2) =>
       reading(
         store.transaction((database: Database) =>
           database
             .query<Row, [number, number]>(
-              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0 and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
-               order by at desc, id desc limit ?`,
+              `select * from journal where kind = 'action' and at >= ? and json_extract(detail, '$.on') is not null order by at desc, id desc limit ?`,
             )
             .all(at, most)
-            .reverse()
             .map(kept),
         ),
       ),
@@ -436,7 +520,7 @@ export const fromStore = (
             )
             .run(at, newer, session, session, ref?.machine ?? null, ref?.id ?? null)
         })
-        .pipe(Effect.catchAll((error) => Effect.logWarning("Could not note what's out of date in my journal", error))),
+        .pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what's out of date in my journal", error))),
     heard: (most) =>
       reading(
         store.transaction((database: Database) =>
@@ -447,6 +531,7 @@ export const fromStore = (
         ),
       ),
     kept: written === undefined ? Stream.never : Stream.fromPubSub(written),
+    marked: marks === undefined ? Stream.never : Stream.fromPubSub(marks),
     lastHeard: store
       .transaction((database: Database) =>
         Option.map(
@@ -469,7 +554,7 @@ export const fromStore = (
 export const layer = Layer.effect(
   Journal,
   Effect.gen(function* () {
-    return fromStore(yield* Store.Store, yield* naming, yield* PubSub.unbounded<Kept>())
+    return fromStore(yield* Store.Store, yield* naming, yield* PubSub.unbounded<Kept>(), yield* PubSub.unbounded<void>())
   }),
 )
 
@@ -477,6 +562,6 @@ export const layer = Layer.effect(
 export const memory = Layer.scoped(
   Journal,
   Effect.gen(function* () {
-    return fromStore(yield* Store.make(":memory:"), undefined, yield* PubSub.unbounded<Kept>())
+    return fromStore(yield* Store.make(":memory:"), undefined, yield* PubSub.unbounded<Kept>(), yield* PubSub.unbounded<void>())
   }),
 ).pipe(Layer.orDie)
