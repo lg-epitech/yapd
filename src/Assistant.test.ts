@@ -10698,3 +10698,66 @@ describe("Assistant turned off and on", () => {
   })
 })
 
+describe("Assistant offers giving way", () => {
+  const held = (journal: Journal.Journal["Type"], minutesAgo: number, said: string) =>
+    journal.write({ at: now - minutesAgo * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said, detail: { priority: "done", held: "focus" } })
+
+  test("a rundown offer left unanswered gives way to a thread's question that comes meanwhile, which is asked next, and comes back after", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { modes: true, others: [cloud], items: card("q1", [colour]), briefs: () => "Pass 7 is running, sir." })
+        yield* held(made.journal, 30, "Pass 7 is running.")
+        yield* made.rundown(1, "focus")
+        yield* made.flush
+        yield* made.unanswered()
+        yield* made.wait(5)
+        // A thread asks while the offer waits out its minute.
+        yield* asked(made, cloud)
+        const next = made.spoken()
+        yield* made.answer("Red.")
+        yield* made.wait(60)
+        return { next, after: made.spoken().slice(next.length) }
+      }),
+    )
+    expect(result.next).toEqual([
+      "Focus is over, sir. One thing came in. Want the rundown?",
+      "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+    ])
+    expect(result.after).toEqual(["Red it is, sir.", "Shall I still give you the rundown, sir?"])
+  })
+
+  test("a thread's question that's due goes before a rundown offered after it, and as yapd is turned on, what came in while it was off is offered first and then gives way", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const rundown = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { modes: true, others: [cloud], items: card("q1", [colour]), briefs: () => "Pass 7 is running, sir." })
+        yield* held(made.journal, 30, "Pass 7 is running.")
+        yield* asked(made, cloud)
+        yield* made.rundown(1, "focus")
+        yield* made.flush
+        const first = made.spoken()
+        yield* made.answer("Red.")
+        return { first, after: made.spoken().slice(first.length) }
+      }),
+    )
+    expect(rundown.first).toEqual(["A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."])
+    expect(rundown.after).toEqual(["Red it is, sir.", "Focus is over, sir. One thing came in. Want the rundown?"])
+    const turnedOn = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), briefs: () => "Distribox migrated, sir." })
+        yield* made.journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* made.journal.write({ at: now - 60 * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said: "Distribox migrated.", detail: { priority: "done", held: "off" } })
+        yield* made.back
+        yield* made.flush
+        // The question comes as T3 Code catches up, while the offer waits for its answer.
+        yield* asked(made, cloud)
+        const offered = made.spoken()
+        yield* made.unanswered()
+        return { offered, then: made.spoken().slice(offered.length) }
+      }),
+    )
+    expect(turnedOn.offered).toEqual(["You missed one, sir. Want the rundown?"])
+    expect(turnedOn.then).toEqual(["A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."])
+  })
+})

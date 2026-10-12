@@ -1276,12 +1276,14 @@ export const make = (options: {
         if (!(yield* options.power).on) return
         if (asking.asks >= asks) return yield* letGo(asking.open)
         const now = yield* Clock.currentTimeMillis
-        const { open, from, asks: count } = asking
-        if (open.kind === "question" && from !== undefined && Option.isSome(yield* askable(now))) {
-          if (asking?.open.id !== id) return
-          const back = resumed(from, open, { asks: count + 1, back: "still", notBefore: now + Duration.toMillis(again) })
+        const { open, from, asks: count, offer } = asking
+        if ((open.kind === "question" && from !== undefined) || offer !== undefined) {
+          if (Option.isNone(yield* askable(now)) || asking?.open.id !== id) return yield* later(id)
           yield* close(open, "dropped: unanswered, others waiting")
-          asked.push(back)
+          // A catch-up offered gives way to what a thread waits on him for, as a thread's question does to another's, and is offered
+          // once more no sooner than a minute later.
+          if (offer !== undefined) offered = { ...offer, asks: count + 1, notBefore: now + Duration.toMillis(again) }
+          else if (from !== undefined) asked.push(resumed(from, open, { asks: count + 1, back: "still", notBefore: now + Duration.toMillis(again) }))
           return yield* offering
         }
         yield* later(id)
@@ -3468,7 +3470,7 @@ export const make = (options: {
     const wake = (now: number) =>
       Effect.gen(function* () {
         // Not for what's due already, which waits for what's asked now to be done with, rather than wake for it over and over.
-        const soonest = Math.min(...asked.flatMap(({ notBefore }) => (notBefore === undefined || notBefore <= now ? [] : [notBefore])))
+        const soonest = Math.min(...[...asked, ...(offered === undefined ? [] : [offered])].flatMap(({ notBefore }) => (notBefore === undefined || notBefore <= now ? [] : [notBefore])))
         if (!Number.isFinite(soonest) || (waking !== undefined && waking.at <= soonest)) return
         if (waking !== undefined) yield* Fiber.interruptFork(waking.fiber)
         const fiber = yield* Effect.sleep(Math.max(0, soonest - now)).pipe(
@@ -3493,14 +3495,16 @@ export const make = (options: {
      */
     const givingWay = Effect.gen(function* () {
       if (asking === undefined || asking.repeat === undefined || asking.held.size > 0 || presses.size > 0) return
-      const { open, from, due } = asking
+      const { open, from, due, offer } = asking
       const now = yield* Clock.currentTimeMillis
-      if (open.kind !== "question" || from === undefined || due === undefined || Option.isNone(yield* askable(now))) return
+      if (!((open.kind === "question" && from !== undefined) || offer !== undefined) || due === undefined || Option.isNone(yield* askable(now))) return
       if (asking?.open.id !== open.id) return
       if (asking.asks >= asks) return yield* letGo(open)
-      const back = resumed(from, open, { asks: asking.asks + 1, back: "still", notBefore: due })
+      const count = asking.asks
       yield* close(open, "dropped: unanswered, others waiting")
-      asked.push(back)
+      // A catch-up offered waits out its minute behind it too.
+      if (offer !== undefined) offered = { ...offer, asks: count + 1, notBefore: due }
+      else if (from !== undefined) asked.push(resumed(from, open, { asks: count + 1, back: "still", notBefore: due }))
     })
 
     /**
