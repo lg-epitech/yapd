@@ -134,11 +134,23 @@ export const make = (
     readonly hands?: Hands.Hands["Type"]
     readonly mutes?: Mutes.Mutes
     readonly naming?: Naming
-    /** What yapd sent a thread for him since then, like a message, an answer to its question or the work it started, by when and in what words. */
+    /**
+     * What yapd sent a thread for him since then, like a message, an answer to
+     * its question or the work it started, by when, in what words, and what
+     * it was, with the id of the message it went as.
+     */
     readonly sent?: (
       to: Threads.Ref,
       since: number,
-    ) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly digest: string | null; readonly how?: Ledger.How | null }>>
+    ) => Effect.Effect<
+      ReadonlyArray<{
+        readonly at: number
+        readonly digest: string | null
+        readonly how?: Ledger.How | null
+        readonly kind?: Ledger.Kind
+        readonly messageId?: string | null
+      }>
+    >
     /** Focus or quiet, while one is on, which holds for later what a mute would keep quiet: none without modes. */
     readonly holding?: Effect.Effect<Option.Option<Modes.Hold>>
     /** How much of an update is said: its headline, or all of it once he asked for everything. The headline without modes. */
@@ -718,6 +730,8 @@ export const make = (
     readonly fallback?: Fallback
     /** Whether it answers what he asked of it himself, a follow-up by voice or a message yapd sent it, which is said however he muted its thread. */
     readonly answering: boolean
+    /** Whether it's the first turn of work yapd started for him, which is what he asked for, however slight. */
+    readonly opening?: boolean
     /** The prompt its turn began with, through the hooks or as T3 Code has its run, and when, to tell whether it's one yapd sent its thread. */
     readonly prompted?: { readonly text: string | undefined; readonly at: number }
     /**
@@ -837,6 +851,19 @@ export const make = (
     )
 
   /**
+   * Why an update is held for later, if it is: what a mute could keep quiet,
+   * as `holds` says; and the first turn of work yapd started, which answers
+   * what he asked, only by quiet, for the morning's rundown, unless it needs
+   * him. Nothing else he asked for is held.
+   */
+  const heldFor = (priority: Inbox.Ready["priority"], full: boolean, mutable: boolean, opening: boolean) =>
+    mutable
+      ? holds(priority, full)
+      : opening && priority !== "needs-you"
+        ? Effect.map(holdingNow, Option.filter((mode): mode is "quiet" => mode === "quiet"))
+        : Effect.succeedNone
+
+  /**
    * Whether a hook's turn whose prompt came before yapd started answers what
    * he said by voice back through its hook before then: the journal has it
    * sent to the session after the last update kept of it, within the hour.
@@ -857,28 +884,47 @@ export const make = (
   /** How long before a turn's prompt came what yapd sent its thread still counts as what began it, as it's kept before it goes out. */
   const sending = 60_000
 
+  /** What yapd sent a thread that a turn arriving at `arrivedAt` may answer: the work it started within the day, the rest within the hour. */
+  const answerable = (to: Threads.Ref, arrivedAt: number) =>
+    options.sent === undefined
+      ? Effect.succeed([])
+      : Effect.map(options.sent(to, arrivedAt - lastDay), (rows) =>
+          rows.filter(({ at, kind }) => at <= arrivedAt && (kind === "start" || at >= arrivedAt - forgotten)),
+        )
+
+  /** What a turn answers, out of what it was matched with: the work yapd started over anything sent it since. */
+  const answered = (rows: ReadonlyArray<{ readonly kind?: Ledger.Kind }>): Option.Option<"start" | "sent"> =>
+    rows.some(({ kind }) => kind === "start") ? Option.some("start") : rows.length > 0 ? Option.some("sent") : Option.none()
+
   /**
-   * Whether a hook's turn answers what yapd sent its thread for him: sent a
-   * little before its prompt came, or steered into it since, or sent in its
-   * prompt's words, as a message that waited in T3 Code's queue. One that
-   * went into the queue once the turn was under way waits for a turn of its
-   * own, which it begins in its words: the turn it waited behind isn't his.
-   * For a turn said in its hook's place, its run's prompt and start, as T3
-   * Code has them. Never for a hook's turn whose prompt never came through
-   * the hooks, which can't be told.
+   * What of what yapd sent its thread for him a hook's turn answers, if any:
+   * sent a little before its prompt came, or steered into it since, or sent
+   * in its prompt's words, as a message that waited in T3 Code's queue, or the
+   * work it started, by its words, however long it took to get ready. One
+   * that went into the queue once the turn was under way waits for a turn of
+   * its own, which it begins in its words: the turn it waited behind isn't
+   * his. For a turn said in its hook's place, its run's prompt and start, as
+   * T3 Code has them. A hook's turn whose prompt never came through the
+   * hooks, as when it began before yapd restarted, goes by what's kept:
+   * the work yapd started, while nothing of the thread was kept since, or what
+   * it sent after the last that was.
    */
   const asked = (to: Threads.Ref, finished: Finished) =>
     Effect.gen(function* () {
-      const { sent } = options
       const { prompted, arrivedAt } = finished
-      if (sent === undefined || prompted === undefined) return false
+      const rows = yield* answerable(to, arrivedAt)
+      if (rows.length === 0) return Option.none()
+      if (prompted === undefined) {
+        const last = (yield* journal.byThread(to.machine, to.id, 1, ["update"]))[0]?.at ?? Number.NEGATIVE_INFINITY
+        return answered(rows.filter(({ at }) => at > last))
+      }
       const words = prompted.text === undefined ? "" : Ledger.digest(prompted.text)
-      const rows = yield* sent(to, arrivedAt - forgotten)
-      return rows.some(
-        ({ at, digest, how }) =>
-          at <= arrivedAt && ((words !== "" && digest === words) || (at >= prompted.at - sending && (at <= prompted.at || how !== "queued"))),
+      return answered(
+        rows.filter(
+          ({ at, digest, how }) => (words !== "" && digest === words) || (at >= prompted.at - sending && (at <= prompted.at || how !== "queued")),
+        ),
       )
-    }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), false)))
+    }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), Option.none())))
 
   /**
    * Whether he heard since the entry of a turn kept quiet in its hook's
@@ -947,19 +993,22 @@ export const make = (
         ],
         { concurrency: 3 },
       )
+      /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
+      const tied = Option.orElse(about, () => owner)
+      // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for.
+      const answers = Option.isSome(tied) ? yield* asked(tied.value, finished) : Option.none()
+      const opening = finished.opening === true || Option.contains(answers, "start")
       // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
       // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.
       const full = needsYou || summary.priority === "needs-you" || (yield* options.detail ?? Effect.succeed<Modes.Detail>("brief")) === "full"
-      // Whoever sent it knows it needs the user, whatever the summary makes of it.
-      const priority = needsYou ? "needs-you" : full && summary.priority === "progress" ? "done" : summary.priority
+      // Whoever sent it knows it needs the user, whatever the summary makes of it, and the first turn of work yapd started is never slight.
+      const priority = needsYou ? "needs-you" : (full && summary.priority === "progress") || (opening && summary.priority === "trivial") ? "done" : summary.priority
       const more = full ? "" : (summary.more ?? "").trim()
-      /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
-      const tied = Option.orElse(about, () => owner)
-      // What answers what yapd sent its thread for him, as a message by the shortcut, is his own ask too, and so is what answers what he said
-      // back through its hook before yapd restarted, when its prompt came before then.
+      // What answers what yapd sent its thread for him, as a message by the shortcut or the work it started, is his own ask too, and so is
+      // what answers what he said back through its hook before yapd restarted, when its prompt came before then.
       const answering =
         finished.answering ||
-        (priority !== "needs-you" && Option.isSome(tied) && (yield* asked(tied.value, finished))) ||
+        (priority !== "needs-you" && Option.isSome(answers)) ||
         (priority !== "needs-you" && finished.unprompted === true && (yield* repliedBefore(session, arrivedAt)))
       // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
       // summed up may be either, as far as yapd can tell, so it's said.
@@ -1027,7 +1076,7 @@ export const make = (
       // nothing that came in around turning off is said late.
       if (yield* offSince(turns)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: "off" })
       // Muted first, then kept as yapd is off, then held by the mode, then held as progress: kept the same way, by the same rule, and never rendered.
-      const held = mutable ? yield* holds(priority, full) : Option.none<Held>()
+      const held: Option.Option<Held> = yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(held)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: held.value })
 
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
@@ -1085,7 +1134,7 @@ export const make = (
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
-      const lateHeld = mutable ? yield* holds(priority, full) : Option.none<Held>()
+      const lateHeld: Option.Option<Held> = yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(lateHeld)) {
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
@@ -1311,6 +1360,13 @@ export const make = (
           sentAt <= input.at &&
           input.run.natives.includes(current.update.thread.session),
       )
+      // The first turn of work yapd started, by the message it started with, is what he asked for, however slight.
+      const opening =
+        options.sent !== undefined &&
+        Option.isSome(input.run.userMessageId) &&
+        (yield* options.sent(input.about, input.at - lastDay)).some(
+          ({ kind, messageId }) => kind === "start" && messageId === Option.getOrUndefined(input.run.userMessageId),
+        )
       forsake(session)
       fallbacks.set(input.key, fallback)
       // A newer one for the thread takes the place of one waiting to be said, and a reply to that one is held back.
@@ -1344,6 +1400,7 @@ export const make = (
           known: input.about,
           fallback,
           answering: input.answering === true || followedUp,
+          opening,
           // Its run's prompt and start, so a message yapd sent the thread for him, steered into it or begun in its words, is told as a hook's is.
           prompted: { text: Option.getOrUndefined(input.turn.prompt), at: input.run.startedAt },
         }),
@@ -1413,8 +1470,10 @@ export const make = (
           const needsYou = payload.needs_you === true
           // Nobody watches a session yapd started, so it's heard from however quick its turn, as is one that needs the user.
           const watched = !needsYou && origin.launched !== true
-          // The user is probably still looking at a turn this short. Without a prompt there's no telling, so it's spoken.
+          // The user is probably still looking at a turn this short. Without a prompt there's no telling, so it's spoken. Skipped, it tells
+          // of nothing he heard, so a turn of work yapd started or a message it sent is still said from T3 Code's word.
           if (watched && !followedUp && prompt !== undefined && arrivedAt - prompt.at < minMillis) {
+            stop.skipped = "quick"
             yield* release(hook)
             yield* Effect.logInfo("Skipped quick turn").pipe(Effect.annotateLogs({ project }))
             return hook

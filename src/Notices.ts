@@ -140,6 +140,8 @@ export const reason = (failure: Option.Option<{ readonly class: string; readonly
 export interface Stop {
   readonly at: number
   readonly message: string
+  /** Not said, as a turn he was likely watching, which a turn of work yapd sent never is: T3 Code's word says that one. */
+  skipped?: "quick"
 }
 
 /** Words as they're compared: case, punctuation and spacing aside. */
@@ -175,13 +177,15 @@ export const whose = (stop: Stop, run: Pick<T3Actions.Ran, "final" | "others">) 
  * told came: the last run before that went well had one coming as it ended,
  * which takes a moment to get going, and when none had come by the time this
  * one started, the first since, while it could still be that one's, is taken
- * for it. Any other is still left to as if it were this one's.
+ * for it. Any other is still left to as if it were this one's. Never one
+ * skipped as quick, for a run a message of yapd's started: that never told
+ * of what he asked for.
  */
-export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous">, startedAt: number) =>
+export const hooked = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous" | "userMessageId">, startedAt: number) =>
   hooking(stops, run, startedAt).length > 0
 
 /** The Stops a run is left to, as `hooked` tells them, oldest first. */
-export const hooking = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous">, startedAt: number) => {
+export const hooking = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "status" | "final" | "others" | "previous" | "userMessageId">, startedAt: number) => {
   const since = startedAt - leeway
   const theirs =
     run.status !== "failed" && run.final !== ""
@@ -189,16 +193,20 @@ export const hooking = (stops: ReadonlyArray<Stop>, run: Pick<T3Actions.Ran, "st
       : Option.flatMap(run.previous, (previous) =>
           Option.filter(Option.fromNullable(stops.find((stop) => stop.at >= previous.startedAt - leeway)), (first) => first.at >= since && first.at <= previous.endedAt + late),
         )
+  const asked = sent(run)
   return stops.filter((stop) => {
-    if (stop.message.trim() === "" || stop.at < since) return false
+    if (stop.message.trim() === "" || stop.at < since || (asked && stop.skipped === "quick")) return false
     const owner = whose(stop, run)
     return owner === "own" || (owner === "unknown" && !Option.exists(theirs, (taken) => taken === stop))
   })
 }
 
+/** Whether a message yapd sent started a run: what he asked for, by voice or by starting the work. */
+export const sent = (run: Pick<T3Actions.Ran, "userMessageId">) => Option.exists(run.userMessageId, (id) => id.startsWith("yapd:"))
+
 /** Whether a run was short enough that he was likely still looking at it, unless yapd sent what started it. */
 export const quick = (run: Pick<T3Actions.Ran, "startedAt" | "userMessageId">, ended: number, shortest: number) =>
-  Option.exists(run.startedAt, (started) => ended - started < shortest) && !Option.exists(run.userMessageId, (id) => id.startsWith("yapd:"))
+  Option.exists(run.startedAt, (started) => ended - started < shortest) && !sent(run)
 
 const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
@@ -419,7 +427,7 @@ export interface Finished {
   readonly at: number
   readonly key: string
   readonly turns: number
-  readonly run: Pick<T3Actions.Ran, "status" | "final" | "others" | "natives" | "previous"> & { readonly startedAt: number }
+  readonly run: Pick<T3Actions.Ran, "status" | "final" | "others" | "natives" | "previous" | "userMessageId"> & { readonly startedAt: number }
   readonly current: Effect.Effect<boolean>
   /** Whether a message yapd sent the thread started it, so it answers what he asked: said however he muted the thread. */
   readonly answering?: boolean
@@ -637,9 +645,9 @@ export const make = (options: {
           at,
           key: key.done(ref.machine, runId),
           turns,
-          run: { status, final: run.value.final, others: run.value.others, natives, previous: run.value.previous, startedAt },
+          run: { status, final: run.value.final, others: run.value.others, natives, previous: run.value.previous, userMessageId: run.value.userMessageId, startedAt },
           current,
-          answering: Option.exists(run.value.userMessageId, (id) => id.startsWith("yapd:")),
+          answering: sent(run.value),
         })
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read how a run went", error)))
 

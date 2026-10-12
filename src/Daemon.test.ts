@@ -406,7 +406,7 @@ const unhooked = (message: string, runId: string, turns: number, current: Effect
   at: 0,
   key: `done:Rosie:${runId}`,
   turns,
-  run: { status: "completed", final: message, others: [], natives: ["native-loader"], previous: Option.none(), startedAt: -60_000 },
+  run: { status: "completed", final: message, others: [], natives: ["native-loader"], previous: Option.none(), userMessageId: Option.none(), startedAt: -60_000 },
   current,
 })
 
@@ -1041,10 +1041,11 @@ describe("Daemon", () => {
       }),
     )
     const [first, other, second] = result.at as [number, number, number]
+    // The two quick ones were skipped as such.
     const [pr, loader, merged] = [
       { at: first, message: "The PR is ready." },
-      { at: other, message: "The loader is fixed." },
-      { at: second, message: "Done, it's merged." },
+      { at: other, message: "The loader is fixed.", skipped: "quick" as const },
+      { at: second, message: "Done, it's merged.", skipped: "quick" as const },
     ]
     expect(result.kept).toEqual({ a: [pr, merged], b: [loader], both: [pr, loader, merged] })
     expect(result.later).toEqual({ a: [], b: 1 })
@@ -1477,7 +1478,7 @@ describe("Daemon", () => {
           // T3 Code reads the run before with it, which ended on the same words.
           const run2: Notices.Finished = {
             ...unhooked(words, "run-2", turns),
-            run: { status: "completed", final: words, others: [words], natives: ["native-loader"], previous: Option.none(), startedAt: 0 },
+            run: { status: "completed", final: words, others: [words], natives: ["native-loader"], previous: Option.none(), userMessageId: Option.none(), startedAt: 0 },
           }
           yield* then(harness, run2)
           yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: words }, { project: "yapd", host: hostname() }, false)
@@ -4022,7 +4023,7 @@ describe("Daemon with threads muted", () => {
           about: { machine: "Rosie", id: "t-tezos" },
           turn: { prompt: Option.some("Run the integration tests."), message: "The fast tests pass." },
           at: ended,
-          run: { status: "completed", final: "The fast tests pass.", others: [], natives: ["s-tezos"], previous: Option.none(), startedAt: started },
+          run: { status: "completed", final: "The fast tests pass.", others: [], natives: ["s-tezos"], previous: Option.none(), userMessageId: Option.none(), startedAt: started },
         })
         yield* nextEvent("Ready: yapd. The fast tests pass.")
         yield* wait(30)
@@ -4057,7 +4058,7 @@ describe("Daemon with threads muted", () => {
           about: { machine: "Rosie", id: "t-tezos" },
           turn: { prompt: Option.some("Run the integration tests."), message: "The fast tests pass." },
           at: ended,
-          run: { status: "completed", final: "The fast tests pass.", others: [], natives: ["s-tezos"], previous: Option.none(), startedAt: ended },
+          run: { status: "completed", final: "The fast tests pass.", others: [], natives: ["s-tezos"], previous: Option.none(), userMessageId: Option.none(), startedAt: ended },
         })
         yield* nextEvent("Muted update for yapd")
         yield* wait(30)
@@ -4093,7 +4094,7 @@ describe("Daemon with threads muted", () => {
               ...unhooked(message, runId, turns),
               turn: { prompt: Option.some(prompt), message },
               at,
-              run: { status: "completed", final: message, others: [], natives: [], previous: Option.none(), startedAt },
+              run: { status: "completed", final: message, others: [], natives: [], previous: Option.none(), userMessageId: Option.none(), startedAt },
             })
           })
         yield* wait(600)
@@ -4141,7 +4142,7 @@ describe("Daemon with threads muted", () => {
         yield* made.finished({
           ...unhooked("The fee table is in.", "run-1", (yield* made.power).turns),
           at: yield* Clock.currentTimeMillis,
-          run: { status: "completed", final: "The fee table is in.", others: [], natives: ["tezos"], previous: Option.none(), startedAt },
+          run: { status: "completed", final: "The fee table is in.", others: [], natives: ["tezos"], previous: Option.none(), userMessageId: Option.none(), startedAt },
         })
         for (let i = 0; i < 2; i++) yield* wait(11)
         return { played: [...played], followUps: [...followUps] }
@@ -4170,7 +4171,7 @@ describe("Daemon with threads muted", () => {
         yield* made.finished({
           ...unhooked("The fee table is in.", "run-1", turns),
           at: yield* Clock.currentTimeMillis,
-          run: { status: "completed", final: "The fee table is in.", others: [], natives: ["tezos"], previous: Option.none(), startedAt: first },
+          run: { status: "completed", final: "The fee table is in.", others: [], natives: ["tezos"], previous: Option.none(), userMessageId: Option.none(), startedAt: first },
         })
         yield* nextEvent("Ready: yapd. The fee table is in.")
         for (let i = 0; i < 2; i++) yield* wait(11)
@@ -4181,7 +4182,7 @@ describe("Daemon with threads muted", () => {
         yield* made.finished({
           ...unhooked("The loader is refactored.", "run-2", turns),
           at: yield* Clock.currentTimeMillis,
-          run: { status: "completed", final: "The loader is refactored.", others: [], natives: ["tezos"], previous: Option.none(), startedAt: second },
+          run: { status: "completed", final: "The loader is refactored.", others: [], natives: ["tezos"], previous: Option.none(), userMessageId: Option.none(), startedAt: second },
         })
         yield* nextEvent("Muted update for yapd")
         for (let i = 0; i < 2; i++) yield* wait(11)
@@ -4210,7 +4211,7 @@ describe("Daemon with threads muted", () => {
         yield* made.finished({
           ...unhooked("The loader is refactored.", "run-1", (yield* made.power).turns),
           at: yield* Clock.currentTimeMillis,
-          run: { status: "completed", final: "The loader is refactored.", others: [], natives: ["native-loader"], previous: Option.none(), startedAt },
+          run: { status: "completed", final: "The loader is refactored.", others: [], natives: ["native-loader"], previous: Option.none(), userMessageId: Option.none(), startedAt },
         })
         yield* nextEvent("Muted update for yapd")
         for (let i = 0; i < 2; i++) yield* wait(11)
@@ -4315,7 +4316,7 @@ describe("Daemon with threads muted", () => {
         yield* made.finished({
           ...unhooked(message, "run-1", (yield* made.power).turns),
           at: startedAt,
-          run: { status: "completed", final: message, others: [], natives: ["tezos"], previous: Option.none(), startedAt },
+          run: { status: "completed", final: message, others: [], natives: ["tezos"], previous: Option.none(), userMessageId: Option.none(), startedAt },
         })
         yield* nextEvent("Muted update for yapd")
         yield* speak
@@ -4577,6 +4578,105 @@ describe("Daemon with threads muted", () => {
       }),
     )
     expect(result).toEqual(["yapd. The loader is fixed."])
+  })
+
+  test("the first turn of work yapd started is said, however quick or slight, even after a restart", async () => {
+    const asked = "Find out whether Apple shipped an API for third-party glucose sensors on the Watch."
+    const answer = "Apple hasn't shipped one."
+    const glucose = { machine: "Rosie", id: "t-glucose" }
+    /** The ledger's row for starting it, written before it was asked for, with its words and the id of the message it started with. */
+    const start = { at: 0, digest: Ledger.digest(asked), kind: "start" as const, messageId: "yapd:u1:0:m" }
+    /** The daemon, with the thread muted and its answer what the summary takes for slight. */
+    const research = Effect.gen(function* () {
+      const mutes = yield* muting
+      yield* mutes.mute({ key: Mutes.key.thread(glucose), called: "the glucose question" })
+      return yield* make(undefined, {
+        mutes,
+        link: () => Effect.succeedSome(glucose),
+        sent: (to, since) => Effect.succeed(Threads.same(to, glucose) ? [start].filter(({ at }) => at >= since) : []),
+        trivialMessages: [answer, "Nothing more on it."],
+      })
+    })
+    const quickly = await run(
+      Effect.gen(function* () {
+        const { handle, made, wait, played } = yield* research
+        // Ready in a minute, it answers in five seconds, which its hook skips as a turn he was watching.
+        yield* wait(60)
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-glucose", cwd: "/t3/scratch/glucose", prompt: asked }, { project: "glucose", host: hostname() }, false)
+        yield* wait(5)
+        const at = yield* Clock.currentTimeMillis
+        yield* stopHere(handle, "s-glucose", answer)
+        yield* wait(20)
+        const skipped = [...played]
+        // T3 Code's word that it finished, with the id of the message yapd started it with.
+        yield* made.finished({
+          ...unhooked(answer, "run-1", (yield* made.power).turns),
+          about: glucose,
+          turn: { prompt: Option.some(asked), message: answer },
+          at,
+          run: { status: "completed", final: answer, others: [], natives: ["s-glucose"], previous: Option.none(), userMessageId: Option.some(start.messageId), startedAt: at - 5_000 },
+          answering: true,
+        })
+        yield* wait(11)
+        return { skipped, played: [...played] }
+      }),
+    )
+    expect(quickly).toEqual({ skipped: [], played: [`yapd. ${answer}`] })
+    // With no prompt seen, as after a restart, only what's kept tells: its first turn is his, and the next isn't.
+    const restarted = await run(
+      Effect.gen(function* () {
+        const { handle, wait, played } = yield* research
+        yield* wait(600)
+        yield* stopHere(handle, "s-glucose", answer)
+        yield* wait(11)
+        yield* stopHere(handle, "s-glucose", "Nothing more on it.")
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(restarted).toEqual([`yapd. ${answer}`])
+  })
+
+  test("a research answer that comes in quiet is held for the morning, and said at once in focus", async () => {
+    const asked = "Find out whether Apple shipped an API for third-party glucose sensors on the Watch."
+    const sent = "Also check the fee table."
+    const kept = (mode: "quiet" | "focus") =>
+      run(
+        Effect.gen(function* () {
+          const ledger: Record<string, ReadonlyArray<{ readonly at: number; readonly digest: string; readonly kind: Ledger.Kind }>> = {
+            "t-glucose": [{ at: 0, digest: Ledger.digest(asked), kind: "start" }],
+            "t-tezos": [],
+          }
+          const { handle, wait, played, journal } = yield* make(undefined, {
+            link: (session) => Effect.succeedSome({ machine: "Rosie", id: `t-${session}` }),
+            sent: (to, since) => Effect.succeed((ledger[to.id] ?? []).filter(({ at }) => at >= since)),
+            holding: Effect.succeed(Option.some(mode)),
+          })
+          const turn = (session: string, prompt: string, message: string) =>
+            Effect.gen(function* () {
+              yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: session, cwd: "/code/yapd", prompt }, { project: "yapd", host: hostname() }, false)
+              yield* wait(60)
+              yield* stopHere(handle, session, message)
+              yield* wait(11)
+            })
+          // Started minutes ago, as a worktree can take, it's told by its words.
+          yield* wait(300)
+          yield* turn("glucose", asked, "Apple hasn't shipped one.")
+          // The answer to his own message comes through either way, as ever.
+          ledger["t-tezos"] = [{ at: yield* Clock.currentTimeMillis, digest: Ledger.digest(sent), kind: "message" }]
+          yield* turn("tezos", sent, "The fee table is right.")
+          const updates = yield* journal.since(0, { kinds: ["update"] })
+          return { played: [...played], held: updates.map((entry) => [entry.said, heldFor(entry)]) }
+        }),
+      )
+    expect(await kept("quiet")).toEqual({
+      played: ["yapd. The fee table is right."],
+      held: [
+        ["yapd. Apple hasn't shipped one.", "quiet"],
+        ["yapd. The fee table is right.", undefined],
+      ],
+    })
+    expect((await kept("focus")).played).toEqual(["yapd. Apple hasn't shipped one.", "yapd. The fee table is right."])
   })
 
   test("a session's mute, once its update is tied to a thread, mutes it and becomes the thread's", async () => {

@@ -1,6 +1,6 @@
 import { Clock, type Duration, Effect, Either, Fiber, Option } from "effect"
 import { type Catalog, LaunchError, type Launcher, type Request, type Started } from "./Launcher.ts"
-import type * as Ledger from "./Ledger.ts"
+import * as Ledger from "./Ledger.ts"
 import { afterOnIt, type Lines, Persona, withOnIt } from "./Persona.ts"
 import type { Heard } from "./Recent.ts"
 import type { Line } from "./Responder.ts"
@@ -307,6 +307,8 @@ export const make = (options: {
               machine: machine.name,
               thread,
               message: true,
+              // Its words, by which its first turn is told to answer it, however long T3 Code takes to get it ready.
+              digest: Ledger.digest(request.prompt),
               body: ({ commandId, messageId }) => ({ ...request, ids: { thread, message: messageId ?? "", command: commandId } }),
             })
             .pipe(Effect.either)
