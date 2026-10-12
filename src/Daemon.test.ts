@@ -1279,7 +1279,7 @@ describe("Daemon", () => {
     expect(result.states).toEqual(["NotSent", "failed"])
   })
 
-  test("a turn no hook told of is said like a hook's update, once under its key, and never once yapd was turned off since", async () => {
+  test("a turn no hook told of is said like a hook's update, once under its key, and kept unheard, never said, once yapd was turned off since", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { made, wait, played, journal, finish, notice } = yield* make()
@@ -1295,24 +1295,27 @@ describe("Daemon", () => {
         // Heard of twice, as after a reconnect, it's said the once.
         yield* loader(turns, "run-1")
         yield* wait(11)
-        // One heard of before yapd was turned off and on isn't said.
+        // One heard of before yapd was turned off and on isn't said, but kept for him to catch up on.
         yield* made.turn(false)
         yield* made.turn(true)
         yield* loader(turns, "run-2")
         yield* wait(11)
         const updates = yield* journal.since(0, { kinds: ["update"] })
-        return { played: [...played], kept: updates.map(({ machine, thread, key }) => [machine, thread, key]) }
+        return { played: [...played], kept: updates.map(({ machine, thread, key, detail }) => [machine, thread, key, (detail as { held?: string }).held]) }
       }),
     )
     expect(result.played.toSorted()).toEqual(["The loader wants your go-ahead.", "yapd. Something else first.", "yapd. The loader is fixed, run-1."])
-    // Kept with its thread, and the one never said isn't kept as if it were.
-    expect(result.kept.slice(1)).toEqual([["Rosie", "t-loader", "done:Rosie:run-1"]])
+    // Kept with its thread, and the one never said kept as unheard, from while yapd was off.
+    expect(result.kept.slice(1)).toEqual([
+      ["Rosie", "t-loader", "done:Rosie:run-1", undefined],
+      ["Rosie", "t-loader", "done:Rosie:run-2", "off"],
+    ])
   })
 
-  test("a turn no hook told of, dropped as it was handed on after yapd was turned off and on, is said when T3 Code tells of it again", async () => {
+  test("a turn no hook told of, handed on after yapd was turned off and on, is kept unheard once, and not said when T3 Code tells of it again", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { made, wait, played } = yield* make()
+        const { made, wait, played, journal } = yield* make()
         const before = (yield* made.power).turns
         yield* made.turn(false)
         yield* made.turn(true)
@@ -1321,10 +1324,12 @@ describe("Daemon", () => {
         // As after a reconnect.
         yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
         yield* wait(11)
-        return [...played]
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: updates.map(({ key, heardAt, detail }) => [key, heardAt, (detail as { held?: string }).held]) }
       }),
     )
-    expect(result).toEqual(["yapd. The loader is fixed."])
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([["done:Rosie:run-1", undefined, "off"]])
   })
 
   test("a turn no hook told of, waiting to be said, isn't once its thread started again or went", async () => {
@@ -1683,12 +1688,12 @@ describe("Daemon", () => {
         yield* notice("cut", "The loader fix is ready, sir.", { answer: true, gone })
         yield* cutOff
         yield* wait(11)
-        // Turned off as one is said and another waits, and told one while it's off.
+        // Turned off as one is said and another waits, and told one of its own accord while it's off.
         yield* notice("playing", "The Tezos migration is comparing request formats, sir.", { answer: true, gone })
         yield* notice("waiting", "Two running, sir.", { answer: true, gone })
         yield* wait(2)
         yield* toggle(false)
-        yield* notice("off", "One running, sir.", { answer: true, gone })
+        yield* notice("off", "The Tezos migration failed.", { gone })
         return { putBack, gone }
       }),
     )
@@ -1719,27 +1724,37 @@ describe("Daemon", () => {
     expect(result.asked).toEqual([])
   })
 
-  test("turned off, stops at once, drops what waits and lets its hooks go, and never says what finishes meanwhile", async () => {
+  test("turned off, stops at once, keeps what was being read, what waits and what finishes meanwhile unheard, lets their hooks go, and never says them", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { finish, wait, toggle, played, stopped, condensed, followUps } = yield* daemon
+        const { finish, wait, toggle, played, stopped, condensed, followUps, journal, renders } = yield* daemon
         yield* finish("a", "The PR is ready.", true)
         yield* finish("b", "The tests pass.", true)
         yield* wait(1)
         yield* toggle(false)
         const letGo = [...followUps]
+        // Its hook is never kept waiting while yapd is off.
         yield* finish("c", "Deployed it.", true)
         yield* wait(30)
+        const off = (yield* journal.since(0, { kinds: ["update"] })).map(({ said, heardAt, detail }) => [said, heardAt, (detail as { held?: string }).held])
         yield* toggle(true)
         yield* wait(30)
-        return { played: [...played], stopped: [...stopped], condensed: condensed.map(({ message }) => message), letGo }
+        return { played: [...played], stopped: [...stopped], condensed: condensed.map(({ message }) => message), letGo, after: [...followUps], off, renders: renders() }
       }),
     )
     expect(result.played).toEqual(["yapd. The PR is ready."])
     expect(result.stopped).toEqual(["yapd. The PR is ready."])
     // The one it was reading was heard, so its hook waits for a reply to it heard again.
     expect(result.letGo).toEqual(["claude:b let go"])
-    expect(result.condensed).toEqual(["The PR is ready.", "The tests pass."])
+    expect(result.after).toEqual(["claude:b let go"])
+    expect(result.condensed).toEqual(["The PR is ready.", "The tests pass.", "Deployed it."])
+    // What came in while off is summed up but never rendered.
+    expect(result.renders).toBe(2)
+    expect(result.off).toEqual([
+      ["yapd. The PR is ready.", undefined, "off"],
+      ["yapd. The tests pass.", undefined, "off"],
+      ["yapd. Deployed it.", undefined, "off"],
+    ])
   })
 
   test("says an update again as it was said, only one it said and only while on", async () => {
@@ -4248,20 +4263,24 @@ describe("Daemon with threads muted", () => {
     expect(result.told).toEqual(["x"])
   })
 
-  test("while yapd is off, a muted update isn't kept at all, as one it would have said isn't", async () => {
+  test("while yapd is off, a muted update is kept as muted, not as what came in while it was off, and its hook is never kept waiting", async () => {
     const result = await run(
       Effect.gen(function* () {
         const mutes = yield* muting
-        const { finish, toggle, wait, journal, followUps } = yield* make(undefined, { mutes })
+        const { finish, toggle, wait, journal, followUps, played } = yield* make(undefined, { mutes })
         yield* mutes.mute({ key: sessionKey("noisy") })
         yield* toggle(false)
         yield* finish("noisy", "Still going.", true)
         yield* wait(11)
-        return { kept: yield* journal.since(0, { kinds: ["update"] }), followUps: [...followUps] }
+        yield* toggle(true)
+        yield* wait(11)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return { kept: kept.map(({ said, detail }) => [said, quieted({ detail } as Journal.Kept), (detail as { held?: string }).held]), followUps: [...followUps], played: [...played] }
       }),
     )
-    expect(result.kept).toEqual([])
+    expect(result.kept).toEqual([["yapd. Still going.", true, undefined]])
     expect(result.followUps).toEqual([])
+    expect(result.played).toEqual([])
   })
 
   test("a muted turn no hook told of is kept quiet once, under its key, as heard, so its own Stop coming late isn't said, nor the turn once he unmutes it", async () => {
@@ -4903,3 +4922,218 @@ const stopHere = (handle: Handle, session: string, message: string) =>
   handle("claude", { hook_event_name: "Stop", session_id: session, cwd: "/code/yapd", last_assistant_message: message }, { project: "yapd", host: hostname() }, false).pipe(
     Effect.zipRight(Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))),
   )
+
+/** What a journal entry was held for, if it was. */
+const heldFor = (kept: Journal.Kept) => (kept.detail as { readonly held?: string } | undefined)?.held
+
+describe("Daemon while off", () => {
+  test("a Stop that waits is let go of at once, and its update is summed up and kept unheard, with its rest and how much it needs him, never rendered or played", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, toggle, wait, journal, played, renders, warms } = yield* make(undefined, {
+          waitingHooks: true,
+          mores: { "The migration is merged.": "Two follow-ups are left in the ticket." },
+          urgentMessages: ["Which network first?"],
+        })
+        yield* toggle(false)
+        // A hook that waits gets its empty reply at once, rather than for as long as an update takes.
+        const hook = yield* Effect.fork(finish("a", "The migration is merged.", true))
+        yield* wait(0)
+        const replied = yield* Fiber.poll(hook)
+        yield* finish("b", "Which network first?", true)
+        yield* wait(30)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return {
+          replied: Option.map(replied, Exit.isSuccess),
+          kept: kept.map((row) => [row.said, row.heardAt, heldFor(row), (row.detail as { more?: string; priority?: string }).more, (row.detail as { priority?: string }).priority]),
+          played: [...played],
+          renders: renders(),
+          warms: warms(),
+        }
+      }),
+    )
+    expect(result.replied).toEqual(Option.some(true))
+    expect(result.kept).toEqual([
+      ["yapd. The migration is merged.", undefined, "off", "Two follow-ups are left in the ticket.", "done"],
+      ["yapd. Which network first?", undefined, "off", undefined, "needs-you"],
+    ])
+    expect(result).toMatchObject({ played: [], renders: 0, warms: 0 })
+  })
+
+  test("what needs him, what couldn't be summed up and the answer to what he sent its thread are kept unheard too, and none of it is said once yapd is on again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const asked = "Also run the integration tests."
+        const ledger: Array<{ readonly at: number; readonly digest: string | null }> = []
+        const { handle, finish, toggle, wait, journal, played } = yield* make(undefined, {
+          urgentMessages: ["The deploy failed."],
+          unsummarizable: ["Garbled."],
+          link: (session) => Effect.succeed(session === "s-tezos" ? Option.some({ machine: "Rosie", id: "t-tezos" }) : Option.none()),
+          sent: (to, since) => Effect.succeed(to.id === "t-tezos" ? ledger.filter(({ at }) => at >= since) : []),
+        })
+        yield* toggle(false)
+        yield* finish("deploy", "The deploy failed.")
+        yield* finish("garbled", "Garbled.")
+        // He sent it by the shortcut while yapd was off, and its answer comes in.
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "s-tezos", cwd: "/code/yapd", prompt: asked }, { project: "yapd", host: hostname() }, false)
+        ledger.push({ at: (yield* Clock.currentTimeMillis) - 1000, digest: Ledger.digest(asked) })
+        yield* wait(120)
+        yield* stopHere(handle, "s-tezos", "Integration tests pass.")
+        yield* wait(11)
+        yield* toggle(true)
+        yield* wait(30)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: kept.map((row) => [row.said, row.heardAt, heldFor(row)]) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([
+      ["yapd. The deploy failed.", undefined, "off"],
+      ["yapd finished a turn, but I couldn't summarize it.", undefined, "off"],
+      ["yapd. Integration tests pass.", undefined, "off"],
+    ])
+  })
+
+  test("a turn no hook told of while yapd is off is kept unheard under its key, and its own Stop coming once it's on isn't said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, toggle, wait, journal, played, nextEvent } = yield* make()
+        yield* toggle(false)
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Held update for yapd, for later (off)")
+        yield* toggle(true)
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/code/yapd", last_assistant_message: "The loader is fixed." }, { project: "yapd" }, false)
+        yield* wait(30)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: kept.map((row) => [row.key, row.heardAt, heldFor(row)]) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([["done:Rosie:run-1", undefined, "off"]])
+  })
+
+  test("turning off while an update is being made ready lets its hook go at once, and the update is kept unheard as what came in while it was off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, toggle, wait, journal, played, followUps } = yield* make(undefined, { renderSeconds: 5 })
+        yield* finish("a", "The PR is ready.", true)
+        yield* wait(1)
+        yield* toggle(false)
+        const letGo = [...followUps]
+        yield* wait(5)
+        yield* wait(30)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return { letGo, after: [...followUps], played: [...played], kept: kept.map((row) => [row.said, row.heardAt, heldFor(row)]) }
+      }),
+    )
+    expect(result.letGo).toEqual(["claude:a let go"])
+    // Let go of once.
+    expect(result.after).toEqual(["claude:a let go"])
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([["yapd. The PR is ready.", undefined, "off"]])
+  })
+
+  test("what he asks while yapd is off is answered with nothing listened for after it, a question it asks left open for the shortcut, and nothing else is said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, toggle, wait, speak, played, listened, finish } = yield* make("Tell it to merge.")
+        yield* toggle(false)
+        const followUp: Array<string> = []
+        const heard: Array<string> = []
+        const asked: Array<string> = []
+        const answers: Array<string> = []
+        yield* notice("answer", "Distribox is migrated, sir.", { answer: true, followUp, heard })
+        yield* wait(5)
+        yield* speak
+        yield* wait(11)
+        yield* notice("which", "The Tezos migration or the Mina tickets, sir?", { question: asked, answers, heard })
+        yield* wait(11)
+        yield* speak
+        yield* wait(11)
+        // Of its own accord, nothing.
+        yield* notice("failed", "The Tezos migration failed.")
+        yield* finish("a", "The PR is ready.")
+        yield* wait(30)
+        return { played: [...played], followUp, heard, asked, answers, listened: listened.length }
+      }),
+    )
+    expect(result.played).toEqual(["Distribox is migrated, sir.", "The Tezos migration or the Mina tickets, sir?"])
+    expect(result).toMatchObject({ followUp: [], answers: [], listened: 0, heard: ["answer", "which"], asked: ["which unanswered"] })
+  })
+
+  test("what he hears is heard only once it's said to the end, and progress of the same work is out of date only once he hears how it went, not as that's queued", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, toggle, wait, journal } = yield* make(undefined, { progressMessages: ["Pass 7 is running."] })
+        const heard = Effect.map(journal.since(0, { kinds: ["update"] }), (kept) => kept.map((row) => [row.said, row.heardAt !== undefined, heldFor(row)]))
+        yield* finish("review", "Pass 7 is running.")
+        yield* finish("other", "Something long.")
+        yield* finish("review", "The review is merged.")
+        // Queued behind the other line, and then cut off by turning yapd off.
+        const queued = yield* heard
+        yield* wait(11)
+        yield* wait(5)
+        yield* toggle(false)
+        const cut = yield* heard
+        yield* toggle(true)
+        yield* finish("review", "The review is merged, again.")
+        yield* wait(11)
+        return { queued, cut, after: yield* heard }
+      }),
+    )
+    expect(result.queued).toEqual([
+      ["yapd. Pass 7 is running.", false, "progress"],
+      ["yapd. Something long.", false, undefined],
+      ["yapd. The review is merged.", false, undefined],
+    ])
+    expect(result.cut).toEqual([
+      ["yapd. Pass 7 is running.", false, "progress"],
+      ["yapd. Something long.", true, undefined],
+      ["yapd. The review is merged.", false, "off"],
+    ])
+    expect(result.after).toEqual([
+      ["yapd. Pass 7 is running.", true, "progress"],
+      ["yapd. Something long.", true, undefined],
+      ["yapd. The review is merged.", false, "off"],
+      ["yapd. The review is merged, again.", true, undefined],
+    ])
+  })
+})
+
+describe("Daemon holding what a failure was left to", () => {
+  for (const [held, options] of [
+    ["focus", { holding: Effect.succeedSome("focus" as const) }],
+    ["progress", { progressMessages: ["The provider had an error, so I stopped."] }],
+  ] as const) {
+    test(`a failure left to the Stop that told of it is said after all once that Stop's update is held for ${held}`, async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { made, finish, nextEvent } = yield* make(undefined, options)
+          const told: Array<string> = []
+          yield* finish("held", "The provider had an error, so I stopped.")
+          yield* nextEvent(`Held update for yapd, for later (${held})`)
+          yield* Effect.flatMap(made.stopped(["held"]), (stops) => made.unheard(stops, Effect.sync(() => void told.push("held"))))
+          return told
+        }),
+      )
+      expect(result).toEqual(["held"])
+    })
+  }
+
+  test("a failure left to a Stop whose update is kept as what came in while yapd was off isn't said apart: that update tells of it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, finish, toggle, nextEvent, wait } = yield* make()
+        const told: Array<string> = []
+        yield* toggle(false)
+        yield* finish("off", "The provider had an error, so I stopped.")
+        yield* nextEvent("Held update for yapd, for later (off)")
+        yield* Effect.flatMap(made.stopped(["off"]), (stops) => made.unheard(stops, Effect.sync(() => void told.push("off"))))
+        yield* toggle(true)
+        yield* wait(30)
+        return told
+      }),
+    )
+    expect(result).toEqual([])
+  })
+})
