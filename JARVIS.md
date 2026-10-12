@@ -4,7 +4,7 @@ A short list of what this branch changed and what yapd can do now. The commit lo
 
 Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite`, `yapd.before-interrupt.sqlite`, `yapd.before-interrupt-v5.sqlite` and `yapd.before-thread-menu.sqlite`.
 
-Live on `dev` now: everything below but headline first, focus and quiet, which are on `jarvis-m5`, the daemon side only, waiting on review. Also live: the menu bar app's thread menu. Talking over yapd's first seconds stopping it at once, muting threads, rig's threads, and agents' questions read out and answered by voice are waiting on their first checks with you.
+Live on `dev` now: everything below but headline first, focus and quiet, which are on `jarvis-m5`, with the menu bar app's side, waiting on review. Also live: the menu bar app's thread menu. Talking over yapd's first seconds stopping it at once, muting threads, rig's threads, and agents' questions read out and answered by voice are waiting on their first checks with you.
 
 ## Talk to it (the shortcut)
 
@@ -33,14 +33,15 @@ Live on `dev` now: everything below but headline first, focus and quiet, which a
 - The menu bar lists those threads with their project icons, how long ago each finished and whether it's muted: clicking one says its latest update again, and the Mute menu, or Option over a row on macOS 15 and later, mutes it or takes the mute off. An older yapd still gets the old Hear Again list.
 - A terminal session's or an archived thread's older update can't be heard again from the menu: its row is greyed out, and can still be muted.
 
-## Headline first, focus and quiet (on `jarvis-m5`, the daemon side)
+## Headline first, focus and quiet (on `jarvis-m5`)
 
 - Updates are said as a headline of about fifteen words, and "more" over it or just after says the rest at once, rendered as the headline plays; over yapd's first seconds the model decides. What needs you is said in full, question and all. Real headlines from six test messages kept the question and the outcome, at 8 to 15 words.
 - Progress, like "pass 7 is running" or "still waiting on CI", is held for a digest, told from news by what yapd last said about the same work. The digest comes once it's been quiet a minute, with three held or one held twenty minutes, at most every twenty minutes, never in focus or quiet; you can reply to it or cut it off, and only what you heard to the end counts as heard.
 - "Focus", "focus for two hours", "goodnight", "quiet for an hour", "I'm back", "talk shorter" and "give me everything", by the shortcut or over an update, in so many words; anything else about them goes to the model, or over an update gets "Ask me that with the shortcut." A bare "quiet" still only stops yapd. Focus and quiet keep your mute rule: what needs you and the answer to your own message still come through. "I'm back" gives the rundown straight away; a mode that ends on its own, or from the API, offers it once.
 - What finished while yapd was down is held as "… finished while I was offline", with no model call, each once, ever; a failure from then is said.
 - The updates you heard last can be heard again after a restart, under the same ids, and a reply to one goes to its thread through T3 Code.
-- The API's state has `mode`, `until` and `waiting`, and `PUT /state` changes only what it names. The menu bar app doesn't show them yet.
+- The API's state has `mode`, `until` and `waiting`, and `PUT /state` changes only what it names.
+- The menu bar app has a Mode menu (Normal, Focus for an Hour, Quiet until Morning) and says when focus or quiet ends; its icon gets a moon in focus or quiet and a dot while a thread waits on you, and "N Threads Waiting on You" has yapd say who, as "who needs me?" would. With a yapd from before modes it shows none of this.
 
 ## Show me
 

@@ -65,7 +65,7 @@ There's no authentication: anything that can reach the port can use it, as hooks
 - `revision` in `showing`: the `revision` the card went up at, this time. It stays the same while the card stays up, even as the state's own moves on, and a card put back up is up anew, at a later one. Send it to [take the card down](#cards) only as it went up then. A yapd from before it doesn't send it.
 - `revision`: goes up by one each time yapd puts a card up or takes one down, or is asked to take one down and doesn't, like one that's down already. It starts from `0` when yapd starts. Send it to [put a card back up](#cards) only if nothing came since. A yapd from before it doesn't send it.
 
-The menu bar app's icon shows "not running" when it can't reach the API, "off" when `on` is false, and `activity` otherwise. A card that's showing opens in a panel under the icon.
+The menu bar app's icon shows "not running" when it can't reach the API, "off" when `on` is false, and `activity` otherwise, with a moon while `mode` is `focus` or `quiet` and a dot while `waiting` isn't `0`. A card that's showing opens in a panel under the icon.
 
 ## Following changes
 

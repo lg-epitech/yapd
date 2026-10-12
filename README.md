@@ -47,12 +47,16 @@ From a clone, `bun run app` builds it with Xcode into `~/Applications` and opens
 | Icon | |
 | --- | --- |
 | Arc reactor | On, and quiet |
+| Arc reactor with a moon | On, in focus or quiet |
+| Arc reactor with a dot | On, and a thread waits on you |
 | Speaker | Speaking |
 | Microphone | Listening, for your reply or while you dictate |
 | Arc reactor gone dark, just its casing and an empty core | Off |
 | Faded arc reactor | yapd isn't running |
 
 Off, yapd says nothing, never opens the microphone and lets go of the shortcut. Turning it off drops whatever hasn't started yet: what it was about to say, a dictation, and new work it was still writing up or asking you about. Updates that finish meanwhile aren't said later, and it stays off when it restarts, until you turn it on again. The menu also lists the threads with the latest updates, each with its project's icon as T3 Code draws it, how long ago it finished and whether it's muted: click one to hear its latest update again and reply to it, and mute a noisy one from the Mute menu, or by holding Option over it on macOS 15 and later. Muting keeps its progress and finished work quiet, but anything that needs you still comes through. With a yapd from before that, it has the last few updates to hear again instead.
+
+The Mode menu puts yapd in focus for an hour or quiet until the morning, or back to normal, and the menu says when focus or quiet ends. While a thread waits on you, the menu says how many do: choose it and yapd tells you who, aloud.
 
 Ask yapd to show you something, like "show me what's running" or "show me that PR", and the card goes up in a panel under the icon, to read only, until a while after yapd has finished talking about it. "Hide that" takes it down sooner, and Show Last Card in the menu brings it back.
 
