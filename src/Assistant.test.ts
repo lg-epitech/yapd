@@ -10787,6 +10787,27 @@ describe("Assistant turned off and on", () => {
     expect(pressing).toEqual(["Distribox migrated, sir."])
   })
 
+  test("while off, what's left of a request whose question he talked over isn't said of its own accord: only what answers him is", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) =>
+          Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low", rest: "tell it to run the tests" }),
+        )
+        yield* made.toggle(false)
+        yield* made.heard({ heard: "What's the migration one doing? And tell it to run the tests.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 2 })
+        yield* made.flush
+        const asked = made.spoken()
+        // He says something over it, which takes its place.
+        yield* made.replied
+        yield* made.flush
+        return { asked, after: made.spoken().slice(asked.length), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    expect(result.asked).toEqual(["Migrate Tezos Integration or Open Mina SSV2 Bug Tickets, sir?"])
+    expect(result.after).toEqual([])
+    expect(result.open).toBe(false)
+  })
+
   test("what he asks by the shortcut while yapd is off is answered, but nothing of its own accord: its own question isn't asked again, and a thread's waits for it to be on", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
