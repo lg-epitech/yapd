@@ -49,8 +49,8 @@ export interface State {
 /** How many updates can be heard again. */
 const replayable = 5
 
-/** How many of the latest updates kept are looked through, at startup, for those he heard. */
-const lookedBack = 50
+/** How many of the updates he heard last are looked through, at startup, allowing for those heard twice or too little was kept of. */
+const lookedBack = 2 * replayable
 
 /** What a kept update's detail says of it, as it was kept. */
 const remembered = (kept: Kept) => {
@@ -281,7 +281,8 @@ export const make = (
   const soon = STM.commit(TRef.set(coming, true))
   // What he heard last, kept through a restart under the ids its entries in the journal have.
   const seeded: Array<HeardUpdate> = []
-  for (const kept of yield* journal.page({ most: lookedBack, kinds: ["update"] })) {
+  // Only what he heard, so however many updates were kept quiet or held since, it's still there.
+  for (const kept of yield* journal.heard(lookedBack)) {
     if (seeded.length >= replayable) break
     const update = restored(kept, called(hostname()))
     if (Option.isNone(update) || seeded.some(({ update: other }) => other.session === update.value.session && other.at === update.value.at)) continue

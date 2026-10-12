@@ -121,6 +121,12 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * update kept under the session, tied to it, or kept under the thread.
      */
     readonly previous: (at: number, session: string, ref?: { readonly machine: string; readonly id: string }) => Effect.Effect<Option.Option<Kept>>
+    /**
+     * The updates he heard, newest kept first, `most` of them: never one kept
+     * quiet or held for later, which he never heard said, however many of
+     * those came since.
+     */
+    readonly heard: (most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Each update and notice as it's kept. */
     readonly kept: Stream.Stream<Kept>
     /** The latest thing the user heard. */
@@ -411,6 +417,15 @@ export const fromStore = (
           ),
         )
         .pipe(Effect.catchAll((error) => Effect.logWarning("Could not read my journal", error).pipe(Effect.as(Option.none<Kept>())))),
+    heard: (most) =>
+      reading(
+        store.transaction((database: Database) =>
+          database
+            .query<Row, [number]>(`select * from journal where kind = 'update' and heard_at is not null and ${quiet} = 0 and not ${heldBack} order by id desc limit ?`)
+            .all(most)
+            .map(kept),
+        ),
+      ),
     kept: written === undefined ? Stream.never : Stream.fromPubSub(written),
     lastHeard: store
       .transaction((database: Database) =>

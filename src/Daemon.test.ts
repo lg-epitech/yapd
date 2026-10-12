@@ -3387,6 +3387,26 @@ describe("Daemon headline first", () => {
     expect(result.more).toEqual(Option.some("Retries back off now."))
   })
 
+  test("the updates he heard last are kept through a restart however many were kept quiet or held since", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        const ids: Array<string> = []
+        for (let i = 1; i <= 5; i++) {
+          const id = yield* journal.write({ at: i * 1000, kind: "update", thread: `claude:s${i}`, project: "yapd", said: `yapd. Update ${i}.`, heardAt: i * 1000 + 500 })
+          ids.unshift(String(Option.getOrThrow(id)))
+        }
+        // A noisy muted thread, progress held for the digest and a night in quiet.
+        for (let i = 0; i < 60; i++) {
+          yield* journal.write({ at: 10_000 + i, kind: "update", thread: "claude:noisy", project: "yapd", said: "yapd. Still going.", detail: i % 2 === 0 ? { muted: true } : { held: "progress" } })
+        }
+        const { heard } = yield* make(undefined, { journal })
+        return { ids, heard: yield* heard }
+      }),
+    )
+    expect(result.heard).toEqual(result.ids)
+  })
+
   test("a reply to an update heard before a restart, tied to its thread, reaches that thread through T3 Code", async () => {
     const result = await run(
       Effect.gen(function* () {
