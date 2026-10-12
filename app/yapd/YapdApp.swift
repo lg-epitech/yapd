@@ -1,10 +1,10 @@
 import ServiceManagement
 import SwiftUI
 
-// yapd in the menu bar: whether it's on, what it's doing, the threads with the
-// latest updates, to hear again and mute, and the card it's showing, in a
-// panel under the icon. It only uses the API in docs/api.md, so another UI can
-// do all of this too.
+// yapd in the menu bar: whether it's on, what it's doing, its mode, the
+// threads waiting on him, the threads with the latest updates, to hear again
+// and mute, and the card it's showing, in a panel under the icon. It only uses
+// the API in docs/api.md, so another UI can do all of this too.
 
 @MainActor @Observable
 final class Yapd {
@@ -54,14 +54,17 @@ final class Yapd {
     }
   }
 
-  /// yapd's own mark while it's on and quiet, off or not running, and what it's doing otherwise.
+  /// yapd's own mark while it's on and quiet, with a moon in focus or quiet and a dot while a thread waits on him, off or not
+  /// running, and what it's doing otherwise.
   var icon: some View {
-    guard let state else { return Image(nsImage: Mark.down).accessibilityLabel("yapd isn't running") }
-    guard state.on else { return Image(nsImage: Mark.off).accessibilityLabel("yapd is off") }
-    switch state.activity {
-    case "speaking": return Image(systemName: "speaker.wave.2.fill").accessibilityLabel("yapd is speaking")
-    case "listening": return Image(systemName: "mic.fill").accessibilityLabel("yapd is listening")
-    default: return Image(nsImage: Mark.on).accessibilityLabel("yapd is on")
+    switch Status.look(state) {
+    case .down: return Image(nsImage: Mark.down).accessibilityLabel("yapd isn't running")
+    case .off: return Image(nsImage: Mark.off).accessibilityLabel("yapd is off")
+    case .speaking: return Image(systemName: "speaker.wave.2.fill").accessibilityLabel("yapd is speaking")
+    case .listening: return Image(systemName: "mic.fill").accessibilityLabel("yapd is listening")
+    case .on(let moon, let dot):
+      let told = [state?.modeLine(now: now), state?.waitingLine].compactMap { $0 }
+      return Image(nsImage: Mark.on(moon: moon, dot: dot)).accessibilityLabel((["yapd is on"] + told).joined(separator: ", "))
     }
   }
 
@@ -108,6 +111,18 @@ final class Yapd {
 
   func turn(on: Bool) {
     send("PUT", "state", body: try? JSONEncoder().encode(["on": on]))
+  }
+
+  /// Has yapd talk in `mode`, changing nothing else, unless it's too old to have modes or it's back to normal when it's normal
+  /// already. Only how yapd talks changes: nothing is sent to any thread.
+  func talk(in mode: Mode) {
+    guard let change = state?.change(to: mode) else { return }
+    send("PUT", "state", body: try? JSONEncoder().encode(change))
+  }
+
+  /// Asks yapd who's waiting on him, as if he'd said it, so the answer is said. It only reads his threads.
+  func whoNeedsMe() {
+    send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.whoNeedsMe))
   }
 
   func replay(_ update: Status.Update) {
@@ -187,6 +202,15 @@ struct YapdApp: App {
     MenuBarExtra {
       if let state = yapd.state {
         Button(state.on ? "Turn Off" : "Turn On") { yapd.turn(on: !state.on) }
+        if let mode = state.mode {
+          if let line = state.modeLine(now: yapd.now) { Text(line) }
+          ModeItems(mode: mode, talk: yapd.talk)
+        }
+        if let waiting = state.waitingLine {
+          // yapd answers it aloud, which it can't while it's off.
+          Button(waiting) { yapd.whoNeedsMe() }
+            .disabled(!state.on)
+        }
         Button("Show Last Card") { yapd.showLast() }
           .disabled(yapd.last == nil)
         if let recent = state.recent {
@@ -212,6 +236,21 @@ struct YapdApp: App {
         .keyboardShortcut("q")
     } label: {
       yapd.icon
+    }
+  }
+}
+
+/// The modes, with the one yapd is in checked: choosing one has yapd talk in it, focus or quiet for as long as yapd gives it,
+/// and choosing focus or quiet again starts its time again. While yapd is off, its mode still changes, for when it's back on.
+struct ModeItems: View {
+  let mode: Mode
+  let talk: @MainActor (Mode) -> Void
+
+  var body: some View {
+    Menu("Mode") {
+      ForEach(Mode.allCases, id: \.self) { each in
+        Toggle(each.item, isOn: Binding(get: { mode == each }, set: { _ in talk(each) }))
+      }
     }
   }
 }

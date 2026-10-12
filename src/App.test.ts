@@ -144,4 +144,26 @@ describe.skipIf(swiftc === undefined)("App", () => {
     },
     120_000,
   )
+
+  test(
+    "the menu reads the mode, when it ends and how many threads wait from any yapd, shows the moon and the dot as they say, has yapd change only its mode with a PUT /state, and asks who's waiting as he'd say it",
+    async () => {
+      expect(await run("mode")).toEqual({ code: 0, out: "The app's checks pass.\n" })
+      const yapd = await Bun.file(join(app, "yapd", "YapdApp.swift")).text()
+      // The icon is what the checks say it is, and the mode is changed only by what they check, never with `on` or a time of the app's own.
+      expect(yapd).toMatch(/switch Status\.look\(state\) \{/)
+      expect(yapd).toMatch(/case \.on\(let moon, let dot\):[\s\S]*?Mark\.on\(moon: moon, dot: dot\)/)
+      expect(yapd).not.toMatch(/Mark\.on\)/)
+      expect(yapd).toMatch(/func talk\(in mode: Mode\) \{\s*guard let change = state\?\.change\(to: mode\) else \{ return \}\s*send\("PUT", "state", body: try\? JSONEncoder\(\)\.encode\(change\)\)\s*\}/)
+      expect(yapd.match(/send\("PUT", "state"[^\n]*/g)).toEqual(['send("PUT", "state", body: try? JSONEncoder().encode(["on": on]))', 'send("PUT", "state", body: try? JSONEncoder().encode(change))'])
+      expect(yapd).not.toMatch(/until:/)
+      // The menu offers the modes only to a yapd that has them, each choice through `talk`, and its line while one is on.
+      expect(yapd).toMatch(/if let mode = state\.mode \{\s*if let line = state\.modeLine\(now: yapd\.now\) \{ Text\(line\) \}\s*ModeItems\(mode: mode, talk: yapd\.talk\)/)
+      expect(yapd).toMatch(/Toggle\(each\.item, isOn: Binding\(get: \{ mode == each \}, set: \{ _ in talk\(each\) \}\)\)/)
+      // Who's waiting is asked only with the words the checks check, and only while yapd is on to answer it.
+      expect(yapd.match(/send\("POST", "utterances"[^\n]*/g)).toEqual(['send("POST", "utterances", body: try? JSONEncoder().encode(Utterance.whoNeedsMe))'])
+      expect(yapd).toMatch(/if let waiting = state\.waitingLine \{[^}]*Button\(waiting\) \{ yapd\.whoNeedsMe\(\) \}\s*\.disabled\(!state\.on\)/)
+    },
+    120_000,
+  )
 })

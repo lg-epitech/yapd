@@ -191,8 +191,15 @@ struct Status: Decodable {
   /// How many times yapd put a card up or took one down, or was asked to take one down, which a card asked to go back up is
   /// sent with, so it goes back up only if nothing came since. None from a yapd too old to count them.
   let revision: Int?
+  /// How yapd talks of its own accord. None from a yapd from before modes, which talks as in normal and can't be asked to
+  /// change it, and for a mode the app doesn't know.
+  let mode: Mode?
+  /// ISO 8601, when focus or quiet ends on its own, only while one is on.
+  let until: String?
+  /// How many threads wait on him, on every machine yapd can see. 0 from a yapd from before it.
+  let waiting: Int
 
-  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, showing, revision }
+  private enum CodingKeys: String, CodingKey { case on, activity, updates, recent, showing, revision, mode, until, waiting }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -204,6 +211,96 @@ struct Status: Decodable {
     // An older yapd doesn't send them at all.
     showing = try container.decodeIfPresent(Showing.self, forKey: .showing)
     revision = try container.decodeIfPresent(Int.self, forKey: .revision)
+    // What the app can't read of the mode leaves the rest of the state as it is.
+    mode = (try? container.decodeIfPresent(String.self, forKey: .mode)).flatMap(Mode.init(rawValue:))
+    until = mode == nil || mode == .normal ? nil : try? container.decodeIfPresent(String.self, forKey: .until)
+    waiting = max(0, (try? container.decodeIfPresent(Int.self, forKey: .waiting)) ?? 0)
+  }
+}
+
+/// How yapd talks of its own accord: `normal` says what finished and what needs him; `focus` and `quiet` say only what needs
+/// him, and hold the rest for later.
+enum Mode: String, Codable, CaseIterable {
+  case normal, focus, quiet
+
+  /// How the menu offers it, each lasting as long as yapd gives it when it isn't told: focus an hour, quiet until 8:00.
+  var item: String {
+    switch self {
+    case .normal: "Normal"
+    case .focus: "Focus for an Hour"
+    case .quiet: "Quiet until Morning"
+    }
+  }
+}
+
+/// What `PUT /state` is sent to change the mode, and nothing else: no `on`, and no `until`, so yapd gives focus an hour and
+/// quiet until the morning, by its own clock.
+struct ModeChange: Encodable, Equatable {
+  let mode: Mode
+}
+
+/// What `POST /utterances` is sent, as if he'd said it by the shortcut.
+struct Utterance: Encodable, Equatable {
+  let text: String
+
+  /// Asks yapd who's waiting on him, so the answer is said, as any answer is. It only reads his threads.
+  static let whoNeedsMe = Utterance(text: "who needs me?")
+}
+
+extension Status {
+  /// What the menu bar icon shows.
+  enum Look: Equatable {
+    /// yapd isn't running.
+    case down
+    case off
+    case speaking
+    case listening
+    /// On and quiet, with a moon in focus or quiet, and a dot while a thread waits on him.
+    case on(moon: Bool, dot: Bool)
+  }
+
+  /// What the icon shows for `state`, none while yapd isn't running.
+  static func look(_ state: Status?) -> Look {
+    guard let state else { return .down }
+    guard state.on else { return .off }
+    switch state.activity {
+    case "speaking": return .speaking
+    case "listening": return .listening
+    default: return .on(moon: state.mode == .focus || state.mode == .quiet, dot: state.waiting > 0)
+    }
+  }
+
+  /// What the menu says of the mode while focus or quiet is on, like "Focus until 3:00 PM", with "tomorrow" when it ends on a
+  /// later day than `now`. None in normal, and from a yapd from before modes.
+  func modeLine(now: Date, zone: TimeZone = .current, locale: Locale = .current) -> String? {
+    let name: String
+    switch mode {
+    case .focus: name = "Focus"
+    case .quiet: name = "Quiet"
+    case .normal, nil: return nil
+    }
+    guard let ends = until.flatMap(Status.date) else { return name }
+    let format = DateFormatter()
+    format.locale = locale
+    format.timeZone = zone
+    format.dateStyle = .none
+    format.timeStyle = .short
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = zone
+    let later = calendar.startOfDay(for: ends) > calendar.startOfDay(for: now)
+    return "\(name) until \(format.string(from: ends))\(later ? " tomorrow" : "")"
+  }
+
+  /// What the menu says of the threads waiting on him, none while there are none.
+  var waitingLine: String? {
+    waiting == 0 ? nil : "\(waiting) \(waiting == 1 ? "Thread" : "Threads") Waiting on You"
+  }
+
+  /// What `PUT /state` is sent to have yapd talk in `mode`: none from a yapd from before modes, which would turn it away, and
+  /// none to go back to normal when it's normal already. Focus or quiet asked again starts its time again.
+  func change(to mode: Mode) -> ModeChange? {
+    guard let current = self.mode else { return nil }
+    return current == .normal && mode == .normal ? nil : ModeChange(mode: mode)
   }
 }
 
