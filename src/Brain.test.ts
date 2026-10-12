@@ -9,6 +9,7 @@ import * as Notices from "./Notices.ts"
 import type { Kept } from "./Journal.ts"
 import type * as Ledger from "./Ledger.ts"
 import * as Missed from "./Missed.ts"
+import * as Mutes from "./Mutes.ts"
 import * as Persona from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import * as Research from "./Research.ts"
@@ -1860,6 +1861,11 @@ describe("catching up", () => {
     // Rig is away, but what it kept of rig is still there to catch up on.
     expect(checked({ machine: "rig" })._tag).toBe("Do")
     expect(checked({ target: "u7" })).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    // A session he muted, in a terminal, by its handle in MUTED: what it said is his to ask about.
+    const mutes = [{ key: Mutes.key.session("Rosie", "claude:docs"), called: "the docs sweep", at: now }]
+    const muted = Brain.check(Brain.decision({ act: "catchup", target: "m1", how: "muted" }), situation("What has the docs sweep been up to?", { desk: on, missed, mutes }), lines)
+    expect(muted._tag).toBe("Do")
+    expect(Brain.check(Brain.decision({ act: "catchup", target: "m2" }), situation("What has the docs sweep been up to?", { desk: on, missed, mutes }), lines)._tag).toBe("Say")
   })
 
   test("the brief of a catch-up has its scope, what needs him first, what it left out and its word budget; its detail has what was kept for more", () => {

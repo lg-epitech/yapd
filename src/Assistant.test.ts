@@ -10612,6 +10612,29 @@ describe("Assistant catching up", () => {
     expect(result.after).toEqual(["Tezos pass 7 is running.", "The Mina tickets are filed."])
   })
 
+  test("a muted session off the desk, named by its handle in MUTED, is caught up on, and only it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, spoken, journal, mutes } = yield* assistant(
+          (situation) => (situation.utterance.heard === "Catch me up." ? Brain.decision({ act: "catchup" }) : Brain.decision({ act: "catchup", target: "m1", how: "muted" })),
+          undefined,
+          { muting: true, waiting: true, briefs: (rows) => rows.map(({ said }) => said).join(" ") },
+        )
+        yield* mutes!.mute({ key: Mutes.key.session("Rosie", "claude:docs"), called: "the docs sweep" })
+        yield* journal.write({ at: now - 30 * 60_000, kind: "update", thread: "claude:docs", project: "yapd", said: "Docs sweep rewrote the API page intro.", detail: { priority: "done", muted: true } })
+        yield* kept(journal, 20, tezos.id, "Tezos pass 7 is done.")
+        yield* dictate("What has the docs sweep been up to?")
+        yield* play()
+        const scoped = spoken()
+        yield* dictate("Catch me up.")
+        return { scoped, general: spoken().slice(scoped.length), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.scoped).toEqual(["Docs sweep rewrote the API page intro."])
+    expect(result.general).toEqual(["Tezos pass 7 is done."])
+    expect(result.after).toEqual(["Tezos pass 7 is done."])
+  })
+
   test("a since the model put in the future, as when it took his clock for another's, gathers everything rather than nothing", async () => {
     const result = await run(
       Effect.gen(function* () {

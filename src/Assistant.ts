@@ -2689,8 +2689,18 @@ export const make = (options: {
     const scoping = (plan: Brain.Plan, situation: Brain.Situation): Scope => {
       const { decision, target } = plan
       const group = situation.missed.groups.find(({ handle }) => handle === decision.target)
+      // A muted thread or session that isn't on the desk, like one in a terminal, by its handle in MUTED: what it kept is under its thread, or its session.
+      const mute = Option.isSome(target) || group !== undefined ? undefined : Option.getOrUndefined(Brain.mutedBy(decision.target, situation))
+      const muted = mute === undefined ? undefined : Option.getOrUndefined(Mutes.parse(mute.key))
       const thread = Option.match(target, {
-        onNone: () => (group === undefined ? undefined : { machine: group.machine, thread: group.thread }),
+        onNone: () =>
+          group !== undefined
+            ? { machine: group.machine, thread: group.thread }
+            : muted === undefined
+              ? undefined
+              : muted._tag === "Thread"
+                ? { machine: muted.ref.machine, thread: muted.ref.id }
+                : { machine: undefined, thread: `${muted.agent}:${muted.session}` },
         onSome: ({ ref }) => ({ machine: ref.machine, thread: ref.id }),
       })
       const project = decision.text.trim()
@@ -2701,6 +2711,7 @@ export const make = (options: {
       const named =
         Option.getOrUndefined(Option.map(target, ({ called }) => called)) ??
         (group === undefined ? undefined : Brain.missedName(group)) ??
+        (mute === undefined ? undefined : Brain.mutedName(mute, situation.desk)) ??
         (project === "" ? undefined : project) ??
         (machine === "" ? undefined : machine) ??
         (decision.how === "muted" ? "your muted threads" : undefined)

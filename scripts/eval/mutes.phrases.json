@@ -3,5 +3,6 @@
   { "heard": "Silence the yapd thread for an hour.", "thread": "yapd", "act": "mute", "how": "mute", "until": true },
   { "heard": "Unmute the muted one.", "thread": "Tezos", "act": "mute", "how": "unmute", "muted": ["Tezos"] },
   { "heard": "Mute the integration one.", "thread": "", "asks": true },
-  { "heard": "Unmute the Claude session in yapd.", "thread": "", "act": "mute", "how": "unmute", "muted": ["Tezos"], "sessions": ["the Claude session in yapd"], "target": "m2" }
+  { "heard": "Unmute the Claude session in yapd.", "thread": "", "act": "mute", "how": "unmute", "muted": ["Tezos"], "sessions": ["the Claude session in yapd"], "target": "m2" },
+  { "heard": "What has the docs sweep been up to?", "thread": "", "act": "catchup", "muted": ["Tezos"], "sessions": ["the docs sweep"], "target": "m2" }
 ]
