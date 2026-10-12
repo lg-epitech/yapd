@@ -339,12 +339,11 @@ export const serve = Effect.gen(function* () {
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
-    // One at a time, so what's remembered is what's in effect.
+    // One at a time, so what's remembered is what's in effect. Noted as of when it was asked, so it comes before what turning off keeps.
     turn: (on) =>
-      Effect.zipRight(settings.remember(on), turn(on)).pipe(
-        Effect.zipRight(Effect.flatMap(Clock.currentTimeMillis, (at) => journal.write({ at, kind: "action", detail: { on } }))),
-        switching.withPermits(1),
-      ),
+      Effect.flatMap(Clock.currentTimeMillis, (at) =>
+        Effect.zipRight(settings.remember(on), turn(on)).pipe(Effect.zipRight(journal.write({ at, kind: "action", detail: { on } }))),
+      ).pipe(switching.withPermits(1)),
     // Ended from the menu, focus or quiet offers the rundown, as when its time runs out.
     mode: (mode, until) =>
       Effect.gen(function* () {

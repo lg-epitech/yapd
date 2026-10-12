@@ -10725,7 +10725,7 @@ describe("Assistant turned off and on", () => {
     expect(result.after).toEqual(["Distribox migrated."])
   })
 
-  test("what was waiting or being summed up as he turned it off counts in the offer, but not what was kept while it was off before", async () => {
+  test("what was waiting or being summed up as he turned it off counts in the offer, and so does what was kept while it was off before and he hasn't heard", async () => {
     const result = await run(
       Effect.gen(function* () {
         const { back, spoken, journal, flush } = yield* assistant(unasked, undefined, { briefs: () => "Distribox migrated, sir." })
@@ -10740,7 +10740,68 @@ describe("Assistant turned off and on", () => {
         return spoken()
       }),
     )
-    expect(result).toEqual(["You missed one, sir. Want the rundown?"])
+    expect(result).toEqual(["You missed two, sir. Want the rundown?"])
+  })
+
+  test("turned on with nothing new since it was last on, or with its last switch an on, it offers nothing, though what came in before is still unheard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, spoken, journal, flush } = yield* assistant(unasked, undefined, { briefs: () => "Distribox migrated, sir." })
+        yield* journal.write({ at: now - 300 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 250, "Kept the time before.")
+        yield* journal.write({ at: now - 200 * 60_000, kind: "action", detail: { on: true } })
+        // Started on, or asked for on again from the API.
+        yield* back
+        yield* flush
+        const whileOn = spoken().length
+        // Off for a moment, with nothing coming in.
+        yield* journal.write({ at: now - 10 * 60_000, kind: "action", detail: { on: false } })
+        yield* back
+        yield* flush
+        return { whileOn, spoken: spoken(), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result).toEqual({ whileOn: 0, spoken: [], after: ["Kept the time before."] })
+  })
+
+  test("what needs him from a weekend off, which he didn't take the offer for, is still caught up on after a short off and on, and counted in the next offer", async () => {
+    const hour = 60
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, answer, dictate, play, spoken, journal, flush, briefings } = yield* assistant(
+          (situation) => (situation.utterance.heard === "Catch me up." ? Brain.decision({ act: "catchup" }) : Brain.decision({ act: "answer", spoken: "Two running, sir." })),
+          undefined,
+          { waiting: true, briefs: (rows) => rows.map(({ said }) => said).join(" ") },
+        )
+        yield* journal.write({ at: now - 64 * hour * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 50 * hour, "Mina: fee rounding or a nonce gap?", { priority: "needs-you", held: "off" })
+        yield* journal.write({ at: now - 40 * hour * 60_000, kind: "notice", machine: "Rosie", thread: mina.id, key: "fail:Rosie:r1", said: "The loader failed.", detail: { failure: "provider_error" } })
+        yield* kept(journal, 30 * hour, "Distribox copied the EU bucket.")
+        // Turned on, he lets the offer go.
+        yield* back
+        yield* flush
+        yield* play()
+        yield* answer("What's going on?")
+        yield* flush
+        yield* journal.write({ at: now - 4 * hour * 60_000, kind: "action", detail: { on: true } })
+        // Off for a call, and on again, with one more kept meanwhile.
+        yield* journal.write({ at: now - 2 * hour * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 90, "Distribox deployed.")
+        yield* back
+        yield* flush
+        yield* play()
+        const offers = spoken().filter((line) => line.startsWith("You missed"))
+        yield* answer("No.")
+        yield* journal.write({ at: now - hour * 60_000, kind: "action", detail: { on: true } })
+        yield* dictate("Catch me up.")
+        yield* play()
+        return { offers, said: spoken().at(-1), briefed: briefings.at(-1)?.groups.flatMap(({ rows }) => rows.map(({ said }) => said)), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.offers).toEqual(["You missed three, sir. Want the rundown?", "You missed four, sir. Want the rundown?"])
+    expect(result.said).toBe("Mina: fee rounding or a nonce gap? The loader failed. Distribox copied the EU bucket. Distribox deployed.")
+    expect(result.briefed).toEqual(["Distribox copied the EU bucket.", "Distribox deployed."])
+    expect(result.after).toEqual([])
   })
 
   test("the offer left unanswered is let go without a word, never asked again, and nothing is marked heard", async () => {

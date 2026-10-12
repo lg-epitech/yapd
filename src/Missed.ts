@@ -24,14 +24,27 @@ export interface Off {
   readonly to?: number
 }
 
-/** When he last had yapd off, from the times it was turned on or off, newest first, as the journal keeps them. */
-export const off = (switched: ReadonlyArray<Kept>): Off | undefined => {
-  const at = switched.findIndex((kept) => (kept.detail as { readonly on?: unknown } | undefined)?.on === false)
-  const turnedOff = switched[at]
-  if (turnedOff === undefined) return undefined
-  const turnedOn = at > 0 ? switched[at - 1] : undefined
-  return { from: turnedOff.at, ...(turnedOn === undefined ? {} : { to: turnedOn.at }) }
+const offRow = (kept: Kept) => (kept.detail as { readonly on?: unknown } | undefined)?.on === false
+
+/**
+ * When he last had yapd off, from the times it was turned on or off, newest
+ * first, as the journal keeps them: from the first "off" of the last time it
+ * went off to the first "on" after, as an "on" or "off" asked for again, like
+ * from the API, changes nothing. `before` is when it was last on before then,
+ * when that's known.
+ */
+export const off = (switched: ReadonlyArray<Kept>): (Off & { readonly before?: number }) | undefined => {
+  const last = switched.findIndex(offRow)
+  if (last === -1) return undefined
+  let first = last
+  while (first + 1 < switched.length && offRow(switched[first + 1]!)) first++
+  const turnedOn = last > 0 ? switched[last - 1] : undefined
+  const before = switched[first + 1]
+  return { from: switched[first]!.at, ...(turnedOn === undefined ? {} : { to: turnedOn.at }), ...(before === undefined ? {} : { before: before.at }) }
 }
+
+/** How many times yapd was turned on or off in a week at most, as far as what he missed reads them. */
+export const switches = 1000
 
 const detail = (kept: Kept) => (typeof kept.detail === "object" && kept.detail !== null ? (kept.detail as Record<string, unknown>) : {})
 
@@ -147,14 +160,23 @@ export interface Missed {
 /**
  * What he missed as of `now`: what he never heard read out since the window
  * began, and what he heard cut off since he last `spoke`, but not what's
- * `coming`, waiting to be read, which he's told of as it is.
+ * `coming`, waiting to be read or being read, which he's told of as it is.
+ * What came in while yapd was off, what needs him and what he's to hear
+ * whatever he muted count for a week, whenever he had yapd off, so a short
+ * time off since, or another night off, never makes them drop out unheard.
  */
 export const gather = (journal: Pick<Journal["Type"], "missed" | "switched">, given: { readonly now: number; readonly spoke: number; readonly coming: ReadonlyArray<number>; readonly desk: Threads.Desk }) =>
   Effect.gen(function* () {
-    const switched = off(yield* journal.switched(given.now - week))
-    const from = since(given.now, switched?.from)
-    const rows = (yield* journal.missed(from, Math.max(from, given.spoke))).filter(({ id }) => !given.coming.includes(id))
-    return { since: from, spoke: given.spoke, ...(switched === undefined ? {} : { off: switched }), groups: group(rows, given.desk) } satisfies Missed
+    const last = off(yield* journal.switched(given.now - week, switches))
+    const from = since(given.now, last?.from)
+    const rows = (yield* journal.missed(from, Math.max(from, given.spoke), undefined, given.now - week)).filter(({ id }) => !given.coming.includes(id))
+    const switched = last === undefined ? undefined : { from: last.from, ...(last.to === undefined ? {} : { to: last.to }) }
+    return {
+      since: Math.min(from, ...rows.map(({ at }) => at)),
+      spoke: given.spoke,
+      ...(switched === undefined ? {} : { off: switched }),
+      groups: group(rows, given.desk),
+    } satisfies Missed
   })
 
 /** How much of it there is, threads and rows. */

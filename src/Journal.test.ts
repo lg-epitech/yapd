@@ -287,6 +287,23 @@ describe("Journal", () => {
     expect(kept.missed).toEqual(kept.ids)
   })
 
+  test("what he missed reaches back further for what came in while yapd was off, what needs him and what he's to hear whatever he muted, but not for the rest", async () => {
+    const kept = await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* Journal.Journal
+        const said = (rows: ReadonlyArray<Journal.Kept>) => rows.map(({ said }) => said)
+        yield* journal.write({ at: 5, kind: "update", thread: "t-dist", said: "Kept while off.", detail: { held: "off" } })
+        yield* journal.write({ at: 6, kind: "notice", thread: "t-dist", key: "fail:Rosie:r1", said: "Distribox failed.", detail: { failure: "provider_error" } })
+        yield* journal.write({ at: 7, kind: "update", thread: "t-tez", said: "Which network?", detail: { priority: "needs-you", held: "focus" } })
+        yield* journal.write({ at: 8, kind: "update", thread: "t-tez", said: "The answer to his message.", detail: { audible: true, muted: true } })
+        yield* journal.write({ at: 9, kind: "update", thread: "t-tez", said: "Held for focus.", detail: { held: "focus" } })
+        yield* journal.write({ at: 2, kind: "update", thread: "t-old", said: "Too long ago.", detail: { held: "off" } })
+        return { window: said(yield* journal.missed(10, 20)), further: said(yield* journal.missed(10, 20, 500, 3)) }
+      }).pipe(Effect.provide(Journal.memory)),
+    )
+    expect(kept).toEqual({ window: [], further: ["Kept while off.", "Distribox failed.", "Which network?", "The answer to his message."] })
+  })
+
   test("what was held is read for some reasons only, like all but what came in while yapd was off", async () => {
     const kept = await Effect.runPromise(
       Effect.gen(function* () {

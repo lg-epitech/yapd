@@ -658,6 +658,8 @@ export const make = (options: {
   readonly skip: (update: Conversation.Update) => Effect.Effect<void>
   /** The updates waiting to be read, like one a dictation cut off, by their entry in the journal: coming up, so not missed. */
   readonly upcoming: Effect.Effect<ReadonlyArray<number>>
+  /** What's being said now, an update or a notice, by its entry in the journal, until it's heard or put by: being told him, so not missed. */
+  readonly speaking?: Effect.Effect<ReadonlyArray<number>>
   /** What a thread waits on him for, read and worded now, to read back what he answers by dictation, unless he's heard it. */
   readonly compose: (ref: Threads.Ref, requestId: string) => Effect.Effect<Option.Option<Worded>>
   /** What's muted, and muting and unmuting threads, which never reaches an agent. Without them, muting is something yapd can't do yet. */
@@ -675,6 +677,8 @@ export const make = (options: {
     const { threads, journal, drafts, hands, ledger } = options
     /** One request at a time, from working it out to what's said of it. */
     const turn = yield* Effect.makeSemaphore(1)
+    /** What's waiting to be said or being said, which isn't missed: he's told of it as it is. */
+    const beingTold = Effect.map(Effect.all([options.upcoming, options.speaking ?? Effect.succeed<ReadonlyArray<number>>([])]), ([coming, saying]) => [...coming, ...saying])
 
     /**
      * The open question, how many times it's been asked, its asking again
@@ -966,7 +970,7 @@ export const make = (options: {
         // like a cough taken for "Thank you.". Not what's waiting to be read, like an update his asking cut off: he's told of that as
         // it's read, not twice.
         const since = spoke.findLast((kept) => !catchUp(kept) && !noise(kept))?.at ?? now - day
-        const missed = yield* Missed.gather(journal, { now, spoke: since, coming, desk: shortlist })
+        const missed = yield* Missed.gather(journal, { now, spoke: since, coming: [...coming, ...(yield* options.speaking ?? Effect.succeed([]))], desk: shortlist })
         // What was done, like a stop, even what he was never told of since he turned yapd off, but not the bookkeeping of questions closed, which says nothing.
         const done = recent.filter((kept) => kept.kind !== "action" || kept.said !== undefined || Brain.unsaid(kept) !== undefined).slice(-lately.most)
         const seen = yield* options.show.seen
@@ -2729,7 +2733,7 @@ export const make = (options: {
         const coming = yield* options.upcoming
         // Caught up, however he asked, what came in while yapd was off isn't offered after.
         if (offered?.kind === "missed") offered = undefined
-        const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming, desk })
+        const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming: [...coming, ...(yield* options.speaking ?? Effect.succeed([]))], desk })
         // A project he named as it's called, or else by whole words of its name, like "connectors"; one named nowhere, he's told yapd
         // couldn't tell what he meant, rather than that nothing came in.
         const { project } = scope
@@ -3715,18 +3719,21 @@ export const make = (options: {
 
     /**
      * How much came in while yapd was off that he hasn't heard, as it's
-     * turned on again: updates kept then, and failures and limits, but not
-     * what was kept quiet as he muted its thread.
+     * turned on again: updates kept while it was off, then or any time in
+     * the week a catch-up looks back over, and failures and limits, but not
+     * what was kept quiet as he muted its thread. None unless something of
+     * it is new since it was last on: what was waiting, being read or being
+     * summed up as he turned it off is, as it's kept as off too.
      */
     const keptWhileOff = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis
-      const switched = yield* journal.switched(now - Missed.week, 3)
-      const off = Missed.off(switched)
+      const off = Missed.off(yield* journal.switched(now - Missed.week, Missed.switches))
       if (off === undefined || off.to !== undefined) return 0
-      // Since it was last on: what was waiting, being read or being summed up as he turned it off came in before, and is kept as off too.
-      const on = switched.slice(switched.findIndex((kept) => (kept.detail as { readonly on?: unknown } | undefined)?.on === false) + 1)[0]?.at ?? now - Missed.week
-      const rows = yield* journal.missed(on, Number.MAX_SAFE_INTEGER)
-      return rows.filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || (kept.kind === "notice" && kept.at >= off.from))).length
+      const missed = yield* Missed.gather(journal, { now, spoke: now, coming: yield* beingTold, desk: nowhere })
+      const rows = missed.groups.flatMap(({ rows }) => rows).filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || kept.kind === "notice"))
+      const since = off.before ?? now - Missed.week
+      const heldAt = (kept: Kept) => (kept.detail as { readonly heldAt?: unknown } | undefined)?.heldAt
+      return rows.some((kept) => Math.max(kept.at, Number(heldAt(kept) ?? kept.at) || kept.at) >= since) ? rows.length : 0
     })
 
     /** Works out what he said and acts on it, then says what came of it, one request at a time. `pressed` is what "it" meant as its shortcut was pressed. */
@@ -3992,7 +3999,7 @@ export const make = (options: {
         }),
       missed: Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        return yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* options.upcoming, desk: nowhere })
+        return yield* Missed.gather(journal, { now, spoke: yield* lastSpoke(now), coming: yield* beingTold, desk: nowhere })
       }),
       welcome: Effect.gen(function* () {
         const { on, turns } = yield* options.power

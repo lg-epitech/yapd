@@ -130,9 +130,12 @@ export class Journal extends Context.Tag("yapd/Journal")<
      * updates and notices he hasn't heard, but never an agent's question,
      * which waits on him in T3 Code. What was never read out, held or kept
      * quiet, and a notice of a failure or a limit, count whenever they came;
-     * an update cut off counts only since he last `spoke`.
+     * an update cut off counts only since he last `spoke`. What came in while
+     * yapd was off, what needs him and what he can't be kept from hearing
+     * count from `whenever` on, however long before `at` that is, like from a
+     * night off before the one just gone.
      */
-    readonly missed: (at: number, spoke: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
+    readonly missed: (at: number, spoke: number, most?: number, whenever?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** These entries, by id, oldest first, heard or not, like the ones a catch-up told him of. */
     readonly rows: (ids: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<Kept>>
     /** The times yapd was turned on or off since `at`, newest first, the latest `most` of them, as the entries kept as it was. */
@@ -275,6 +278,14 @@ const holding = (which: Holding = {}) => {
     values: [...only, ...except],
   }
 }
+
+/**
+ * Whether a row is one he's never to lose track of while it's unheard: kept
+ * as yapd was off, a notice of a failure or a limit, what needs him, or what
+ * he's to hear whatever he muted, like the answer to what he asked a thread.
+ */
+const unmissable =
+  "(json_extract(detail, '$.held') = 'off' or kind = 'notice' or json_extract(detail, '$.priority') = 'needs-you' or coalesce(json_extract(detail, '$.audible'), 0) = 1)"
 
 /**
  * Whether a row tells him something he still has to hear: never one asking
@@ -455,19 +466,19 @@ export const fromStore = (
             .map(kept)
         }),
       ),
-    missed: (at, spoke, most = 500) =>
+    missed: (at, spoke, most = 500, whenever = at) =>
       reading(
         store.transaction((database: Database) =>
           database
             // Through the index of what's unheard. A held row that came before `at` but was only held since, as it waited to be said as yapd was
             // turned off, counts as held since.
-            .query<Row, [number, number, number]>(
+            .query<Row, [number, number, number, number]>(
               `select * from journal where heard_at is null and kind in ('update', 'notice') and ${telling}
-               and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
+               and (max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ? or (at >= ? and ${unmissable}))
                and (${heldBack} or ${quiet} = 1 or kind = 'notice' or at >= ?)
                order by at desc, id desc limit ?`,
             )
-            .all(at, spoke, most)
+            .all(at, Math.min(at, whenever), spoke, most)
             .reverse()
             .map(kept),
         ),
