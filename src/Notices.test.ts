@@ -89,6 +89,8 @@ const notices = (
     readonly on?: boolean
     /** The threads he muted, by key. */
     readonly muted?: ReadonlyArray<string>
+    /** What yapd sent each thread for him, by its id, when and how T3 Code took it. */
+    readonly sent?: Readonly<Record<string, ReadonlyArray<{ readonly at: number; readonly how: string }>>>
   },
 ) =>
   Effect.gen(function* () {
@@ -182,6 +184,7 @@ const notices = (
       shortest: 60_000,
       ...(given.offline === undefined ? {} : given.offline),
       muted: (keys) => Effect.succeed(Option.fromNullable(keys.find((key) => given.muted?.includes(key))).pipe(Option.map((key) => ({ key, at: 0 })))),
+      sent: (to, since) => Effect.succeed((given.sent?.[to.id] ?? []).filter(({ at }) => at >= since)),
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -1110,25 +1113,42 @@ describe("Notices", () => {
         done("stopped", "Stopped work", ended("stopped", 33)),
         done("glance", "Glanced work", ended("glance", 32)),
         done("typed", "Typed work", ended("typed", 31)),
+        done("steered", "Steered work", ended("steered", 34)),
+        done("behind", "Work he queued behind", ended("behind", 36)),
       ]
       const reads = {
         answer: ran("answer", "completed", ended("answer", 40), ended("answer", 35), "yapd:u1:0:m"),
         stopped: ran("stopped", "interrupted", ended("stopped", 40), ended("stopped", 33), "yapd:u2:0:m"),
         glance: ran("glance", "completed", ended("glance", 32) - 30_000, ended("glance", 32), "m-typed"),
         typed: ran("typed", "completed", ended("typed", 40), ended("typed", 31), "m-typed-2"),
+        steered: ran("steered", "completed", ended("steered", 40), ended("steered", 34), "m-typed-3"),
+        behind: ran("behind", "completed", ended("behind", 40), ended("behind", 36), "m-typed-4"),
       }
       const result = await run(
         Effect.gen(function* () {
-          const made = yield* notices({ view: threads, bounded: reads, offline: { alive: Option.some(alive), started }, muted: ["t3:Rosie:answer"] })
+          const made = yield* notices({
+            view: threads,
+            bounded: reads,
+            offline: { alive: Option.some(alive), started },
+            muted: ["t3:Rosie:answer"],
+            // He steered a message into one run, and queued one behind another, which is still to start.
+            sent: { steered: [{ at: ended("steered", 38), how: "steered" }], behind: [{ at: ended("behind", 38), how: "queued" }] },
+          })
           yield* made.reconcileOn("Rosie")
           yield* made.flush
           const kept = yield* made.journal.since(0, { kinds: ["update"] })
           return { finished: [...made.finished], told: [...made.told], kept: kept.map(({ thread, key, detail }) => [thread, key, held(detail)]) }
         }),
       )
-      expect(result.finished).toEqual([{ key: "done:Rosie:run-answer", message: "The fee table is in.", answering: true }])
+      expect(result.finished).toEqual([
+        { key: "done:Rosie:run-steered", message: "The fee table is in.", answering: true },
+        { key: "done:Rosie:run-answer", message: "The fee table is in.", answering: true },
+      ])
       expect(result.told).toEqual([])
-      expect(result.kept).toEqual([["typed", "done:Rosie:run-typed", { session: "finished:Rosie:typed", held: "offline" }]])
+      expect(result.kept).toEqual([
+        ["behind", "done:Rosie:run-behind", { session: "finished:Rosie:behind", held: "offline" }],
+        ["typed", "done:Rosie:run-typed", { session: "finished:Rosie:typed", held: "offline" }],
+      ])
     })
 
     test("nothing is looked for without a heartbeat, as the first time, or while yapd is off", async () => {

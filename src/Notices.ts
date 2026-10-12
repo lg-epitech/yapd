@@ -467,6 +467,8 @@ export const make = (options: {
   readonly started?: number
   /** The mute a thread is under, if any, so what finished on a muted thread is kept quiet rather than held. */
   readonly muted?: (keys: ReadonlyArray<string>) => Effect.Effect<Option.Option<Mutes.Mute>>
+  /** What yapd sent a thread for him since then, and how T3 Code took it, so what finished meanwhile that answers it is said. */
+  readonly sent?: (to: Threads.Ref, since: number) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly how?: string | null }>>
 }) =>
   Effect.gen(function* () {
     const { threads, journal } = options
@@ -736,6 +738,15 @@ export const make = (options: {
         }
       })
 
+    /** Whether yapd sent the thread a message for him between `from` and `to` that went into the run under way, rather than its queue. */
+    const sentDuring = (ref: Threads.Ref, from: number, to: number) =>
+      options.sent === undefined
+        ? Effect.succeed(false)
+        : options.sent(ref, from).pipe(
+            Effect.map((rows) => rows.some(({ at, how }) => at >= from && at <= to && how !== "queued")),
+            Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), false)),
+          )
+
     /** The machines what finished while yapd was down was looked for on, once each. */
     const caughtUp = new Set<string>()
 
@@ -789,8 +800,13 @@ export const make = (options: {
           }
           // One he stopped, or short enough that he was likely watching it, is nothing to tell, as when yapd is up.
           if (Option.isSome(run) && (!["completed", "waiting"].includes(run.value.status) || quick(run.value, at, options.shortest))) continue
-          // What answers a message yapd sent it for him is his own ask: summed up and said, however he muted the thread, as when yapd is up.
-          if (Option.isSome(run) && run.value.said !== "" && Option.exists(run.value.userMessageId, (id) => id.startsWith("yapd:"))) {
+          // What answers a message yapd sent it for him is his own ask: begun by it, or steered into it, rather than queued behind it. It's
+          // summed up and said, however he muted the thread, as when yapd is up.
+          const answers =
+            Option.isSome(run) &&
+            (Option.exists(run.value.userMessageId, (id) => id.startsWith("yapd:")) ||
+              (yield* sentDuring(ref, Option.getOrElse(run.value.startedAt, () => at), at)))
+          if (Option.isSome(run) && run.value.said !== "" && answers) {
             const since = generation(ref)
             const { status, final, others, natives, previous } = run.value
             yield* options.finished({
