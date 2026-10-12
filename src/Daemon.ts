@@ -107,9 +107,6 @@ const patience = "15 seconds"
 /** How long an answer on its way holds everything else back at most, in case it never comes. */
 const holding = "20 seconds"
 
-/** How much of the end of what a run said last is kept with what was said in its hook's place, to tell a Stop of its own by. */
-const lastWords = 1000
-
 /** How long a Stop is kept in mind: T3 Code says its thread finished well within it. */
 const forgotten = 60 * 60_000
 
@@ -940,9 +937,6 @@ export const make = (
         // Said whatever he mutes, though it doesn't need him: the answer to what he asked its thread, or a turn yapd couldn't sum up. So
         // held as yapd was off, it isn't kept quiet when he mutes its thread later.
         ...(mutable || priority === "needs-you" ? {} : { audible: true }),
-        // Said in its hook's place, the agent's own ids for its run and the end of what it said last, so a Stop of its own coming late,
-        // even once yapd restarted, is told to be its.
-        ...(finished.fallback === undefined ? {} : { natives: finished.fallback.run.natives, final: finished.fallback.run.final.slice(-lastWords) }),
         // A Stop come late for a turn kept quiet in its hook's place: it takes the place of what was kept of that turn, so the turn is
         // read and counted once, as this, and what was kept is heard with it, never before.
         ...(finished.over?.row === undefined ? {} : { replaces: finished.over.row }),
@@ -1172,73 +1166,10 @@ export const make = (
         if (fallback.row !== undefined) yield* journal.markHeard([fallback.row], stop.at)
       }
       // A turn still to be said gave way to it, like a newer run's that ended on the same words: whose Stop it is can't be told, so the hook wins.
-      // With none of its run's in mind, as once yapd restarted, what the journal kept of it goes the same way.
-      const through = still ?? (withdrawn ? undefined : (late ?? (yield* keptBefore(session, stop, prompted))))
+      const through = still ?? (withdrawn ? undefined : late)
       if (through !== undefined) taken.add(stop)
       return through
     })
-
-  /** Whether a row was kept quiet, held or kept as yapd was off, rather than said. */
-  const quietRow = (kept: Kept) => Missed.muted(kept) || Missed.whileOff(kept) || Missed.held(kept)
-
-  /**
-   * What the journal kept, within the hour, of a Stop's turn said in its
-   * hook's place that nothing kept in mind tells of, as once yapd restarted:
-   * by the agent's own ids for its run and the end of what it said last,
-   * which the Stop's words have to be, and enough to tell it by once a
-   * prompt came through the hooks since, `prompted`. Kept quiet, held
-   * or kept as yapd was off, the Stop goes over it as over one kept in mind,
-   * and its entry takes that one's place; heard as it was said, it was the
-   * turn's, so the Stop isn't said; still to be said or broken off, it gives
-   * way to the Stop, which is said in its stead.
-   */
-  const keptBefore = (session: string, stop: Notices.Stop, prompted: number | undefined) =>
-    Effect.gen(function* () {
-      const kept = (yield* journal.since(stop.at - forgotten, { kinds: ["update"], most: 200 })).findLast((row) => {
-        if (row.key === undefined || !row.key.startsWith("done:") || fallbacks.has(row.key) || row.machine === undefined || row.thread === undefined) return false
-        if (prompted !== undefined && prompted > row.at && !Notices.telling(stop.message)) return false
-        const { natives, final } = (typeof row.detail === "object" && row.detail !== null ? row.detail : {}) as { readonly natives?: unknown; readonly final?: unknown }
-        return Array.isArray(natives) && natives.includes(session) && typeof final === "string" && Notices.alike(stop.message, final)
-      })
-      if (kept?.key === undefined || kept.machine === undefined || kept.thread === undefined) return undefined
-      const quiet = quietRow(kept)
-      if (kept.heardAt === undefined && !quiet) {
-        yield* journal.markHeard([kept.id], stop.at)
-        return yield* Effect.as(Effect.logInfo("Not saying a turn no hook told of, since its hook came after all"), undefined)
-      }
-      const about = { machine: kept.machine, id: kept.thread }
-      const final = (kept.detail as { readonly final: string }).final
-      const fallback: Fallback = {
-        about,
-        session: `finished:${about.machine}:${about.id}`,
-        key: kept.key,
-        run: { status: "completed", final, others: [], natives: [session], previous: Option.none(), startedAt: kept.at },
-        current: Effect.succeed(false),
-        at: kept.at,
-        heard: true,
-        quiet,
-        row: kept.id,
-      }
-      return fallback
-    })
-
-  /**
-   * The Stops of a run's sessions the journal kept since `at`, said or not,
-   * as what they told of was kept: what a restart forgot of those kept in
-   * mind. Never one that took the place of a turn T3 Code told of first,
-   * which is that run's.
-   */
-  const keptStops = (natives: ReadonlyArray<string>, at: number) =>
-    Effect.map(journal.since(at, { kinds: ["update"], most: 200 }), (rows) =>
-      rows.flatMap((row): ReadonlyArray<Notices.Stop> => {
-        const detail = (typeof row.detail === "object" && row.detail !== null ? row.detail : {}) as { readonly session?: unknown; readonly replaces?: unknown }
-        if (row.key !== undefined || detail.replaces !== undefined) return []
-        const session = typeof detail.session === "string" ? detail.session : row.thread
-        const [agent, ...rest] = (session ?? "").split(":")
-        if (!Agent.literals.some((known) => known === agent) || !natives.includes(rest.join(":"))) return []
-        return [{ at: row.at, message: row.text ?? "" }]
-      }),
-    )
 
   /**
    * A turn said in its hook's place, as its turn to be said comes: being
@@ -1286,10 +1217,6 @@ export const make = (
       if (!(yield* input.current)) return yield* Effect.logInfo("Not saying a turn no hook told of, since its thread started again")
       // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands.
       if (Notices.hooked(stopsOf(input.run.natives), input.run, input.run.startedAt)) return yield* Effect.logInfo("Left to its hook")
-      // So does one the journal kept before yapd restarted, which nothing kept in mind tells of now: the turn is its, kept once.
-      if (Notices.hooked(yield* keptStops(input.run.natives, input.run.startedAt - forgotten), input.run, input.run.startedAt)) {
-        return yield* Effect.logInfo("Left to its hook, kept before")
-      }
       // Heard of twice, as after a reconnect, it's said the once, and the one on its way isn't put aside for it.
       if (fallbacks.has(input.key)) return
       const at = yield* Clock.currentTimeMillis
