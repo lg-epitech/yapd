@@ -10871,6 +10871,28 @@ describe("Assistant turned off and on", () => {
     expect(result.after).toEqual(["Distribox migrated."])
   })
 
+  test("turned on with a thread's question already waiting, the offer is said first and the question right after it goes unanswered", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(unasked, undefined, { others: [cloud], items: card("q1", [colour]), briefs: () => "Distribox migrated, sir." })
+        yield* made.toggle(false)
+        yield* made.journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(made.journal, 90, "Distribox migrated.")
+        // The question came while it was off, so it waits for it to be on.
+        yield* asked(made, cloud)
+        yield* made.toggle(true)
+        yield* made.back
+        yield* made.flush
+        const first = made.spoken()
+        yield* made.unanswered()
+        return { first, then: made.spoken().slice(first.length) }
+      }),
+    )
+    expect(result.first).toEqual(["You missed one, sir. Want the rundown?"])
+    expect(result.then).toEqual(["A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue."])
+  })
+
   test("a press over the offer that comes to nothing lets it go, never asked again, and a thread's question that comes meanwhile is asked next, the offer not after", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const pressed = (asks: boolean) =>
