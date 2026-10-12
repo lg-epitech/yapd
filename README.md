@@ -106,7 +106,7 @@ A session another app drives, like T3 Code, only gets follow-ups through that ap
 
 Updates that only say how running work is going, like another review round, are held for a digest: a short catch-up once nothing has been said for a minute, at most every twenty minutes. "Give me everything" has yapd say each update in full and hold none, and "talk shorter" goes back to headlines.
 
-"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. "I'm back" ends either and tells you what was held; one that ends on its own offers you the rundown once. What finished while yapd was down is held the same way, and a failure from then is said. Turning yapd off is still the way to hear nothing at all. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
+"Focus" holds everything that doesn't need you for an hour, or as long as you say ("focus for two hours"), and "goodnight" until 8:00 in the morning. A thread's question, a failure, a usage limit and the answer to your own message still come through, as with a muted thread. "I'm back" ends either and tells you what was held; one that ends on its own offers you the rundown once. Work that finished or failed while yapd was down isn't told when it starts again, though a thread's question still waiting is. Turning yapd off is still the way to hear nothing at all. Both are kept through a restart, and the [API](docs/api.md#modes) sets them too.
 
 ## Dictating
 
