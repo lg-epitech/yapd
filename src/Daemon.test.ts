@@ -5584,4 +5584,72 @@ describe("Daemon, one turn kept twice", () => {
     expect(result.played).toEqual(["yapd. Something long."])
     expect(result.unheard).toEqual(["yapd. The loader is fixed."])
   })
+
+  test("a question kept unheard in its hook's place while yapd is off, heard in a catch-up, isn't told again by its Stop come late", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, played, journal } = yield* make(undefined, { ...loader, urgentMessages: ["Which network first?"] })
+        yield* toggle(false)
+        yield* made.finished(unhooked("Which network first?", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        const told = yield* catchingUp(journal)
+        yield* journal.markHeard(told.map(({ id }) => id), yield* Clock.currentTimeMillis)
+        yield* toggle(true)
+        yield* handle("claude", stop("Which network first?", true), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        yield* wait(11)
+        return {
+          told: told.map(({ said }) => said),
+          played: [...played],
+          kept: (yield* journal.since(0, { kinds: ["update", "action"] })).map((row) => [row.kind, row.key ?? (row.detail as { through?: string }).through]),
+        }
+      }),
+    )
+    expect(result.told).toEqual(["yapd. Which network first?"])
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([
+      ["update", "done:Rosie:run-1"],
+      ["action", "done:Rosie:run-1"],
+    ])
+  })
+
+  test("a turn kept unheard in its hook's place while yapd is off, heard in a catch-up, still lets its Stop through when the Stop needs him and it didn't", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, played, journal } = yield* make(undefined, loader)
+        yield* toggle(false)
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        yield* journal.markHeard((yield* catchingUp(journal)).map(({ id }) => id), yield* Clock.currentTimeMillis)
+        yield* toggle(true)
+        yield* handle("claude", stop("The loader is fixed.", true), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The loader is fixed."])
+  })
+
+  test("a turn held as progress in its hook's place, put aside as out of date by newer work he heard, still lets its Stop through when it couldn't be summed up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, played, nextEvent } = yield* make(undefined, {
+          ...loader,
+          progressMessages: ["The loader migration is halfway done."],
+          unsummarizable: ["Update: the loader migration is halfway done."],
+        })
+        yield* made.finished(unhooked("The loader migration is halfway done.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Held update for yapd, for later (progress)")
+        // Newer work on the same thread, heard to the end, which puts what was held as progress of it aside.
+        yield* handle("claude", { ...stop("The tests are green."), session_id: "native-tests" }, { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        yield* handle("claude", stop("Update: the loader migration is halfway done."), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        yield* wait(11)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["yapd. The tests are green.", "yapd finished a turn, but I couldn't summarize it."])
+  })
 })

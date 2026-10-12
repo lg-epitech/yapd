@@ -724,7 +724,7 @@ export const make = (
      * For a Stop whose turn was said in its hook's place, but kept quiet as
      * he muted its thread, held or kept as yapd was off, that turn: the Stop
      * is said only if it needs him, as otherwise the turn was kept quiet
-     * already.
+     * already, and not even then once he heard that turn since.
      */
     readonly over?: Fallback
     /**
@@ -880,6 +880,21 @@ export const make = (
       )
     }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), false)))
 
+  /**
+   * Whether he heard since the entry of a turn kept quiet in its hook's
+   * place, as in a catch-up, from the menu or in a digest, so its Stop come
+   * late, of `priority`, tells him nothing new. Never when the Stop needs him
+   * and what he heard didn't, which asked him nothing, nor when it was held
+   * as progress, which is put aside unheard once newer work is heard.
+   */
+  const heardSince = (row: number, priority: Summary["priority"]) =>
+    Effect.map(journal.rows([row]), (kept) =>
+      kept.some(({ heardAt, detail }) => {
+        const { held, priority: was } = (typeof detail === "object" && detail !== null ? detail : {}) as { readonly held?: unknown; readonly priority?: unknown }
+        return heardAt !== undefined && held !== "progress" && (priority !== "needs-you" || was === "needs-you")
+      }),
+    )
+
   const prepare = (finished: Finished) => {
     const { session, project, turn, thread, arrivedAt, generation, hook, needsYou, turns } = finished
     if (hook !== undefined) summing.set(session, hook)
@@ -919,6 +934,12 @@ export const make = (
       // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
       // summed up may be either, as far as yapd can tell, so it's said.
       const mutable = priority !== "needs-you" && !answering && summarized
+      // Its turn was kept quiet in its hook's place, then heard since, as in a catch-up, from the menu or in a digest: it's said already.
+      if (finished.over?.row !== undefined && (yield* heardSince(finished.over.row, priority))) {
+        yield* release(hook)
+        yield* passedThrough(arrivedAt, thread, project, finished.over, session)
+        return yield* Effect.logInfo("Skipped update, heard already from T3 Code's word that it finished")
+      }
       // Its turn was kept quiet in its hook's place: only what needs him of it, or may, or answers what he asked, is said now.
       if (finished.over !== undefined && mutable) {
         yield* release(hook)
