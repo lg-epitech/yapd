@@ -1827,6 +1827,37 @@ describe("Daemon", () => {
     expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready."])
   })
 
+  test("an update he heard only the headline of, cut off by turning yapd off, is said again in full, its rest too, before it counts as heard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { finish, wait, toggle, played, heard, replay, journal, lastHeard } = yield* make(undefined, { mores: { "The PR is ready.": "Two review comments are left." } })
+        yield* finish("a", "The PR is ready.")
+        const [id] = yield* heard
+        yield* toggle(false)
+        yield* toggle(true)
+        const queued = yield* replay(id!, "t3:Rosie:t-tezos")
+        yield* wait(0)
+        // Being said, it isn't heard yet.
+        const saying = (yield* journal.unheard(0, 12)).length
+        yield* wait(11)
+        const last = yield* lastHeard
+        return {
+          queued,
+          saying,
+          played: [...played],
+          after: (yield* journal.unheard(0, 12)).length,
+          said: Option.map(last, ({ said }) => said),
+          more: Option.map(last, ({ update }) => update.more),
+        }
+      }),
+    )
+    expect(result).toMatchObject({ queued: "queued", saying: 1, after: 0 })
+    expect(result.played).toEqual(["yapd. The PR is ready.", "yapd. The PR is ready. Two review comments are left."])
+    // What "say that again" repeats is all of it, with nothing left for "more".
+    expect(result.said).toEqual(Option.some("yapd. The PR is ready. Two review comments are left."))
+    expect(result.more).toEqual(Option.some(undefined))
+  })
+
   test("sends no reply to an update heard again once its session has moved on", async () => {
     let deliveries = 0
     const result = await run(
@@ -3520,7 +3551,7 @@ describe("Daemon headline first", () => {
     expect(result.renders).toBe(2)
   })
 
-  test("an update he heard keeps its id across a restart, and is said again as it was, with its rest for more", async () => {
+  test("an update he heard keeps its id across a restart, and is said again in full, its rest too, with none left for more", async () => {
     const result = await run(
       Effect.gen(function* () {
         const journal = Journal.fromStore(yield* Store.make(":memory:"))
@@ -3545,8 +3576,8 @@ describe("Daemon headline first", () => {
     expect(result.before).toEqual([result.rows[0]!])
     expect(result.after).toEqual(result.before)
     expect(result.replayed).toBe("queued")
-    expect(result.played).toEqual(["yapd. The loader is fixed."])
-    expect(result.more).toEqual(Option.some("Retries back off now."))
+    expect(result.played).toEqual(["yapd. The loader is fixed. Retries back off now."])
+    expect(result.more).toEqual(Option.some(undefined))
   })
 
   test("the updates he heard last are kept through a restart however many were kept quiet or held since", async () => {

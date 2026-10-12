@@ -1939,7 +1939,8 @@ export const make = (
     })
 
   /**
-   * Says an update the user heard again, as it was said, and listens for a
+   * Says an update the user heard again, all of it, its headline and the
+   * rest kept for "more" too, since he asked to hear it, and listens for a
    * reply like after any update. Asked for from the menu, it's said for that
    * row, by its key, so "mute it" over it mutes that row.
    */
@@ -1959,13 +1960,19 @@ export const make = (
       )
     })
 
-  /** Renders an update heard before, and queues it. */
+  /**
+   * Renders an update heard before, all of it, and queues it: heard to the
+   * end, it was heard in full, so it's noted as heard and "say that again"
+   * says all of it, with nothing left for "more".
+   */
   const again = (found: HeardUpdate, asked: Inbox.Replay) =>
     Effect.gen(function* () {
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
+      const { more, ...was } = found.update
+      const spoken = Missed.whole(was.spoken, more)
       yield* soon
-      yield* voice.render(found.update.spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
-      const update = { ...found.update, audio }
+      yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      const update: Conversation.Update = { ...was, spoken, audio }
       // Replays keep both the hook generation and the original chain of voice replies.
       const generation = generations.get(found.update)
       if (generation !== undefined) generations.set(update, generation)

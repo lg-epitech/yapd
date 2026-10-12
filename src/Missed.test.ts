@@ -30,6 +30,13 @@ describe("Missed", () => {
     expect(Missed.since(now, now - 10 * day)).toBe(now - 7 * day)
   })
 
+  test("all of what was said of something is its headline then its rest, the rest once even when the headline has it already", () => {
+    expect(Missed.whole(" The loader is fixed. ", " Retries back off now. ")).toBe("The loader is fixed. Retries back off now.")
+    expect(Missed.whole("The loader is fixed. Retries back off now.", "Retries back off now.")).toBe("The loader is fixed. Retries back off now.")
+    expect(Missed.whole("The loader is fixed.", undefined)).toBe("The loader is fixed.")
+    expect(Missed.whole("The loader is fixed.", "")).toBe("The loader is fixed.")
+  })
+
   test("when he last had yapd off runs from the first off to the first on after, whatever was asked for again", () => {
     const row = (at: number, on: boolean) => ({ id: at, at, kind: "action", detail: { on } }) as unknown as Journal.Kept
     // Newest first, as the journal keeps them.
