@@ -267,6 +267,8 @@ final class Audio {
       // Voice processing sometimes starts like that, so it rests instead, to start afresh with the next update.
       guard rendering() else {
         rest()
+        // Starting said the microphone was on, so it says resting turned it off, before the daemon hears the playback failed.
+        link.send(["type": "rested"])
         return link.send(["type": "failed", "id": id, "message": "The audio engine started but didn't play anything"])
       }
       let start = min(AVAudioFramePosition(max(0, from) * format.sampleRate), file.length)

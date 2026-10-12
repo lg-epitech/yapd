@@ -145,6 +145,7 @@ export const AfplayAudio = Layer.effectContext(
 const Event = Schema.Union(
   Schema.Struct({ type: Schema.Literal("hello", "permission"), permission: Schema.String }),
   Schema.Struct({ type: Schema.Literal("active"), listening: Schema.Boolean }),
+  Schema.Struct({ type: Schema.Literal("rested") }),
   Schema.Struct({ type: Schema.Literal("playing"), id: Schema.String, duration: Schema.Number }),
   Schema.Struct({ type: Schema.Literal("finished"), id: Schema.String }),
   Schema.Struct({ type: Schema.Literal("stopped"), id: Schema.optional(Schema.String), at: Schema.optional(Schema.Number) }),
@@ -329,6 +330,13 @@ export const native = (
           if (listening && frames === undefined) frames = runSync(PubSub.sliding<Float32Array>(64))
           heard = 0
           playingSince = undefined
+          return
+        case "rested":
+          // It rested of its own accord, on an engine that didn't play anything, as `rest` asks it to. Said
+          // before that playback fails, so whoever then asks for the microphone hears it's off rather than
+          // listening to one that will never hear anything. An older helper never says.
+          quiet()
+          runFork(endMicrophone())
           return
         case "playing":
           // Silence, which neither speaks nor teaches the echo cancellation anything.

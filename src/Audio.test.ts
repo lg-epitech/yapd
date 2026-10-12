@@ -21,6 +21,8 @@ const device = (delayPlaying = false, delayStopping = false) =>
     let playing: string | undefined
     /** Whether its engine is running, which starts a new voice processor, and says so, when it isn't. */
     let running = false
+    /** Whether the next playback's engine won't play anything, which it then gives up on: see `unrendered`. */
+    let stalls = false
     const closed = yield* Deferred.make<void>()
     yield* Effect.addFinalizer(() => Effect.sync(() => sockets.forEach((socket) => socket.terminate())))
     const send = (event: object) => connection?.write(Helper.encode(event))
@@ -45,7 +47,8 @@ const device = (delayPlaying = false, delayStopping = false) =>
                     playing = command.id
                     if (!running) send({ type: "active", listening: true })
                     running = true
-                    if (!delayPlaying) send({ type: "playing", id: playing, duration: 10 })
+                    if (stalls) stalls = false
+                    else if (!delayPlaying) send({ type: "playing", id: playing, duration: 10 })
                   } else if (command.type === "stop" && !delayStopping) {
                     send({ type: "stopped", ...(playing === undefined ? {} : { id: playing, at: 1 }) })
                     playing = undefined
@@ -96,6 +99,16 @@ const device = (delayPlaying = false, delayStopping = false) =>
       frame: (value: number) => Effect.sync(() => frame(value)),
       acknowledge: Effect.sync(() => {
         if (playing !== undefined) send({ type: "playing", id: playing, duration: 10 })
+      }),
+      stall: Effect.sync(() => {
+        stalls = true
+      }),
+      /** Gives up on the playback that stalled, resting as the helper does. */
+      unrendered: Effect.sync(() => {
+        send({ type: "rested" })
+        if (playing !== undefined) send({ type: "failed", id: playing, message: "The audio engine started but didn't play anything" })
+        playing = undefined
+        running = false
       }),
     }
   })
@@ -151,6 +164,37 @@ describe("Native audio", () => {
       ),
     )
   }
+
+  test("ends microphone subscribers when the helper rests itself on an engine that doesn't play, and a later playback gets a fresh microphone", () =>
+    run(
+      Effect.gen(function* () {
+        const fake = yield* device()
+        const seen = yield* Queue.unbounded<string>()
+        yield* fake.activity.pipe(Stream.runForEach((doing) => Queue.offer(seen, doing)), Effect.forkScoped)
+        const until = (doing: string) => Queue.take(seen).pipe(Effect.repeat({ until: (seen) => seen === doing }))
+        yield* fake.stall
+        const playing = yield* Effect.fork(fake.audio.play("/tmp/cue.wav"))
+        // Its engine started, which opened the microphone, a moment before it finds the engine doesn't play anything.
+        yield* until("listening")
+        const first = yield* fake.audio.microphone
+        expect(Option.isSome(first)).toBe(true)
+        if (Option.isNone(first)) return
+        yield* fake.unrendered
+        yield* Fiber.join(playing)
+        expect(fake.order).toEqual(["play", "fallback"])
+        // Played with the fallback, there's no microphone to listen to, rather than one that never hears anything.
+        yield* Queue.awaitShutdown(first.value)
+        expect(Option.isNone(yield* fake.audio.microphone)).toBe(true)
+        yield* until("idle")
+        yield* fake.audio.play("/tmp/next.wav")
+        const second = yield* fake.audio.microphone
+        expect(Option.isSome(second)).toBe(true)
+        if (Option.isNone(second)) return
+        yield* TestClock.adjust("3 seconds")
+        yield* fake.frame(0.5)
+        expect(yield* Queue.take(second.value)).toEqual(new Float32Array(512).fill(0.5))
+      }),
+    ))
 
   test("preserves microphone subscribers through device recovery and drops frames while inactive", () =>
     run(
