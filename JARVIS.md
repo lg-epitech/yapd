@@ -2,9 +2,9 @@
 
 A short list of what this branch changed and what yapd can do now. The commit log has the detail, including every fix that came out of review.
 
-Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite`, `yapd.before-interrupt.sqlite`, `yapd.before-interrupt-v5.sqlite` and `yapd.before-thread-menu.sqlite`.
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite`, `yapd.before-interrupt.sqlite`, `yapd.before-interrupt-v5.sqlite`, `yapd.before-thread-menu.sqlite` and `yapd.before-m5-off.sqlite`.
 
-Live on `dev` now: everything below but headline first, focus and quiet, which are on `jarvis-m5`, with the menu bar app's side, waiting on review, and off keeping everything with catching up, which is on `jarvis-off`, built on `jarvis-m5`, with the menu bar app's side, waiting on review. Also live: the menu bar app's thread menu. Talking over yapd's first seconds stopping it at once, muting threads, rig's threads, and agents' questions read out and answered by voice are waiting on their first checks with you.
+Live on `dev` now: everything below, headline first, focus and quiet, and off keeping everything with catching up included; their menu bar app side needs the new app installed. Talking over yapd's first seconds stopping it at once, muting threads, headline first and modes, off and catching up, rig's threads, and agents' questions read out and answered by voice are waiting on their first checks with you.
 
 ## Talk to it (the shortcut)
 
@@ -33,7 +33,7 @@ Live on `dev` now: everything below but headline first, focus and quiet, which a
 - The menu bar lists those threads with their project icons, how long ago each finished and whether it's muted: clicking one says its latest update again, and the Mute menu, or Option over a row on macOS 15 and later, mutes it or takes the mute off. An older yapd still gets the old Hear Again list.
 - A terminal session's or an archived thread's older update can't be heard again from the menu: its row is greyed out, and can still be muted.
 
-## Headline first, focus and quiet (on `jarvis-m5`)
+## Headline first, focus and quiet (live, waiting on its live check with you)
 
 - Updates are said as a headline of about fifteen words, and "more" over it or just after says the rest at once, rendered as the headline plays; over yapd's first seconds the model decides. What needs you is said in full, question and all. Real headlines from six test messages kept the question and the outcome, at 8 to 15 words.
 - Progress, like "pass 7 is running" or "still waiting on CI", is held for a digest, told from news by what yapd last said about the same work. The digest comes once it's been quiet a minute, with three held or one held twenty minutes, at most every twenty minutes, never in focus or quiet; you can reply to it or cut it off, and only what you heard to the end counts as heard. Progress of work you've since heard the outcome of, or of a thread you mute since, never comes up in it, nor in the rundown.
@@ -42,7 +42,7 @@ Live on `dev` now: everything below but headline first, focus and quiet, which a
 - The API's state has `mode`, `until` and `waiting`, and `PUT /state` changes only what it names.
 - The menu bar app has a Mode menu (Normal, Focus for an Hour, Quiet until Morning) and says when focus or quiet ends; its icon gets a moon in focus or quiet and a dot while a thread waits on you, and "N Threads Waiting on You" has yapd say who, as "who needs me?" would. With a yapd from before modes it shows none of this.
 
-## Off keeps everything, and catching up (on `jarvis-off`)
+## Off keeps everything, and catching up (live, waiting on its live check with you)
 
 - Off no longer drops anything: what finishes while yapd is off is summed up and kept, unheard, never said on its own, not even once it's back on. That's every update, what needs you and the answer to your own message too, a run that fails or hits a limit, and a turn with no hook; a muted thread's stays muted. Turning off keeps what was waiting to be said, what was being summed up and what it was reading, unheard, and lets agents' hooks go at once, so none waits on yapd.
 - The shortcut still works while it's off: what you ask is answered, then it's quiet again, with no listening for a reply. A question it asks you then, like "which one?", waits for your next press, and isn't asked again of its own accord.
