@@ -5063,6 +5063,31 @@ describe("Daemon while off", () => {
     expect(result.kept).toEqual([["done:Rosie:run-1", undefined, "off"]])
   })
 
+  test("a turn no hook told of, waiting to be said as yapd is turned off, is kept unheard once, and its own Stop coming after isn't kept or said again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, finish, handle, toggle, wait, journal, played, nextEvent } = yield* make()
+        yield* finish("a", "The PR is ready.")
+        yield* nextEvent("Ready:")
+        // Waiting behind it as he turns yapd off.
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* wait(1)
+        yield* toggle(false)
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "native-loader", cwd: "/code/yapd", last_assistant_message: "The loader is fixed." }, { project: "yapd" }, false)
+        yield* wait(11)
+        yield* toggle(true)
+        yield* wait(30)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: kept.map((row) => [row.said, row.heardAt, heldFor(row)]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The PR is ready."])
+    expect(result.kept).toEqual([
+      ["yapd. The PR is ready.", undefined, "off"],
+      ["yapd. The loader is fixed.", undefined, "off"],
+    ])
+  })
+
   test("turning off while an update is being made ready lets its hook go at once, and the update is kept unheard as what came in while it was off", async () => {
     const result = await run(
       Effect.gen(function* () {
