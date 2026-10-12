@@ -3307,6 +3307,95 @@ describe("Daemon headline first", () => {
     ])
   })
 
+  test("a dictation in focus cutting off an update reads what needs him again after, while finished work is held for later", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let mode = Option.none<"focus" | "quiet">()
+        const { made, finish, wait, dictate, played, journal } = yield* make(undefined, { holding: Effect.sync(() => mode), urgentMessages: ["Which network first?"] })
+        yield* finish("tezos", "The migration compiles.")
+        yield* wait(1)
+        // Focus begins as it's said, which never stops the line being said.
+        mode = Option.some("focus")
+        yield* made.hold("focus")
+        const first = yield* dictate
+        yield* wait(2)
+        yield* Scope.close(first, Exit.void)
+        yield* wait(11)
+        yield* finish("ask", "Which network first?")
+        yield* wait(1)
+        const second = yield* dictate
+        yield* wait(2)
+        yield* Scope.close(second, Exit.void)
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: updates.map(({ said, detail }) => [said, (detail as { held?: string }).held]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. The migration compiles.", "yapd. Which network first?", "yapd. Which network first?"])
+    expect(result.kept).toEqual([
+      ["yapd. The migration compiles.", "focus"],
+      ["yapd. Which network first?", undefined],
+    ])
+  })
+
+  test("what its hook says needs him is said in full, though the summary takes it for finished work", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { turn, wait, played, journal } = yield* make(undefined, { mores: { "Pick a network.": "Tezos has its fee table ready, Mina doesn't." } })
+        yield* turn("ask", "Pick a network.", 120, { needsYou: true })
+        yield* wait(11)
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { played: [...played], kept: updates.map(({ detail }) => (detail as { more?: string }).more) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Pick a network. Tezos has its fee table ready, Mina doesn't."])
+    expect(result.kept).toEqual([undefined])
+  })
+
+  test("focus begun while an update is rendered holds it, never said", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let mode = Option.none<"focus" | "quiet">()
+        const { finish, wait, played, journal } = yield* make(undefined, { holding: Effect.sync(() => mode), renderSeconds: 5 })
+        yield* finish("tezos", "The fee table is in.")
+        yield* wait(1)
+        mode = Option.some("focus")
+        yield* wait(15)
+        return { played: [...played], held: (yield* journal.held(0)).map(({ said, detail }) => [said, (detail as { held?: string }).held]) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.held).toEqual([["yapd. The fee table is in.", "focus"]])
+  })
+
+  test("how long it's been quiet counts from the end of the last line, and is nothing while anything is summed up, waits, is said or dictated", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, finish, wait, dictate } = yield* make(undefined, { renderSeconds: 2 })
+        yield* wait(30)
+        const quiet = yield* made.idle
+        yield* finish("tezos", "The fee table is in.")
+        const preparing = yield* made.idle
+        yield* wait(3)
+        const saying = yield* made.idle
+        yield* wait(10)
+        const after = yield* made.idle
+        yield* wait(60)
+        const later = yield* made.idle
+        const dictation = yield* dictate
+        const dictating = yield* made.idle
+        yield* Scope.close(dictation, Exit.void)
+        return { quiet, preparing, saying, after, later, dictating }
+      }),
+    )
+    expect(result.quiet).toEqual(Option.some(30_000))
+    expect(result.preparing).toEqual(Option.none())
+    expect(result.saying).toEqual(Option.none())
+    expect(Option.getOrThrow(result.after)).toBeLessThan(2_000)
+    expect(Option.getOrThrow(result.later)).toBeGreaterThanOrEqual(60_000)
+    expect(result.dictating).toEqual(Option.none())
+  })
+
   test("'more' over a headline, or just after it, plays the rest at once without the model, rendered once as the headline began", async () => {
     const result = await run(
       Effect.gen(function* () {
