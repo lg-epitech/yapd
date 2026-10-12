@@ -2759,10 +2759,11 @@ export const make = (options: {
         if (groups.length === 0) return plain(scope.named === undefined ? (given.nothing ?? lines.caughtUp) : lines.nothingFrom(scope.named))
         const ids = (all: ReadonlyArray<Missed.Group>) => all.flatMap(({ rows }) => rows.map(({ id }) => id))
         // What needs him, a question in an agent's last words, a failure or a limit, is read to him first as it was kept, question, options and
-        // all, never summed up: a few at most, the rest left for more, unheard.
+        // all, never summed up, and then what he's to hear whatever he muted, like the answer to what he asked a thread or a turn yapd couldn't
+        // sum up, which a brief could leave out: a few at most, the rest left for more, unheard. Not again for more of what he just heard.
         const needing = groups
-          .flatMap(({ rows }) => rows.filter((kept) => Missed.needs(kept) && (kept.said ?? "").trim() !== ""))
-          .toSorted((one, other) => one.at - other.at || one.id - other.id)
+          .flatMap(({ rows }) => rows.filter((kept) => Missed.audible(kept) && (kept.said ?? "").trim() !== "" && (kind !== "detail" || kept.heardAt === undefined)))
+          .toSorted((one, other) => Number(Missed.needs(other)) - Number(Missed.needs(one)) || one.at - other.at || one.id - other.id)
         const read = needing.slice(0, inFull)
         const unread = new Set(needing.slice(inFull).map(({ id }) => id))
         const reading = new Set(read.map(({ id }) => id))

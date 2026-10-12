@@ -10542,6 +10542,35 @@ describe("Assistant catching up", () => {
     expect(result.after).toEqual(["The Mina tickets are filed."])
   })
 
+  test("the answer to what he asked a thread, and a turn yapd couldn't sum up, are read in full after what needs him, however many came after them, which only the brief tells of", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, spoken, journal, briefings } = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, {
+          waiting: true,
+          briefs: (rows) => `${rows.length} passes running, sir.`,
+        })
+        yield* kept(journal, 120, tezos.id, "Switched to TzKT's rounding as you asked; the March totals now match.", { priority: "done", held: "off", audible: true })
+        yield* kept(journal, 110, mina.id, "Mina finished a turn, but I couldn't summarize it.", { priority: "done", held: "off", audible: true })
+        for (const pass of [8, 9, 10, 11]) yield* kept(journal, 100 - pass, tezos.id, `Pass ${pass} is running.`, { priority: "progress", held: "off" })
+        yield* kept(journal, 50, distractors[0]!.id, "Which network first?", { priority: "needs-you", held: "off" })
+        yield* dictate("Catch me up.")
+        yield* play()
+        return {
+          spoken: spoken(),
+          briefed: briefings.flatMap(({ groups }) => groups.flatMap(({ rows }) => rows.map(({ said }) => said))),
+          read: briefings.map(({ read }) => read),
+          after: yield* unheard(journal),
+        }
+      }),
+    )
+    expect(result.spoken).toEqual([
+      "Which network first? Switched to TzKT's rounding as you asked; the March totals now match. Mina finished a turn, but I couldn't summarize it. 4 passes running, sir.",
+    ])
+    expect(result.briefed).toEqual(["Pass 8 is running.", "Pass 9 is running.", "Pass 10 is running.", "Pass 11 is running."])
+    expect(result.read).toEqual([3])
+    expect(result.after).toEqual([])
+  })
+
   test("a catch-up the model scoped to a thread, a project, a machine or since when tells only of that, and one with nothing in it says so with no brief", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -10606,6 +10635,27 @@ describe("Assistant catching up", () => {
       }),
     )
     expect(result).toEqual({ spoken: ["You're all caught up, sir."], briefs: 0 })
+  })
+
+  test("more with nothing left gives in detail what needs him that he just heard read in full, rather than reading it to him again", async () => {
+    const question = "Mina: fee rounding or a nonce gap, and the same PR as the tests?"
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, play, spoken, journal, briefings } = yield* assistant(
+          (situation) => Brain.decision({ act: "catchup", how: situation.utterance.heard === "More." ? "more" : "" }),
+          undefined,
+          { waiting: true, briefs: (rows, brief) => `${brief.kind}: ${rows.map(({ said }) => said).join(" ")}` },
+        )
+        yield* kept(journal, 60, mina.id, question, { priority: "needs-you", held: "off" })
+        yield* kept(journal, 30, tezos.id, "Tezos pass 7 is done.")
+        yield* dictate("Catch me up.")
+        yield* play()
+        yield* dictate("More.")
+        return { spoken: spoken(), read: briefings.map(({ read }) => read ?? 0) }
+      }),
+    )
+    expect(result.spoken).toEqual([`${question} catchup: Tezos pass 7 is done.`, `detail: ${question} Tezos pass 7 is done.`])
+    expect(result.read).toEqual([1, 0])
   })
 
   test("with twelve threads it tells of eight, what's left is told next for more, and more with nothing left gives what it told in detail", async () => {

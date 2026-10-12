@@ -2515,7 +2515,7 @@ export const briefPrompt = (brief: Brief, desk: Threads.Desk, now: number, style
     ...Option.toArray(Option.map(style, styled)),
     `SCOPE: ${brief.scope === undefined ? "everything he hasn't heard" : `what he asked about: ${fenced(brief.scope, 90)}`}${
       brief.off === undefined ? "" : `\nHe had you off from ${past(brief.off.from, now)}${brief.off.to === undefined ? "" : ` to ${past(brief.off.to, now)}`}.`
-    }${brief.read === undefined || brief.read === 0 ? "" : `\nYou just read him ${brief.read === 1 ? "one thing" : `${count(brief.read)} things`} that need him, word for word: leave them out.`}`,
+    }${brief.read === undefined || brief.read === 0 ? "" : `\nYou just read him ${brief.read === 1 ? "one thing" : `${count(brief.read)} things`} word for word, what needs him or answers what he asked: leave them out.`}`,
     `WAITING ON YOU:\n${waiting.length === 0 ? "Nothing." : waiting.map((listed) => `- ${fenced(listed.called, 90)}: ${doing(listed, now)}`).join("\n")}`,
     `NEEDS YOU:\n${needing.length === 0 ? "Nothing." : needing.join("\n")}`,
     `THREADS, oldest first:\n${threads

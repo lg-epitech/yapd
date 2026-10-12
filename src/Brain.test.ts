@@ -1887,7 +1887,7 @@ describe("catching up", () => {
     expect(detail).not.toContain("word for word")
     // What needs him, read to him in full just before, is left out of it.
     const after = Brain.briefPrompt({ kind: "catchup", groups, left: { threads: 0, rows: 0 }, read: 3 }, on, now, Option.none())
-    expect(after).toContain("SCOPE: everything he hasn't heard\nYou just read him three things that need him, word for word: leave them out.")
+    expect(after).toContain("SCOPE: everything he hasn't heard\nYou just read him three things word for word, what needs him or answers what he asked: leave them out.")
   })
 
   test("what's said of catching up without the model, and the catch-up offered as yapd is turned on", () => {
