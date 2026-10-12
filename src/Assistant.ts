@@ -1278,6 +1278,12 @@ export const make = (options: {
         // and it isn't asked again of yapd's own accord.
         if (asking?.open.id !== id || asking.held.size > 0 || asking.repeat !== undefined) return
         if (!(yield* options.power).on) return
+        // What came in while yapd was off is offered the once: not taken up, it's let go without a word, nothing marked heard, and what's
+        // next is asked.
+        if (asking.offer?.kind === "missed") {
+          yield* close(asking.open, "dropped: unanswered")
+          return yield* offering
+        }
         if (asking.asks >= asks) return yield* letGo(asking.open)
         const now = yield* Clock.currentTimeMillis
         const { open, from, asks: count, offer } = asking
@@ -2702,6 +2708,8 @@ export const make = (options: {
         const lines = Brain.catchupLines(said)
         const { desk } = given
         const coming = yield* options.upcoming
+        // Caught up, however he asked, what came in while yapd was off isn't offered after.
+        if (offered?.kind === "missed") offered = undefined
         const missed = yield* Missed.gather(journal, { now, spoke: given.spoke, coming, desk })
         const inScope = (groups: ReadonlyArray<Missed.Group>) => groups.flatMap((group) => Option.toArray(Option.fromNullable(within(scope, group))))
         const before = given.more === true && given.about._tag === "Answer" ? given.about.catchup : undefined

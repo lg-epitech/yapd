@@ -10721,6 +10721,68 @@ describe("Assistant turned off and on", () => {
     expect(result.after).toEqual(["Distribox migrated."])
   })
 
+  test("the offer left unanswered is let go without a word, never asked again, and nothing is marked heard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { back, unanswered, spoken, journal, flush, wait } = yield* assistant(unasked, undefined, { briefs: () => "Distribox migrated, sir." })
+        yield* journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(journal, 90, "Distribox migrated.")
+        yield* back
+        yield* flush
+        yield* unanswered()
+        yield* wait(180)
+        return { spoken: spoken(), after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.spoken).toEqual(["You missed one, sir. Want the rundown?"])
+    expect(result.after).toEqual(["Distribox migrated."])
+  })
+
+  test("caught up some other way, the offer isn't made after: once it gave way to a thread's question, or while he was pressing the shortcut as it was turned on", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const gaveWay = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => (situation.utterance.heard === "Catch me up." ? Brain.decision({ act: "catchup" }) : undefined),
+          undefined,
+          { others: [cloud], items: card("q1", [colour]), briefs: () => "Distribox migrated, sir." },
+        )
+        yield* made.journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(made.journal, 90, "Distribox migrated.")
+        yield* made.back
+        yield* made.flush
+        yield* asked(made, cloud)
+        yield* made.unanswered()
+        yield* made.answer("Red.")
+        yield* made.dictate("Catch me up.")
+        yield* made.wait(120)
+        return made.spoken()
+      }),
+    )
+    expect(gaveWay).toEqual([
+      "You missed one, sir. Want the rundown?",
+      "A question on Cloud deployment discovery, sir: Which colour should the test use? Red or Blue? I'd go with Blue.",
+      "Red it is, sir.",
+      "Distribox migrated, sir.",
+    ])
+    const pressing = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(() => Brain.decision({ act: "catchup" }), undefined, { briefs: () => "Distribox migrated, sir." })
+        yield* made.journal.write({ at: now - 120 * 60_000, kind: "action", detail: { on: false } })
+        yield* kept(made.journal, 90, "Distribox migrated.")
+        // He's pressing the shortcut as yapd is turned on, and asks to be caught up.
+        yield* made.prepare(1, 1)
+        yield* made.back
+        yield* made.flush
+        yield* made.heard({ heard: "Catch me up.", via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 }, 1)
+        yield* made.flush
+        yield* made.wait(120)
+        return made.spoken()
+      }),
+    )
+    expect(pressing).toEqual(["Distribox migrated, sir."])
+  })
+
   test("what he asks by the shortcut while yapd is off is answered, but nothing of its own accord: its own question isn't asked again, and a thread's waits for it to be on", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const result = await run(
