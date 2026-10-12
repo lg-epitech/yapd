@@ -25,6 +25,22 @@ const machines: ReadonlyArray<Server.Machine> = [
   { machine: "rig", reason: "I can't see rig's threads yet.", threads: [] },
 ]
 
+/** What's known of the thread it lists, as a panel beside its row shows it. */
+const detailed: Server.Details = {
+  key: "t3:Rosie:850299f8",
+  machine: "Rosie",
+  thread: "850299f8",
+  state: "running",
+  since: "2026-10-02T09:40:00.000Z",
+  branch: "t3/tezos",
+  pr: { number: 412, url: "https://github.com/lg-epitech/integration/pull/412", state: "open", checks: "passing" },
+  muted: false,
+  updates: [
+    { id: 9, at: "2026-10-02T10:00:00.000Z", kind: "update", said: "integration. The migration is done. Two fixtures needed new rounding.", unsaid: "off" },
+    { id: 8, at: "2026-10-02T09:50:00.000Z", kind: "sent", text: "Use TzKT's rounding." },
+  ],
+}
+
 /** An API that only handles hooks. */
 const hooks = (handle: Server.Handle): Server.Api => ({
   handle,
@@ -42,6 +58,7 @@ const hooks = (handle: Server.Handle): Server.Api => ({
   mute: () => Effect.succeed("unknown"),
   unmute: () => Effect.void,
   replayThread: () => Effect.succeed("unknown"),
+  details: () => Effect.succeedNone,
   icon: () => Effect.succeedNone,
 })
 
@@ -75,6 +92,7 @@ const stateful = Effect.gen(function* () {
       // A session's row it can't say again is turned away, as one yapd can't reach is.
       replayThread: (key) =>
         Effect.map(SubscriptionRef.get(ref), (state) => (!known.has(key) ? "unknown" : key.startsWith("session:") ? "unreachable" : state.on ? "queued" : "off")),
+      details: (key) => Effect.sync(() => (key === detailed.key ? Option.some({ ...detailed, muted: muted.has(key) }) : Option.none())),
       icon: (machine, project) =>
         Effect.succeed(
           machine === "Rosie" && project === "p/1" ? Option.some({ bytes: new TextEncoder().encode("<svg/>"), type: "image/svg+xml", revision: "9f2c4e1a7b3d" }) : Option.none(),
@@ -505,6 +523,34 @@ describe("Server", () => {
       // Unmuted, or not muted at all.
       expect(unmuted).toEqual([204, 204, 400, 400])
       expect([...muted.keys()]).toEqual(["session:rig:claude:s-1"])
+    })))
+  })
+
+  test("tells more of a thread by its key, only reading, and turns away what isn't a key yapd makes", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const { api, muted } = yield* stateful
+      const server = yield* Server.serve(0, api)
+      const url = `http://127.0.0.1:${server.port}`
+      const call = (path: string, init?: RequestInit) => Effect.promise(() => fetch(`${url}${path}`, init))
+      const key = encodeURIComponent("t3:Rosie:850299f8")
+      const shown = yield* call(`/threads/${key}`)
+      const body = yield* Effect.promise(() => shown.json())
+      // Muted since, it says so.
+      yield* call(`/threads/${key}/mute`, { method: "PUT" })
+      const after = yield* Effect.promise(() => fetch(`${url}/threads/t3:Rosie:850299f8`).then((response) => response.json()))
+      const statuses = {
+        unknown: (yield* call(`/threads/${encodeURIComponent("t3:Rosie:nope")}`)).status,
+        notKey: (yield* call(`/threads/${encodeURIComponent("whatever")}`)).status,
+        undecodable: (yield* call("/threads/%E0%A4%A")).status,
+        // Nothing else is done to a thread here.
+        posted: (yield* call(`/threads/${key}`, { method: "POST", body: '{"text": "Merge it."}' })).status,
+        deleted: (yield* call(`/threads/${key}`, { method: "DELETE" })).status,
+      }
+      expect(shown.status).toBe(200)
+      expect(body).toEqual(detailed)
+      expect(after).toEqual({ ...detailed, muted: true })
+      expect(statuses).toEqual({ unknown: 404, notKey: 400, undecodable: 400, posted: 404, deleted: 404 })
+      expect([...muted.keys()]).toEqual(["t3:Rosie:850299f8"])
     })))
   })
 

@@ -106,8 +106,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     ) => Effect.Effect<ReadonlyArray<Kept>>
     /** A page of entries, newest written first: `most` of them, only older than the entry `before` and of `kinds` when given. */
     readonly page: (options: { readonly most: number; readonly before?: number; readonly kinds?: ReadonlyArray<Kind> }) => Effect.Effect<ReadonlyArray<Kept>>
-    /** The latest entries about a thread, newest first. */
-    readonly byThread: (machine: string, thread: string, most: number) => Effect.Effect<ReadonlyArray<Kept>>
+    /** The latest entries about a thread, newest first, only of `kinds` when given. */
+    readonly byThread: (machine: string, thread: string, most: number, kinds?: ReadonlyArray<Kind>) => Effect.Effect<ReadonlyArray<Kept>>
     /**
      * Updates and notices since `at` the user hasn't heard, oldest first, the
      * latest `most` of them: with `muted`, only those kept quiet because he
@@ -412,14 +412,15 @@ export const fromStore = (
             .map(kept)
         }),
       ),
-    byThread: (machine, thread, most) =>
+    byThread: (machine, thread, most, kinds = []) =>
       reading(
-        store.transaction((database: Database) =>
-          database
-            .query<Row, [string, string, number]>("select * from journal where machine = ? and thread = ? order by at desc, id desc limit ?")
-            .all(machine, thread, most)
-            .map(kept),
-        ),
+        store.transaction((database: Database) => {
+          const filter = kinds.length === 0 ? "" : ` and kind in (${kinds.map(() => "?").join(", ")})`
+          return database
+            .query<Row, Array<string | number>>(`select * from journal where machine = ? and thread = ?${filter} order by at desc, id desc limit ?`)
+            .all(machine, thread, ...kinds, most)
+            .map(kept)
+        }),
       ),
     unheard: (at, most, muted, held) =>
       reading(

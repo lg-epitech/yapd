@@ -337,6 +337,8 @@ export const serve = Effect.gen(function* () {
   })
   // What the menu does to a thread it lists: mute it, or hear it again.
   const { mute, replayThread } = Latest.menu({ latest, threads, mutes, controls, daemon, mention: assistant.mention, journal })
+  // Every thread it can see, not only the likeliest, in the order the desk puts them.
+  const served = Show.served(show, threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), journal.page, Effect.map(mutes.list, (all) => new Set(all.map(({ key }) => key))))
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
@@ -354,11 +356,12 @@ export const serve = Effect.gen(function* () {
     replay: daemon.replay,
     // Typed words were never faint, so nothing typed is taken for Whisper hearing words in silence.
     utter: (text) => Effect.flatMap(daemon.power, ({ turns }) => heard(text, "typed", Number.POSITIVE_INFINITY, turns)),
-    // Every thread it can see, not only the likeliest, in the order the desk puts them.
-    ...Show.served(show, threads.desk(Option.none(), [], Number.MAX_SAFE_INTEGER), journal.page, Effect.map(mutes.list, (all) => new Set(all.map(({ key }) => key)))),
+    ...served,
     mute,
     unmute: (key) => Effect.asVoid(controls.unmute(key)),
     replayThread,
+    // What a panel beside a row shows of its thread, what it's doing and its pull request as /threads has them.
+    details: Latest.details({ latest, threads, mutes, journal, listing: served.threads }),
     icon: icons.image,
   })
   // Asked as the user starts talking, so it's there by the time they've finished.

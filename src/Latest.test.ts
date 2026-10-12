@@ -595,6 +595,124 @@ describe("Latest", () => {
     })
   })
 
+  describe("details", () => {
+    /** What a panel beside a row shows, over the latest threads, with `/threads` listing `machines` as what yapd can see now. */
+    const detailsOf = (shown: Readonly<Record<string, ReadonlyArray<T3Live.Thread>>>, machines: ReadonlyArray<Server.Machine>) =>
+      Effect.gen(function* () {
+        const listed = yield* listing(shown)
+        const details = Latest.details({ latest: listed.latest, threads: listed.threads, mutes: listed.mutes, journal: listed.journal, listing: Effect.succeed(machines) })
+        /** What it shows of a thread by its key, if anything, and what he hasn't heard before and after, which it never changes. */
+        const look = (key: string) =>
+          Effect.gen(function* () {
+            const before = (yield* listed.journal.unheard(0, 20)).map(({ id }) => id)
+            const shown = Option.getOrUndefined(yield* details(key))
+            return { shown, unchanged: JSON.stringify((yield* listed.journal.unheard(0, 20)).map(({ id }) => id)) === JSON.stringify(before) }
+          })
+        const settle = Effect.zipRight(TestClock.adjust("250 millis"), flush)
+        return { ...listed, look, settle }
+      })
+
+    const at = (ms: number) => new Date(ms).toISOString()
+
+    test("tells of a thread what it's doing, its branch and pull request as /threads has them, its mute, and the latest five told of it or sent to it for him, from every session of it, in full, newest first", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const tezos: Server.Machine["threads"][number] = {
+            id: "t-tezos",
+            key: "t3:Rosie:t-tezos",
+            muted: true,
+            project: "integration",
+            title: "Migrate the Tezos integration",
+            state: "running",
+            since: "2026-10-12T13:40:00.000Z",
+            pr: { number: 412, url: "https://github.com/lg-epitech/integration/pull/412", state: "open", checks: "passing" },
+          }
+          const { journal, mutes, look, settle } = yield* detailsOf(
+            { Rosie: [thread("t-tezos", "Migrate the Tezos integration", { branch: "t3/tezos" }), thread("t-mina", "Fix the Mina tickets")] },
+            [{ machine: "Rosie", threads: [tezos] }],
+          )
+          const id = (written: Option.Option<number>) => Option.getOrThrow(written)
+          yield* journal.write({ at: 1, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Started.", detail: { session: "claude:s-old" } })
+          // The session before, resumed, its link timing out, and what he said back to it, kept under it.
+          const older = id(yield* journal.write({ at: 2, kind: "update", host: "Rosie", thread: "claude:s-old", said: "Older, under the session before." }))
+          const sent = id(yield* journal.write({ at: 3, kind: "sent", host: "Rosie", thread: "claude:s-old", directory: "/code/integration", text: "Use TzKT's rounding." }))
+          // T3 Code told of a turn, and its Stop came late, telling the same.
+          const first = id(
+            yield* journal.write({ at: 4, kind: "update", machine: "Rosie", thread: "t-tezos", key: "done:Rosie:r1", said: "Which network first?", detail: { session: "finished:Rosie:t-tezos" } }),
+          )
+          const asked = id(yield* journal.write({ at: 5, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Which network first?", heardAt: 6, detail: { session: "claude:s1", replaces: first } }))
+          const done = id(
+            yield* journal.write({ at: 7, kind: "update", machine: "Rosie", thread: "t-tezos", said: "Migrated.", detail: { session: "claude:s1", muted: true, more: "Two fixtures needed new rounding." } }),
+          )
+          const failed = id(yield* journal.write({ at: 8, kind: "notice", machine: "Rosie", thread: "t-tezos", key: "fail:Rosie:r2", said: "It failed.", detail: { failure: "provider_error" } }))
+          // Neither what yapd did to it, nor another thread's.
+          yield* journal.write({ at: 9, kind: "action", machine: "Rosie", thread: "t-tezos", said: "Muted it, sir." })
+          yield* journal.write({ at: 10, kind: "update", machine: "Rosie", thread: "t-mina", said: "Mina, done.", detail: { session: "claude:s-mina" } })
+          yield* mutes.mute({ key: "t3:Rosie:t-tezos", ends: 60 * 60_000 })
+          yield* settle
+          return { ...(yield* look("t3:Rosie:t-tezos")), ids: { older, sent, asked, done, failed } }
+        }),
+      )
+      const { older, sent, asked, done, failed } = result.ids
+      expect(result.shown).toEqual({
+        key: "t3:Rosie:t-tezos",
+        machine: "Rosie",
+        thread: "t-tezos",
+        state: "running",
+        since: "2026-10-12T13:40:00.000Z",
+        branch: "t3/tezos",
+        pr: { number: 412, url: "https://github.com/lg-epitech/integration/pull/412", state: "open", checks: "passing" },
+        muted: true,
+        until: at(60 * 60_000),
+        updates: [
+          { id: failed, at: at(8), kind: "notice", said: "It failed." },
+          { id: done, at: at(7), kind: "update", said: "Migrated. Two fixtures needed new rounding.", unsaid: "muted" },
+          { id: asked, at: at(5), kind: "update", said: "Which network first?", heard: at(6) },
+          { id: sent, at: at(3), kind: "sent", text: "Use TzKT's rounding." },
+          { id: older, at: at(2), kind: "update", said: "Older, under the session before." },
+        ],
+      })
+      expect(result.unchanged).toBe(true)
+    })
+
+    test("tells of a session's row, a thread T3 Code has but yapd doesn't list, and one only muted, by what's kept of each, and of no thread it doesn't know", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { journal, mutes, look, settle } = yield* detailsOf(
+            { Rosie: [thread("t-old", "Old work", { branch: "t3/old", archivedAt: "2026-10-10T00:00:00.000Z" })] },
+            [
+              { machine: "Rosie", threads: [] },
+              { machine: "rig", reason: "I can't see rig's threads yet.", threads: [] },
+            ],
+          )
+          const term = Option.getOrThrow(yield* journal.write({ at: 1, kind: "update", host: "Rosie", thread: "claude:term", directory: "/tmp", said: "The terminal one is done." }))
+          // On rig, which is away.
+          yield* mutes.mute({ key: "t3:rig:t-rig", called: "The rig work" })
+          yield* settle
+          return {
+            term,
+            session: yield* look("session:Rosie:claude:term"),
+            archived: yield* look("t3:Rosie:t-old"),
+            muted: yield* look("t3:rig:t-rig"),
+            unknown: yield* look("t3:Rosie:nope"),
+            notKey: yield* look("whatever"),
+          }
+        }),
+      )
+      const { term, ...looked } = result
+      expect(looked).toEqual({
+        session: {
+          shown: { key: "session:Rosie:claude:term", machine: "Rosie", thread: null, muted: false, updates: [{ id: term, at: at(1), kind: "update", said: "The terminal one is done." }] },
+          unchanged: true,
+        },
+        archived: { shown: { key: "t3:Rosie:t-old", machine: "Rosie", thread: "t-old", muted: false, updates: [] }, unchanged: true },
+        muted: { shown: { key: "t3:rig:t-rig", machine: "rig", thread: "t-rig", muted: true, updates: [] }, unchanged: true },
+        unknown: { shown: undefined, unchanged: true },
+        notKey: { shown: undefined, unchanged: true },
+      })
+    })
+  })
+
   test("counts what he hasn't heard of each thread, what came in while yapd was off and what was kept quiet too, and in all only what wasn't kept quiet, and drops once he's heard it", async () => {
     const result = await run(
       Effect.gen(function* () {

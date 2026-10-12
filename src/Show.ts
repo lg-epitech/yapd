@@ -696,14 +696,6 @@ export const listing = (desk: Threads.Desk, muted: ReadonlySet<string> = new Set
   ]
 }
 
-/** Why an update wasn't read out, as `/journal` says it: kept quiet as he muted its thread, or held, and for what. */
-const unsaid = (kept: Kept): Server.Entry["unsaid"] => {
-  if (kept.kind !== "update") return undefined
-  const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as { readonly muted?: unknown; readonly held?: unknown }
-  if (detail.muted === true) return "muted"
-  return detail.held === "focus" || detail.held === "quiet" || detail.held === "progress" || detail.held === "off" ? detail.held : undefined
-}
-
 /** A journal entry as `/journal` returns it. */
 export const entry = (kept: Kept): Server.Entry => ({
   id: kept.id,
@@ -716,7 +708,7 @@ export const entry = (kept: Kept): Server.Entry => ({
   ...(kept.text === undefined ? {} : { text: kept.text }),
   ...(kept.utterance === undefined ? {} : { utterance: kept.utterance }),
   ...(kept.heardAt === undefined ? {} : { heard: new Date(kept.heardAt).toISOString() }),
-  ...Option.match(Option.fromNullable(unsaid(kept)), { onNone: () => ({}), onSome: (unsaid) => ({ unsaid }) }),
+  ...Option.match(Option.fromNullable(Missed.unsaid(kept)), { onNone: () => ({}), onSome: (unsaid) => ({ unsaid }) }),
 })
 
 /** A card as `/cards/{id}` returns it, and, without its markdown, as `/state` points at it. */

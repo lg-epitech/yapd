@@ -230,7 +230,7 @@ Archived threads and the ones a thread runs for itself aren't listed. Nothing he
 
 Each row of `recent` in the [state](#state) is a thread, by its newest update or notice, which is how a menu lists what's been going on:
 
-- `key`: the thread's key, the same as in [`/threads`](#threads), to [mute](#muting-a-thread) it or [hear it again](#hearing-a-thread-again) by. Treat it as a name, not something to take apart. A session yapd can't tie to a T3 Code thread, like one run in a terminal, has a key of its own.
+- `key`: the thread's key, the same as in [`/threads`](#threads), to [see more of it](#thread-details), [mute](#muting-a-thread) it or [hear it again](#hearing-a-thread-again) by. Treat it as a name, not something to take apart. A session yapd can't tie to a T3 Code thread, like one run in a terminal, has a key of its own.
 - `machine`: where it runs. `thread`: its id in T3 Code, as [`/threads`](#threads) has it, or `null` for a session yapd can't tie to one.
 - `title`: the thread's title in T3 Code, or for a session, "Claude session" or "Codex session", with "on rig" after it when it's not this machine. While yapd can't see a thread in T3 Code, as for a few seconds after it starts or while another machine can't be reached, it's what yapd calls the thread when it's muted, else "A thread", and the thread has no `project` `id` or `icon` until it's seen again.
 - `project`: there when yapd knows the project. `name` is how it's called, and `id` and `icon` are there only for a project T3 Code has.
@@ -249,6 +249,42 @@ Each row of `recent` in the [state](#state) is a thread, by its newest update or
 Every icon carries `text` and `color` too, the monogram to draw for a kind you don't know, or an image you can't read. `color` is one of `gray`, `red`, `orange`, `amber`, `yellow`, `lime`, `green`, `emerald`, `teal`, `cyan`, `sky`, `blue`, `indigo`, `violet`, `purple`, `fuchsia`, `pink` and `rose`, as T3 Code has them.
 
 `GET /projects/{machine}/{project}/icon` returns the image itself, by the machine and the project's `id`, with T3 Code's `Content-Type` and an `ETag` of its `revision`. It answers `304` when you send that back in `If-None-Match`, and `404` when the project has no image, or none yapd has fetched yet. yapd fetches it from T3 Code itself, so you never need T3 Code's address or a link that would expire.
+
+## Thread details
+
+`GET /threads/{key}` tells more of a thread, by its `key` from `recent`, percent-encoded, as a panel beside its row in a menu shows it:
+
+```json
+{
+  "key": "t3:Rosie:850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+  "machine": "Rosie",
+  "thread": "850299f8-3b2a-4c1d-8e7f-6a5b4c3d2e1f",
+  "state": "running",
+  "since": "2026-10-02T13:40:00.000Z",
+  "branch": "t3/migrate-tezos",
+  "pr": { "number": 412, "url": "https://github.com/lg-epitech/integration/pull/412", "state": "open", "checks": "passing" },
+  "muted": true,
+  "until": "2026-10-02T15:00:00.000Z",
+  "updates": [
+    { "id": 1872, "at": "2026-10-02T14:01:40.000Z", "kind": "update", "said": "integration. The migration is done and the tests pass. Two fixtures needed TzKT's rounding.", "unsaid": "muted" },
+    { "id": 1860, "at": "2026-10-02T13:52:05.000Z", "kind": "sent", "text": "Use TzKT's rounding." },
+    { "id": 1851, "at": "2026-10-02T13:50:12.000Z", "kind": "notice", "said": "The Tezos migration asks which rounding to use.", "heard": "2026-10-02T13:50:20.000Z" }
+  ]
+}
+```
+
+- `machine` and `thread`: as in `recent`.
+- `state`, `since`, `branch` and `pr`: what it's doing and since when, the branch it works on and its latest pull request, as [`/threads`](#threads) has them. They're there only for a thread T3 Code has that yapd can see now, and `branch` and `pr` only when it has them.
+- `muted` and `until`: as in `recent`.
+- `updates`: its latest five updates and notices, heard or not, and messages yapd passed on to it for you, newest first, from every session of it. `said` is all of what yapd said or kept of one, what it keeps for "more" too, and `text` the words it passed on. `heard` and `unsaid` are as the [journal](#journal) has them.
+
+It only reads: nothing reaches the thread, and nothing counts as heard.
+
+| Status | |
+| --- | --- |
+| `200` | What yapd knows of it. |
+| `400` | The key isn't one yapd makes. |
+| `404` | No thread yapd knows, as for [muting](#muting-a-thread) one. A yapd from before it answers this for every key. |
 
 ## Muting a thread
 

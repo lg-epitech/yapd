@@ -131,16 +131,55 @@ export interface Machine {
     readonly state: string
     /** ISO 8601, when it got to that state. */
     readonly since: string
-    readonly pr?: {
-      readonly number: number
-      /** Only ever an https address from T3 Code. */
-      readonly url?: string
-      readonly state?: string
-      readonly checks?: string
-      readonly review?: string
-      readonly mergeability?: string
-    }
+    readonly pr?: PullRequest
   }>
+}
+
+/** A thread's latest pull request, as T3 Code knows it. */
+export interface PullRequest {
+  readonly number: number
+  /** Only ever an https address from T3 Code. */
+  readonly url?: string
+  readonly state?: string
+  readonly checks?: string
+  readonly review?: string
+  readonly mergeability?: string
+}
+
+/** What `/threads/{key}` returns of a thread, for a panel beside its row in `recent`. */
+export interface Details {
+  readonly key: string
+  readonly machine: string
+  /** T3 Code's id for it, or null for a session yapd can't tie to a thread. */
+  readonly thread: string | null
+  /** What it's doing, as `/threads` has it, only for a thread T3 Code has that yapd can see now. */
+  readonly state?: string
+  /** ISO 8601, when it got to that state. */
+  readonly since?: string
+  /** The branch it works on, when T3 Code knows it. */
+  readonly branch?: string
+  readonly pr?: PullRequest
+  readonly muted: boolean
+  /** ISO 8601, when the mute ends on its own, if it does. */
+  readonly until?: string
+  /** The latest of what was told of it and what was sent to it for him, from every session of it, newest first. */
+  readonly updates: ReadonlyArray<Told>
+}
+
+/** An update or notice of a thread, or a message sent to it for him, as `/threads/{key}` lists it. */
+export interface Told {
+  readonly id: number
+  /** ISO 8601. */
+  readonly at: string
+  readonly kind: "update" | "notice" | "sent"
+  /** All of what yapd said of it, or kept, its "more" too. */
+  readonly said?: string
+  /** What he sent. */
+  readonly text?: string
+  /** ISO 8601, when the user heard it through. */
+  readonly heard?: string
+  /** For an update yapd didn't read out, why, as `/journal` has it. */
+  readonly unsaid?: Entry["unsaid"]
 }
 
 /** A journal entry, as `/journal` returns it. */
@@ -195,6 +234,8 @@ export interface Api {
   readonly unmute: (key: string) => Effect.Effect<void>
   /** Says a thread's latest update again, by its key: unreachable when it's a row that can't be heard again. */
   readonly replayThread: (key: string) => Effect.Effect<"queued" | "off" | "unknown" | "unreachable", unknown>
+  /** What's known of a thread by its key, for a panel beside its row: none when it's no thread yapd knows. Only reads. */
+  readonly details: (key: string) => Effect.Effect<Option.Option<Details>>
   /** A project's image, by its machine and id. */
   readonly icon: (machine: string, project: string) => Effect.Effect<Option.Option<Icons.Image>>
 }
@@ -391,6 +432,16 @@ export const serve = (port: number, api: Api) =>
             ),
             Effect.catchAll(failed("replay an update")),
           )
+        }
+        // What a panel beside a row shows of its thread, only ever read.
+        const details = request.method === "GET" ? /^\/threads\/([^/]+)$/.exec(url.pathname) : null
+        if (details !== null) {
+          const key = decoded(details[1]!)
+          if (Option.isNone(key) || Option.isNone(Mutes.parse(key.value))) return new Response("That's no thread's key.", { status: 400 })
+          return Option.match(yield* api.details(key.value), {
+            onNone: () => new Response("No such thread.", { status: 404 }),
+            onSome: (details) => Response.json(details),
+          })
         }
         const thread = /^\/threads\/([^/]+)\/(mute|replay)$/.exec(url.pathname)
         if (thread !== null) {

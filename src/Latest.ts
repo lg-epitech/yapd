@@ -1,7 +1,7 @@
 import { Clock, Effect, Option, Schedule, Stream, SubscriptionRef } from "effect"
 import type * as Daemon from "./Daemon.ts"
 import type * as Icons from "./Icons.ts"
-import type { Journal, Kept } from "./Journal.ts"
+import type { Journal, Kept, Kind } from "./Journal.ts"
 import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import type * as Server from "./Server.ts"
@@ -330,4 +330,79 @@ export const menu = (options: {
         return "queued" as const
       }),
   }
+}
+
+/** How many of what was told of a thread, or sent to it for him, a panel beside its row shows. */
+const panel = 5
+
+/** What a panel beside a thread's row shows of it: its updates and notices, and the messages sent to it for him. */
+const telling: ReadonlyArray<Kind> = ["update", "notice", "sent"]
+
+/** An update or notice of a thread, with all of what was kept of it, its "more" too, or a message sent to it with his words. */
+const told = (kept: Kept): Server.Told => {
+  const said = Missed.full(kept)
+  const unsaid = Missed.unsaid(kept)
+  return {
+    id: kept.id,
+    at: new Date(kept.at).toISOString(),
+    // Only ever read of these kinds.
+    kind: kept.kind as Server.Told["kind"],
+    ...(said === "" ? {} : { said }),
+    ...(kept.kind !== "sent" || kept.text === undefined ? {} : { text: kept.text }),
+    ...(kept.heardAt === undefined ? {} : { heard: new Date(kept.heardAt).toISOString() }),
+    ...(unsaid === undefined ? {} : { unsaid }),
+  }
+}
+
+/**
+ * What a menu shows of a thread beside its row, by its key, for a thread it
+ * lists, one T3 Code has or one that's muted, as muting it knows them: what
+ * it's doing, its branch and its pull request as `/threads` has them, whether
+ * it's muted, and the latest of what was told of it or sent to it for him,
+ * from every session of it. It only reads: nothing reaches an agent, and
+ * nothing counts as heard.
+ */
+export const details = (options: {
+  readonly latest: Pick<Latest, "current" | "under">
+  readonly threads: Pick<Threads.Threads["Type"], "find">
+  readonly mutes: Pick<Mutes.Mutes, "muted">
+  readonly journal: Pick<Journal["Type"], "byThread">
+  /** Every thread yapd can see, as `/threads` lists them. */
+  readonly listing: Effect.Effect<ReadonlyArray<Server.Machine>>
+}) => {
+  const { latest, threads, mutes, journal, listing } = options
+  return (key: string) =>
+    Effect.gen(function* () {
+      const about = Mutes.parse(key)
+      if (Option.isNone(about)) return Option.none<Server.Details>()
+      const ref = about.value._tag === "Thread" ? about.value.ref : undefined
+      const found = ref === undefined ? Option.none<T3Live.Thread>() : yield* threads.find(ref)
+      const mute = Option.getOrUndefined(yield* mutes.muted([key, ...(yield* latest.under(key))]))
+      const row = (yield* latest.current).find((row) => row.key === key)
+      if (row === undefined && Option.isNone(found) && mute === undefined) return Option.none<Server.Details>()
+      // A session is kept under its agent and its own id for it.
+      const { machine, id } = about.value._tag === "Thread" ? about.value.ref : { machine: about.value.machine, id: `${about.value.agent}:${about.value.session}` }
+      // Its own, then those of every session its updates came from: what was kept under one as its link timed out, and what he said
+      // back to one, which was sent and kept under the session it answered.
+      const own = yield* journal.byThread(machine, id, read, telling)
+      const sessions = [...new Set(own.map(sessionOf))].flatMap((session) => (session === undefined || session.startsWith("finished:") ? [] : [session]))
+      const all = [...own, ...(yield* Effect.forEach(sessions, (session) => journal.byThread(machine, session, read, telling))).flat()]
+      // A turn kept twice, as T3 Code told of it and its Stop came late, is shown once, as what took the other's place, as a catch-up tells of it.
+      const replaced = new Set(all.map((kept) => (kept.detail as { readonly replaces?: unknown } | undefined)?.replaces))
+      const updates = all.filter((kept) => !replaced.has(kept.id)).toSorted((one, other) => other.at - one.at || other.id - one.id)
+      // What it's doing, only while yapd can see it, as /threads lists it.
+      const listed = ref === undefined ? undefined : (yield* listing).find((listed) => listed.machine === ref.machine)?.threads.find((thread) => thread.id === ref.id)
+      const branch = listed === undefined ? undefined : Option.getOrUndefined(Option.flatMap(found, ({ branch }) => Option.fromNullable(branch)))
+      return Option.some({
+        key,
+        machine,
+        thread: ref === undefined ? null : ref.id,
+        ...(listed === undefined ? {} : { state: listed.state, since: listed.since }),
+        ...(branch === undefined ? {} : { branch }),
+        ...(listed?.pr === undefined ? {} : { pr: listed.pr }),
+        muted: mute !== undefined,
+        ...(mute?.ends === undefined ? {} : { until: new Date(mute.ends).toISOString() }),
+        updates: updates.slice(0, panel).map(told),
+      } satisfies Server.Details)
+    })
 }

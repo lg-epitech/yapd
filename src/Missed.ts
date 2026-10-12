@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import type { Journal, Kept } from "./Journal.ts"
+import type { Held, Journal, Kept } from "./Journal.ts"
 import type * as Threads from "./Threads.ts"
 
 // What he hasn't heard, gathered from the journal a thread at a time, for
@@ -75,6 +75,14 @@ export const held = (kept: Kept) => typeof detail(kept).held === "string" && !wh
 
 /** Whether a row was read to him and cut off, rather than never read out. */
 export const cut = (kept: Kept) => kept.kind === "update" && !muted(kept) && detail(kept).held === undefined
+
+/** Why an update wasn't read out, as the API says it: kept quiet as he muted its thread, or held, and for what. */
+export const unsaid = (kept: Kept): "muted" | Held | undefined => {
+  if (kept.kind !== "update") return undefined
+  if (muted(kept)) return "muted"
+  const { held } = detail(kept)
+  return held === "focus" || held === "quiet" || held === "progress" || held === "off" ? held : undefined
+}
 
 /** What he hasn't heard of one thread or session. */
 export interface Group {
