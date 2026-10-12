@@ -1881,9 +1881,10 @@ export const make = (
           if (on === next) return undefined
           yield* TRef.set(power, { on: next, turns: turns + 1 })
           yield* TRef.set(coming, false)
-          // Off, no answer is on its way any more.
+          // Off, no answer is on its way any more. On, what was still to be said in answer to what he asked while it was off is dropped too,
+          // as what it was saying is stopped.
           if (!next) yield* TRef.set(awaited, [])
-          return next ? [] : yield* TRef.modify(inbox, (queued) => [[...queued.values()], Inbox.empty] as const)
+          return yield* TRef.modify(inbox, (queued) => [[...queued.values()], Inbox.empty] as const)
         }),
       )
       if (dropped === undefined) return

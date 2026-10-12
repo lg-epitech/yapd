@@ -5053,6 +5053,24 @@ describe("Daemon while off", () => {
     expect(result).toMatchObject({ followUp: [], answers: [], listened: 0, heard: ["answer", "which"], asked: ["which unanswered"] })
   })
 
+  test("turned on again, what it was saying or about to say in answer to what he asked while it was off is stopped and dropped, never heard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, toggle, wait, played, stopped } = yield* make()
+        yield* toggle(false)
+        const heard: Array<string> = []
+        const gone: Array<string> = []
+        yield* notice("first", "Distribox is migrated, sir.", { answer: true, heard, gone })
+        yield* notice("second", "The Tezos one is still running, sir.", { answer: true, heard, gone })
+        yield* wait(2)
+        yield* toggle(true)
+        yield* wait(30)
+        return { played: [...played], stopped: [...stopped], heard, gone: gone.toSorted() }
+      }),
+    )
+    expect(result).toEqual({ played: ["Distribox is migrated, sir."], stopped: ["Distribox is migrated, sir."], heard: [], gone: ["first", "second"] })
+  })
+
   test("what he hears is heard only once it's said to the end, and progress of the same work is out of date only once he hears how it went, not as that's queued", async () => {
     const result = await run(
       Effect.gen(function* () {
