@@ -2334,9 +2334,10 @@ const usageLines = (usage: Option.Option<Threads.Usage>, now: number) =>
 /**
  * What a yes, a no or an answer does to what a thread waits on him for, which
  * OPEN asks about: for a question, only the part being asked, with what he
- * answered of it before, its options and what they mean, and yapd's pick.
+ * answered of it before, its options and what they mean, and yapd's pick;
+ * and when he spoke over it, what it hadn't said yet, `unsaid`.
  */
-const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording">) => {
+const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording">, unsaid: string | undefined) => {
   const { asks } = open
   switch (asks?._tag) {
     case "Approval":
@@ -2365,12 +2366,17 @@ const waitingOn = (open: Pick<Assistant.Open, "asks" | "wording">) => {
               `Its options: ${question.options.map(({ label, description }) => `${fenced(label, 80)}${description.trim() === "" ? "" : ` (${fenced(description, 80)})`}`).join(", ")}.`,
               ...(question.multiSelect ? ["Several can be picked."] : []),
             ]),
-        // Cut off before the end, he may not have heard every option, nor yapd's pick, however his words sound.
+        // Cut off before the end, he may not have heard every option, nor yapd's pick, however his words sound. Said over it, what he'd
+        // heard by then is known, so a plain yes or no to the question itself, once he'd heard all of it, can be its answer.
         ...(asks.inFull
           ? Option.match(pick, { onNone: () => [], onSome: (label) => [`You said you'd go with ${fenced(label, 80)}.`] })
-          : [
-              `He stopped you before the end, so he may not have heard every option${Option.match(pick, { onNone: () => "", onSome: (label) => `, nor that you'd go with ${fenced(label, 80)}` })}: what doesn't name an option, like "the last one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`,
-            ]),
+          : unsaid !== undefined
+            ? [
+                `He spoke over you, so he'd heard only what you'd said by then: you hadn't yet said ${fenced(unsaid, 400)}. His words are an option only when they answer what he'd heard. A plain yes or no, like "yes", "approved", "go ahead", "no" or "no thanks", to a yes-or-no question he'd heard all of, where just one option means that yes, or that no, is that option. What may be about options or a pick he hadn't heard yet, like "the last one", "the second", "that one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`,
+              ]
+            : [
+                `He stopped you before the end, so he may not have heard every option${Option.match(pick, { onNone: () => "", onSome: (label) => `, nor that you'd go with ${fenced(label, 80)}` })}: what doesn't name an option, like "the last one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`,
+              ]),
         `An answer is "reply": "text" is the option he picked, as it's written; several, one a line.${
           question.allowCustomAnswer
             ? ` When he adds a condition, a reason or anything the work should know, like "Blue, but only for the tests", "none of those, use staging" or "hold off until I check the fees", "text" is all of his words, as he'd type them.`
@@ -2447,7 +2453,7 @@ export const prompt = (situation: Situation, style: Option.Option<string>) => {
             : `\nIts choices, in the order you said them: ${open.candidates.map((ref) => handleOf(desk, ref.machine, ref.id) ?? "a thread that's gone").join(", ")}`
         }${
           open.asks !== undefined
-            ? waitingOn(open)
+            ? waitingOn(open, situation.utterance.unsaid)
             : yesNo(open.kind)
               ? `\nWhat a yes does: "${open.decision.act}"${open.decision.act === "send" ? ` with the message ${fenced(open.decision.text, 400)}` : ""}${
                   open.decision.act === "mode" ? ` with "how" "${open.decision.how}", which gives him the catch-up` : open.decision.act === "catchup" ? ", which catches him up on what he hasn't heard" : ""

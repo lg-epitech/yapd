@@ -626,10 +626,10 @@ const assistant = (
           yield* made.heard({ heard, via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1 })
           yield* flush
         }),
-      /** Said over or right after the question, as the conversation takes it: worked out, then acted on. */
-      answer: (heard: string, to = questions().at(-1), echo?: string, afterPause?: string) =>
+      /** Said over or right after the question, as the conversation takes it: worked out, then acted on. Said over it, with what it hadn't said yet. */
+      answer: (heard: string, to = questions().at(-1), echo?: string, afterPause?: string, unsaid?: string) =>
         Effect.gen(function* () {
-          const taken = yield* to!.question!.answer(heard, 1, echo, afterPause)
+          const taken = yield* to!.question!.answer(heard, 1, echo, afterPause, unsaid)
           if (Option.isSome(taken)) yield* taken.value
           yield* flush
           return Option.isSome(taken)
@@ -2646,6 +2646,99 @@ describe("Assistant", () => {
     const both = { spoken: ["Testnet and Devnet it is, sir."], answers: [{ networks: ["Testnet (Recommended)", "Devnet"] }] }
     expect(await answering("Yeah, that works, and devnet too.", false)).toEqual(both)
     expect(await answering("Testnet, and devnet too I guess.", true)).toEqual(both)
+  })
+
+  test("a plain yes said over a yes-or-no question once he'd heard it, before its options, goes as the option the model takes it for; with no telling how far it had got, it's asked again in full", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    // As a thread asked it on 2026-10-12, when he said "Yes." as soon as he'd heard the question, and was asked it again till it was let go.
+    const install = {
+      id: "install",
+      header: "Install",
+      question: "Sir, shall I install and relaunch the redesigned Yapd menu bar app now, knowing you may need to reposition its icon?",
+      options: [{ label: "Install it now (Recommended)" }, { label: "Not yet" }],
+    }
+    const line = "Sir, shall I install and relaunch the redesigned Yapd menu bar app now, knowing you may need to reposition its icon? Install it now or Not yet? I'd go with Install it now."
+    const answering = (unsaid?: string) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes his yes for the option that means it, as the real one did.
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Install it now (Recommended)", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [install]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* made.cut()
+          yield* made.answer("Yes.", undefined, undefined, undefined, unsaid)
+          const closed = (yield* made.journal.since(0, { kinds: ["action"] })).flatMap(({ detail }) => {
+            const open = (detail as { readonly open?: unknown }).open
+            return typeof open === "string" ? [open] : []
+          })
+          const told = made.seen.map((situation) => Brain.prompt(situation, Option.none()))
+          return { spoken: made.spoken(), answers: answered(made.dispatched), open: Option.isSome(yield* made.open), closed, told }
+        }),
+      )
+    // Said over its options: the model's told what he hadn't heard yet, and his yes goes to the thread.
+    const over = await answering("Install it now or Not yet? I'd go with Install it now.")
+    expect(over.told.map((prompt) => prompt.includes("you hadn't yet said «Install it now or Not yet? I'd go with Install it now.»"))).toEqual([true])
+    expect(over.spoken).toEqual([`A question on Cloud deployment discovery, sir: ${line}`, "Install it now it is, sir."])
+    expect(over.answers).toEqual([{ install: "Install it now (Recommended)" }])
+    expect(over.open).toBe(false)
+    expect(over.closed).toEqual(["answered"])
+    // Not known, as when he cut it off by dictating, the yes may be to yapd's pick he never heard: nothing goes, and it's asked again in full.
+    const unknown = await answering()
+    expect(unknown.spoken).toEqual([`A question on Cloud deployment discovery, sir: ${line}`, `Again, sir: ${line}`])
+    expect(unknown.answers).toEqual([])
+    expect(unknown.open).toBe(true)
+    expect(unknown.closed).toEqual([])
+  })
+
+  test("an option picked by where it came, said over the question before he'd heard them all, is asked again in full when the model says so, told what he hadn't heard", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const shade = { id: "shade", question: "Which shade should the badge use?", options: [{ label: "Red" }, { label: "Green" }, { label: "Blue" }] }
+    const result = await run(
+      Effect.gen(function* () {
+        // A model that asks it again in full, as it's told to, when "the last one" may be to one he hadn't heard.
+        const made = yield* assistant(
+          (situation) =>
+            Brain.prompt(situation, Option.none()).includes("you hadn't yet said «Green or Blue?»")
+              ? Brain.decision({ act: "again", how: "same", target: handle(situation, cloud), pending: "answers" })
+              : Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Blue", pending: "answers" }),
+          undefined,
+          { others: [cloud], items: card("q1", [shade]), waiting: true },
+        )
+        yield* asked(made, cloud)
+        yield* made.cut()
+        yield* made.answer("The last one.", undefined, undefined, undefined, "Green or Blue?")
+        return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open) }
+      }),
+    )
+    expect(result).toEqual({ spoken: ["Again, sir: Which shade should the badge use? Red, Green or Blue?"], answers: [], open: true })
+  })
+
+  test("said over an approval, what's known of how far it had got changes nothing: a plain yes never allows it, and 'approve' before he'd heard all of it asks it again in full", async () => {
+    const cloud = waitingOn({ id: "r1", kind: "command" })
+    const over = (heard: string) =>
+      run(
+        Effect.gen(function* () {
+          // A model that takes whatever he says for allowing it.
+          const made = yield* assistant((situation) => Brain.decision({ act: "decide", target: handle(situation, cloud), how: "accept", pending: "answers" }), undefined, {
+            others: [cloud],
+            items: approval("r1", "npm install left-pad"),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* made.cut()
+          yield* made.answer(heard, undefined, undefined, undefined, "left-pad. Say 'approve' if you want it, sir.")
+          return { spoken: made.spoken().slice(1), dispatched: made.dispatched.length }
+        }),
+      )
+    for (const heard of ["Yes.", "Go ahead.", "Sure."]) {
+      expect([heard, await over(heard)]).toEqual([heard, { spoken: ["It needs an 'approve', so I've left it waiting for you in T3 Code, sir."], dispatched: 0 }])
+    }
+    for (const heard of ["Approve.", "Approved."]) {
+      expect([heard, await over(heard)]).toEqual([heard, { spoken: ["Shall I still allow Cloud deployment discovery to run npm install left-pad, sir? Only 'approve' will do."], dispatched: 0 }])
+    }
   })
 
   test("a plain no after yapd's pick is the model's, which may ask which one then, without it, and what he says then is the model's too unless it's an option's exact name", async () => {

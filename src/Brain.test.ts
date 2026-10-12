@@ -237,6 +237,38 @@ describe("Brain", () => {
     expect(looked).toContain("Asking him: «Which colour should the test use?» Its options: «Red», «Blue».")
   })
 
+  test("said over a thread's question, the model is told what yapd hadn't said yet, and that a plain yes or no is an option only to a yes-or-no question he'd heard; an approval is told as ever", () => {
+    const { open } = questionOpen(1)
+    const unheard: Assistant.Open = { ...open, ...(open.asks?._tag === "Question" ? { asks: { ...open.asks, inFull: false } } : {}) }
+    /** The prompt for a yes said back to `asking`, with what yapd hadn't said yet when he said it, if that's known. */
+    const over = (asking: Assistant.Open, unsaid?: string) => {
+      const said = situation("Yes.", { open: Option.some(asking), desk: desk([...asking.candidates]) })
+      return Brain.prompt({ ...said, utterance: { ...said.utterance, via: "reply", ...(unsaid === undefined ? {} : { unsaid }) } }, Option.none())
+    }
+    const told = over(unheard, "Any of Alpha, Beta and Gamma? I'd go with Gamma.")
+    expect(told).toContain(`He spoke over you, so he'd heard only what you'd said by then: you hadn't yet said «Any of Alpha, Beta and Gamma? I'd go with Gamma.».`)
+    expect(told).toContain(
+      `A plain yes or no, like "yes", "approved", "go ahead", "no" or "no thanks", to a yes-or-no question he'd heard all of, where just one option means that yes, or that no, is that option.`,
+    )
+    expect(told).toContain(`What may be about options or a pick he hadn't heard yet, like "the last one", "the second", "that one" or "yeah, that works", is "again" with "how" "same", to ask it in full.`)
+    expect(told).not.toContain("He stopped you before the end")
+    expect(told).not.toContain("You said you'd go with")
+    // Not known how far it had got, as when he dictated over it, nothing that doesn't name an option is one, as before.
+    const unknown = over(unheard)
+    expect(unknown).toContain(`He stopped you before the end, so he may not have heard every option, nor that you'd go with «Gamma (Recommended)»: what doesn't name an option`)
+    expect(unknown).not.toContain("you hadn't yet said")
+    // An approval he hasn't heard all of is told as ever, whatever's known of how far it had got.
+    const approval: Assistant.Open = {
+      ...which([ref(std)]),
+      kind: "approval",
+      asked: "Fix the transcription upload wants to run npm install. Say 'approve' if you want it, sir.",
+      asks: { _tag: "Approval", requestId: "r1", decisions: ["accept", "decline"], inFull: false },
+    }
+    const allowing = over(approval, "Say 'approve' if you want it, sir.")
+    expect(allowing).toContain("He didn't hear all of it, so take a bare yes for one only when nothing else fits.")
+    expect(allowing).not.toContain("you hadn't yet said")
+  })
+
   test("a no to a thread's question is told to the model as its answer, never as letting it go", () => {
     const { open } = questionOpen(0)
     const shown = Brain.prompt(situation("No.", { open: Option.some(open), desk: desk([ref(tezos)]) }), Option.none())

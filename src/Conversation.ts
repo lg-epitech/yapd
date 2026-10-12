@@ -218,8 +218,11 @@ export interface Question {
    * first words heard may be some of it, or their first word lost under it.
    * With it, `afterPause` is what they said once they carried on after a
    * pause, when they did, which is surely theirs, as yapd had stopped by then.
+   * Said over it, `unsaid` is what yapd hadn't said of it yet when it
+   * stopped, as far as where it had got to tells, like its options: none
+   * when all of it was said.
    */
-  readonly answer: (heard: string, voiced: number, echo?: string, afterPause?: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
+  readonly answer: (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) => Effect.Effect<Option.Option<Effect.Effect<void>>>
 }
 
 /** An answer to what the user asked yapd, rendered and ready to be said, which they can follow up as they can an update. */
@@ -946,11 +949,13 @@ export const make = (options: {
           const first = yield* hear(outcome.audio)
           // Nothing heard over its first seconds is its own voice, no answer, nor talk that wasn't meant for yapd.
           const { itself, echo, unsure } = whose(outcome, first)
+          // What it hadn't said yet, as for an update, so what he could have heard of it is known, like a question's options.
+          const left = unsaid(said.spoken, outcome.duration > 0 ? outcome.at / outcome.duration : 1)
           const reply =
             itself || first === ""
               ? Option.none()
               : (yield* settle(outcome.ear, first, outcome.audio, hear, !unsure, (heard, voiced, afterPause) =>
-                  echo === undefined || afterPause === "" ? respond(heard, voiced, echo) : respond(heard, voiced, echo, afterPause),
+                  respond(heard, voiced, echo, echo === undefined || afterPause === "" ? undefined : afterPause, left === "" ? undefined : left),
                 )).reply
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.

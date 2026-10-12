@@ -45,6 +45,13 @@ export interface Utterance {
   readonly echo?: string
   /** With `echo`, what he said once he carried on after a pause, which is surely his, as yapd had stopped by then. */
   readonly afterPause?: string
+  /**
+   * Said over a question yapd was asking, what it hadn't said of it yet when
+   * it stopped, as far as where it had got to tells, like its options and its
+   * pick: none when all of it was said, or when that isn't known, as for what
+   * he dictates.
+   */
+  readonly unsaid?: string
 }
 
 /** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
@@ -3100,11 +3107,14 @@ export const make = (options: {
           const part = leaned ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
           // Said before he heard it all, what doesn't name an option, like "the last one" or a plain yes, may be to one he's yet to hear, or
-          // to yapd's pick he never heard, however the model took it, alone or with others he named: it's asked again in full. Asked which
-          // one then, the pick is the one option left, as `leaning` has it.
+          // to yapd's pick he never heard, however the model took it, alone or with others he named: it's asked again in full. Not when he
+          // said it over the question, which tells how far it had got: the model was told what it hadn't said yet, and took his words only
+          // for what he'd heard by then, as a plain yes to the question itself. Asked which one then, the pick is the one option left, as
+          // `leaning` has it.
           if (
             decided.source === "model" &&
             part !== undefined &&
+            utterance.unsaid === undefined &&
             !heardBy(utterance, opened.whole) &&
             answer?._tag === "Picked" &&
             answer.options.some((index) => !Questions.mentions(part, index, utterance.heard))
@@ -3184,17 +3194,27 @@ export const make = (options: {
 
     /**
      * What's said back to the question: worked out as he talks, acted on once
-     * he's stopped, in the background. Only words nobody said, like Whisper
-     * hears in silence, leave it waiting: anything else closes it, even talk
-     * that wasn't meant for yapd.
+     * he's stopped, in the background, with what it hadn't said yet when he
+     * spoke over it, `unsaid`, so the model knows what he'd heard. Only words
+     * nobody said, like Whisper hears in silence, leave it waiting: anything
+     * else closes it, even talk that wasn't meant for yapd.
      */
     const listen =
       (open: Open) =>
-      (heard: string, voiced: number, echo?: string, afterPause?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
+      (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string): Effect.Effect<Option.Option<Effect.Effect<void>>> =>
       Effect.gen(function* () {
         const at = yield* Clock.currentTimeMillis
         const { turns } = yield* options.power
-        const utterance: Utterance = { id: mint(at, "u"), heard, via: "reply", at, voiced, turns, ...overItself(echo, afterPause) }
+        const utterance: Utterance = {
+          id: mint(at, "u"),
+          heard,
+          via: "reply",
+          at,
+          voiced,
+          turns,
+          ...overItself(echo, afterPause),
+          ...(unsaid === undefined || unsaid === "" ? {} : { unsaid }),
+        }
         /**
          * What it asked was dealt with in T3 Code meanwhile, so a late answer to
          * it does nothing, and he's told so: it's noted, but not in his words

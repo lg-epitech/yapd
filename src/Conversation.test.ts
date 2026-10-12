@@ -623,6 +623,25 @@ describe("Questions", () => {
     expect(tried).toEqual([["Thank", 192], ["Thank you.", 1152]])
   })
 
+  test("tells the answer what of the question yapd hadn't said yet when the user spoke over it, and nothing once all of it was said", async () => {
+    const told = (over: boolean) =>
+      scoped(
+        Effect.gen(function* () {
+          const told: Array<string | undefined> = []
+          const { question, speak, wait } = yield* conversation(["Yes."])
+          const asking = yield* question((_heard, _voiced, _echo, _afterPause, unsaid) => Effect.sync(() => void told.push(unsaid)).pipe(Effect.as(Option.some(Effect.void))))
+          // Over it, three seconds in, it stops at two of its ten; or once it's played to the end.
+          yield* wait(over ? 3 : 10)
+          yield* speak
+          yield* Fiber.join(asking)
+          return told
+        }),
+      )
+    // A fifth of "Which project is it for?" was said.
+    expect(await told(true)).toEqual(["project is it for?"])
+    expect(await told(false)).toEqual([undefined])
+  })
+
   test("leaves a question unanswered when nothing is said, or nothing meant for it", async () => {
     const silent = await scoped(
       Effect.gen(function* () {
