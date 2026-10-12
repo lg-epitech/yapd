@@ -3,11 +3,10 @@ import { type Catalog, LaunchError, type Launcher, type Request, type Started } 
 import type * as Ledger from "./Ledger.ts"
 import { afterOnIt, type Lines, Persona, withOnIt } from "./Persona.ts"
 import type { Heard } from "./Recent.ts"
-import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
 import { progress, readied, unstarted } from "./T3CodeLauncher.ts"
 import type * as T3Live from "./T3Live.ts"
-import { type Decision, type Destination, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
+import { type Decision, grounded, type Listing, type Material, vocabulary, Writer } from "./Writer.ts"
 
 // New work, from what the user said to where it starts: the writer decides
 // where it goes and writes the prompt, which is checked against what's there
@@ -22,7 +21,6 @@ export interface Machine {
   /** Names its hooks may report it by. */
   readonly hosts: ReadonlyArray<string>
   readonly launcher: Launcher
-  readonly researcher: Researcher
 }
 
 /** How long a machine has to say what it can start, from when the shortcut is pressed. */
@@ -152,15 +150,6 @@ export type Outcome =
     }
   /** Which project it's for has to be asked, and the material kept for the answer. */
   | { readonly _tag: "Asked"; readonly question: string; readonly about: string; readonly material: Material }
-  /** The project is being read through first, which takes a while: `then` is what comes of it. */
-  | {
-      readonly _tag: "Looking"
-      readonly spoken: string
-      readonly about: string
-      readonly project: string
-      readonly machine: Machine
-      readonly then: Effect.Effect<Outcome>
-    }
   /** It was asked for, and T3 Code is getting it ready, which takes minutes for a worktree: `then` is what comes of it, which can be waited for more than once. */
   | { readonly _tag: "Launching"; readonly about: string; readonly project: string; readonly machine: Machine; readonly then: Effect.Effect<Outcome> }
   /** Nothing started, and this says why, or that there was nothing to start. */
@@ -213,7 +202,6 @@ export const make = (options: {
     const persona = yield* Persona
     const scope = yield* Effect.scope
     const writing = yield* Effect.makeSemaphore(writers)
-    const research = options.machines.some(({ researcher }) => researcher.available)
 
     const listing = (machine: Machine) =>
       machine.launcher.catalog.pipe(
@@ -263,7 +251,7 @@ export const make = (options: {
      * yapd off, which would leave it as if it may have started when it never
      * was asked for.
      */
-    const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, warning?: string, step?: Step) =>
+    const launch = (resolved: Resolved, spoken: string, why: string, about: string, noted: Noted, step?: Step) =>
       Effect.gen(function* () {
         const { machine, project } = resolved
         if (resolved.request.prompt === "") return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
@@ -330,7 +318,7 @@ export const make = (options: {
           const lines = ahead(spoken, resolved, started, written) ? { ...written, onIt: yield* persona.onIt() } : written
           const begun = {
             _tag: "Started",
-            spoken: [confirmation(spoken, resolved, started, lines), warning].filter(Boolean).join(" "),
+            spoken: confirmation(spoken, resolved, started, lines),
             started,
             machine,
             request,
@@ -342,38 +330,8 @@ export const make = (options: {
         return { _tag: "Launching", about, project: project.name, machine, then: Fiber.join(launching) } satisfies Outcome
       }).pipe(Effect.uninterruptible)
 
-    /** Reads through the project before writing the prompt, for a request that leans on something in it. */
-    const look = (material: Material, resolved: Resolved, decision: Decision, noted: Noted, step?: Step): Effect.Effect<Outcome> =>
-      Effect.gen(function* () {
-        const { machine, project, request } = resolved
-        const about = decision.about.trim()
-        yield* Effect.logInfo(`Reading through ${project.name} on ${machine.name} first: ${decision.prompt}. ${decision.why}`)
-        const destination: Destination = {
-          about,
-          project: project.name,
-          machine: machine.here ? "" : machine.name,
-          directory: project.path,
-          model: request.model ?? "",
-          effort: request.effort ?? "",
-          worktree: request.worktree === true,
-          lookFor: decision.prompt,
-        }
-        const written = yield* writer.research(material, destination, machine.researcher).pipe(writing.withPermits(1), Effect.either)
-        if (Either.isRight(written)) {
-          if (written.right.action === "ask") return { _tag: "Asked", question: written.right.spoken, about, material } satisfies Outcome
-          const prompt = written.right.prompt
-          return yield* launch({ ...resolved, request: { ...request, prompt } }, written.right.spoken, written.right.why, about, noted, undefined, step)
-        }
-        // Written from what they said after all, which leaves what was to be looked up to the agent.
-        yield* Effect.logWarning(`Could not read through ${project.name}, so it's written without`, written.left)
-        const plain = { ...material, research: false }
-        const blind = yield* decide(plain).pipe(Effect.either)
-        if (Either.isLeft(blind)) return { _tag: "Said", spoken: unwritten, failed: true } satisfies Outcome
-        return yield* start({ decision: blind.right, material: plain }, noted, "I couldn't read through it first.", step)
-      })
-
     /** Carries out what the writer decided: starts it, or says what has to be asked, or why nothing started. */
-    const start = (written: Written, noted: Noted = () => Effect.void, warning?: string, step?: Step): Effect.Effect<Outcome> =>
+    const start = (written: Written, noted: Noted = () => Effect.void, step?: Step): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { decision, material } = written
         const about = decision.about.trim()
@@ -381,9 +339,8 @@ export const make = (options: {
         switch (decision.action) {
           case "ask":
             return asking(decision.spoken.trim() || `Which project is ${about || "that"} for?`)
-          case "start":
-          case "research": {
-            // Whatever the writer went on to decide, a project it couldn't say why it chose is a guess.
+          case "start": {
+            // A project the writer couldn't say why it chose is a guess.
             if (!grounded(decision, material.lines)) {
               yield* Effect.logInfo(
                 `Asking, since "${decision.project}" was ${decision.settled === "unclear" ? "unclear" : `${decision.settled} by "${decision.evidence}", which they didn't say`}. ${decision.why}`,
@@ -395,10 +352,7 @@ export const make = (options: {
               yield* Effect.logInfo(`Decided on "${decision.project}", which isn't a project anywhere. ${decision.why}`)
               return asking(resolved.left)
             }
-            if (decision.action === "start") return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, warning, step)
-            const { project, machine } = resolved.right
-            const spoken = decision.spoken.trim() || `Looking through ${project.name} first.`
-            return { _tag: "Looking", spoken, about, project: project.name, machine, then: look(material, resolved.right, decision, noted, step) } satisfies Outcome
+            return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, step)
           }
           case "none":
           case "drop":
@@ -428,7 +382,6 @@ export const make = (options: {
                   recent: yield* options.recent,
                   earlier: [],
                   lines,
-                  research,
                   now: yield* Clock.currentTimeMillis,
                 }
               : { ...answering, lines: [...answering.lines, ...lines], now: yield* Clock.currentTimeMillis }
@@ -444,7 +397,6 @@ export const make = (options: {
           )
         }),
       start,
-      look,
     }
   })
 

@@ -1530,8 +1530,7 @@ export const make = (options: {
 
     /**
      * What's said of new work. `asked` is whether the request was asked about
-     * already, which it never is twice: neither then, nor when reading the
-     * project, which comes back later, would ask while another question is open.
+     * already, which it never is twice, nor while another question is open.
      */
     const begun = (outcome: Drafts.Outcome, thought: Thought, said: Lines, asked: boolean): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
@@ -1591,24 +1590,6 @@ export const make = (options: {
             )
             return quiet({ _tag: "Nothing" })
           }
-          case "Looking": {
-            // Reading the project takes a while, so what comes of it is said when it's ready. It's under way from now, so asking for it again meanwhile doesn't start it twice.
-            const settled = yield* underWay(utterance, outcome, `Starting ${outcome.about || "it"}, once I've read through ${outcome.project}.`)
-            yield* background(
-              outcome.then.pipe(
-                Effect.flatMap((after) =>
-                  // A launch takes the reading's place at once, rather than once it's this request's turn, so nothing in between can hide it.
-                  (after._tag === "Launching" ? begun(after, thought, said, asked) : turn.withPermits(1)(begun(after, thought, said, asked))).pipe(
-                    Effect.flatMap((told) => deliver(told, thought)),
-                  ),
-                ),
-                Effect.ensuring(settled),
-                Effect.annotateLogs({ utterance: utterance.id }),
-              ),
-              utterance.turns,
-            )
-            return reply(outcome.spoken, { _tag: "Nothing" })
-          }
         }
       })
 
@@ -1634,7 +1615,7 @@ export const make = (options: {
         if (Option.isNone(ready)) return quiet(thought.subject)
         const prompt = ready.value
         if (Either.isLeft(prompt)) return reply(prompt.left, thought.subject)
-        const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance), undefined, { utterance: utterance.id, step })
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, utterance), { utterance: utterance.id, step })
         const told = yield* begun(outcome, thought, said, false)
         // What comes of starting it is known only later, so the rest isn't done on the strength of it, and he's told so, ahead of any question.
         const rest = thought.decision.rest.trim()
@@ -1661,7 +1642,7 @@ export const make = (options: {
           yield* Effect.logInfo(`Leaving it, since that didn't settle the project. ${prompt.right.decision.why}`)
           return reply(said.leaving, thought.subject)
         }
-        const outcome = yield* drafts.start(prompt.right, noting(utterance, open), undefined, { utterance: utterance.id, step: 0 })
+        const outcome = yield* drafts.start(prompt.right, noting(utterance, open), { utterance: utterance.id, step: 0 })
         if (outcome._tag === "Asked") {
           yield* Effect.logInfo("Leaving it, since that didn't settle the project")
           return reply(said.leaving, thought.subject)

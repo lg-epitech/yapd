@@ -136,8 +136,6 @@ Where the work goes is settled by the first of these that says:
 
 The one thing yapd won't guess is the project. It goes by a project you named, earlier work you pointed at, like "the same in std", or a subject only one project has. That a request looks like your last one isn't enough. When it can't tell, it asks, and you answer by talking right after the question, as you would after an update. Say "never mind" to drop it. If you don't answer, it asks once more a minute later, then drops the request and says so. What you dictated is in the log either way, along with what yapd decided, why, and the prompt as it wrote it.
 
-Most prompts are written from what you said, in a few seconds. When a request leans on something in the project, like "do for the responder what we did for the condenser", yapd reads the project first, which takes longer, and says so before it starts: "Looking through yapd first." It reads with the provider's CLI kept from changing anything: Codex in its read-only sandbox, Claude Code with only its tools that read. With other providers it doesn't read projects, and writes from what you said.
-
 Nothing waits on this. Updates keep being read while a prompt is written, and you can dictate the next request before the last one has started. The shortcut only ever starts a new request, so answer questions by talking.
 
 ### Your rules
@@ -180,7 +178,7 @@ You reply to a headless session like to any other. It has no terminal to type in
 
 ### On other machines
 
-Work starts on the machine the project is on. yapd asks every machine in `YAPD_REMOTES` what it can start as you press the shortcut, so that it knows by the time you've finished talking, and starts the session there over SSH, as with follow-ups. Reading a project happens on its machine too, with the provider set in that machine's settings.
+Work starts on the machine the project is on. yapd asks every machine in `YAPD_REMOTES` what it can start as you press the shortcut, so that it knows by the time you've finished talking, and starts the session there over SSH, as with follow-ups.
 
 Tell yapd what you call this Mac, since its hostname is rarely that:
 

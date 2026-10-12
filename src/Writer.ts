@@ -1,19 +1,16 @@
-import { Context, Data, Effect, JSONSchema, Layer, Option, Schema } from "effect"
+import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import { aloud, styled } from "./Condenser.ts"
 import * as Config from "./Config.ts"
 import type { Catalog } from "./Launcher.ts"
 import { WriterModel } from "./Model.ts"
 import type { Heard } from "./Recent.ts"
-import type { Researcher } from "./Research.ts"
 import type { Line } from "./Responder.ts"
 
 // The user dictates new work to yapd, not to an agent. One call to the model
-// decides where it goes and writes the prompt, which is all most requests
-// need. A request that leans on something in the project is written by a
-// second call instead, an agent run in the project's checkout that can read
-// it, once the first has settled which project that is.
+// decides where it goes and writes the prompt: what the request leans on in
+// the project is the agent's to read once it starts.
 
-export const Action = Schema.Literal("start", "ask", "research", "none", "drop", "wait")
+export const Action = Schema.Literal("start", "ask", "none", "drop", "wait")
 export type Action = typeof Action.Type
 
 /**
@@ -62,15 +59,6 @@ export const grounded = (decision: Pick<Decision, "settled" | "evidence">, lines
   return quoted.length > 0 && quoted.every((word) => said.has(word))
 }
 
-/** What comes back from reading the project: the prompt, or a question it raised. */
-export const Written = Schema.Struct({
-  action: Schema.Literal("start", "ask"),
-  why: Schema.String,
-  prompt: Schema.String,
-  spoken: Schema.String,
-})
-export type Written = typeof Written.Type
-
 /** What a machine can start, or why it can't say. */
 export interface Listing {
   /** What the user calls the machine. */
@@ -93,22 +81,7 @@ export interface Material {
   readonly earlier: ReadonlyArray<string>
   /** What the user dictated, then any questions yapd asked about it and their answers. */
   readonly lines: ReadonlyArray<Line>
-  /** Whether the project can be read through before writing. */
-  readonly research: boolean
   readonly now: number
-}
-
-/** Where a request was settled to go, when its prompt is written by reading the project. */
-export interface Destination {
-  readonly about: string
-  readonly project: string
-  readonly machine: string
-  readonly directory: string
-  readonly model: string
-  readonly effort: string
-  readonly worktree: boolean
-  /** What to look up, as the first call put it. */
-  readonly lookFor: string
 }
 
 export class WriteError extends Data.TaggedError("WriteError")<{ readonly cause: unknown }> {}
@@ -117,8 +90,6 @@ export class Writer extends Context.Tag("yapd/Writer")<
   Writer,
   {
     readonly decide: (material: Material) => Effect.Effect<Decision, WriteError>
-    /** Writes the prompt from the project's checkout, read through the machine's researcher. */
-    readonly research: (material: Material, destination: Destination, researcher: Researcher) => Effect.Effect<Written, WriteError>
     /** Gets ready for a dictation that's under way. */
     readonly prepare: Effect.Effect<void>
   }
@@ -143,14 +114,13 @@ const speaking = (actions: ReadonlyArray<Action>) =>
     aloud,
     `- For "start", what you say once the session has started, which comes after your usual line that it's in hand, so leave that out: the project, the model, and whether it's in a worktree, like "In yapd, on Fable, in a worktree." or "In yapd, on Fable, without a worktree." Always say which, in those words, since it's how they catch you having misheard. Most times that's all of it. The machine is only named when it isn't this one, and the effort only when they asked for one. If you filled in or corrected something that changes what the agent will do, add it in a few words, like "I took the std thing to mean the Redis investigation." Never how you decided, and don't repeat the request back.`,
     `- For "ask", the question, in one sentence. They may have dictated other things since, so it says which request it's about, and offers the candidates when two or three projects really fit, like "For the retry fix, is that cryptio saas or integration connectors?" When they named a project you don't know, say so rather than offer ones they didn't name, like "I don't know a project called billing. Which one is the retry fix for?"`,
-    ...(actions.includes("research") ? [`- For "research", only that you're reading the project first, in a few words, like "Looking through yapd first."`] : []),
     ...(actions.includes("none") ? [`- For "none", a few words on why nothing started, like "That didn't sound like work to start, so I left it."`] : []),
     ...(actions.includes("drop") ? [`- For "drop", that it's dropped, in a word or two. Empty for "wait".`] : []),
   ].join("\n")
 
 const reading = `What you're reading is a transcript of speech, not something they typed. Names and technical words come out mangled, and the short words are the least reliable of all: "no", "not", "on", "in", "a" and "now" get swapped or dropped, which can turn an instruction into its opposite. So read for what a person would have said there, and don't take a short word at its face when the sentence around it says otherwise. Where the two readings would do different things and you can't tell which was meant, don't pick the one that happens to be written.`
 
-const deciding = (research: boolean, answering: boolean) =>
+const deciding = (answering: boolean) =>
   [
     role,
     `Reply with only a JSON object with the keys "action", "about", "settled", "evidence", "project", "machine", "model", "effort", "worktreeFrom", "worktree", "branch", "why", "prompt" and "spoken".`,
@@ -159,11 +129,6 @@ const deciding = (research: boolean, answering: boolean) =>
       `"action":`,
       `- "start" when you know which project it's for and can write the prompt from what's below. That's most requests.`,
       `- "ask" when you can't tell which project they mean. Never guess a project: work started in the wrong one is the costly mistake, and a question costs them a few seconds. Also when the request can be read two ways that would send the agent in different directions. Nothing else is worth a question: not the model, the effort or the worktree, and not a detail the agent can find out in the project.`,
-      ...(research
-        ? [
-            `- "research" when the project is clear, but the request leans on something in it that you'd have to read to know what's being asked, like "do for the responder what we did for the condenser" or "finish what that TODO in the launcher says". It takes a minute, and the agent reads the project itself, so what it can find on its own is no reason. Most requests don't need it.`,
-          ]
-        : []),
       `- "none" when there's nothing in it for an agent to do: they were trying the microphone, like "testing, one two", talking to someone else, asking you something, or it makes no sense. Anything an agent could carry out is work, however small, and even when they call it a test: "this is a test, reply with the word OK" is a prompt like any other, and needs a project like any other.`,
       ...(answering
         ? [
@@ -195,25 +160,8 @@ const deciding = (research: boolean, answering: boolean) =>
       `"branch": the branch a new worktree starts from, when they named one. Empty otherwise.`,
       `"why": for the log, not read out. In a sentence or two, what settled the project, the model, the effort and the worktree, whether said, a rule or last used, and anything you corrected or filled in.`,
     ].join("\n"),
-    `${prompting}\nFor "start" only.${research ? ` For "research", what to look up in the project, in a sentence.` : ""} Empty otherwise.`,
-    speaking(["start", "ask", ...(research ? ["research" as const] : []), "none", ...(answering ? ["drop" as const] : [])]),
-  ].join("\n\n")
-
-const researching = (destination: Destination) =>
-  [
-    `${role} It's for ${destination.project}, and the prompt can't be written without reading the project first, which is what you're here for.`,
-    `You're in its checkout, ${destination.directory}. You can read anything in it and change nothing. Read only what the request leans on, stopping as soon as you can write the prompt. Solving or planning the work is the agent's job, not yours.`,
-    `What to look up: ${destination.lookFor}`,
-    `Reply with only a JSON object with the keys "action", "why", "prompt" and "spoken".`,
-    [
-      `"action":`,
-      `- "start" once you can write the prompt.`,
-      `- "ask" only if what you found leaves what they're asking for open, in a way that would send the agent in different directions.`,
-    ].join("\n"),
-    `"why": for the log, not read out. What you read, and what it settled, in a sentence or two.`,
-    `${prompting}\nYou read the project to spell out what they pointed at, so the prompt says what that is as you found it: what it's called, and what it does today, in a sentence or two. How to do the work is still the agent's to decide. Empty for "ask".`,
-    speaking(["start", "ask"]),
-    `It starts in ${destination.project}${destination.machine === "" ? "" : ` on ${destination.machine}`}, on ${[destination.model, destination.effort].filter(Boolean).join(" ")}, ${destination.worktree ? "in a new worktree" : "in the project's checkout, without a worktree"}.`,
+    `${prompting}\nFor "start" only. Empty otherwise.`,
+    speaking(["start", "ask", "none", ...(answering ? ["drop" as const] : [])]),
   ].join("\n\n")
 
 /**
@@ -342,13 +290,13 @@ const dialogue = (lines: ReadonlyArray<Line>) => {
   ].join("\n\n")
 }
 
-const context = ({ listings, rules, recent, earlier, lines, now }: Material, style: Option.Option<string>, catalogs = true) => [
+const context = ({ listings, rules, recent, earlier, lines, now }: Material, style: Option.Option<string>) => [
   ...Option.toArray(Option.map(style, styled)),
   Option.match(rules, {
     onNone: () => "They have written no rules.",
     onSome: (rules) => `Their rules, as they wrote them:\n${rules}`,
   }),
-  ...(catalogs ? [listed(listings, now)] : []),
+  listed(listings, now),
   recent.length === 0
     ? "You've read nothing out lately."
     : `What you read out lately, newest first:\n${recent.map(heard(listings, now)).join("\n")}`,
@@ -365,10 +313,7 @@ const context = ({ listings, rules, recent, earlier, lines, now }: Material, sty
 
 /** What stays the same from call to call comes first, so the provider can reuse it. */
 export const prompt = (material: Material, style: Option.Option<string>) =>
-  [deciding(material.research, material.lines.length > 1), ...context(material, style)].join("\n\n")
-
-export const researchPrompt = (material: Material, destination: Destination, style: Option.Option<string>) =>
-  [researching(destination), ...context(material, style, false)].join("\n\n")
+  [deciding(material.lines.length > 1), ...context(material, style)].join("\n\n")
 
 export const ProviderWriter = Layer.effect(
   Writer,
@@ -378,17 +323,6 @@ export const ProviderWriter = Layer.effect(
     return {
       decide: (material) =>
         model.ask(Decision, prompt(material, style)).pipe(Effect.mapError((cause) => new WriteError({ cause }))),
-      research: (material, destination, researcher) =>
-        researcher
-          .research({
-            directory: destination.directory,
-            prompt: researchPrompt(material, destination, style),
-            schema: JSONSchema.make(Written) as unknown as Record<string, unknown>,
-          })
-          .pipe(
-            Effect.flatMap(Schema.decodeUnknown(Written)),
-            Effect.mapError((cause) => new WriteError({ cause })),
-          ),
       prepare: model.prepare,
     }
   }),

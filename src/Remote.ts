@@ -4,15 +4,14 @@ import { Origin } from "./Origin.ts"
 import { Agent } from "./Payload.ts"
 import { ProcessError, run } from "./Process.ts"
 import { type Relay, RelayError, type Relays, type Thread, Unreachable } from "./Relay.ts"
-import * as Research from "./Research.ts"
 
 // Agents on other machines reach the daemon through a tunnel the user sets up,
 // but their follow-ups have to be sent from where they run: T3 Code's API and
 // Codex's queue are local to that machine. So the daemon hands them to
 // `yapd relay` there over SSH, which runs the same relays and says how it went.
-// New work goes the same way, to `yapd start`, `yapd catalog` says what that
-// machine can start, and `yapd research` reads through a project there. `yapd
-// t3` says where its T3 Code listens, for the tunnel to it (`Tunnel.ts`).
+// New work goes the same way, to `yapd start`, and `yapd catalog` says what
+// that machine can start. `yapd t3` says where its T3 Code listens, for the
+// tunnel to it (`Tunnel.ts`).
 
 /** Hostname, as the machine's hooks report it, to SSH destination. */
 export type Remotes = ReadonlyMap<string, string>
@@ -97,7 +96,7 @@ export const ask = <E>(
   exec: Exec,
   host: string,
   destination: string,
-  command: "relay" | "start" | "catalog" | "research" | "t3",
+  command: "relay" | "start" | "catalog" | "t3",
   stdin: string,
   // `silent` and `failed` end the sentences that start with the machine's name, as `heard.cut` does.
   wording: { readonly patience: Duration.DurationInput; readonly silent: string; readonly failed: string },
@@ -221,21 +220,6 @@ export const launcher = (host: string, destination: string, exec: Exec = ssh, ma
   }
 }
 
-/** Reads through a project on another machine through `yapd research` there, with that machine's own provider. */
-export const researcher = (host: string, destination: string, exec: Exec = ssh, master: Master = none): Research.Researcher =>
-  Research.remote(host, (stdin) =>
-    ask(
-      exec,
-      host,
-      destination,
-      "research",
-      stdin,
-      { patience: Research.patience, silent: "isn't answering.", failed: "couldn't read through the project." },
-      (reason, cause) => new Research.ResearchError({ reason, cause }),
-      master,
-    ),
-  )
-
 /**
  * Whether a name means this machine: what the user calls it, when they've
  * said, or its hostname, which can carry a domain they wouldn't say, like `.local`.
@@ -269,16 +253,6 @@ export const launchers =
         const refused = Effect.fail(new Launcher.LaunchError({ reason }))
         return { start: () => refused, catalog: refused }
       },
-    })
-
-/** What reads through a machine's projects, picked like its launcher. */
-export const researchers =
-  (remotes: Remotes, self: Self, own: Research.Researcher, exec: Exec = ssh, called?: string, masters: Masters = nowhere) =>
-  (machine?: string): Research.Researcher =>
-    pick(remotes, self, called, machine, {
-      own,
-      remote: (host, destination) => researcher(host, destination, exec, masters(host.toLowerCase())),
-      unknown: Research.unavailable,
     })
 
 /** The machines work can start on, this one first by what the user calls it, as `launchers` knows them. */

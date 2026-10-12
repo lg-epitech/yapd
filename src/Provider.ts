@@ -22,12 +22,6 @@ export interface Provider {
   readonly command: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
   /** Pulls the reply's JSON value out of stdout. Defaults to finding the object in plain text. */
   readonly reply?: (stdout: string) => unknown
-  /**
-   * The same call, run in a project's checkout to read through it. Only for CLIs
-   * that keep the model from changing anything themselves, and were seen to:
-   * OpenCode's plan agent, for one, still has its shell and only asks it not to.
-   */
-  readonly research?: (call: Call) => { readonly argv: ReadonlyArray<string>; readonly stdin?: string }
 }
 
 const flag = (name: string, value: string | undefined) => (value === undefined ? [] : [name, value])
@@ -65,23 +59,21 @@ const codex = ({ prompt, model, effort, tier, schema }: Call) => ({
   stdin: prompt,
 })
 
-const claude =
-  (tools: string) =>
-  ({ prompt, model, effort, schema }: Call) => ({
-    argv: [
-      "claude", "-p",
-      ...flag("--model", model),
-      ...flag("--effort", effort),
-      "--output-format", "json",
-      "--json-schema", schema.json,
-      "--tools", tools,
-      "--setting-sources", "",
-      "--strict-mcp-config",
-      "--disable-slash-commands",
-      "--no-session-persistence",
-    ],
-    stdin: prompt,
-  })
+const claude = ({ prompt, model, effort, schema }: Call) => ({
+  argv: [
+    "claude", "-p",
+    ...flag("--model", model),
+    ...flag("--effort", effort),
+    "--output-format", "json",
+    "--json-schema", schema.json,
+    "--tools", "",
+    "--setting-sources", "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--no-session-persistence",
+  ],
+  stdin: prompt,
+})
 
 export const providers: Record<Name, Provider> = {
   codex: {
@@ -89,13 +81,10 @@ export const providers: Record<Name, Provider> = {
     defaults: { model: "gpt-6-luna", effort: "high", tier: "priority" },
     takesEffort: true,
     command: codex,
-    research: codex,
   },
   claude: {
     takesEffort: true,
-    command: claude(""),
-    // The only tools it's given, so there's no shell and nothing that writes.
-    research: claude("Read,Glob,Grep"),
+    command: claude,
     reply: (stdout) => (JSON.parse(stdout) as { structured_output: unknown }).structured_output,
   },
   grok: {

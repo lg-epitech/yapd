@@ -6,10 +6,9 @@ import * as Ledger from "./Ledger.ts"
 import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
 import * as Remote from "./Remote.ts"
-import * as Research from "./Research.ts"
 import type { Line } from "./Responder.ts"
 import * as Store from "./Store.ts"
-import { type Decision, type Material, type Written, WriteError, Writer } from "./Writer.ts"
+import { type Decision, type Material, WriteError, Writer } from "./Writer.ts"
 
 const models: Catalog["models"] = [
   { name: "claude-fable-5-1", title: "Claude Fable 5.1", aliases: ["fable"], efforts: ["low", "high"] },
@@ -67,7 +66,6 @@ const decision = (overrides: Partial<Decision>): Decision => ({
 const drafts = (
   decide: (material: Material) => Decision | undefined,
   options: {
-    readonly written?: Written
     readonly refuse?: string
     /** T3 Code took what was started, but its answer was lost, so it may have started all the same. */
     readonly lost?: boolean
@@ -85,7 +83,6 @@ const drafts = (
     const started: Array<{ readonly machine: string; readonly request: Request }> = []
     const said: Array<{ readonly spoken: string; readonly came: Drafts.Outcome["_tag"] | "Failed" }> = []
     const asked: Array<Material> = []
-    const researched: Array<{ readonly machine: string; readonly directory: string }> = []
     const catalogs: Array<string> = []
     /** How many times a line for going ahead was picked. */
     let picks = 0
@@ -108,10 +105,6 @@ const drafts = (
           } satisfies Started
         }),
     })
-    const researcher = (machine: string): Research.Researcher => ({
-      available: true,
-      research: ({ directory }) => Effect.sync(() => void researched.push({ machine, directory })).pipe(Effect.as({})),
-    })
     /** `yapd start` on rig as SSH brings it back, with what it said on stderr ahead of SSH's own. */
     const there = (command: ReadonlyArray<string>, stdin: string) => {
       let said = ""
@@ -123,7 +116,7 @@ const drafts = (
     const ledger: Ledger.Ledger["Type"] = options.ledger === "slow" ? { ...kept, prepare: (step) => Effect.zipLeft(kept.prepare(step), Effect.sleep("1 second")) } : kept
     const made = yield* Drafts.make({
       machines: [
-        { name: "rosie", here: true, hosts: ["Rosie.local"], launcher: launcher("rosie", rosie), researcher: researcher("rosie") },
+        { name: "rosie", here: true, hosts: ["Rosie.local"], launcher: launcher("rosie", rosie) },
         {
           name: "rig",
           here: false,
@@ -132,7 +125,6 @@ const drafts = (
             options.remote === true
               ? Remote.launcher("rig", "rig", (command, stdin) => (command.at(-1)?.endsWith("start") ? there(command, stdin) : list(launcher("rig", rig))))
               : launcher("rig", rig),
-          researcher: researcher("rig"),
         },
       ],
       rules: Effect.succeed(Option.some("Fable on high for hard bugs.")),
@@ -146,11 +138,6 @@ const drafts = (
             const decided = decide(material)
             return decided === undefined ? Effect.fail(new WriteError({ cause: "The model is down" })) : Effect.succeed(decided)
           }),
-        research: (_, destination, researcher) =>
-          researcher.research({ directory: destination.directory, prompt: destination.lookFor, schema: {} }).pipe(
-            Effect.mapError((cause) => new WriteError({ cause })),
-            Effect.zipRight(options.written === undefined ? Effect.fail(new WriteError({ cause: "Nothing written" })) : Effect.succeed(options.written)),
-          ),
         prepare: Effect.void,
       }),
       Effect.provideService(Persona.Persona, {
@@ -160,7 +147,7 @@ const drafts = (
       }),
     )
     let material: Material | undefined
-    /** Says what came of it, and what came of reading the project first once that's done. */
+    /** Says what came of it, and what came of a launch once that's done. */
     const told = (outcome: Drafts.Outcome): Effect.Effect<void> =>
       Effect.gen(function* () {
         switch (outcome._tag) {
@@ -174,9 +161,6 @@ const drafts = (
           case "Said":
             said.push({ spoken: outcome.spoken, came: outcome.failed ? "Failed" : "Said" })
             return
-          case "Looking":
-            said.push({ spoken: outcome.spoken, came: "Looking" })
-            return yield* told(yield* outcome.then)
           case "Launching":
             return yield* told(yield* outcome.then)
         }
@@ -185,7 +169,7 @@ const drafts = (
       Effect.gen(function* () {
         const written = yield* made.begin(lines, answering)
         if (Either.isLeft(written)) return said.push({ spoken: written.left, came: "Failed" })
-        yield* told(yield* made.start(written.right, undefined, undefined, step))
+        yield* told(yield* made.start(written.right, undefined, step))
       })
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -210,7 +194,6 @@ const drafts = (
       spoken: () => said.map(({ spoken }) => spoken),
       picks: () => picks,
       asked,
-      researched,
       catalogs,
     }
   })
@@ -248,7 +231,6 @@ describe("Drafts", () => {
       here,
       hosts: [],
       launcher: { start: () => Effect.die("not started"), catalog: Effect.die("not asked") },
-      researcher: Research.unavailable("not here"),
     }))
     const where = (overrides: Partial<Decision>) =>
       Either.map(Drafts.resolve(machines, listings, decision(overrides)), ({ machine, request }) => [machine.name, request.project])
@@ -300,94 +282,10 @@ describe("Drafts", () => {
     ])
   })
 
-  test("says it's reading the project before it does, where the project is", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, started, said, researched } = yield* drafts(
-          () => decision({ action: "research", project: "trainer", machine: "rig", prompt: "What the eval loader does.", spoken: "Looking through trainer first." }),
-          { written: { action: "start", why: "Read the loader.", prompt: "Make the eval loader stream.", spoken: "In trainer on rig, on Fable, in a worktree." } },
-        )
-        yield* dictate("In trainer, do the streaming thing for the eval loader.")
-        return { started, researched, said }
-      }),
-    )
-    expect(result.researched).toEqual([{ machine: "rig", directory: "/home/me/trainer" }])
-    expect(result.said).toEqual([
-      { spoken: "Looking through trainer first.", came: "Looking" },
-      { spoken: "On it. In trainer on rig, on Fable, in a worktree.", came: "Started" },
-    ])
-    expect(result.started).toEqual([
-      { machine: "rig", request: { project: "/home/me/trainer", prompt: "Make the eval loader stream.", model: "claude-fable-5-1", effort: "high", worktree: true } },
-    ])
-  })
-
-  test("writes from what the user said when the project can't be read", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, started, spoken, asked } = yield* drafts(({ research }) =>
-          research ? decision({ action: "research", prompt: "What the loader does.", spoken: "Looking through yapd first." }) : decision({}),
-        )
-        yield* dictate("In yapd, do the streaming thing for the loader.")
-        return { started, spoken: spoken(), research: asked.map(({ research }) => research) }
-      }),
-    )
-    expect(result.research).toEqual([true, false])
-    expect(result.started.map(({ request }) => request.prompt)).toEqual(["Fix the loader."])
-    expect(result.spoken).toEqual(["Looking through yapd first.", "On it. In yapd, on Fable, in a worktree. I couldn't read through it first."])
-  })
-
-  test("resolves the fallback decision again when reading the project fails", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, said, started } = yield* drafts(({ research }) =>
-          research
-            ? decision({ action: "research", evidence: "yapd", spoken: "Looking through yapd first." })
-            : decision({
-                project: "std",
-                evidence: "std",
-                model: "opus-5.5",
-                effort: "XHigh",
-                worktree: false,
-                prompt: "Fix the loader in std.",
-                spoken: "In std, on Opus, without a worktree.",
-              }),
-        )
-        yield* dictate("In yapd, compare the loader with std and fix it.")
-        return { started, spoken: said.at(-1)?.spoken }
-      }),
-    )
-    expect(result.started).toEqual([
-      {
-        machine: "rosie",
-        request: { project: "/code/std", prompt: "Fix the loader in std.", model: "claude-opus-5-5", effort: "xhigh", worktree: false },
-      },
-    ])
-    expect(result.spoken).toBe("On it. In std, on Opus, without a worktree. I couldn't read through it first.")
-  })
-
-  test.each([
-    { project: "std", evidence: "words they never said" },
-    { project: "billing", evidence: "billing" },
-  ])("asks when a research fallback isn't a valid grounded destination: $project / $evidence", async (fallback) => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, said, started } = yield* drafts(({ research }) =>
-          research
-            ? decision({ action: "research", evidence: "yapd", spoken: "Looking through yapd first." })
-            : decision({ ...fallback, prompt: "Fix the loader." }),
-        )
-        yield* dictate("In yapd, compare the loader with billing and fix it.")
-        return { started, last: said.at(-1) }
-      }),
-    )
-    expect(result.started).toEqual([])
-    expect(result.last).toEqual({ spoken: "Which project is the loader fix for?", came: "Asked" })
-  })
-
   test("says what really started when that's not what was asked", () => {
     const resolved = Either.getOrThrow(
       Drafts.resolve(
-        [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") }, researcher: Research.unavailable("") }],
+        [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") } }],
         [{ machine: "rig", here: false, hosts: [], catalog: Option.some(rig) }],
         decision({ project: "trainer", machine: "rig" }),
       ),
@@ -421,7 +319,7 @@ describe("Drafts", () => {
   test("says the line for going ahead in front of the writer's words, in place of an \"On it\" it wrote anyway", () => {
     const resolved = Either.getOrThrow(
       Drafts.resolve(
-        [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") }, researcher: Research.unavailable("") }],
+        [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") } }],
         [{ machine: "rig", here: false, hosts: [], catalog: Option.some(rig) }],
         decision({ project: "trainer", machine: "rig" }),
       ),
@@ -517,25 +415,6 @@ describe("Drafts", () => {
     )
     expect(result.started).toEqual(["yapd:u1:0", "yapd:u2:0"])
     expect(result.said[1]).toEqual({ spoken: "I've already asked for that to start.", came: "Said" })
-  })
-
-  test("new work read through first, as a step of a request, is written down and asked for under its ids, whether the reading comes to anything or not", async () => {
-    const through = (reads: boolean) =>
-      run(
-        Effect.gen(function* () {
-          const { dictate, started, ledger } = yield* drafts(
-            ({ research }) => (research ? decision({ action: "research", prompt: "What the loader does.", spoken: "Looking through yapd first." }) : decision({})),
-            { ledger: true, ...(reads ? { written: { action: "start", why: "Read the loader.", prompt: "Make the loader stream.", spoken: "" } } : {}) },
-          )
-          yield* dictate("In yapd, do the streaming thing for the loader.", { utterance: "u1", step: 1 })
-          const row = yield* ledger.get("yapd:u1:1")
-          return {
-            asked: started.map(({ request }) => request.ids?.command),
-            row: Option.map(row, ({ kind, state, thread }) => [kind, state, thread === started[0]?.request.ids?.thread]),
-          }
-        }),
-      )
-    for (const reads of [true, false]) expect(await through(reads)).toEqual({ asked: ["yapd:u1:1"], row: Option.some(["start", "sent", true]) })
   })
 
   test("new work written down is asked for even when yapd is turned off just then, never left as if it may have started", async () => {

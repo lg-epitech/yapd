@@ -18,7 +18,6 @@ import * as Mutes from "./Mutes.ts"
 import { Model, ModelError } from "./Model.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
-import * as Research from "./Research.ts"
 import type { Line } from "./Responder.ts"
 import * as Show from "./Show.ts"
 import * as Settings from "./Settings.ts"
@@ -223,8 +222,6 @@ const assistant = (
   write: (material: Material) => Written = () => written({}),
   given: {
     readonly writing?: number
-    /** How long reading through a project takes, for a request that leans on something in it. */
-    readonly researching?: number
     readonly launching?: number
     readonly hanging?: boolean
     readonly waiting?: boolean
@@ -410,7 +407,6 @@ const assistant = (
                     ),
                   ),
           },
-          researcher: Research.unavailable("Not here."),
         },
       ],
       rules: Effect.succeed(Option.none()),
@@ -427,8 +423,6 @@ const assistant = (
             Effect.zipRight(Effect.sync(() => write(material))),
             Effect.ensuring(given.writer?.stopped ?? Effect.void),
           ),
-        research: () =>
-          Effect.sleep(`${given.researching ?? 0} seconds`).pipe(Effect.as({ action: "start" as const, why: "It's in the loader.", prompt: "Fix the loader.", spoken: "" })),
         prepare: Effect.void,
       }),
       Effect.provide(persona),
@@ -5290,52 +5284,6 @@ describe("Assistant", () => {
     expect(result.meanwhile).toEqual(["Nothing needs you right now, sir.", "The loader fix is already under way, sir."])
     expect(result.told).toContainEqual(["started", "Starting the loader fix, which T3 Code is still getting ready."])
     expect(result.spoken).toEqual([...result.meanwhile, "About the loader fix: T3 Code is taking too long, so I don't know if it started."])
-    expect(result.started).toEqual([])
-  })
-
-  test("asked for again while yapd still reads through the project first, it's already under way and starts once", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { dictate, wait, spoken, started, seen } = yield* assistant(
-          (situation) =>
-            situation.lately.some(({ kind }) => kind === "started")
-              ? Brain.decision({ act: "answer", spoken: "The loader fix is already under way, sir." })
-              : Brain.decision({ act: "start", text: situation.utterance.heard }),
-          () => written({ action: "research", spoken: "Looking through yapd first." }),
-          { researching: 10 },
-        )
-        yield* dictate("Fix the loader in yapd.")
-        // Said again halfway through the reading.
-        yield* wait(5)
-        yield* dictate("Fix the loader in yapd.")
-        yield* wait(5)
-        return { told: seen[1]!.lately.map(({ kind, said }) => [kind, said]), spoken: spoken(), started: started.map(({ project }) => project) }
-      }),
-    )
-    expect(result.told).toContainEqual(["started", "Starting the loader fix, once I've read through yapd."])
-    expect(result.spoken).toEqual([
-      "Looking through yapd first.",
-      "The loader fix is already under way, sir.",
-      "Started in yapd, on Claude Opus 5.5, without a worktree.",
-    ])
-    expect(result.started).toEqual(["/code/yapd"])
-  })
-
-  test("turned off as soon as he's told it reads through the project first, before the reading has begun, nothing starts", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const { heard, toggle, wait, spoken, started } = yield* assistant(
-          (situation) => Brain.decision({ act: "start", text: situation.utterance.heard }),
-          () => written({ action: "research", spoken: "Looking through yapd first." }),
-          { researching: 5 },
-        )
-        yield* heard({ heard: "Fix the loader in yapd.", via: "typed", at: now, voiced: 3, turns: 1 })
-        yield* toggle(false)
-        yield* wait(10)
-        return { spoken: spoken(), started: started.map(({ project }) => project) }
-      }),
-    )
-    expect(result.spoken).toEqual(["Looking through yapd first."])
     expect(result.started).toEqual([])
   })
 

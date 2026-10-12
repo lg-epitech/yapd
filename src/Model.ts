@@ -1,12 +1,11 @@
 import { ConfigError, Context, Data, Effect, JSONSchema, Layer, Option, Schema } from "effect"
-import { rm, stat } from "node:fs/promises"
+import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as CodexServer from "./CodexServer.ts"
 import * as Config from "./Config.ts"
 import { run } from "./Process.ts"
 import { json, type Name, type Provider, providers } from "./Provider.ts"
-import * as Research from "./Research.ts"
 
 export class ModelError extends Data.TaggedError("ModelError")<{ readonly cause: unknown }> {}
 
@@ -96,8 +95,8 @@ export const writing = Effect.gen(function* () {
 
 const described = ({ name, model, effort, tier }: Chosen) => [name, model, effort, tier && `${tier} tier`].filter(Boolean).join(" ")
 
-/** Runs the CLI once for a call, from `cwd` when there is one. */
-const once = (chosen: Chosen, command: Provider["command"], schema: object, prompt: string, cwd?: string) => {
+/** Runs the CLI once for a call. */
+const once = (chosen: Chosen, command: Provider["command"], schema: object, prompt: string) => {
   const provider = providers[chosen.name]
   const inline = JSON.stringify(schema)
   return Effect.acquireUseRelease(
@@ -108,7 +107,6 @@ const once = (chosen: Chosen, command: Provider["command"], schema: object, prom
       // YAPD_INTERNAL keeps the call from triggering yapd's own hooks.
       return yield* run(argv, {
         ...(stdin === undefined ? {} : { stdin }),
-        ...(cwd === undefined ? {} : { cwd }),
         env: { YAPD_INTERNAL: "1" },
       }).pipe(Effect.flatMap((stdout) => Effect.try(() => (provider.reply ?? json)(stdout))))
     }),
@@ -161,25 +159,3 @@ export const ProviderModel = Layer.scopedContext(
     return Context.make(Model, model).pipe(Context.add(WriterModel, yield* make(writer)))
   }),
 )
-
-/**
- * Reads through projects on this machine with what writes prompts here, run
- * from the project's checkout and kept from changing anything by the CLI itself.
- */
-export const researcher = Effect.map(writing, (chosen): Research.Researcher => {
-  const { research } = providers[chosen.name]
-  if (research === undefined) return Research.unavailable(`${chosen.name} can't be kept from changing a project, so I don't read through any with it.`)
-  return {
-    available: true,
-    research: ({ directory, prompt, schema }) =>
-      Effect.gen(function* () {
-        if (!(yield* Effect.promise(() => stat(directory).then((found) => found.isDirectory(), () => false)))) {
-          return yield* new Research.ResearchError({ reason: `${directory} isn't there.` })
-        }
-        return yield* once(chosen, research, schema, prompt, directory).pipe(
-          Effect.timeout(Research.patience),
-          Effect.mapError((cause) => new Research.ResearchError({ reason: `${chosen.name} couldn't read through it.`, cause })),
-        )
-      }),
-  }
-})

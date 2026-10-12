@@ -12,7 +12,6 @@ import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Persona from "./Persona.ts"
 import * as Questions from "./Questions.ts"
-import * as Research from "./Research.ts"
 import type { Line } from "./Responder.ts"
 import type * as T3Actions from "./T3Actions.ts"
 import * as T3Live from "./T3Live.ts"
@@ -1339,7 +1338,7 @@ describe("Brain", () => {
       ],
     })
     const resolved = Drafts.resolve(
-      [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") }, researcher: Research.unavailable("") }],
+      [{ name: "rig", here: false, hosts: [], launcher: { start: () => Effect.die(""), catalog: Effect.die("") } }],
       [{ machine: "rig", here: false, hosts: [], catalog: Option.some({ projects: [{ name: "trainer", path: "/home/me/trainer", repository: true, branch: "main", worktree: true, recent: [] }], models: [] }) }],
       { about: "the loader fix", project: "trainer", machine: "rig", model: "", effort: "", worktree: true, worktreeFrom: "said", branch: "", prompt: "Fix it." },
     )
