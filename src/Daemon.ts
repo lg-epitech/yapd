@@ -1017,15 +1017,16 @@ export const make = (
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
-      const lateHeld = mutable ? yield* holds(priority, full) : Option.none<Held>()
-      if (Option.isSome(lateHeld)) {
-        yield* removeFile(audio)
-        return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
-      }
+      // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it.
       const off = { _tag: "Held", why: "off" } as const
       if (yield* offSince(turns)) {
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
+      }
+      const lateHeld = mutable ? yield* holds(priority, full) : Option.none<Held>()
+      if (Option.isSome(lateHeld)) {
+        yield* removeFile(audio)
+        return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: lateHeld.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       if (fallback !== undefined) standing.set(update, fallback)
       // What was kept quiet of its turn in its hook's place is told once he hears this, so it isn't what he missed as well.

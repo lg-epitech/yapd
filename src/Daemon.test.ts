@@ -3489,6 +3489,25 @@ describe("Daemon headline first", () => {
     expect(result.held).toEqual([["yapd. The fee table is in.", "focus"]])
   })
 
+  test("focus begun while an update is rendered, then yapd turned off, holds it as what came in while off, for him to catch up on, never for the digest", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        let mode = Option.none<"focus" | "quiet">()
+        const { finish, wait, toggle, played, journal } = yield* make(undefined, { holding: Effect.sync(() => mode), renderSeconds: 5 })
+        yield* finish("tezos", "The fee table is in.")
+        yield* wait(1)
+        mode = Option.some("focus")
+        yield* toggle(false)
+        yield* wait(15)
+        yield* toggle(true)
+        yield* wait(11)
+        return { played: [...played], held: (yield* journal.held(0)).map(({ said, detail }) => [said, (detail as { held?: string }).held]) }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.held).toEqual([["yapd. The fee table is in.", "off"]])
+  })
+
   test("how long it's been quiet counts from the end of the last line, and is nothing while anything is summed up, waits, is said or dictated", async () => {
     const result = await run(
       Effect.gen(function* () {
