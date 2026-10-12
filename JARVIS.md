@@ -2,9 +2,9 @@
 
 A short list of what this branch changed and what yapd can do now. The commit log has the detail, including every fix that came out of review.
 
-Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite`, `yapd.before-interrupt.sqlite`, `yapd.before-interrupt-v5.sqlite`, `yapd.before-thread-menu.sqlite` and `yapd.before-m5-off.sqlite`.
+Where it is: work lands on `t3/jarvis-companion-assistant`, is reviewed by GPT-6.1 Sol until nothing you'd run into is left (the narrowest findings go under "Known, left for now"), then goes into `dev`, which the installed yapd (`~/projects/yapd`) runs. The database was backed up before each step went live: `~/.yapd/yapd.before-jarvis.sqlite`, `yapd.before-m1.sqlite`, `yapd.before-m2.sqlite`, `yapd.before-m7.sqlite`, `yapd.before-m8.sqlite`, `yapd.before-followups.sqlite`, `yapd.before-m3.sqlite`, `yapd.before-interrupt.sqlite`, `yapd.before-interrupt-v5.sqlite`, `yapd.before-thread-menu.sqlite`, `yapd.before-m5-off.sqlite` and `yapd.before-thread-panel.sqlite`.
 
-Live on `dev` now: everything below, headline first, focus and quiet, and off keeping everything with catching up included, with the menu bar app installed. Talking over yapd's first seconds stopping it at once, muting threads, headline first and modes, off and catching up, rig's threads, and agents' questions read out and answered by voice are waiting on their first checks with you.
+Live on `dev` now: everything below, headline first, focus and quiet, off keeping everything with catching up, and yapd's side of the thread panels included. The menu bar app with the thread panels waits on your OK to install; the one installed has the Mute menu. Talking over yapd's first seconds stopping it at once, muting threads, headline first and modes, off and catching up, rig's threads, and agents' questions read out and answered by voice are waiting on their first checks with you.
 
 ## Talk to it (the shortcut)
 
@@ -30,7 +30,7 @@ Live on `dev` now: everything below, headline first, focus and quiet, and off ke
 
 - "Mute it" over or after a noisy thread's update, or "mute the Tezos one", keeps its progress and finished work to yourself, for good or "for an hour"; its questions, failures, limits and the answers to what you sent it still come through, and asking what it said catches you up on it. "Unmute it", "what's muted?", "unmute everything" and "scratch that" work too, and rig's threads are muted by their thread there. A muted terminal session is unmuted by what "what's muted?" calls it. Over an update, only "mute it", "unmute it" and the like, and "scratch that" right after, are taken there; anything else about mutes, like "mute the Tezos one", gets "Ask me that with the shortcut." Nothing about it reaches an agent.
 - The API's state lists the threads with the latest updates, each with its project's icon and whether it's muted, and threads can be muted, heard again and their icons fetched by key.
-- The menu bar lists those threads with their project icons, how long ago each finished and whether it's muted: clicking one says its latest update again, and the Mute menu, or Option over a row on macOS 15 and later, mutes it or takes the mute off. An older yapd still gets the old Hear Again list.
+- The menu bar lists those threads with their project icons, how long ago each finished and whether it's muted: clicking one says its latest update again, and hovering one opens its panel beside the menu, as CodexBar's do. The panel shows what the thread is doing and for how long, its branch, its pull request and its checks, whether it's muted and until when, the latest update in full and what came before it, heard or not; under it are Hear Again, Mute, Mute for an Hour or Unmute, and Open Pull Request. It stays current while it's open. An older yapd still gets the old Hear Again list.
 - A terminal session's or an archived thread's older update can't be heard again from the menu: its row is greyed out, and can still be muted.
 
 ## Headline first, focus and quiet (live, waiting on its live check with you)
@@ -85,6 +85,8 @@ Live on `dev` now: everything below, headline first, focus and quiet, and off ke
 ## Known, left for now
 
 - A held update from a terminal session can't be heard again from the menu.
+- Return on a thread in the menu opens its panel rather than saying it again: Hear Again in the panel does that.
+- A thread pushed out of Recent while its panel is open keeps that panel's Mute or Unmute as it was until the menu opens again.
 - A digest played to an empty room counts as heard.
 - An update heard before a restart from rig is answered the way rig's hooks are, which may not reach it.
 - "I'm back" said over an update that doesn't need you ends it there, and the rundown comes right after as an answer.
