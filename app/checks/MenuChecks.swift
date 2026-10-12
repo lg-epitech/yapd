@@ -86,6 +86,12 @@ import Foundation
   let id = { (state: Status?, title: String) in menu(state, true).all.first { $0.title == title }?.id }
   check(id(full, "Turn Off") != nil && id(full, "Turn Off") == id(off, "Turn On"), "keeps turning yapd on and off as one item")
   check(id(full, "Catch Me Up (3)") == id(off, "Catch Me Up (1)") && id(full, "2 Threads Waiting on You") == id(off, "1 Thread Waiting on You"), "keeps the counted lines as one item each")
+  // With nothing to say, the mode line, who's waiting and Catch Me Up are still there, hidden, so the open menu hides them, or
+  // shows them again, in place.
+  let still = decoded(#"{"on": true, "activity": "idle", "mode": "normal", "waiting": 0, "unheard": 0, "recent": [\#(rows)]}"#)
+  check(menu(still, true).items.map(\.id) == menu(full, true).items.map(\.id), "keeps the same items with nothing waiting, unheard or timed, not \(menu(still, true).items.map(\.id))")
+  check(menu(still, true).items.filter(\.hidden).map(\.id) == ["mode line", "waiting", "unheard"], "hides what has nothing to say, not \(menu(still, true).items.filter(\.hidden).map(\.id))")
+  check(menu(still, true).items.filter(\.hidden).allSatisfy { !$0.enabled }, "can't choose what's hidden")
   check(menu(full, true).items.compactMap { item in if case .row = item.kind { item.id } else { nil } } == menu(off, true).items.compactMap { item in if case .row = item.kind { item.id } else { nil } }, "keeps each row as one item, by its key")
   check(menu(full, true).all.filter { $0.title == "Normal" }.map(\.id) == menu(off, true).all.filter { $0.title == "Normal" }.map(\.id), "keeps each mode as one item")
 

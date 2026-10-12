@@ -103,22 +103,23 @@ struct Menu: Equatable {
       return
     }
     var items = [Item(id: "power", kind: .action(.turn(on: !state.on)), title: state.on ? "Turn Off" : "Turn On", enabled: true)]
+    // The mode line, who's waiting and Catch Me Up are there even when there's nothing to say, hidden, so the open menu shows
+    // them, or hides them, in place, as focus ends, a thread stops waiting or he's heard everything.
     if let mode = state.mode {
-      if let line = state.modeLine(now: now, zone: zone, locale: locale) { items.append(.line("mode line", line)) }
+      let line = state.modeLine(now: now, zone: zone, locale: locale)
+      items.append(Item(id: "mode line", kind: .line, title: line ?? "", enabled: false, hidden: line == nil))
       // While yapd is off, its mode still changes, for when it's back on; focus or quiet chosen again starts its time again.
       let modes = Mode.allCases.map { each in
         Item(id: "mode \(each.rawValue)", kind: .action(.talk(each)), title: each.item, enabled: true, checked: mode == each)
       }
       items.append(Item(id: "mode", kind: .submenu(modes), title: "Mode", enabled: true))
     }
-    if let waiting = state.waitingLine {
-      // yapd answers it aloud, which a yapd from before it answered while off can't do while it's off.
-      items.append(Item(id: "waiting", kind: .action(.whoNeedsMe), title: waiting, enabled: state.answers))
-    }
-    if let unheard = state.unheardLine {
-      // Answered aloud even while yapd is off, as the shortcut is, and then it's quiet again.
-      items.append(Item(id: "unheard", kind: .action(.catchMeUp), title: unheard, enabled: true))
-    }
+    // yapd answers it aloud, which a yapd from before it answered while off can't do while it's off.
+    let waiting = state.waitingLine
+    items.append(Item(id: "waiting", kind: .action(.whoNeedsMe), title: waiting ?? "", enabled: waiting != nil && state.answers, hidden: waiting == nil))
+    // Answered aloud even while yapd is off, as the shortcut is, and then it's quiet again.
+    let unheard = state.unheardLine
+    items.append(Item(id: "unheard", kind: .action(.catchMeUp), title: unheard ?? "", enabled: unheard != nil, hidden: unheard == nil))
     items.append(Item(id: "show last", kind: .action(.showLast), title: "Show Last Card", enabled: last))
     if let recent = state.recent {
       if !recent.isEmpty {

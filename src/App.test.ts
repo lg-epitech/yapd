@@ -252,7 +252,10 @@ describe.skipIf(swiftc === undefined)("App", () => {
       // Sent with the body the checks check, as JSON.
       expect(yapd).toMatch(/if let body = asking\.body \{\s*request\.setValue\("application\/json", forHTTPHeaderField: "Content-Type"\)\s*request\.httpBody = body/)
       const bar = await Bun.file(join(app, "yapd", "MenuBar.swift")).text()
-      expect(bar).toMatch(/func menuWillOpen\(_ menu: NSMenu\) \{\s*guard menu === self\.menu else \{ return \}\s*open = true\s*fetch\(\)/)
+      expect(bar).toMatch(/func menuWillOpen\(_ menu: NSMenu\) \{\s*if menu === self\.menu \{\s*open = true\s*fetch\(\)/)
+      // An open panel asks again as it opens and every few seconds while it's open, as what its thread is doing changes with nothing of its row.
+      expect(bar).toMatch(/while !Task\.isCancelled \{\s*self\?\.fetch\(key\)\s*try\? await Task\.sleep\(for: \.seconds\(5\)\)/)
+      expect(bar).toMatch(/func menuDidClose\(_ menu: NSMenu\) \{\s*watching\.removeValue\(forKey: ObjectIdentifier\(menu\)\)\?\.cancel\(\)/)
       // Shown as they come, only the last asked for, and asked for again once anything of the row changes, as a new update coming.
       expect(bar).toMatch(/let told = await yapd\.details\(of: row\.recent\)\s*guard asked\[key\] == asking else \{ return \}\s*details\[key\] = told\s*change\(panel: key\)/)
       expect(bar).toMatch(/if before\[key\]\?\.recent != row\.recent \{ fetch\(key\) \}/)

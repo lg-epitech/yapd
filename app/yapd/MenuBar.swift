@@ -32,6 +32,9 @@ final class MenuBar: NSObject, NSMenuDelegate {
   private var asked: [String: Int] = [:]
   /// The row drawn highlighted.
   private weak var highlighted: RecentRow?
+  /// Each panel open now, asking yapd again every few seconds what it tells of its thread, since what the thread is doing, or
+  /// its pull request's checks, change with nothing of its row changing.
+  private var watching: [ObjectIdentifier: Task<Void, Never>] = [:]
 
   init(_ yapd: Yapd) {
     self.yapd = yapd
@@ -97,14 +100,25 @@ final class MenuBar: NSObject, NSMenuDelegate {
     }
   }
 
-  /// Open, the menu changes in place as the state does, and asks yapd what it tells of each row's thread.
+  /// Open, the menu changes in place as the state does, and asks yapd what it tells of each row's thread. A row's panel, open,
+  /// asks again what it tells of its thread, then every few seconds for as long as it's open.
   func menuWillOpen(_ menu: NSMenu) {
-    guard menu === self.menu else { return }
-    open = true
-    fetch()
+    if menu === self.menu {
+      open = true
+      fetch()
+    } else if let key = panels[ObjectIdentifier(menu)] {
+      watching[ObjectIdentifier(menu)]?.cancel()
+      watching[ObjectIdentifier(menu)] = Task { [weak self] in
+        while !Task.isCancelled {
+          self?.fetch(key)
+          try? await Task.sleep(for: .seconds(5))
+        }
+      }
+    }
   }
 
   func menuDidClose(_ menu: NSMenu) {
+    watching.removeValue(forKey: ObjectIdentifier(menu))?.cancel()
     guard menu === self.menu else { return }
     open = false
     highlighted?.highlight(false)
@@ -129,6 +143,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
     made = [:]
     rows = [:]
     panels = [:]
+    for watcher in watching.values { watcher.cancel() }
+    watching = [:]
     highlighted = nil
     for item in model.items { menu.addItem(make(item)) }
     // What yapd told of a thread no longer listed isn't shown again.
