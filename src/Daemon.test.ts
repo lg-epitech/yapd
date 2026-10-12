@@ -20,6 +20,7 @@ import { Vad, VadError } from "./Vad.ts"
 import * as Hands from "./Hands.ts"
 import * as Journal from "./Journal.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
@@ -5385,5 +5386,198 @@ describe("Daemon holding what a failure was left to", () => {
       }),
     )
     expect(result).toEqual(["yapd. Pass 8 is running."])
+  })
+})
+
+/** What a catch-up of everything would tell him of now, as the journal has it: each row's words, a thread at a time, oldest first. */
+const catchingUp = (journal: Journal.Journal["Type"]) =>
+  Effect.flatMap(Clock.currentTimeMillis, (now) =>
+    Effect.map(Missed.gather(journal, { now, spoke: 0, coming: [], desk: { threads: [], away: [] } }), ({ groups }) => groups.flatMap(({ rows }) => rows)),
+  )
+
+describe("Daemon, one turn kept twice", () => {
+  const loader = { link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }) }
+  const stop = (message: string, needsYou = false) =>
+    ({ hook_event_name: "Stop", session_id: "native-loader", cwd: "/tmp", last_assistant_message: message, ...(needsYou ? { needs_you: true } : {}) }) as const
+
+  test("a question kept unheard in its hook's place while yapd is off, then asked by its Stop come late while it's still off, is told of once, and both are heard once that is", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, handle, wait, toggle, journal } = yield* make(undefined, { ...loader, urgentMessages: ["Which network first?"] })
+        yield* toggle(false)
+        yield* made.finished(unhooked("Which network first?", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        yield* handle("claude", stop("Which network first?", true), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        const told = yield* catchingUp(journal)
+        const kept = yield* journal.since(0, { kinds: ["update"] })
+        // He hears what a catch-up told him of to the end.
+        yield* journal.markHeard(told.map(({ id }) => id), yield* Clock.currentTimeMillis)
+        const after = yield* journal.since(0, { kinds: ["update"] })
+        return { told: told.map(({ said }) => said), kept: kept.map((row) => [row.key, heldFor(row)]), heard: after.map(({ heardAt }) => heardAt !== undefined), newest: told[0]?.id === kept[1]?.id }
+      }),
+    )
+    expect(result.told).toEqual(["yapd. Which network first?"])
+    expect(result.kept).toEqual([
+      ["done:Rosie:run-1", "off"],
+      [undefined, "off"],
+    ])
+    // The Stop's is what's told, and hearing it hears the one it took the place of.
+    expect(result.newest).toBe(true)
+    expect(result.heard).toEqual([true, true])
+  })
+
+  for (const [how, options] of [
+    ["muted", { mutes: true }],
+    ["held for focus", { holding: Effect.succeedSome("focus" as const) }],
+    ["held as progress", { progressMessages: ["The loader is fixed."] }],
+  ] as const) {
+    test(`a turn kept in its hook's place ${how}, whose Stop comes late needing him while yapd is off, is told of once in a catch-up`, async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const mutes = yield* muting
+          const { made, handle, wait, toggle, journal } = yield* make(undefined, {
+            ...loader,
+            ...("mutes" in options ? { mutes } : {}),
+            ...("holding" in options ? { holding: options.holding } : {}),
+            ...("progressMessages" in options ? { progressMessages: options.progressMessages } : {}),
+          })
+          if ("mutes" in options) yield* mutes.mute({ key: Mutes.key.thread({ machine: "Rosie", id: "t-loader" }) })
+          yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+          yield* wait(11)
+          yield* toggle(false)
+          yield* handle("claude", stop("The loader is fixed.", true), { project: "yapd", host: hostname() }, false)
+          yield* wait(11)
+          return { told: (yield* catchingUp(journal)).map((row) => [row.said, heldFor(row)]), kept: (yield* journal.since(0, { kinds: ["update"] })).length }
+        }),
+      )
+      expect(result.kept).toBe(2)
+      expect(result.told).toEqual([["yapd. The loader is fixed.", "off"]])
+    })
+  }
+
+  test("a Stop kept unheard while yapd is off, then its turn told of by T3 Code once yapd restarted, is kept once and told of once", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { handle, wait, toggle } = yield* make(undefined, { ...loader, journal })
+            yield* toggle(false)
+            yield* handle("claude", stop("The loader is fixed."), { project: "yapd", host: hostname() }, false)
+            yield* wait(11)
+          }),
+        )
+        const { made, wait, toggle, played } = yield* make(undefined, { ...loader, journal })
+        yield* toggle(false)
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        yield* toggle(true)
+        yield* wait(11)
+        return {
+          played: [...played],
+          kept: (yield* journal.since(0, { kinds: ["update"] })).map((row) => [row.key, heldFor(row)]),
+          told: (yield* catchingUp(journal)).map(({ said }) => said),
+        }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([[undefined, "off"]])
+    expect(result.told).toEqual(["yapd. The loader is fixed."])
+  })
+
+  test("once yapd restarted, a newer turn of the session that ends on the same few words as one kept unheard in its hook's place is its own, kept and told of beside it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { made, wait, toggle } = yield* make(undefined, { ...loader, journal })
+            yield* toggle(false)
+            yield* made.finished(unhooked("Which network first?", "run-1", (yield* made.power).turns))
+            yield* wait(11)
+          }),
+        )
+        const { handle, wait, toggle } = yield* make(undefined, { ...loader, journal })
+        yield* toggle(false)
+        yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "native-loader", cwd: "/tmp", prompt: "Start over on the bridge." }, { project: "yapd", host: hostname() }, false)
+        yield* wait(120)
+        yield* handle("claude", stop("Which network first?", true), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        return (yield* catchingUp(journal)).map(({ said, key }) => [said, key])
+      }),
+    )
+    expect(result).toEqual([
+      ["yapd. Which network first?", "done:Rosie:run-1"],
+      ["yapd. Which network first?", undefined],
+    ])
+  })
+
+  test("a turn said in its hook's place and heard, whose Stop comes late once yapd restarted, isn't said again, even needing him", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        const before = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { made, wait, played } = yield* make(undefined, { ...loader, journal })
+            yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+            yield* wait(11)
+            return [...played]
+          }),
+        )
+        const { handle, wait, played } = yield* make(undefined, { ...loader, journal })
+        // Even one that says it needs him, as it would be kept in mind.
+        yield* handle("claude", stop("The loader is fixed.", true), { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        return { before, after: [...played], kept: (yield* journal.since(0, { kinds: ["update", "action"] })).map((row) => [row.kind, row.key ?? (row.detail as { through?: string }).through]) }
+      }),
+    )
+    expect(result.before).toEqual(["yapd. The loader is fixed."])
+    expect(result.after).toEqual([])
+    expect(result.kept).toEqual([
+      ["update", "done:Rosie:run-1"],
+      ["action", "done:Rosie:run-1"],
+    ])
+  })
+
+  test("a turn kept unheard in its hook's place, whose Stop comes late once yapd restarted, is told of once: by the Stop when it needs him, and only as it was kept when it doesn't", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const journal = Journal.fromStore(yield* Store.make(":memory:"))
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { made, wait, toggle } = yield* make(undefined, { ...loader, journal })
+            yield* toggle(false)
+            yield* made.finished(unhooked("Which network first?", "run-1", (yield* made.power).turns))
+            yield* made.finished({ ...unhooked("The docs are swept.", "run-2", (yield* made.power).turns), about: { machine: "Rosie", id: "t-docs" }, run: { ...unhooked("The docs are swept.", "run-2", 0).run, natives: ["native-docs"] } })
+            yield* wait(11)
+          }),
+        )
+        const { handle, wait, toggle, played } = yield* make(undefined, {
+          link: (session) => Effect.succeedSome({ machine: "Rosie", id: session === "native-docs" ? "t-docs" : "t-loader" }),
+          journal,
+        })
+        yield* toggle(false)
+        yield* handle("claude", stop("Which network first?", true), { project: "yapd", host: hostname() }, false)
+        yield* handle("claude", { ...stop("The docs are swept."), session_id: "native-docs" }, { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        const told = yield* catchingUp(journal)
+        yield* journal.markHeard(told.map(({ id }) => id), yield* Clock.currentTimeMillis)
+        return {
+          played: [...played],
+          kept: (yield* journal.since(0, { kinds: ["update"] })).map((row) => [row.said, row.key, heldFor(row)]),
+          told: told.map(({ said }) => said),
+          unheard: (yield* journal.since(0, { kinds: ["update"] })).filter(({ heardAt }) => heardAt === undefined).length,
+        }
+      }),
+    )
+    expect(result.played).toEqual([])
+    expect(result.kept).toEqual([
+      ["yapd. Which network first?", "done:Rosie:run-1", "off"],
+      ["yapd. The docs are swept.", "done:Rosie:run-2", "off"],
+      ["yapd. Which network first?", undefined, "off"],
+    ])
+    expect(result.told.toSorted()).toEqual(["yapd. The docs are swept.", "yapd. Which network first?"])
+    expect(result.unheard).toBe(0)
   })
 })
