@@ -264,6 +264,26 @@ describe("Questions", () => {
     expect(wording(part("Which library?", ["`date-fns`", "Day.js"]))[0]!.terms).toEqual(["date-fns", "Day.js"])
   })
 
+  test("he'd begun hearing yapd's pick once some of it was said before what wasn't, or when how far it got can't be told", () => {
+    const force = part("Shall I force-push to fix the history?", ["Force-push", "Leave it (Recommended)"])
+    const asking = wording(force)[0]!
+    expect(asking.first).toBe("A question on the Tezos migration, sir: Shall I force-push to fix the history? Force-push or Leave it? I'd go with Leave it.")
+    const heard = (unsaid: string, line = asking.first) => Questions.heardPick(force, line, unsaid)
+    // Begun: some or all of it said.
+    expect(heard("Leave it.")).toBe(true)
+    expect(heard("it.")).toBe(true)
+    expect(heard("Which one, sir?", asking.more)).toBe(true)
+    // Not begun: all of it, and maybe more, still to say.
+    expect(heard("I'd go with Leave it.")).toBe(false)
+    expect(heard("Force-push or Leave it? I'd go with Leave it.")).toBe(false)
+    expect(heard("history? Force-push or Leave it? I'd go with Leave it.")).toBe(false)
+    // Not knowing how far it got, it's taken as heard; with no pick in the line, as asked which one then without it, there's none to hear.
+    expect(heard("something it never said.")).toBe(true)
+    expect(heard("Leave it?", "Force-push or Leave it?")).toBe(false)
+    const shade = part("Which shade should the badge use?", ["Red", "Blue"])
+    expect(Questions.heardPick(shade, wording(shade)[0]!.first, "Blue?")).toBe(false)
+  })
+
   test("a question with too many options or parts to take in is only told, with what it asks", () => {
     expect(told(part("Which network first?", ["Mainnet", "Ghostnet", "Shadownet", "Weeklynet", "Localnet"]))).toEqual(
       Option.some("A question on the Tezos migration, sir: Which network first? It has five options, so it's waiting for you in T3 Code."),

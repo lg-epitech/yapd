@@ -283,6 +283,20 @@ const asked = (part: Said) => {
   return `${[question, options].filter((text) => text !== "").join(" ")}${leaning(part)}`
 }
 
+/**
+ * Whether he'd begun hearing yapd's pick in `line`, as `unsaid`, what it
+ * hadn't said of the line yet when he began, tells: some of it was said by
+ * then. Taken as heard when `line` doesn't end on what's unsaid, since how far
+ * it got can't be told; never for a part with no pick, or a line it isn't in,
+ * like which one then, asked without it.
+ */
+export const heardPick = (part: Said, line: string, unsaid: string) => {
+  const pick = leaning(part).trim()
+  const at = pick === "" ? -1 : line.lastIndexOf(pick)
+  if (at < 0) return false
+  return !line.endsWith(unsaid) || at < line.length - unsaid.length
+}
+
 /** "Which one" or, when several can be picked, "Which of them". */
 const which = (part: Said) => (part.several ? "Which of them" : "Which one")
 

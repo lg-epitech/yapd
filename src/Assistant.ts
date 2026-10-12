@@ -3117,15 +3117,19 @@ export const make = (options: {
           const leaned = { ...open, ...leaning(open) }.wording?.part
           const part = leaned ?? (asked === undefined ? undefined : Questions.said(asked, Option.none()))
           const answer: Questions.Reply | undefined = decision.how === "skip" ? { _tag: "Skip" } : part === undefined ? undefined : Questions.resolve(part, decision.text)
+          // The part as it was worded, with the pick it said, and whether what the model took his words for is that pick alone.
+          const worded = open.wording?.part
+          const onlyPick = answer?._tag === "Picked" && answer.options.length === 1 && worded !== undefined && Option.contains(worded.recommended, answer.options[0]!)
           // Said before he heard it all, what doesn't name an option, like "the last one" or a plain yes, may be to one he's yet to hear, or
           // to yapd's pick he never heard, however the model took it, alone or with others he named: it's asked again in full. Not when he
           // spoke over it and yapd knows what it hadn't said yet, which the model was told, to judge what he'd heard, as he asked on
-          // 2026-10-12, when his "Yes." to "shall I install … now" was asked again till it was let go. Asked which one then, the pick is the
-          // one option left, as `leaning` has it.
+          // 2026-10-12, when his "Yes." to "shall I install … now" was asked again till it was let go: then only once he'd begun hearing
+          // yapd's pick, when his yes was to it, and anything but the pick that he didn't name is asked again, however the model took it.
+          // Asked which one then, the pick is the one option left, as `leaning` has it.
           if (
             decided.source === "model" &&
             part !== undefined &&
-            !Brain.spokeOver(utterance) &&
+            (!Brain.spokeOver(utterance) || (worded !== undefined && Questions.heardPick(worded, open.asked, utterance.unsaid ?? "") && !onlyPick)) &&
             !heardBy(utterance, opened.whole) &&
             answer?._tag === "Picked" &&
             answer.options.some((index) => !Questions.mentions(part, index, utterance.heard))

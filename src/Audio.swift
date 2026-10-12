@@ -210,7 +210,14 @@ final class Audio {
       }
     }
     engine.prepare()
-    try engine.start()
+    do {
+      try engine.start()
+    } catch {
+      // Its microphone may still have been on from before, as after a device change: it's off now, and yapd is told so.
+      halt()
+      link.send(["type": "rested"])
+      throw error
+    }
     link.send(["type": "active", "listening": listening])
   }
 

@@ -2727,32 +2727,40 @@ describe("Assistant", () => {
     expect(await answering()).toEqual(again)
   })
 
-  test("a plain yes said over 'which one' once yapd had read what each option means and its pick, which it may be to, is the model's to judge, told the pick: it's asked again in full when the model says so", async () => {
+  test("a plain yes said once he'd begun hearing yapd's pick goes only as that pick: anything else the model takes it for that he didn't name is asked again in full", async () => {
     const cloud = waitingOn({ id: "q1", kind: "user_input" })
     const force = { id: "force", header: "History", question: "Shall I force-push to fix the history?", options: [{ label: "Force-push" }, { label: "Leave it (Recommended)" }] }
-    const result = await run(
-      Effect.gen(function* () {
-        // A model that asks it again, as it's told to, when his yes may be to yapd's pick he'd heard rather than to the question.
-        const made = yield* assistant(
-          (situation) =>
-            Brain.prompt(situation, Option.none()).includes("you hadn't yet said «Which one, sir?». Your pick was «Leave it (Recommended)».")
-              ? Brain.decision({ act: "again", how: "same", target: handle(situation, cloud), pending: "answers" })
-              : Brain.decision({ act: "reply", target: handle(situation, cloud), text: "Force-push", pending: "answers" }),
-          undefined,
-          { others: [cloud], items: card("q1", [force]), waiting: true },
-        )
-        yield* asked(made, cloud)
-        yield* made.play()
-        yield* made.answer("What are the options?")
-        yield* made.cut()
-        yield* made.answer("Yes.", undefined, undefined, undefined, "Which one, sir?")
-        return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open) }
-      }),
-    )
-    expect(result).toEqual({
+    /** His yes said over "Which one, sir?", once yapd had read what each option means and its pick, to a model that takes it for `text`. */
+    const answering = (text: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => Brain.decision({ act: "reply", target: handle(situation, cloud), text, pending: "answers" }), undefined, {
+            others: [cloud],
+            items: card("q1", [force]),
+            waiting: true,
+          })
+          yield* asked(made, cloud)
+          yield* made.play()
+          yield* made.answer("What are the options?")
+          yield* made.cut()
+          yield* made.answer("Yes.", undefined, undefined, undefined, "Which one, sir?")
+          const told = made.seen.at(-1) === undefined ? false : Brain.prompt(made.seen.at(-1)!, Option.none()).includes("a plain yes, like \"yes\", \"approved\" or \"go ahead\", is to your pick, «Leave it (Recommended)»")
+          return { spoken: made.spoken().slice(1), answers: answered(made.dispatched), open: Option.isSome(yield* made.open), told }
+        }),
+      )
+    // Taken for the question's yes, which wasn't his pick to hear, it's asked again, sending nothing.
+    expect(await answering("Force-push")).toEqual({
       spoken: ["Force-push. Leave it. I'd go with Leave it. Which one, sir?", "Again, sir: Shall I force-push to fix the history? Force-push or Leave it? I'd go with Leave it."],
       answers: [],
       open: true,
+      told: true,
+    })
+    // Taken for the pick, it goes.
+    expect(await answering("Leave it (Recommended)")).toEqual({
+      spoken: ["Force-push. Leave it. I'd go with Leave it. Which one, sir?", "Leave it it is, sir."],
+      answers: [{ force: "Leave it (Recommended)" }],
+      open: false,
+      told: true,
     })
   })
 
