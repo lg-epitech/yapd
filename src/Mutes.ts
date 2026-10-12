@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite"
 import { Clock, Effect, Option, PubSub, Stream } from "effect"
 import { hostname } from "node:os"
 import type * as Conversation from "./Conversation.ts"
-import type { Journal, Naming } from "./Journal.ts"
+import type { Journal, Kept, Naming } from "./Journal.ts"
 import { gist } from "./Responder.ts"
 import type * as Store from "./Store.ts"
 import type * as Threads from "./Threads.ts"
@@ -61,6 +61,22 @@ export const keysOf = (update: Pick<Conversation.Update, "session" | "about" | "
   return [
     ...(ref === undefined ? [] : [key.thread(ref)]),
     ...(update.session.startsWith("finished:") ? [] : [key.session(called(update.thread.origin.host ?? hostname()), update.session)]),
+  ]
+}
+
+/**
+ * The keys an update kept in the journal is muted by, as `keysOf` gives
+ * them for the update it was: its thread's when it was tied to one, and the
+ * session's it was kept under or tied from.
+ */
+export const keysOfKept = (kept: Pick<Kept, "machine" | "thread" | "detail">, called: Naming): ReadonlyArray<string> => {
+  const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as { readonly session?: unknown; readonly host?: unknown }
+  const tied = typeof detail.session === "string" ? detail.session : undefined
+  const session = tied ?? kept.thread
+  const host = typeof detail.host === "string" ? detail.host : undefined
+  return [
+    ...(tied !== undefined && kept.machine !== undefined && kept.thread !== undefined ? [key.thread({ machine: kept.machine, id: kept.thread })] : []),
+    ...(session === undefined || session.startsWith("finished:") ? [] : [key.session(called(host ?? hostname()), session)]),
   ]
 }
 

@@ -1536,16 +1536,21 @@ export const make = (
 
   /**
    * A thread was just muted under these keys: its updates waiting to be read
-   * are dropped, and kept as kept quiet, but never what needs him, one he
-   * asked to hear again, the line being said, or what yapd has to say for
-   * itself. A hook he heard waits on, as when he tells an update to stop, and
+   * are dropped, and they and those held for later are kept as kept quiet,
+   * but never what needs him, one he asked to hear again, the line being
+   * said, or what yapd has to say for itself. A hook he heard waits on, as when he tells an update to stop, and
    * any other is let go of. One said in a hook's place is the turn's, so its
    * own Stop coming late isn't said either. What's still being prepared looks
    * for itself.
    */
   const silence = (keys: ReadonlyArray<string>): Effect.Effect<void> => {
     const muted = new Set(keys)
-    return drop((entry) => Mutes.keysOf(entry.update, called).some((key) => muted.has(key)), { _tag: "Muted" })
+    return Effect.gen(function* () {
+      yield* drop((entry) => Mutes.keysOf(entry.update, called).some((key) => muted.has(key)), { _tag: "Muted" })
+      // What of it was held for later is kept quiet too, so the digest and the rundown never bring up a thread he muted since.
+      const held = (yield* journal.held(0)).filter((kept) => Mutes.keysOfKept(kept, called).some((key) => muted.has(key)))
+      yield* journal.mute(held.map(({ id }) => id))
+    })
   }
 
   /**

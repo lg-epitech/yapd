@@ -3407,6 +3407,30 @@ describe("Daemon headline first", () => {
     expect(result.heard).toEqual(result.ids)
   })
 
+  test("muting a thread keeps quiet what of it was held for later, so neither the digest nor the rundown brings it up", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, wait, journal } = yield* make(undefined, { mutes, progressMessages: ["Lint is still running.", "Tests are still running."] })
+        yield* finish("noisy", "Lint is still running.")
+        yield* wait(11)
+        yield* finish("other", "Tests are still running.")
+        yield* wait(11)
+        const before = (yield* journal.held(0)).map(({ said }) => said)
+        const controls = Option.getOrThrow(made.controls)
+        yield* controls.mute({ key: sessionKey("noisy") })
+        const updates = yield* journal.since(0, { kinds: ["update"] })
+        return { before, after: (yield* journal.held(0)).map(({ said }) => said), quiet: updates.map((kept) => [kept.said, quieted(kept)]) }
+      }),
+    )
+    expect(result.before).toEqual(["yapd. Lint is still running.", "yapd. Tests are still running."])
+    expect(result.after).toEqual(["yapd. Tests are still running."])
+    expect(result.quiet).toEqual([
+      ["yapd. Lint is still running.", true],
+      ["yapd. Tests are still running.", false],
+    ])
+  })
+
   test("a reply to an update heard before a restart, tied to its thread, reaches that thread through T3 Code", async () => {
     const result = await run(
       Effect.gen(function* () {
