@@ -10348,6 +10348,26 @@ describe("Assistant modes", () => {
     expect(result.after).toEqual([])
   })
 
+  test("a yes to the rundown offered once he's begun focus again gives the rundown and leaves his focus on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { rundown, answer, spoken, journal, modes, flush } = yield* assistant(() => undefined, undefined, {
+          modes: true,
+          briefs: () => "The Tezos review is on pass 7, sir.",
+        })
+        yield* held(journal, now - 30 * 60_000, "integration's review pass 7 is running.", "focus")
+        yield* modes!.set("focus")
+        yield* rundown(1, "focus")
+        yield* flush
+        yield* answer("Yes.")
+        return { spoken: spoken(), mode: (yield* modes!.current).mode.mode, after: yield* unheard(journal) }
+      }),
+    )
+    expect(result.spoken).toEqual(["Focus is over, sir. One thing came in. Want the rundown?", "The Tezos review is on pass 7, sir."])
+    expect(result.mode).toBe("focus")
+    expect(result.after).toEqual([])
+  })
+
   test("'what did I miss?' covers what was held, even from before he last spoke, which counts as heard once he's heard it", async () => {
     const result = await run(
       Effect.gen(function* () {

@@ -2580,6 +2580,8 @@ export const make = (options: {
           case "full":
             yield* modes.setDetail(how)
             return stays(how === "brief" ? told.brief : told.full)
+          case "rundown":
+            return yield* rundown(thought.situation.desk, said)
           default: {
             if ((yield* modes.current).mode.mode !== "normal") yield* modes.set("normal")
             return yield* rundown(thought.situation.desk, said)
@@ -3369,7 +3371,8 @@ export const make = (options: {
                 kind: "offer",
                 utterance: id,
                 heard: "",
-                decision: Brain.decision({ act: "mode", how: "normal" }),
+                // Only the rundown: focus he began again since is his to end.
+                decision: Brain.decision({ act: "mode", how: "rundown" }),
                 candidates: [],
                 asked: `${news} ${question}`,
                 about: "give you the rundown",

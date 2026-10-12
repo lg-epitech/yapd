@@ -1091,8 +1091,8 @@ export const modeCommand = (heard: string, asks = false): Option.Option<ModeChan
   return Option.none()
 }
 
-/** The ways a mode can go, as the model names them. */
-const modes: ReadonlySet<string> = new Set(["focus", "quiet", "normal", "brief", "full"])
+/** The ways a mode can go, as the model names them, and the rundown alone, which a yes to yapd's offer of it gives. */
+const modes: ReadonlySet<string> = new Set(["focus", "quiet", "normal", "brief", "full", "rundown"])
 
 /** What's muted, in a line: each thread by name, with when its mute ends, if it does. */
 export const mutedList = (situation: Pick<Situation, "mutes" | "desk" | "now">, lines: Lines) => {

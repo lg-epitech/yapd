@@ -80,7 +80,8 @@ Live on `dev` now: everything below but headline first, focus and quiet, which a
 - "I'm back" said over an update that doesn't need you ends it there, and the rundown comes right after as an answer.
 - A mode change said over an update is kept in the journal as a reply whose intent is "mute".
 - Progress held before a thread failed can still come up in the digest after you heard the failure: only an update said about the same work makes it out of date.
-- "Focus is over, sir. Want the rundown?" waiting behind another line as you start focus again is still said.
+- "Focus is over, sir. Want the rundown?" waiting behind another line as you start focus again is still said; a yes gives the rundown and leaves your new focus on.
+- The rundown offered as focus or quiet ends counts what was held since it began, including what was waiting to be said as it did; a yes also covers older progress the digest hadn't brought up yet, or a rundown you turned down before, so it can tell of more than the number said.
 
 - With exactly two lines of your own for going ahead, one picked for something that never plays can let the other come twice in a row.
 - After a message was moved from the queue into the turn under way, "I sent that a minute ago. Again?" can be asked for its same words until ten minutes have passed.
