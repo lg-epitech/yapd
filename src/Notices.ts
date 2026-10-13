@@ -149,9 +149,10 @@ export interface Stop {
   /**
    * Why it told of nothing, when it didn't: "quick", not said as a turn he
    * was likely watching, which a turn of work yapd sent never is; "dropped",
-   * nothing of it said or kept, as a slight turn whose thread its hook
-   * couldn't find in time to tell it answers him, or one that couldn't be got
-   * ready. T3 Code's word says a turn of work yapd sent in its place.
+   * nothing of it said or kept, as a slight turn its hook couldn't tell by
+   * id was the first of work yapd started, its thread not found in time or
+   * what tells that not read, or one that couldn't be got ready. T3 Code's
+   * word says a turn of work yapd sent in its place.
    */
   skipped?: "quick" | "dropped"
 }

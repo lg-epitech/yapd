@@ -942,13 +942,16 @@ export const make = (
    * the work yapd started is answered only by the turn its own message began,
    * whatever when it came or its words say: a first turn that was stopped,
    * or left nothing kept, isn't answered by the next, nor is the work by a
-   * follow-up sent soon after.
+   * follow-up sent soon after. With it, whether that told by id whether it's
+   * the first turn of work yapd started: not when what yapd sent its thread
+   * couldn't be read, nor, with that work among what it may answer, which
+   * message began its run.
    */
   const asked = (to: Threads.Ref, finished: Finished) =>
     Effect.gen(function* () {
       const { prompted, arrivedAt } = finished
       const rows = yield* answerable(to, arrivedAt)
-      if (rows.length === 0) return Option.none()
+      if (rows.length === 0) return { answers: Option.none(), told: true }
       const last = prompted === undefined ? ((yield* journal.byThread(to.machine, to.id, 1, ["update"]))[0]?.at ?? Number.NEGATIVE_INFINITY) : Number.NEGATIVE_INFINITY
       const candidates = rows.filter(({ at }) => at > last)
       // Which message its run began with, as T3 Code has it, read only when it may be the work yapd started that it answers.
@@ -961,11 +964,12 @@ export const make = (
       /** Whether a row is the work yapd started, begun with the message its run began with, when T3 Code says which: none when it can't. */
       const opened = ({ messageId }: { readonly messageId?: string | null }) =>
         Option.map(began, (id) => Option.exists(id, (began) => began === messageId))
+      const told = Option.isSome(began) || !candidates.some(({ kind }) => kind === "start")
       if (prompted === undefined) {
-        return answered(candidates.filter((row) => row.kind !== "start" || Option.getOrElse(opened(row), () => true)))
+        return { answers: answered(candidates.filter((row) => row.kind !== "start" || Option.getOrElse(opened(row), () => true))), told }
       }
       const words = prompted.text === undefined ? "" : Ledger.digest(prompted.text)
-      return answered(
+      const answers = answered(
         candidates.filter((row) =>
           Option.getOrElse(
             row.kind === "start" ? opened(row) : Option.none(),
@@ -973,7 +977,12 @@ export const make = (
           ),
         ),
       )
-    }).pipe(Effect.catchAllCause((cause) => Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), Option.none())))
+      return { answers, told }
+    }).pipe(
+      Effect.catchAllCause((cause) =>
+        Effect.as(Effect.logWarning("Could not tell whether it answers what I sent it", cause), { answers: Option.none<"start" | "sent">(), told: false }),
+      ),
+    )
 
   /**
    * Whether he heard since the entry of a turn kept quiet in its hook's
@@ -1062,8 +1071,9 @@ export const make = (
       )
       /** The thread it's from, here or, only for what's kept, shown and muted, on another machine. */
       const tied = Option.orElse(about, () => owner)
-      // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for.
-      const answers = Option.isSome(tied) ? yield* asked(tied.value, finished) : Option.none()
+      // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for. And
+      // whether that was told by id, which it can't be with no thread found in time.
+      const { answers, told } = Option.isSome(tied) ? yield* asked(tied.value, finished) : { answers: Option.none<"start" | "sent">(), told: false }
       const opening = Option.contains(answers, "start")
       // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
       // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.
@@ -1097,11 +1107,13 @@ export const make = (
         yield* quieten(finished.stop)
         return yield* Effect.logInfo("Skipped update, kept quiet already from T3 Code's word that it finished")
       }
-      // Even a reply to a follow-up, since yapd already said it passed that on. Its Stop told of nothing, so T3 Code's word says a turn of
-      // work yapd sent in its place, as what he asked for, when its thread couldn't be found in time to tell that here.
+      // Even a reply to a follow-up, since yapd already said it passed that on. When it couldn't be told by id whether it's the first turn
+      // of work yapd started, its thread not found in time or what it was sent, or which message began its run, not read, its Stop told
+      // of nothing: T3 Code's word, which can tell, says a turn of work yapd sent in its place, as what he asked for when it is. Otherwise
+      // it's slight, and its Stop stands, so T3 Code's word leaves it to its hook.
       if (priority === "trivial") {
         yield* release(hook)
-        if (finished.stop !== undefined) finished.stop.skipped = "dropped"
+        if (finished.stop !== undefined && !told) finished.stop.skipped = "dropped"
         return yield* Effect.logInfo("Skipped trivial update")
       }
 
