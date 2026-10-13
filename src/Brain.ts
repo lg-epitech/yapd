@@ -2375,21 +2375,27 @@ const mentionsVague = (words: string) =>
       app === undefined && (plural !== "" || !somethingElse[name!.toLowerCase()]?.has(after?.toLowerCase() ?? "")),
   )
 
-/** What names something only he should know, like a password, a PIN, a key or a token, or a code or phrase that stands for one. */
-const credential = String.raw`(?:pass(?:word|code|phrase)|pin(?: code)?|secret|token|(?:api|access|private) key|key|recovery code|seed phrase|(?:2fa|two[ -]factor|backup) code)s?`
+/**
+ * What names something only he should know, like a password, a PIN, a key or
+ * a token, or a code or phrase that stands for one, and a password as it's
+ * said out loud, or as Whisper writes it down: a pass, a pw, a pwd, a pword
+ * or a passwd.
+ */
+const credential = String.raw`(?:pass(?:word|code|phrase|wd)?|pw(?:d|ord)?|pin(?: code)?|secret|token|(?:api|access|private) key|key|recovery code|seed phrase|(?:2fa|two[ -]factor|backup) code)s?`
 
 /**
  * A credential given with its value, whatever's said between of whose or
  * what for it is: "my password for GitHub is hunter2", "the password I use
- * there is …", "the GitHub password: …", "my token's …", one word after a
- * comma or a dash at the end, "my GitHub password, hunter2", or the other way
- * round, "hunter2 is my GitHub password". Taken for one whenever it could be,
- * so "the key is to batch them" is too, but never "rig's key bindings are
- * vim-style", where what follows the word is what it's of.
+ * there is …", "the GitHub password: …", "my token's …", "the Wi-Fi pass,
+ * it's …", one word after a comma or a dash at the end, "my GitHub password,
+ * hunter2", or the other way round, "hunter2 is my GitHub password". Taken
+ * for one whenever it could be, so "the key is to batch them" is too, but
+ * never "rig's key bindings are vim-style", where what follows the word is
+ * what it's of, nor "check the tests pass, then deploy".
  */
 const given = [
   new RegExp(
-    String.raw`(?<![a-z0-9])${credential}(?:\s+(?:for|to|of|on|at|in|into|with|from|i|we|you|that|which)\s+[^\s:=]+?(?:\s+[^\s:=]+?){0,4}?)?(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|was|are|were|equals)\s+)${valued}`,
+    String.raw`(?<![a-z0-9])${credential}(?:\s+(?:for|to|of|on|at|in|into|with|from|i|we|you|that|which)\s+[^\s:=]+?(?:\s+[^\s:=]+?){0,4}?)?(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|was|are|were|equals)\s+|\s*[,.;—–-]?\s+it(?:['’]s|\s+(?:is|was))\s+)${valued}`,
     "i",
   ),
   new RegExp(String.raw`(?<![a-z0-9])${credential}(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$`, "i"),

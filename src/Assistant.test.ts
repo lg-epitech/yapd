@@ -12509,6 +12509,52 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain("hunter2")
   })
 
+  test("a routine that gives a pass, a pw, a pwd, a pword or a passwd its value isn't kept, read back nor shown the model after, while one with tests that pass is", async () => {
+    const refused: Readonly<Record<string, string>> = {
+      "When I say staging, connect to Wi-Fi, the pass is hunter2.": "staging: connect to Wi-Fi, the pass is hunter2",
+      "When I say staging, connect to Wi-Fi, the pw: hunter2.": "staging: connect to Wi-Fi, the pw: hunter2",
+      "When I say staging, connect to Wi-Fi, the pwd's hunter2.": "staging: connect to Wi-Fi, the pwd's hunter2",
+      "When I say staging, connect to Wi-Fi, the pword, hunter2.": "staging: connect to Wi-Fi, the pword, hunter2",
+      "When I say staging, connect to Wi-Fi, the passwd is hunter2.": "staging: connect to Wi-Fi, the passwd is hunter2",
+      "When I say staging, connect to Wi-Fi, the pass, it's hunter2.": "staging: connect to Wi-Fi, the pass, it's hunter2",
+      "When I say staging, connect to Wi-Fi, hunter2 is the Wi-Fi pass.": "staging: connect to Wi-Fi, hunter2 is the Wi-Fi pass",
+    }
+    const kept: Readonly<Record<string, string>> = { "When I say ship, check the tests pass, then deploy.": "ship: check the tests pass, then deploy" }
+    const routines = { ...refused, ...kept }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const text = routines[situation.utterance.heard]
+            return text === undefined ? Brain.decision({ act: "answer", spoken: "Nothing else, sir." }) : Brain.decision({ act: "remember", how: "routine", text })
+          },
+          undefined,
+          { memories: true },
+        )
+        const said: Array<string | undefined> = []
+        const told: Array<string> = []
+        for (const heard of Object.keys(routines)) {
+          yield* made.dictate(heard)
+          said.push(made.spoken().at(-1))
+          yield* made.dictate("Anything else?")
+          told.push(Brain.prompt(made.seen.at(-1)!, Option.none()))
+        }
+        return {
+          said,
+          told,
+          spoken: made.spoken().join(" "),
+          kept: (yield* made.memories!.list).map(({ name, text }) => `${name}: ${text}`),
+          journal: JSON.stringify(yield* made.journal.since(0)),
+        }
+      }),
+    )
+    expect(result.said).toEqual([...Object.keys(refused).map(() => "I won't keep that, sir. It looks like a secret."), "Noted, sir. Ship: check the tests pass, then deploy."])
+    expect(result.kept).toEqual(["ship: check the tests pass, then deploy"])
+    expect(result.spoken).not.toContain("hunter2")
+    for (const prompt of result.told) expect(prompt).not.toContain("hunter2")
+    expect(result.journal).not.toContain("hunter2")
+  })
+
   test("a secret the model's answer says back is said, but kept in the journal and logged nowhere", async () => {
     const lines: Array<string> = []
     const logger = Logger.make(({ message }) => {
