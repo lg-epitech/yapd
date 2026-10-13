@@ -4795,8 +4795,13 @@ export const make = (options: {
               priority: "done",
               spoken,
               at: now,
-              // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell.
-              stale: Effect.zipWith(holding, journal.held(oldest), (mode, still) => Option.isSome(mode) || !still.some(({ id }) => covered.includes(id))),
+              // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell. Any of it kept quiet since,
+              // like a thread he muted or one whose subagents he no longer has read, it's never said, so none of that is: what else it
+              // covers is still held, for the next.
+              stale: Effect.map(
+                Effect.all([holding, journal.held(oldest), journal.rows(covered)]),
+                ([mode, still, rows]) => Option.isSome(mode) || rows.some(Missed.muted) || !still.some(({ id }) => covered.includes(id)),
+              ),
               saying: Effect.gen(function* () {
                 // Only now, so what one that's never said would have covered comes up in the next.
                 yield* options.modes?.briefed(until) ?? Effect.void
