@@ -102,15 +102,17 @@ export const lasting = (said: string) => {
  * offset, like "2026-10-12T15:00", which stays right across a change of the
  * clocks, or as given with one, like a time yapd worked out itself. NaN for
  * anything else, and for a day or an hour that isn't on the calendar, like
- * October 32 or 25:00, never the one it would roll over to.
+ * October 32 or 25:00, never the one it would roll over to. 24:00 is the
+ * midnight that ends its day, as ISO 8601 and ECMAScript have it.
  */
 export const instant = (when: string) => {
-  const written = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(when.trim())
+  const written = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(when.trim())
   if (written === null) return Date.parse(when)
   const [year, month, day, hour, minute, second] = written.slice(1, 7).map((part) => Number(part ?? 0))
   const days = new Date(Date.UTC(year!, month!, 0)).getUTCDate()
-  if (month! < 1 || month! > 12 || day! < 1 || day! > days || hour! > 23 || minute! > 59 || second! > 59) return Number.NaN
-  return written[7] === undefined ? new Date(year!, month! - 1, day!, hour!, minute!, second!).getTime() : Date.parse(when.trim())
+  const midnight = hour === 24 && minute === 0 && second === 0 && written[7] === undefined
+  if (month! < 1 || month! > 12 || day! < 1 || day! > days || (hour! > 23 && !midnight) || minute! > 59 || second! > 59) return Number.NaN
+  return written[8] === undefined ? new Date(year!, month! - 1, day!, hour!, minute!, second!).getTime() : Date.parse(when.trim())
 }
 
 /**
