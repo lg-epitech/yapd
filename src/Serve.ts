@@ -175,6 +175,20 @@ export const serve = Effect.gen(function* () {
             return Option.map(yield* actions.ran(to.id, latest.value), ({ userMessageId }) => userMessageId)
           }).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read which message its latest run began with", error), Option.none()))),
       }),
+    // How the turn a Stop told of ended, by its thread's latest run when that's the Stop's own, for what he set on its finishing to say.
+    ending: (to, stop) => {
+      const unknown: Reminders.Ending = { _tag: "Unknown" }
+      return Option.match(threads.actions(to.machine), {
+        onNone: () => Effect.succeed(unknown),
+        onSome: (actions) =>
+          Effect.gen(function* () {
+            const thread = yield* threads.find(to)
+            const latest = Option.flatMap(thread, ({ latestRunId }) => Option.fromNullable(latestRunId))
+            if (Option.isNone(thread) || Option.isNone(latest)) return unknown
+            return Option.match(yield* actions.ran(to.id, latest.value), { onNone: () => unknown, onSome: (run) => Notices.ended(stop, run, thread.value) })
+          }).pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read how its run ended", error), unknown))),
+      })
+    },
     holding: modes.holding,
     detail: modes.detail,
     // "Focus", "talk shorter" or "I'm back" said over an update, in so many words: done here, never sent to the agent. Back, what was

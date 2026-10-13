@@ -260,6 +260,13 @@ const notices = (
         }),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       flush,
+      /** What waits is taken up to be said, then cut off by a dictation before its end and put back to be said again, as the daemon keeps it. */
+      cut: Effect.gen(function* () {
+        for (const notice of [...waiting.values()]) {
+          if (yield* notice.stale) waiting.delete(notice.id)
+          else yield* notice.saying ?? Effect.void
+        }
+      }),
       /** What waits is said in turn, and what comes of it, till nothing does. */
       speak: Effect.gen(function* () {
         while (waiting.size > 0) {
@@ -1668,6 +1675,73 @@ describe("Notices of reminders", () => {
     expect(result.told).toEqual([expect.stringMatching(/^Migrate Tezos Integration hit Claude's limit, sir; it resets at \d.*\. You asked me to remind you then: call Bob\.$/)])
     expect(result.heard).toEqual([true])
   })
+
+  test("a reminder riding on a failure waiting to be said has gone off, so what's said of the failure never tells of one he cancelled", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-1", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos], bounded, reminding: true, queueing: true })
+        const bob = yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.hear(ended(tezos, "run-1"))
+        yield* made.wait(10)
+        // He cancels it while the failure waits behind something else being said.
+        const cancelled = yield* made.reminders!.cancel(bob.id)
+        yield* made.speak
+        return { cancelled: Option.isSome(cancelled), told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.cancelled).toBe(false)
+    expect(result.told).toEqual(["Migrate Tezos Integration failed, sir: the model provider had an error. You asked me to remind you then: call Bob."])
+    expect(result.heard).toEqual([true])
+  })
+
+  test("what he set on a thread finishing that ended while yapd couldn't hear it goes by how its run ended: a failure says why, and one he stopped keeps it for its next", async () => {
+    const over = new Date(now - 30_000).toISOString()
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "interrupted", latestRunId: "run-1", latestRunCompletedAt: over })
+    const std = thread("std", "Fix the std build", { status: "failed", latestRunId: "run-2", latestRunCompletedAt: over, lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "interrupted", ordinal: 1, startedAt: minutes(5) }] },
+      std: { runs: [{ id: "run-2", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-2", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos, std], bounded, reminding: true })
+        yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.reminders!.add({ ...tezosDone(), thread: "std", called: "the std fix" })
+        // yapd restarts, or T3 Code comes back, once both are over.
+        yield* made.reconcileOn("Rosie")
+        yield* made.flush
+        return { told: made.told, pending: (yield* made.reminders!.pending).map(({ thread }) => thread) }
+      }),
+    )
+    expect(result.told).toEqual(["Fix the std build stopped, sir, before finishing: the model provider had an error."])
+    expect(result.pending).toEqual(["tezos"])
+  })
+
+  test("how a Stop's turn ended, for what he set on its finishing, is read only from its own run: a failure says why, and nothing else can tell", () => {
+    const std = thread("std", "Fix the std build", { status: "failed", latestRunId: "run-2", lastErrorClass: "provider_error" })
+    const failed: T3Actions.Ran = {
+      id: "run-2",
+      status: "failed",
+      startedAt: Option.some(now - 60_000),
+      userMessageId: Option.none(),
+      prompt: Option.none(),
+      said: "The provider failed, so I stopped.",
+      final: "The provider failed, so I stopped.",
+      others: [],
+      failure: Option.some({ class: "provider_error", message: "API Error: 500 Internal server error", resetAt: null }),
+      natives: [],
+      previous: Option.none(),
+    }
+    const stop = (message: string): Notices.Stop => ({ at: now, message })
+    expect(Notices.ended(stop("The provider failed, so I stopped."), failed, std)).toEqual({ _tag: "Failed", why: "the model provider had an error." })
+    // In words that aren't its run's, as when the thread is on another run by now, it can't be told how it went.
+    expect(Notices.ended(stop("The build is green again."), failed, std)).toEqual({ _tag: "Unknown" })
+    expect(Notices.ended(stop("The provider failed, so I stopped."), { ...failed, status: "running" }, std)).toEqual({ _tag: "Unknown" })
+  })
 })
 
 describe("Notices of usage", () => {
@@ -1715,6 +1789,97 @@ describe("Notices of usage", () => {
     // Said at 95, what was kept at 80 of the same window isn't for the digest any more.
     expect(result.heldAfter).toBe(0)
     expect(result.next).toHaveLength(1)
+  })
+
+  test("a monthly window said at 95 percent isn't said again more than a week on, once when it resets moves into the next hour", async () => {
+    // Weeks off, 20 seconds before the hour.
+    const first = Math.floor((now + 20 * 24 * 60 * 60_000) / 3_600_000) * 3_600_000 + 59 * 60_000 + 40_000
+    let resets = new Date(first).toISOString()
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: { checkedAt: new Date(now).toISOString(), windows: [{ id: "claude-monthly", kind: "monthly", label: "Monthly", usedPercent: 96, resetsAt: resets }] },
+      },
+    ]
+    const told = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage })
+        yield* made.usage
+        yield* made.wait(8 * 24 * 60 * 60)
+        resets = new Date(first + 40_000).toISOString()
+        yield* made.usage
+        return made.told
+      }),
+    )
+    expect(told).toEqual([expect.stringMatching(/^Claude's monthly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
+  test("a 95 percent warning waiting to be said as quiet begins is kept for the morning, never said that night", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 96, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() }],
+        },
+      },
+    ]
+    let mode = Option.none<"focus" | "quiet">()
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, queueing: true, holding: () => mode })
+        yield* made.usage
+        // It waits behind something being said, and he says goodnight.
+        mode = Option.some("quiet")
+        yield* made.speak
+        // Read again later that night.
+        yield* made.wait(16 * 60)
+        yield* made.usage
+        yield* made.speak
+        return { told: made.told, morning: (yield* made.journal.held(0, 200, { only: ["quiet"] })).map(({ said }) => said) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.morning).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
+  test("a 95 percent warning cut off by a dictation, then taken up again once quiet began, is kept for the morning, never said that night", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 96, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() }],
+        },
+      },
+    ]
+    let mode = Option.none<"focus" | "quiet">()
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, queueing: true, holding: () => mode })
+        yield* made.usage
+        // A dictation cuts it off as it's being said, and puts it back; he says goodnight before it's taken up again.
+        yield* made.cut
+        mode = Option.some("quiet")
+        yield* made.speak
+        // Read again later that night.
+        yield* made.wait(16 * 60)
+        yield* made.usage
+        yield* made.speak
+        return { told: made.told, morning: (yield* made.journal.held(0, 200, { only: ["quiet"] })).map(({ said }) => said) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.morning).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
   })
 
   test("a threshold passed while yapd is off is kept for a catch-up alone, never for the digest or the morning", async () => {

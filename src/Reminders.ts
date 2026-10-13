@@ -45,6 +45,17 @@ export interface Reminder {
 /** A reminder as he asks for it, before it's kept. */
 export type Asked = Omit<Reminder, "id" | "state" | "firedAt">
 
+/**
+ * How a thread's turn ended, for what he set on its finishing: it finished,
+ * it failed and why, he stopped it, which leaves that for its next, or it
+ * can't be told, which is never taken for finished.
+ */
+export type Ending =
+  | { readonly _tag: "Finished" }
+  | { readonly _tag: "Failed"; readonly why: string }
+  | { readonly _tag: "Stopped" }
+  | { readonly _tag: "Unknown" }
+
 /** The key it's said once under, ever. */
 export const key = (id: number) => `remind:${id}`
 
@@ -279,6 +290,9 @@ export const lines = (said: Pick<Lines, "address">, now: number) => {
     },
     /** What's said of a thread he wanted to hear finish that failed instead, with why, as a failure is said. */
     failed: (reminder: Reminder, called: string, why: string): string => `${capital(called)} stopped${sir}, before finishing: ${why}${also(reminder) === "" ? "" : ` ${also(reminder)}`}`,
+    /** What's said of a thread he wanted to hear finish whose turn is over when how it went can't be told: never that it finished, nor that it failed. */
+    ended: (reminder: Reminder, called: string): string =>
+      also(reminder) === "" ? `${capital(called)} has stopped working on it${sir}, as you asked to hear.` : `${capital(called)} has stopped working on it${sir}. ${also(reminder)}`,
     /** What a reminder adds to what's said of its thread's failure, said with it: "" when it's only that it finished. */
     also,
     /** An offer, told rather than asked, like while yapd is off, for him to ask for it if he still wants it. */
@@ -295,6 +309,16 @@ export const lines = (said: Pick<Lines, "address">, now: number) => {
       } It's gone from T3 Code.`,
     /** The question an offer is asked with once it's due: what a yes sends, and to which thread. */
     asking: (reminder: Reminder, called: string) => ({ doing: message(reminder.propose ?? "", called), question: `Shall I ${message(reminder.propose ?? "", called)}${sir}?` }),
+    /**
+     * One named among those he's asked to choose between: what it's to say,
+     * then when, like "call the bank at 3:00 PM", or the thread it waits on;
+     * "the one" when it's to say nothing more; an offer by its thread.
+     */
+    chosen: (reminder: Reminder, called: string): string => {
+      if (reminder.propose !== undefined) return `your offer to ${called} ${reminder.event === undefined ? ahead(reminder.due ?? now, now) : `for when it ${doing(reminder.event)}`}`
+      const when = reminder.event === undefined ? ahead(reminder.due ?? now, now) : `when ${called} ${doing(reminder.event)}`
+      return words(reminder.text) === "" ? `the one ${reminder.event === undefined ? when : `for ${when}`}` : `${words(reminder.text)} ${when}`
+    },
     /** What's said once he cancels it, or takes back cancelling it, naming it. */
     cancelled: (reminder: Reminder, called: string, kept = false): string => {
       const done = kept ? "Kept" : "Cancelled"
@@ -341,9 +365,11 @@ export interface Leading {
 
 /**
  * What a finished turn's update is led by, for the thread it's about: the
- * reminders he set on it finishing by `before`, when it came. `announce`
- * says one of yapd's own accord, kept under its entry's key, as notices are,
- * under `kept`, the entry it was kept under already.
+ * reminders he set on it finishing by `before`, when it came, each saying how
+ * its turn `ended`, which is only read when there's one; none when he stopped
+ * it, which leaves them for its next. `announce` says one of yapd's own
+ * accord, kept under its entry's key, as notices are, under `kept`, the entry
+ * it was kept under already.
  */
 export const finishing = (options: {
   readonly reminders: Reminders
@@ -351,16 +377,18 @@ export const finishing = (options: {
   readonly lines: Effect.Effect<Lines>
   readonly announce: (spoken: string, entry: Entry & { readonly key: string }, kept: Option.Option<number>, about: Threads.Ref) => Effect.Effect<void>
 }) =>
-  (about: Threads.Ref, before: number): Effect.Effect<ReadonlyArray<Leading>> =>
+  (about: Threads.Ref, before: number, ended: Effect.Effect<Ending>): Effect.Effect<ReadonlyArray<Leading>> =>
     Effect.gen(function* () {
       const set = (yield* options.reminders.on(about, "finished", before)).filter(({ propose }) => propose === undefined)
       if (set.length === 0) return []
+      const how = yield* ended
+      if (how._tag === "Stopped") return []
       const now = yield* Clock.currentTimeMillis
       const said = lines(yield* options.lines, now)
       const desk = yield* options.desk(about)
       return set.map((reminder): Leading => {
         const called = calling(reminder, desk)
-        const line = said.fired(reminder, called)
+        const line = how._tag === "Finished" ? said.fired(reminder, called) : how._tag === "Failed" ? said.failed(reminder, called, how.why) : said.ended(reminder, called)
         return {
           line,
           fire: (off) =>

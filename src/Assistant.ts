@@ -235,6 +235,12 @@ export interface Open {
   readonly question?: string
   /** For an offer he set to be made later, the reminder it is: a yes sends it as any message he sends goes, checked for one sent just before. */
   readonly reminder?: number
+  /**
+   * For which of his reminders he meant, its choices, by the ids they're
+   * kept under, in the order they were named: his answer goes to the one he
+   * picked, whatever else he set, cancelled or went off meanwhile.
+   */
+  readonly reminders?: ReadonlyArray<number>
 }
 
 /** What the user meant, worked out, not yet acted on. */

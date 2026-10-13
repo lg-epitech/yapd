@@ -122,7 +122,12 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly latest: (at: number, most: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** Notes that these were kept quiet because he muted their thread, like updates dropped as he did. */
     readonly mute: (ids: ReadonlyArray<number>) => Effect.Effect<void>
-    /** Notes that these were held for later, and why, like updates dropped as focus began, and when they were. */
+    /**
+     * Notes that these were held for later, and why, like updates dropped as
+     * focus began, and when they were. A notice held other than as yapd was
+     * off is ranked with finished work from then on, as one held as it comes
+     * in is, since only such a notice is read back as held.
+     */
     readonly hold: (ids: ReadonlyArray<number>, why: Held) => Effect.Effect<void>
     /**
      * The updates held for later since `at` that he hasn't heard, and that
@@ -147,6 +152,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly missed: (at: number, spoke: number, most?: number, whenever?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** These entries, by id, oldest first, heard or not, like the ones a catch-up told him of. */
     readonly rows: (ids: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<Kept>>
+    /** The entries kept under a key that starts with `prefix`, however long ago, oldest first, the latest `most` of them. */
+    readonly keyed: (prefix: string, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /** The times yapd was turned on or off since `at`, newest first, the latest `most` of them, as the entries kept as it was. */
     readonly switched: (at: number, most?: number) => Effect.Effect<ReadonlyArray<Kept>>
     /**
@@ -478,6 +485,12 @@ export const fromStore = (
                   `update journal set detail = json_set(coalesce(detail, '{}'), '$.held', ?, '$.heldAt', ?) where id in (${ids.map(() => "?").join(", ")})`,
                 )
                 .run(why, now, ...ids)
+              if (why === "off") return
+              database
+                .query<never, Array<number>>(
+                  `update journal set detail = json_set(detail, '$.priority', 'done') where kind = 'notice' and id in (${ids.map(() => "?").join(", ")})`,
+                )
+                .run(...ids)
             }),
           ).pipe(mark, Effect.catchAll((error) => Effect.logWarning("Could not note what I held for later in my journal", error))),
     held: (at, most = 200, which) =>
@@ -519,6 +532,19 @@ export const fromStore = (
               database
                 .query<Row, Array<number>>(`select * from journal where id in (${ids.map(() => "?").join(", ")}) order by at, id`)
                 .all(...ids)
+                .map(kept),
+            ),
+          ),
+    keyed: (prefix, most = 1000) =>
+      prefix === ""
+        ? Effect.succeed([])
+        : reading(
+            store.transaction((database: Database) =>
+              database
+                // Keys from the prefix on, up to the first that doesn't start with it: what the index on keys finds.
+                .query<Row, [string, string, number]>("select * from journal where key >= ? and key < ? order by at desc, id desc limit ?")
+                .all(prefix, `${prefix.slice(0, -1)}${String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)}`, most)
+                .reverse()
                 .map(kept),
             ),
           ),

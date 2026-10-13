@@ -1978,4 +1978,18 @@ describe("memories", () => {
       `Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.`,
     )
   })
+
+  test("a memory is forgotten only when his words point at it, never on a guess between two", () => {
+    const memories = {
+      kept: [
+        { id: 1, at: now, kind: "fact" as const, text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." },
+        { id: 2, at: now, kind: "fact" as const, text: "rig's tunnel goes through Rosie", heard: "Remember that rig's tunnel goes through Rosie." },
+      ],
+      written: [],
+    }
+    const forget = (sure: Brain.Decision["sure"]) =>
+      Brain.check(Brain.decision({ act: "forget", target: "k1", sure, others: sure === "high" ? "" : "k2" }), situation("Forget the one about rig.", { memories }), lines)
+    expect(forget("medium")).toEqual({ _tag: "Say", spoken: lines.cantTell })
+    expect(forget("high")).toMatchObject({ _tag: "Do" })
+  })
 })

@@ -102,7 +102,9 @@ const make = (says?: string, options: {
   /** The journal, when it's kept from before a restart, rather than one of its own. */
   readonly journal?: Journal.Journal["Type"]
   /** What he asked to hear once a thread finishes. */
-  readonly finishing?: (about: Threads.Ref, before: number) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+  readonly finishing?: (about: Threads.Ref, before: number, ended: Effect.Effect<Reminders.Ending>) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+  /** How the turn a Stop told of ended, as its thread's run has it. */
+  readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -270,6 +272,7 @@ const make = (says?: string, options: {
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.command === undefined ? {} : { command: options.command }),
     ...(options.finishing === undefined ? {} : { finishing: options.finishing }),
+    ...(options.ending === undefined ? {} : { ending: options.ending }),
     // This machine is Rosie, as yapd serves it.
     naming,
   }).pipe(Effect.provide(context))
@@ -6289,5 +6292,55 @@ describe("Daemon reminders", () => {
     // Fired once, it's handed over once, on its own, under the entry it fired under, unheard until it's said.
     expect(result.apart).toEqual([{ spoken: "The loader fix has finished. You asked me to remind you then: call the bank.", key: "remind:1", kept: true }])
     expect(result.kept).toEqual([["remind:1", false]])
+  })
+
+  /** What a hook's turn of the loader fix, which he asked to hear finish, is led by, and what's left waiting, when how it went reads as `ended`. */
+  const hooked = (message: string, ended?: Reminders.Ending) =>
+    run(
+      Effect.gen(function* () {
+        const store = yield* Store.make(":memory:")
+        const journal = Journal.fromStore(store)
+        const reminders = Reminders.make(store, journal)
+        yield* reminders.add({ at: -120_000, heard: "Tell me when the loader one finishes.", text: "", event: "finished", machine: "Rosie", thread: "t-loader", called: "the loader fix" })
+        const finishing = Reminders.finishing({
+          reminders,
+          desk: () => Effect.succeed({ threads: [], away: [] }),
+          lines: Effect.succeed(Persona.plain),
+          announce: () => Effect.void,
+        })
+        const { handle, wait, played } = yield* make(undefined, {
+          journal,
+          finishing,
+          link: () => Effect.succeedSome({ machine: "Rosie", id: "t-loader" }),
+          ...(ended === undefined ? {} : { ending: () => Effect.succeed(ended) }),
+        })
+        yield* handle("claude", { hook_event_name: "Stop", session_id: "s-loader", cwd: "/code/yapd", last_assistant_message: message }, { project: "yapd", host: hostname() }, false)
+        yield* wait(11)
+        return { played: [...played], pending: (yield* reminders.pending).length }
+      }),
+    )
+
+  test("a hook's turn of a thread he asked to hear finish that failed is led by why it stopped, never that it finished", async () => {
+    const result = await hooked("The provider failed, so I stopped.", { _tag: "Failed", why: "the model provider had an error." })
+    expect(result.played).toEqual(["The loader fix stopped, before finishing: the model provider had an error. yapd. The provider failed, so I stopped."])
+    expect(result.pending).toBe(0)
+  })
+
+  test("a hook's turn of a thread he asked to hear finish whose run can't be read, as on rig, says it stopped working on it, never that it finished", async () => {
+    const result = await hooked("The provider failed, so I stopped.")
+    expect(result.played).toEqual(["The loader fix has stopped working on it, as you asked to hear. yapd. The provider failed, so I stopped."])
+    expect(result.pending).toBe(0)
+  })
+
+  test("a hook's turn of a thread he asked to hear finish that he stopped leaves it waiting for its next", async () => {
+    const result = await hooked("Stopped as you asked.", { _tag: "Stopped" })
+    expect(result.played).toEqual(["yapd. Stopped as you asked."])
+    expect(result.pending).toBe(1)
+  })
+
+  test("a hook's turn of a thread he asked to hear finish that went well says it finished", async () => {
+    const result = await hooked("The loader is fixed.", { _tag: "Finished" })
+    expect(result.played).toEqual(["The loader fix has finished, as you asked. yapd. The loader is fixed."])
+    expect(result.pending).toBe(0)
   })
 })
