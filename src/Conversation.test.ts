@@ -1820,6 +1820,28 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(result).toEqual({ done: true, offs: 0 })
   })
 
+  test("once the moment after a notice is over, short talk like a TV's left waiting while Whisper lags holds what's next up no longer than 'Mute.' could", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"]], { off: true, tell: true, queued: true, transcribing: 3.9 })
+        yield* helper.finish
+        yield* helper.wait(0.3)
+        // Three short bursts in the moment after it, the last two waiting while Whisper is on the first until 0.3 seconds before what's
+        // next can be held up no longer.
+        for (let time = 0; time < 3; time++) {
+          yield* helper.talk(0.8, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.05)
+        }
+        yield* helper.wait(3.75)
+        // Just past four seconds after the pause between lines.
+        yield* helper.wait(0.4)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
+  })
+
   test.each([
     ["while Whisper can't hear yet, its model still loading, it isn't asked", { unready: true, transcribing: 30 }, 0.6],
     ["Whisper taking longer than 'Mute.' could be heard out in, it's taken for other talk", { transcribing: 10 }, 4],

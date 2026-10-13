@@ -511,31 +511,37 @@ export const make = (options: {
          */
         const heeded = (at: number, over: number) => at >= finished - brink && at <= Math.min(Math.max(over + beat, ended + breather), over + outburst)
         // Once it's all over, only what's heeded is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk that goes
-        // on, like a TV's, ends it as one gone deaf does. What's come in already is looked at first, however long it waited.
-        const next = Effect.suspend(() => {
+        // on, like a TV's, ends it as one gone deaf does. What's come in already is looked at first, however long it waited, but only
+        // until `outburst` has passed since that moment was over: then it's over, however much is still waiting to be looked at.
+        const next = Effect.suspend((): Effect.Effect<Signal | undefined> => {
           if (over === undefined) return Queue.take(signals)
+          const last = over + outburst
           const until =
             onset === undefined
-              ? Math.min(Math.max(over + beat, ended + breather), over + outburst)
+              ? Math.min(Math.max(over + beat, ended + breather), last)
               : heeded(since, over)
                 ? Math.min(since, over) + outburst
                 : over
-          return Effect.flatMap(
-            Queue.poll(signals),
-            Option.match({
-              onSome: (signal) => Effect.succeed(signal),
-              onNone: () =>
-                Effect.flatMap(Clock.currentTimeMillis, (now) =>
-                  Queue.take(signals).pipe(
-                    Effect.timeout(Math.max(0, until - now)),
-                    Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
-                  ),
+          return Effect.flatMap(Clock.currentTimeMillis, (now) =>
+            now >= last
+              ? Effect.succeed(undefined)
+              : Effect.flatMap(
+                  Queue.poll(signals),
+                  Option.match({
+                    onSome: (signal) => Effect.succeed(signal),
+                    onNone: () =>
+                      Queue.take(signals).pipe(
+                        Effect.timeout(Math.max(0, until - now)),
+                        Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
+                      ),
+                  }),
                 ),
-            }),
           )
         })
         while (true) {
           const signal = yield* next
+          // Past the moment after it, which only ever begins once it's played to the end.
+          if (signal === undefined) return { _tag: "Finished" } satisfies Outcome
           switch (signal._tag) {
             case "Onset":
               // Begun once that moment is over, but not heeded, it's more of other talk, like a TV's, which holds nothing up.
@@ -559,11 +565,10 @@ export const make = (options: {
               echoing = false
               // Longer than "Mute." could be, it isn't, so Whisper isn't asked, and nothing waits on it; nor while Whisper can't hear yet,
               // as while its model loads. What it takes longer to make out than "Mute." could be heard out in is taken for something else,
-              // as is what it hasn't made out once nothing more is listened for after that moment, but for a breather at least, so what's
-              // next is held up hardly past then.
+              // as is what it hasn't made out once nothing more is listened for after that moment, so what's next is never held up past then.
               if (options.off !== undefined && voiced(signal.audio) <= curt && (yield* transcriber.ready)) {
                 const heard = yield* unlogged(signal.audio).pipe(
-                  Effect.timeout(over === undefined ? outburst : Math.max(breather, over + outburst - ended)),
+                  Effect.timeout(over === undefined ? outburst : Math.max(0, over + outburst - ended)),
                   Effect.orElseSucceed(() => ""),
                 )
                 if (halted(heard, echo)) {
