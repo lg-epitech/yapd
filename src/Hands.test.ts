@@ -2905,6 +2905,44 @@ describe("Hands", () => {
     expect(restarted).toEqual({ said: "I couldn't confirm it got your go-ahead before, sir, so I won't risk sending it again: it needs T3 Code.", dispatched: ["yapd:u1:0 accept"] })
   })
 
+  test("an archive whose answer was lost, that a restart couldn't confirm, is said once and never sent again, and scratch that still sends its way back", async () => {
+    /** Archived as T3 Code did, or not, `got`, its answer lost either way, then yapd restarted, then scratch that, which T3 Code takes as it is then. */
+    const restarting = (got: boolean) =>
+      run(
+        Effect.gen(function* () {
+          const { run: act, answering, ledger, dispatched, restarted } = yield* hands()
+          answering(() => Effect.fail(new Server.Trouble({ reason: "T3 Code is taking too long.", sent: true })))
+          const archived = yield* act({ utterance: "u1", step: 0 }, { _tag: "Tidy", to: [{ ref: tezos, called: "the Tezos migration" }], what: "archive" })
+          answering((payload) =>
+            payload.type === "thread.unarchive" && !got
+              ? Effect.fail(new Server.Refusal({ tag: "OrchestrationV2DispatchCommandError", message: `Thread ${tezos.id} is not archived.` }))
+              : Effect.succeed({ sequence: 7 }),
+          )
+          yield* TestClock.adjust("30 seconds")
+          const back = restarted(yield* Clock.currentTimeMillis)
+          const { unconfirmed } = yield* back.reconcile
+          const undone = yield* back.run({ utterance: "u2", step: 0 }, { _tag: "Undo", to: Option.none(), carry: false })
+          return {
+            archived: archived._tag,
+            said: Hands.untidied(unconfirmed.map((row) => ({ ...row, called: "the Tezos migration" })), lines),
+            undone: undone._tag === "Tidied" ? Hands.tidied(undone, lines, now) : undone._tag,
+            again: (yield* back.reconcile).unconfirmed.length,
+            dispatched: dispatched.map(({ type, commandId }) => [type, commandId]),
+          }
+        }),
+      )
+    const sent = [["thread.archive", "yapd:u1:0"], ["thread.unarchive", "yapd:u2:0:1"]]
+    expect(await restarting(true)).toEqual({
+      archived: "Tidied",
+      said: "Before I restarted, I couldn't confirm the Tezos migration was archived, sir.",
+      undone: "Unarchived, sir: the Tezos migration.",
+      again: 0,
+      dispatched: sent,
+    })
+    // Never archived after all, the way back is turned down as plainly as that.
+    expect((await restarting(false)).undone).toBe("I couldn't unarchive the Tezos migration, sir: it isn't archived.")
+  })
+
   test("taking back a snooze of several says each the way it went back, never the first one's way for all of them", () => {
     // Tuesday morning: the Tezos importer was snoozed till Friday at nine before, the Tezos fees not at all.
     const tuesday = new Date(2026, 9, 13, 10, 0).getTime()

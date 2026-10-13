@@ -1711,9 +1711,11 @@ export const make = (options: {
    * Not confirmed after a restart, it's said once, with why, and never done
    * again. A message stays as it may be, never offered again on its own, so
    * the same words said again find it, and are offered under its own ids.
+   * So does a tidy, so taking it back still sends its way back, which T3
+   * Code does once, whether the tidy got there or not, never the tidy again.
    * Only while it's as it was read: what came of it since, like his yes or no
    * to sending it again, stands, and was said then, so nothing is given back.
-   * A message is noted as never to be offered in the same write: noted
+   * One is noted as never to be offered in the same write: noted
    * first, it would be there to offer, for this reason, to anything reading
    * it in between. What's said is the reason as it is. One yapd's database
    * couldn't write is said all the same, since nothing else will say it,
@@ -1721,7 +1723,8 @@ export const make = (options: {
    */
   const unverified = (row: Ledger.Row, reason: string) =>
     Effect.gen(function* () {
-      const noted = row.kind === "message" ? { state: "unknown" as const, reason: Ledger.leftBe(reason) } : { state: "abandoned" as const, reason }
+      const noted =
+        row.kind === "message" || row.kind === "tidy" ? { state: "unknown" as const, reason: Ledger.leftBe(reason) } : { state: "abandoned" as const, reason }
       if ((yield* ledger.settle(row.commandId, noted.state, { reason: noted.reason, as: row })) === "stale") return Option.none<Ledger.Row>()
       yield* Effect.logWarning(`Couldn't confirm ${row.commandId} went through before restarting: ${reason}`)
       return Option.some<Ledger.Row>({ ...row, reason })
