@@ -137,6 +137,24 @@ export const migrations: ReadonlyArray<string> = [
   ) strict;
   create index reminders_due on reminders (due) where state = 'pending' and due is not null;
   create index reminders_event on reminders (machine, thread) where state = 'pending' and event is not null;`,
+  // What he asked yapd to keep in mind, by voice: a fact, or a routine, steps
+  // sent whenever he says its name. His words are kept as he said them beside
+  // what's kept of them, and the dictation they came in. One forgotten stays,
+  // to be brought back. A routine's name is told by its letters whatever their
+  // case, so there's only ever one of each kept; never reused, an id forgotten
+  // and brought back is always the same memory.
+  `create table memories (
+    id integer primary key autoincrement,
+    at integer not null,
+    kind text not null check (kind in ('fact', 'routine')),
+    name text,
+    text text not null,
+    heard text not null,
+    utterance text,
+    forgotten_at integer,
+    check ((kind = 'routine') = (name is not null))
+  ) strict;
+  create unique index memories_routine on memories (lower(name)) where kind = 'routine' and forgotten_at is null;`,
 ]
 
 export class Store extends Context.Tag("yapd/Store")<
