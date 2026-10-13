@@ -1245,6 +1245,55 @@ describe("Notices while yapd is off", () => {
     })
   })
 
+  test("the first turn of work yapd started still under way as T3 Code catches up is looked into once it's over, should what's heard of it then come to nothing", async () => {
+    const going = thread("glucose", "glucose", { activeRunId: "run-glucose", latestRunId: "run-glucose" })
+    const over = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(0) })
+    const asked = { id: "yapd:glucose:0:m", runId: "run-glucose", role: "user", text: "Find out.", createdAt: minutes(8) }
+    const latest = { id: "run-glucose", status: "running", ordinal: 1, startedAt: minutes(8), userMessageId: asked.id }
+    const bounded = { glucose: { runs: [latest], messages: [asked] } }
+    const result = await run(
+      Effect.gen(function* () {
+        let troubled = false
+        const made = yield* notices({ view: [going], bounded, started: [{ at: now - 10 * 60_000, thread: "glucose", messageId: asked.id }], troubled: () => troubled })
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(5)
+        // It ends, and T3 Code fails a moment as what it said is read.
+        bounded.glucose = {
+          runs: [{ ...latest, status: "completed" }],
+          messages: [asked, { id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(0) }],
+        }
+        troubled = true
+        yield* made.becomes(over)
+        yield* made.hear(ended(over, "run-glucose"))
+        yield* made.wait(13)
+        troubled = false
+        const heard = made.finished.map(({ key }) => key)
+        for (let i = 0; i < 18; i++) yield* made.wait(5)
+        return { heard, looked: made.finished.map(({ key }) => key) }
+      }),
+    )
+    expect(result).toEqual({ heard: [], looked: ["done:Rosie:run-glucose"] })
+  })
+
+  test("the first turn of work yapd started in a thread he archived since is never looked into", async () => {
+    const archived = thread("glucose", "glucose", { latestRunId: "run-glucose", latestRunCompletedAt: minutes(2), archivedAt: minutes(1) })
+    const bounded = {
+      glucose: {
+        runs: [{ id: "run-glucose", status: "completed", ordinal: 1, startedAt: minutes(8), userMessageId: "yapd:glucose:0:m" }],
+        messages: [{ id: "a-glucose", runId: "run-glucose", role: "assistant", text: "Apple hasn't shipped one.", createdAt: minutes(2) }],
+      },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [archived], bounded, started: [{ at: now - 10 * 60_000, thread: "glucose", messageId: "yapd:glucose:0:m" }] })
+        yield* made.reconcileOn("Rosie")
+        for (let i = 0; i < 36; i++) yield* made.wait(5)
+        return { finished: made.finished, reads: made.reads.length }
+      }),
+    )
+    expect(result).toEqual({ finished: [], reads: 0 })
+  })
+
   test("a question asked while yapd is off isn't worded then, and is asked once it's on", async () => {
     const asking = [{ type: "user_input_request", status: "waiting", requestId: "r1", questions: [{ id: "q", question: "Which fee table?" }] }]
     const request = { id: "r1", kind: "user_input", createdAt: minutes(1) }

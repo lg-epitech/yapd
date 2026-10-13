@@ -660,6 +660,8 @@ export const make = (options: {
         }
         if (status === "failed") return yield* Effect.as(failure, false)
         const thread = yield* threads.find(ref)
+        // Archived, he's done with it: nothing of it is said, or ever to keep.
+        if (Option.exists(thread, ({ archivedAt }) => archivedAt !== null)) return false
         const shown = yield* listed(ref)
         if (Option.isNone(thread) || Option.isNone(shown)) return true
         // Outside his projects, it isn't named by a project at all.
@@ -803,10 +805,12 @@ export const make = (options: {
      * Whether the first turn of work yapd started that the ledger's `start`
      * row is of may still be to keep, looking into it as a turn no hook told
      * of when it is: once it's over, while nothing of its thread was kept
-     * since it started, and only the turn its message began. Not once its
-     * thread is gone, or it's still at it, which is heard of as it ends; but
-     * it may be while the machine's threads can't be seen. Failing when it
-     * can't be read.
+     * since it started, and only the turn its message began. Still at it,
+     * it may be too: it's heard of as it ends, but that can come to nothing,
+     * as when its hook drops it and T3 Code fails a moment as it's read, and
+     * its run's key keeps it said once. Not once its thread is gone or
+     * archived; but it may be while the machine's threads can't be seen.
+     * Failing when it can't be read.
      */
     const unkept = (
       machine: string,
@@ -819,13 +823,16 @@ export const make = (options: {
         if (Option.isSome(yield* threads.unseen(machine))) return true
         const ref = { machine, id: start.thread }
         const thread = yield* threads.find(ref)
-        if (Option.isNone(thread) || start.messageId === null) return false
+        if (Option.isNone(thread) || start.messageId === null || thread.value.archivedAt !== null) return false
         const { latestRunId, latestRunCompletedAt } = thread.value
+        const busy = T3Live.busy(thread.value)
         const over = latestRunCompletedAt === null ? Number.NaN : Date.parse(latestRunCompletedAt)
-        if (latestRunId === null || T3Live.busy(thread.value) || !(over > start.at)) return false
+        if (latestRunId === null || (!busy && !(over > start.at))) return false
         if ((yield* journal.byThread(machine, ref.id, 1, ["update"])).length > 0) return false
         const run = yield* actions.ran(ref.id, latestRunId)
         if (!Option.exists(run, ({ userMessageId }) => Option.contains(userMessageId, start.messageId))) return false
+        // Looked into once it's over, should what's heard of it as it ends come to nothing.
+        if (busy) return true
         yield* Effect.logInfo("Looking into the first turn of work I started, which ended while I couldn't hear it").pipe(Effect.annotateLogs({ thread: thread.value.title }))
         const since = generation(ref)
         const current = Effect.sync(() => generation(ref) === since)
