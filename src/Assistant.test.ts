@@ -11689,21 +11689,43 @@ describe("Assistant memories", () => {
     expect(result.changed).toEqual({ said: "Changed, sir. Review it: have Opus review it twice.", kept: ["review it: have Opus review it twice"] })
   })
 
-  test("a secret isn't remembered, nor kept in the journal", async () => {
+  test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {
     const result = await run(
       Effect.gen(function* () {
         const made = yield* assistant(
-          (situation) =>
-            situation.utterance.heard.startsWith("Remember") ? Brain.decision({ act: "remember", how: "fact", text: "the staging key is sk-live-4f9a8b7c6d5e" }) : undefined,
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Remember that the staging key is sk-live-4f9a8b7c6d5e.") return Brain.decision({ act: "remember", how: "fact", text: "the staging key is sk-live-4f9a8b7c6d5e" })
+            // Not word for word his, which would be turned down for that.
+            if (heard === "Remember the staging key, sk-live-4f9a8b7c6d5e.") return Brain.decision({ act: "remember", how: "fact", text: "staging key: sk-live-4f9a8b7c6d5e" })
+            return undefined
+          },
           undefined,
           { memories: true },
         )
+        const said = () => Effect.map(made.memories!.list, (kept) => ({ said: made.spoken().at(-1), kept: kept.length }))
         yield* made.dictate("Remember that the staging key is sk-live-4f9a8b7c6d5e.")
-        return { said: made.spoken().at(-1), kept: (yield* made.memories!.list).length, journal: JSON.stringify(yield* made.journal.since(0)) }
+        const plain = yield* said()
+        yield* made.dictate("Remember the staging key, sk-live-4f9a8b7c6d5e.")
+        const reworded = yield* said()
+        // Over yapd's own voice, which would be turned down for that.
+        yield* made.heard({
+          heard: "Remember that the staging key is sk-live-4f9a8b7c6d5e.",
+          via: "shortcut",
+          at: yield* TestClock.currentTimeMillis,
+          voiced: 3,
+          turns: 1,
+          echo: "I'll tell you when it finishes, sir.",
+        })
+        yield* made.flush
+        const echoed = yield* said()
+        return { plain, reworded, echoed, journal: JSON.stringify(yield* made.journal.since(0)) }
       }),
     )
-    expect(result.said).toBe("I won't keep that, sir. It looks like a secret.")
-    expect(result.kept).toBe(0)
+    const refused = { said: "I won't keep that, sir. It looks like a secret.", kept: 0 }
+    expect(result.plain).toEqual(refused)
+    expect(result.reworded).toEqual(refused)
+    expect(result.echoed).toEqual(refused)
     expect(result.journal).not.toContain("4f9a8b7c6d5e")
   })
 })

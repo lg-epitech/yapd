@@ -1878,6 +1878,15 @@ const answersTo = (phrase: string) => {
   )
 }
 
+/**
+ * Whether what he asked to be kept in mind may give a secret away, in all he
+ * said or in what the model made of it. It's refused as a secret before
+ * anything else would turn it down, since only that keeps his words out of
+ * the journal.
+ */
+export const secretive = (choice: Pick<Decision, "text">, utterance: Pick<Assistant.Utterance, "heard" | "whole">) =>
+  [utterance.heard, utterance.whole ?? "", choice.text].some((words) => T3Actions.revealing(words))
+
 /** What's said of what can't be kept in mind, or forgotten. */
 const rememberLines = (lines: Pick<Lines, "address">) => {
   const sir = addressed(lines)
@@ -2050,6 +2059,8 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       return Option.isNone(memory.value.kept) ? { _tag: "Say", spoken: rememberLines(lines).written } : doing({ decision: choice, target: Option.none() })
     }
     case "remember": {
+      // What may give a secret away is refused as one, whatever else is wrong with it, so his words stay out of the journal.
+      if (secretive(choice, situation.utterance)) return doing({ decision: { ...choice, target: "" }, target: Option.none() })
       // Said over something, too little speech is talk or noise nearby, never something to keep.
       if (murmured(choice, situation.utterance)) return doing({ decision: { ...choice, act: "resume" }, target: Option.none() })
       const said = rememberLines(lines)

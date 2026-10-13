@@ -2999,19 +2999,20 @@ export const make = (options: {
     const remembering = (plan: Brain.Plan, thought: Thought, said: Lines) =>
       Effect.gen(function* () {
         const { memories } = options
-        if (memories === undefined) return reply(Brain.notYet(said), thought.subject)
         const { decision } = plan
         const { utterance } = thought
         const told = Memory.lines(said)
+        // Before anything else would turn it down, even over yapd's own voice, since only this keeps his words out of the journal.
+        if (Brain.secretive(decision, utterance)) {
+          yield* Effect.logInfo("Not keeping it, since it looks like a secret")
+          return { ...reply(told.secret, thought.subject), withheld: true }
+        }
+        if (memories === undefined) return reply(Brain.notYet(said), thought.subject)
         // All he said, for the rest of a request too, unless some of it may have been yapd's own voice.
         const heard = utterance.whole ?? ownWords(utterance)
         if (utterance.echo !== undefined || heard.trim() === "") return reply(told.echoed, thought.subject)
         const routine = decision.how === "routine" ? Brain.routineOf(decision.text) : undefined
         const text = routine?.steps ?? decision.text.trim()
-        if (T3Actions.revealing(heard) || T3Actions.revealing(text)) {
-          yield* Effect.logInfo("Not keeping it, since it looks like a secret")
-          return { ...reply(told.secret, thought.subject), withheld: true }
-        }
         if (decision.how === "routine" && routine === undefined) return reply(said.cantTell, thought.subject)
         const now = yield* Clock.currentTimeMillis
         const asked: Memory.Asked = { at: now, kind: routine === undefined ? "fact" : "routine", ...(routine === undefined ? {} : { name: routine.name }), text, heard, utterance: utterance.id }
