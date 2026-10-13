@@ -145,12 +145,13 @@ test("a database at version 3 with its journal moves to version 4 and keeps it",
   expect(tables(path).version).toBe(4)
 }))
 
-test("a database at version 4, as Rosie's is, moves to version 5 with nothing muted, and keeps its journal and what was done", () => within(async path => {
+test("a database at version 5, as Rosie's is, moves to version 6 with no reminders, and keeps its journal, what was done and what's muted", () => within(async path => {
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-    const store = yield* Store.make(path, Store.migrations.slice(0, 4))
+    const store = yield* Store.make(path, Store.migrations.slice(0, 5))
     yield* store.transaction(database => {
       database.run("insert into journal (at, kind, said) values (1, 'update', 'yapd. The tests pass.')")
       database.run("insert into actions (command_id, utterance, step, kind, machine, thread, body, state, at) values ('yapd:u1:0', 'u1', 0, 'stop', 'Rosie', 't1', '{}', 'sent', 1)")
+      database.run("insert into mutes (key, at) values ('t3:Rosie:t1', 1)")
     })
   })))
   const found = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
@@ -159,13 +160,14 @@ test("a database at version 4, as Rosie's is, moves to version 5 with nothing mu
       said: database.query<{ said: string }, []>("select said from journal").all(),
       actions: database.query<{ count: number }, []>("select count(*) as count from actions").get()?.count,
       mutes: database.query<{ count: number }, []>("select count(*) as count from mutes").get()?.count,
+      reminders: database.query<{ count: number }, []>("select count(*) as count from reminders").get()?.count,
     }))
   })))
-  expect(found).toEqual({ said: [{ said: "yapd. The tests pass." }], actions: 1, mutes: 0 })
-  expect(tables(path)).toEqual({ names: ["actions", "journal", "messages", "mutes", "settings", "threads"], version: 5 })
+  expect(found).toEqual({ said: [{ said: "yapd. The tests pass." }], actions: 1, mutes: 1, reminders: 0 })
+  expect(tables(path)).toEqual({ names: ["actions", "journal", "messages", "mutes", "reminders", "settings", "sqlite_sequence", "threads"], version: 6 })
 }))
 
-test("a new database has every step, mutes last", () => within(async path => {
+test("a new database has every step, reminders last", () => within(async path => {
   await Effect.runPromise(Effect.scoped(Store.make(path)))
-  expect(tables(path)).toEqual({ names: ["actions", "journal", "messages", "mutes", "settings", "threads"], version: 5 })
+  expect(tables(path)).toEqual({ names: ["actions", "journal", "messages", "mutes", "reminders", "settings", "sqlite_sequence", "threads"], version: 6 })
 }))
