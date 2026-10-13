@@ -69,6 +69,7 @@ Say anything while yapd is talking and it stops. The model that writes the summa
 - "Mute." on its own turns yapd off at once, as Turn Off in the menu does, with no model and not a word back, over anything it says or just after, its first seconds and a notice too, and by the [shortcut](#dictating). What was waiting stays unheard for your catch-up, and nothing reaches an agent: one whose question it was reading still waits on you in T3 Code. Turn it back on from the menu, or press the shortcut and say "unmute" or "turn on". "Mute it" still mutes the thread.
 - "Got it", "sounds good" or "quiet" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
 - "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and asking what it said catches you up on it. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
+- "Read me its subagents" and "stop reading its subagents" change whether you hear that thread's [subagents](#subagents). Nothing about it reaches the agent; "have a subagent review it" still does.
 - "More" over a headline, or just after it, says the rest at once.
 - "Focus", "goodnight", "I'm back", "talk shorter" and "give me everything" change how yapd talks, as in [Focus and quiet](#focus-and-quiet). Nothing about them reaches the agent.
 - Ask something the update answers, like "which PR was that?", and it answers.
@@ -112,6 +113,10 @@ Updates that only say how running work is going, like another review round, are 
 ## Catching up
 
 yapd keeps every update it sums up, and knows which you heard to the end. Ask it to catch you up, however you put it, "catch me up", "what did I miss on Distribox?" or "anything from rig since lunch?", and the model decides that's what you want and what about; yapd first reads you what needs you as it was kept, a failure or an agent's question with its options, and the answer to what you asked a thread, then briefs you on the rest in about ninety words and eight threads at most. "More" gets the threads it left out, or the detail of the ones it told you of. What it told you counts as heard only once you've heard it to the end. Muted threads are left out unless you ask about one. Nothing it does reaches an agent.
+
+## Subagents
+
+The reviews and other work T3 Code runs for a thread as its subagents are kept to yapd unless you ask for them: summed up and kept, but never said, whatever they say, and left out of what you missed. The thread's own turns, like the one where it takes in a review, are said as ever. "Read me its subagents" over or after one of its updates, or "read me the Tezos migration's subagents" with the shortcut, has them read to you from now on, each led by the thread: "For the Tezos migration: one release blocker is left." "Stop reading its subagents" keeps them to yapd again, and "scratch that" right after either takes it back. "Mute it" over one of them mutes that one only; muting the thread mutes its subagents too. "What did its subagents say?" catches you up on what they kept. Subagents a provider runs inside the thread's own session, like Claude's Agent tool, never reach yapd: their results come in the thread's own turn. The [API](docs/api.md#hearing-a-threads-subagents) does the same by a thread's key.
 
 ## Reminders
 
