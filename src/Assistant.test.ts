@@ -11762,7 +11762,7 @@ describe("Assistant memories", () => {
         return { kept, before, forgot, after, back, again: told() }
       }),
     )
-    expect(result.kept.said).toBe("Noted, sir.")
+    expect(result.kept.said).toBe("Noted, sir: rig's T3 Code runs the nightly.")
     expect(result.kept.memories).toEqual([{ kind: "fact", text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." }])
     expect(result.before).toContain("- k1 «rig's T3 Code runs the nightly»")
     expect(result.forgot).toEqual({ said: "Forgotten, sir: rig's T3 Code runs the nightly.", memories: 0 })
@@ -11800,7 +11800,8 @@ describe("Assistant memories", () => {
         return { again, forgot, restored: Option.getOrUndefined(Option.map(restored, (back) => (back._tag === "Full" ? [back._tag] : [back._tag, back.memory.id]))), kept: yield* made.memories!.list }
       }),
     )
-    expect(result.again).toEqual({ said: "Noted, sir.", kept: ["rig's T3 Code runs the nightly"] })
+    // Read back as it's kept, from the first time.
+    expect(result.again).toEqual({ said: "Noted, sir: rig's T3 Code runs the nightly.", kept: ["rig's T3 Code runs the nightly"] })
     expect(result.forgot).toEqual({ said: "Forgotten, sir: rig's T3 Code runs the nightly.", kept: [] })
     expect(result.kept.map(({ text }) => text)).toEqual(["rig's T3 Code runs the nightly"])
     expect(result.restored).toEqual(["Already", result.kept[0]!.id])
@@ -11831,9 +11832,9 @@ describe("Assistant memories", () => {
         return { again, undone, both: { said: made.spoken().at(-1), kept: yield* kept() } }
       }),
     )
-    expect(result.again).toEqual({ said: "Noted, sir.", kept: ["rig uses C++"] })
+    expect(result.again).toEqual({ said: "Noted, sir: rig uses C++.", kept: ["rig uses C++"] })
     expect(result.undone).toEqual({ said: "There's nothing to take back, sir.", kept: ["rig uses C++"] })
-    expect(result.both).toEqual({ said: "Noted, sir.", kept: ["rig uses C++", "rig uses C"] })
+    expect(result.both).toEqual({ said: "Noted, sir: rig uses C.", kept: ["rig uses C++", "rig uses C"] })
   })
 
   test("a routine's name sends its steps to the focus thread once, as they're written", async () => {
@@ -11979,7 +11980,7 @@ describe("Assistant memories", () => {
       }),
     )
     expect(result.listed).toBe(Memory.most - 1)
-    expect(result.said).toBe("Noted, sir.")
+    expect(result.said).toBe("Noted, sir: rig runs the nightly.")
     expect(result.back).toEqual(["Deploy straight to production."])
   })
 
@@ -12070,7 +12071,7 @@ describe("Assistant memories", () => {
     // Another request after it is done as ever when it's all the model's rest, his words after an "and", "then" or "also", and the fact all he
     // said before them; otherwise nothing is kept, nor anything of the rest done.
     expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toEqual({
-      said: "Noted, sir. On it: Open Mina SSV2 Bug Tickets.",
+      said: "Noted, sir: rig runs the nightly. On it: Open Mina SSV2 Bug Tickets.",
       kept: ["rig runs the nightly"],
       sent: ["Rebase."],
     })
@@ -12097,7 +12098,17 @@ describe("Assistant memories", () => {
     for (const heard of ["Remember that rig runs the nightly. Tell the Mina one to rebase.", "Remember that rig runs the nightly; tell the Mina one to rebase."]) {
       expect([heard, await saving(heard, "rig runs the nightly", "fact", "tell the Mina one to rebase")]).toEqual([heard, { said: `${alone} I left the rest: tell the Mina one to rebase.`, kept: [], sent: [] }])
     }
-    expect(await saving("Okay, remember that Rig uses C++ for the parser, thanks.", "rig uses C++ for the parser", "fact")).toMatchObject({ kept: ["Rig uses C++ for the parser"] })
+    expect(await saving("Okay, remember that Rig uses C++ for the parser, thanks.", "rig uses C++ for the parser", "fact")).toEqual({
+      said: "Noted, sir: Rig uses C++ for the parser.",
+      kept: ["Rig uses C++ for the parser"],
+      sent: [],
+    })
+    // Read back as it's kept, but for what can't be read out, when it's said by what it's about, in its first words.
+    expect(await saving("Remember that the logs are in /var/log/yapd/daemon.log.", "the logs are in /var/log/yapd/daemon.log", "fact")).toEqual({
+      said: "Noted, sir: the one about the logs are in a file.",
+      kept: ["the logs are in /var/log/yapd/daemon.log"],
+      sent: [],
+    })
     // A word to yapd is left out only before what he asks, or once a pause sets it off: one that runs straight into his words is his, so
     // the model's copy without it keeps nothing.
     expect(await saving("When I say ping, ask Jarvis.", "ping: ask")).toEqual({ said: "I couldn't keep the steps in your own words, sir, so I didn't save it.", kept: [], sent: [] })
@@ -12113,7 +12124,7 @@ describe("Assistant memories", () => {
       "Um, could you keep in mind that rig runs the nightly.",
       "So I want you to note that rig runs the nightly.",
     ]) {
-      expect([heard, await saving(heard, "rig runs the nightly", "fact")]).toEqual([heard, { said: "Noted, sir.", kept: ["rig runs the nightly"], sent: [] }])
+      expect([heard, await saving(heard, "rig runs the nightly", "fact")]).toEqual([heard, { said: "Noted, sir: rig runs the nightly.", kept: ["rig runs the nightly"], sent: [] }])
     }
     expect(await saving("Remember that so rig runs the nightly.", "rig runs the nightly", "fact")).toEqual(unsaved)
     expect(await saving("Don't remember that rig runs the nightly.", "rig runs the nightly", "fact")).toEqual({ said: alone, kept: [], sent: [] })

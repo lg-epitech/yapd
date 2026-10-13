@@ -3015,8 +3015,10 @@ export const make = (options: {
 
     /**
      * Keeps what he asked yapd to keep in mind, in his words, with all he
-     * said as he said it beside it, and says so once it's kept, reading a
-     * routine's steps back, so he hears exactly what's sent for its name.
+     * said as he said it beside it, and says so once it's kept, or was
+     * already, reading it back: a fact as it's kept, so he hears what of his
+     * words is, and a routine's steps, so he hears exactly what's sent for
+     * its name.
      * Nothing that may have been yapd's own voice is kept, since it would be
      * in every prompt as his, nor what may give a secret away, which isn't
      * kept in the journal either: he's told why.

@@ -205,9 +205,10 @@ const naming = 6
 
 /**
  * What's said of memories, in fixed words: a fact as he said it, when it can
- * be read out as it is, and a routine by its name, with its steps read back
- * as he said them whenever they're kept, so he hears exactly what's sent for
- * it.
+ * be read out as it is, read back whenever it's kept, so he hears exactly
+ * what's kept of what he said, and a routine by its name, with its steps
+ * read back as he said them whenever they're kept, so he hears exactly
+ * what's sent for it.
  */
 export const lines = (said: Pick<Lines, "address">) => {
   const sir = addressed(said)
@@ -216,9 +217,9 @@ export const lines = (said: Pick<Lines, "address">) => {
   /** A routine by its name and steps, read back. */
   const routine = (kept: Pick<Memory, "name" | "text">) => `${named(kept.name ?? "")}: ${words(kept.text)}.`
   return {
-    /** What's said once it's kept: a routine read back, changed when it took the place of one called the same. */
+    /** What's said once it's kept, or found kept already: read back, a routine changed when it took the place of one called the same. */
     kept: (kept: Pick<Memory, "kind" | "name" | "text">, changed: boolean): string =>
-      kept.kind === "routine" ? `${changed ? "Changed" : "Noted"}${sir}. ${routine(kept)}` : `Noted${sir}.`,
+      kept.kind === "routine" ? `${changed ? "Changed" : "Noted"}${sir}. ${routine(kept)}` : `Noted${sir}: ${fact(kept.text)}.`,
     /** What's said once it's forgotten, naming it. */
     forgotten: (kept: Pick<Memory, "kind" | "name" | "text">): string =>
       kept.kind === "routine" ? `Forgotten${sir}: ${words(kept.name ?? "")}.` : `Forgotten${sir}: ${fact(kept.text)}.`,
