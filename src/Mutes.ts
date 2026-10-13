@@ -11,7 +11,9 @@ import type * as Threads from "./Threads.ts"
 // and finished work are summed up and kept, but never said; whatever needs
 // him still is: a question, an approval, a failure, a limit, and the answer
 // to a message he sent it himself. A mute is his to make and take off, from
-// the menu or by voice, and nothing about it ever reaches an agent.
+// the menu or by voice, and nothing about it ever reaches an agent. Beside
+// them, the threads whose subagents he has read to him: every other thread's
+// are kept to yapd, whatever they say.
 
 /**
  * What a mute is kept under: `t3:<machine>:<thread>` for a thread T3 Code
@@ -53,16 +55,24 @@ export const parse = (text: string): Option.Option<About> => {
 
 /**
  * The keys an update is muted by: its thread's, when it's tied to one, here
- * or on another machine, and its session's, unless it's a turn T3 Code told
- * of, which has no session of its own.
+ * or on another machine, or the subagent's it came from, and its session's,
+ * unless it's a turn T3 Code told of, which has no session of its own. Never
+ * the thread a subagent is part of, so unmuting one of its updates never
+ * unmutes that thread.
  */
-export const keysOf = (update: Pick<Conversation.Update, "session" | "about" | "owner" | "thread">, called: Naming): ReadonlyArray<string> => {
-  const ref = update.about ?? update.owner
+export const keysOf = (update: Pick<Conversation.Update, "session" | "about" | "owner" | "subagent" | "thread">, called: Naming): ReadonlyArray<string> => {
+  const ref = update.about ?? update.owner ?? update.subagent?.child
   return [
     ...(ref === undefined ? [] : [key.thread(ref)]),
     ...(update.session.startsWith("finished:") ? [] : [key.session(called(update.thread.origin.host ?? hostname()), update.session)]),
   ]
 }
+
+/** The keys an update is kept quiet by: its own, and a subagent's, the thread's it's part of too, so muting that thread mutes its subagents. */
+export const covering = (update: Pick<Conversation.Update, "session" | "about" | "owner" | "subagent" | "thread">, called: Naming): ReadonlyArray<string> => [
+  ...keysOf(update, called),
+  ...(update.subagent?.head === undefined ? [] : [key.thread(update.subagent.head.ref)]),
+]
 
 /**
  * The keys an update kept in the journal is muted by, as `keysOf` gives
@@ -78,6 +88,18 @@ export const keysOfKept = (kept: Pick<Kept, "machine" | "thread" | "detail">, ca
     ...(tied !== undefined && kept.machine !== undefined && kept.thread !== undefined ? [key.thread({ machine: kept.machine, id: kept.thread })] : []),
     ...(session === undefined || session.startsWith("finished:") ? [] : [key.session(called(host ?? hostname()), session)]),
   ]
+}
+
+/** The thread a subagent's update kept in the journal is part of, by its key, as `covering` adds it: none for any other. */
+export const headKept = (kept: Pick<Kept, "machine" | "detail">): string | undefined => {
+  const detail = (typeof kept.detail === "object" && kept.detail !== null ? kept.detail : {}) as { readonly subagent?: unknown; readonly head?: unknown }
+  return detail.subagent === true && typeof detail.head === "string" && kept.machine !== undefined ? key.thread({ machine: kept.machine, id: detail.head }) : undefined
+}
+
+/** The keys an update kept in the journal is kept quiet by, as `covering` gives them for the update it was. */
+export const coveringKept = (kept: Pick<Kept, "machine" | "thread" | "detail">, called: Naming): ReadonlyArray<string> => {
+  const head = headKept(kept)
+  return [...keysOfKept(kept, called), ...(head === undefined ? [] : [head])]
 }
 
 /** Counts as they're said for how long a mute lasts, beside the digits Whisper often writes. */
@@ -136,13 +158,16 @@ const everything: ReadonlySet<string> = new Set(["unmute everything", "unmute al
 /**
  * Muting or unmuting what he's on about, or unmuting everything, said in so
  * many words, like "mute it", "silence this one for an hour" or "unmute
- * that", with how many minutes a mute for a while lasts. Anything else, like
- * a thread by name, a mute "until tomorrow", or more said around it, is
- * none: the model's to work out.
+ * that", with how many minutes a mute for a while lasts; or reading him its
+ * subagents, or no longer, as "read me its subagents" or "stop reading their
+ * subagents". Anything else, like a thread by name, a mute "until tomorrow",
+ * or more said around it, is none: the model's to work out.
  */
-export const command = (heard: string): Option.Option<{ readonly how: "mute" | "unmute" | "clear"; readonly minutes?: number }> => {
+export const command = (heard: string): Option.Option<{ readonly how: "mute" | "unmute" | "clear" | "subagents" | "nosubagents"; readonly minutes?: number }> => {
   const said = gist(heard)
   if (everything.has(said)) return Option.some({ how: "clear" })
+  const reading = /^(read|stop reading|don't read)(?: me)? (?:its|their) subagents$/.exec(said)
+  if (reading !== null) return Option.some({ how: reading[1] === "read" ? "subagents" : "nosubagents" })
   const asked = new RegExp(`^(mute|silence|unmute) (?:${it})(?: for (.+))?$`).exec(said)
   if (asked === null) return Option.none()
   const how = asked[1] === "unmute" ? "unmute" : "mute"
@@ -167,6 +192,32 @@ export const aboutMuting = (heard: string) => {
   )
 }
 
+/**
+ * Whether what he said is about which of a thread's subagents are read to
+ * him, but not in so many words, like "read me the subagents", "can you read
+ * me its subagents" or "keep its subagents to yourself": as a whole, so
+ * "have a subagent review it" or "read the subagents' findings and fix
+ * them", which are for the agent, aren't.
+ */
+export const aboutSubagents = (heard: string) => {
+  const said = gist(heard)
+  return (
+    /^(?:(?:can|could|would|will) you |please )?(?:read|hear|start reading|keep reading|stop reading|quit reading|don't read|dont read|do not read|mute|silence)(?: me| us)? (?:its|their|the|this thread's|that thread's) subagents(?: (?:too|again|aloud|out loud|from now on|please))?$/.test(said) ||
+    /^keep (?:its|their|the) subagents (?:to yourself|quiet)$/.test(said)
+  )
+}
+
+/** A thread whose subagents he has read to him. */
+export interface Reading {
+  /** Its key, as a thread's. */
+  readonly key: string
+  /** What it's called aloud, for when there's nothing else to call it by. */
+  readonly called?: string | undefined
+  readonly project?: string | undefined
+  /** When he asked for them. */
+  readonly at: number
+}
+
 /** A thread he muted. */
 export interface Mute {
   readonly key: string
@@ -179,12 +230,18 @@ export interface Mute {
   readonly ends?: number | undefined
 }
 
-/** A change he made to what's muted, which "scratch that" takes back: the mutes it made and the ones it took off. */
+/**
+ * A change he made to what's muted, or to whose subagents are read to him,
+ * which "scratch that" takes back: the mutes it made and the ones it took
+ * off, and the threads whose subagents it started or stopped reading.
+ */
 export interface Change {
-  readonly how: "mute" | "unmute" | "clear" | "undo"
+  readonly how: "mute" | "unmute" | "clear" | "undo" | "subagents" | "nosubagents"
   readonly at: number
   readonly added: ReadonlyArray<Mute>
   readonly removed: ReadonlyArray<Mute>
+  readonly read?: ReadonlyArray<Reading>
+  readonly unread?: ReadonlyArray<Reading>
 }
 
 /** How long a change can be taken back for, as for anything else yapd did. */
@@ -207,8 +264,33 @@ export interface Mutes {
   readonly list: Effect.Effect<ReadonlyArray<Mute>>
   /** The last change he made, if it was in the last two minutes. */
   readonly last: Effect.Effect<Option.Option<Change>>
-  /** Each time what's muted changes, even when a mute ends on its own. */
+  /** Each time what's muted changes, even when a mute ends on its own, or whose subagents are read. */
   readonly changes: Stream.Stream<void>
+  /** Whether the subagents of the thread under this key are read to him, from memory. */
+  readonly reads: (key: string) => Effect.Effect<boolean>
+  /** Starts or stops reading him a thread's subagents, and says whether that changed anything. */
+  readonly read: (thread: Omit<Reading, "at">, on: boolean) => Effect.Effect<boolean>
+  /** The threads whose subagents are read to him, oldest first. */
+  readonly reading: Effect.Effect<ReadonlyArray<Reading>>
+}
+
+/** What `settings` keeps the threads whose subagents are read under. */
+const readingSetting = "subagents"
+
+/** The threads whose subagents are read, as kept: none for anything that isn't a list of them. */
+const readingsIn = (value: string): ReadonlyArray<Reading> => {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((one): ReadonlyArray<Reading> => {
+      if (typeof one !== "object" || one === null) return []
+      const { key, called, project, at } = one as Record<string, unknown>
+      if (typeof key !== "string" || Option.isNone(parse(key)) || typeof at !== "number") return []
+      return [{ key, ...(typeof called === "string" ? { called } : {}), ...(typeof project === "string" ? { project } : {}), at }]
+    })
+  } catch {
+    return []
+  }
 }
 
 interface Row {
@@ -241,6 +323,12 @@ export const make = (store: Store.Store["Type"]) =>
       .transaction((database: Database) => database.query<Row, []>("select key, called, project, at, ends_at from mutes order by at, key").all())
       .pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read what's muted", error), [] as ReadonlyArray<Row>)))
     const mutes = new Map(kept.map((row) => [row.key, fromRow(row)]))
+    const stored = yield* store
+      .transaction((database: Database) =>
+        database.query<{ value: string }, [string]>("select value from settings where name = ?").get(readingSetting)?.value,
+      )
+      .pipe(Effect.catchAll((error) => Effect.as(Effect.logWarning("Could not read whose subagents I read you", error), undefined)))
+    const readings = new Map((stored === undefined ? [] : readingsIn(stored)).map((reading) => [reading.key, reading]))
     /**
      * A session's mute moved to its thread since the last change: what it
      * was, and whether the thread had a mute of its own already, which it
@@ -275,19 +363,48 @@ export const make = (store: Store.Store["Type"]) =>
         yield* PubSub.publish(changed, undefined)
       })
 
-    /** Records a change he made, for taking it back. */
-    const change = (how: Change["how"], added: ReadonlyArray<Mute>, removed: ReadonlyArray<Mute>) =>
+    /** Writes whose subagents are read, in memory whatever the database makes of it. */
+    const keep = (read: ReadonlyArray<Reading>, unread: ReadonlyArray<Reading>) =>
       Effect.gen(function* () {
-        yield* save(added, removed)
-        last = { how, at: yield* Clock.currentTimeMillis, added, removed, moves: [] }
+        if (read.length === 0 && unread.length === 0) return
+        for (const { key } of unread) readings.delete(key)
+        for (const reading of read) readings.set(reading.key, reading)
+        const value = JSON.stringify([...readings.values()])
+        yield* store
+          .transaction((database: Database) => {
+            database.query("insert into settings (name, value) values (?, ?) on conflict (name) do update set value = excluded.value").run(readingSetting, value)
+          })
+          .pipe(Effect.catchAll((error) => Effect.logWarning("Could not keep whose subagents I read you", error)))
+        yield* PubSub.publish(changed, undefined)
+      })
+
+    /** Records a change he made, for taking it back. */
+    const change = (
+      how: Change["how"],
+      added: ReadonlyArray<Mute>,
+      removed: ReadonlyArray<Mute>,
+      reading: { readonly read: ReadonlyArray<Reading>; readonly unread: ReadonlyArray<Reading> } = { read: [], unread: [] },
+    ) =>
+      Effect.gen(function* () {
+        if (added.length > 0 || removed.length > 0) yield* save(added, removed)
+        yield* keep(reading.read, reading.unread)
+        last = {
+          how,
+          at: yield* Clock.currentTimeMillis,
+          added,
+          removed,
+          ...(reading.read.length === 0 ? {} : { read: reading.read }),
+          ...(reading.unread.length === 0 ? {} : { unread: reading.unread }),
+          moves: [],
+        }
         return shown(last)
       })
 
     /** A change as he'd know it: what it did to a session that's since been found to be a thread's, it did to the thread. */
-    const shown = ({ how, at, added, removed, moves }: NonNullable<typeof last>): Change => {
+    const shown = ({ how, at, added, removed, read, unread, moves }: NonNullable<typeof last>): Change => {
       const follow = (all: ReadonlyArray<Mute>) =>
         all.map((mute) => moves.reduce((mute, { from, to }) => (mute.key === from ? { ...mute, key: to } : mute), mute))
-      return { how, at, added: follow(added), removed: follow(removed) }
+      return { how, at, added: follow(added), removed: follow(removed), ...(read === undefined ? {} : { read }), ...(unread === undefined ? {} : { unread }) }
     }
 
     /**
@@ -366,10 +483,13 @@ export const make = (store: Store.Store["Type"]) =>
         // By what each mute is, as one moved since is put back as a mute of its own, the same as the one there now.
         const added = [...after.values()].filter((mute) => !same(mutes.get(mute.key), mute))
         const removed = [...mutes.values()].filter((mute) => !same(after.get(mute.key), mute))
+        // Whose subagents are read flips back too: those it started reading stop, and those it stopped are read again.
+        const read = (undone.value.unread ?? []).filter(({ key }) => !readings.has(key))
+        const unread = (undone.value.read ?? []).flatMap(({ key }) => Option.toArray(Option.fromNullable(readings.get(key))))
         // Nothing to take back, as when the thread was muted before the session he muted was found to be its own.
-        if (added.length === 0 && removed.length === 0) return Option.none()
+        if (added.length === 0 && removed.length === 0 && read.length === 0 && unread.length === 0) return Option.none()
         // Taken back, it's a change of its own, so taking that back too puts things as they were before.
-        return Option.some(yield* change("undo", added, removed))
+        return Option.some(yield* change("undo", added, removed, { read, unread }))
       }),
       rekey: (from, to) =>
         Effect.gen(function* () {
@@ -386,6 +506,17 @@ export const make = (store: Store.Store["Type"]) =>
       ),
       last: Effect.map(lately, Option.map(shown)),
       changes: Stream.fromPubSub(changed),
+      reads: (key) => Effect.sync(() => readings.has(key)),
+      read: ({ key, called, project }, on) =>
+        Effect.gen(function* () {
+          const before = readings.get(key)
+          if (on === (before !== undefined)) return false
+          const now = yield* Clock.currentTimeMillis
+          const reading: Reading = { key, ...(called === undefined ? {} : { called }), ...(project === undefined ? {} : { project }), at: now }
+          yield* change(on ? "subagents" : "nosubagents", [], [], on ? { read: [reading], unread: [] } : { read: [], unread: before === undefined ? [] : [before] })
+          return true
+        }),
+      reading: Effect.sync(() => [...readings.values()].toSorted((one, other) => one.at - other.at || (one.key < other.key ? -1 : one.key > other.key ? 1 : 0))),
     } satisfies Mutes
   })
 
@@ -399,6 +530,12 @@ export interface Controls {
   readonly clear: Effect.Effect<ReadonlyArray<Mute>>
   /** Takes back the last change to what's muted, made in the last two minutes, and notes it. What taking it back changed. */
   readonly undo: Effect.Effect<Option.Option<Change>>
+  /**
+   * Starts or stops reading him a thread's subagents, and notes it: stopped,
+   * what of them waits to be said is dropped, and what was held is kept
+   * quiet, whatever it is. Whether that changed anything.
+   */
+  readonly subagents: (thread: Omit<Reading, "at">, on: boolean) => Effect.Effect<boolean>
 }
 
 /**
@@ -408,9 +545,12 @@ export interface Controls {
 export const controls = (options: {
   readonly mutes: Mutes
   readonly silence: (keys: ReadonlyArray<string>) => Effect.Effect<void>
+  /** Drops what of a thread's subagents waits to be said, whatever it is, and keeps what of them was held quiet: nothing without it. */
+  readonly unread?: (key: string) => Effect.Effect<void>
   readonly journal: Journal["Type"]
 }): Controls => {
   const { mutes, silence, journal } = options
+  const unread = options.unread ?? (() => Effect.void)
   /** Under the thread it's about, when it's a thread. */
   const where = (key: string) =>
     Option.match(parse(key), {
@@ -445,11 +585,27 @@ export const controls = (options: {
     undo: Effect.gen(function* () {
       const undone = yield* mutes.undo
       if (Option.isNone(undone)) return undone
-      const { added, removed } = undone.value
+      const { added, removed, read = [], unread: stopped = [] } = undone.value
       yield* silenced(added)
-      yield* noted({ undo: { mute: added.map(({ key }) => key), unmute: removed.map(({ key }) => key) } })
+      yield* Effect.forEach(stopped, ({ key }) => unread(key), { discard: true })
+      yield* noted({
+        undo: {
+          mute: added.map(({ key }) => key),
+          unmute: removed.map(({ key }) => key),
+          ...(read.length === 0 ? {} : { subagents: read.map(({ key }) => key) }),
+          ...(stopped.length === 0 ? {} : { nosubagents: stopped.map(({ key }) => key) }),
+        },
+      })
       return undone
     }),
+    subagents: (thread, on) =>
+      Effect.gen(function* () {
+        const changed = yield* mutes.read(thread, on)
+        if (!changed) return false
+        if (!on) yield* unread(thread.key)
+        yield* noted({ [on ? "subagents" : "nosubagents"]: thread.key }, thread.key)
+        return true
+      }),
   }
 }
 
