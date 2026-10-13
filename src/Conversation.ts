@@ -412,8 +412,10 @@ export const make = (options: {
      * heard and his word is heard clear of it, and it's back to full volume
      * once what he said is heard out and isn't "Mute.": never the rest of a
      * line played through for a TV, which talk that goes on would keep
-     * quiet. What he's still saying once that moment is over is heard out,
-     * for as long as it could be "Mute.".
+     * quiet, nor over its first seconds, while its own voice can still get
+     * into the microphone, which would dip it for nothing he said. What he's
+     * still saying once that moment is over is heard out, for as long as it
+     * could be "Mute.".
      */
     const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>, ducks: boolean) =>
       Effect.gen(function* () {
@@ -437,8 +439,14 @@ export const make = (options: {
         /** Played to the end, and then the usual moment after it too. */
         let played = false
         let over = false
+        /** Ducked for what he's saying. */
+        let lowered = false
         /** Back to full volume, while it's still playing, once what ducked it is over. */
-        const unduck = Effect.suspend(() => (ducks && !played ? playback.volume(1) : Effect.void))
+        const unduck = Effect.suspend(() => {
+          if (!lowered) return Effect.void
+          lowered = false
+          return played ? Effect.void : playback.volume(1)
+        })
         // Once it's all over, only what he's still saying is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk
         // that goes on, like a TV's, ends it as one gone deaf does.
         const next = Effect.suspend(() =>
@@ -458,7 +466,11 @@ export const make = (options: {
               onset = yield* position
               since = yield* Clock.currentTimeMillis
               echoing = signal.echo
-              if (ducks && !played) yield* playback.volume(ducked)
+              // Never over its first seconds, by the clock, while its own voice can still get into the microphone: it would dip for that.
+              if (ducks && !played && !echoing) {
+                lowered = true
+                yield* playback.volume(ducked)
+              }
               break
             case "Abandoned":
               onset = undefined
@@ -1178,9 +1190,9 @@ export const make = (options: {
     /**
      * Says something of yapd's own that nothing he'd say over it has anywhere
      * to go, like a notice: it plays through whatever's said, ducked while
-     * he talks, listening only for "Mute.", over it and the usual moment
-     * after it, so its `through` runs as soon as it's said to the end. Fails
-     * when it can't be played or breaks off.
+     * he talks but over its first seconds, listening only for "Mute.", over
+     * it and the usual moment after it, so its `through` runs as soon as it's
+     * said to the end. Fails when it can't be played or breaks off.
      */
     const tell = (said: Pick<Answer, "audio" | "spoken" | "saying" | "confirmed" | "through">) =>
       Effect.gen(function* () {

@@ -1629,6 +1629,22 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(await over("What time is it?")).toEqual({ timeline: ["play", "volume 0.25", "volume 1"], offs: 0 })
   })
 
+  test("over a notice's first seconds, while its own voice can still get into the microphone, nothing ducks it, but 'Mute.' still stops it before yapd is turned off", async () => {
+    const over = (said: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.95, said]], { off: true, tell: true })
+          yield* helper.wait(1)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+          return { timeline: helper.timeline.map(({ type, value }) => (value === undefined ? type : `${type} ${value}`)), offs: helper.offs() }
+        }),
+      )
+    expect(await over("Mute.")).toEqual({ timeline: ["play", "stop", "off"], offs: 1 })
+    expect(await over("What time is it?")).toEqual({ timeline: ["play"], offs: 0 })
+  })
+
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */
   const ending = (
     at: number,
