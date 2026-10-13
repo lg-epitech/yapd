@@ -3561,11 +3561,14 @@ export const make = (options: {
         if (opened === undefined) return yield* follow(Brain.check(decision, decided.situation, said), decided, said)
         // Taking back what he just did, of the question's thread or none named, a message he dictated, taken as the answer to a part of the
         // question, is taken back out of it. That was all he took back, since it never went: he's told so, and the question's asked again
-        // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder or a memory.
+        // after, from the part it answered. Let go with "scratch that", it's let go without it. Never when the model took him to mean a reminder,
+        // a memory or the catch-up he cleared.
         const undone = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
         const ours = undone === undefined || opened.open.candidates.some((ref) => Threads.same(ref, undone.ref))
         const takenBack =
-          ours && ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory") || (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
+          ours &&
+          ((decision.act === "undo" && decision.how !== "reminder" && decision.how !== "memory" && decision.how !== "catchup") ||
+            (decision.act === "dismiss" && Brain.takesBack(utterance.heard)))
         const open = takenBack ? withdrawing(opened.open) : opened.open
         if (open !== opened.open && decision.act === "undo") {
           yield* close(open, "replaced", utterance.id)

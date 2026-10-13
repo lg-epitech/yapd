@@ -11126,6 +11126,42 @@ describe("Assistant catching up", () => {
     expect(result.over).toEqual({ said: "Cleared, sir: two updates set aside.", unheard: [] })
     expect(result.dictated).toEqual({ said: "Cleared, sir: one update set aside.", unheard: [], stale: true })
   })
+
+  test("bringing back the catch-up he cleared while a part of a question holds his dictated answer brings it back, and the answer stays for the rest", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const message = "Hold off on the deploy until I've checked the fees."
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Clear the catch-up.") return Brain.decision({ act: "catchup", how: "clear" })
+            if (heard === "Bring them back.") return Brain.decision({ act: "undo", how: "catchup" })
+            return Brain.decision({ act: "send", target: handle(situation, cloud), text: message, how: "now" })
+          },
+          undefined,
+          { others: [cloud], items: card("q1", [colour, extras]) },
+        )
+        const first = yield* kept(made.journal, 90, tezos.id, "The Tezos migration is done.")
+        yield* made.dictate("Clear the catch-up.")
+        yield* asked(made, cloud)
+        yield* made.answer("Later.")
+        yield* made.dictate("Tell the cloud one: hold off on the deploy until I've checked the fees.")
+        const before = made.spoken().length
+        yield* made.answer("Bring them back.")
+        const back = { said: made.spoken().slice(before), counted: yield* counted(made), open: Option.isSome(yield* made.open) }
+        yield* made.answer("Alpha.")
+        return { first, back, answers: answered(made.dispatched) }
+      }),
+    )
+    // Never withdrawn: the rest of the question is asked again after, and what he dictated goes with it.
+    expect(result.back).toEqual({
+      said: ["Brought it back, sir.", "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?"],
+      counted: [result.first],
+      open: true,
+    })
+    expect(result.answers).toEqual([{ [colour.id]: message, [extras.id]: ["Alpha"] }])
+  })
 })
 
 describe("Assistant turned off and on", () => {
