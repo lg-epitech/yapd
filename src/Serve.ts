@@ -255,6 +255,8 @@ export const serve = Effect.gen(function* () {
     ask: assistant.ask,
     settled: assistant.settled,
     returned: assistant.returned,
+    // The work it started, whose first turn may have ended while yapd restarted, with no word of it then.
+    started: (machine, since) => ledger.steps(since, { kinds: ["start"], states: ["prepared", "sent", "unknown"], machine }),
     shortest: (yield* Config.minSeconds) * 1000,
   })
   yield* Effect.forkScoped(notices.follow)

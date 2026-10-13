@@ -87,6 +87,8 @@ const notices = (
     readonly power?: { on: boolean; turns: number }
     /** What's queued is dropped unsaid as yapd is turned off, rather than said. */
     readonly dropping?: boolean
+    /** The work yapd started, as the ledger has it. */
+    readonly started?: ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>
   },
 ) =>
   Effect.gen(function* () {
@@ -190,6 +192,7 @@ const notices = (
         }),
       settled: (requestId) => Effect.sync(() => void settled.push(requestId)),
       returned: (machine) => Effect.sync(() => void returned.push(machine)),
+      ...(given.started === undefined ? {} : { started: (_, since) => Effect.succeed((given.started ?? []).filter(({ at }) => at >= since)) }),
       shortest: 60_000,
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
@@ -1152,6 +1155,45 @@ describe("Notices while yapd is off", () => {
     )
     expect(result.finished).toEqual([{ key: "done:Rosie:run-2", message: "The loader is fixed." }])
     expect(result.told).toEqual([])
+  })
+
+  test("the first turn of work yapd started that ended while yapd restarted is looked into once T3 Code has caught up, though yapd is off", async () => {
+    /** A thread yapd started minutes ago, whose latest run, begun with `userMessageId`, ended two minutes ago with `said`. */
+    const started = (id: string, userMessageId: string, said: string, overrides: Record<string, unknown> = {}) => ({
+      thread: thread(id, id, { latestRunId: `run-${id}`, latestRunCompletedAt: minutes(2), modelSelection: { instanceId: "opencode", model: "kimi-k3" }, ...overrides }),
+      bounded: {
+        runs: [{ id: `run-${id}`, status: "completed", ordinal: 1, startedAt: minutes(8), userMessageId }],
+        messages: [
+          { id: userMessageId, runId: `run-${id}`, role: "user", text: "Find out.", createdAt: minutes(8) },
+          { id: `a-${id}`, runId: `run-${id}`, role: "assistant", text: said, createdAt: minutes(2) },
+        ],
+      },
+      start: { at: now - 10 * 60_000, thread: id, messageId: `yapd:${id}:0:m` },
+    })
+    const threads = [
+      started("glucose", "yapd:glucose:0:m", "Apple hasn't shipped one."),
+      // He typed the next turn himself, after its first.
+      started("sensors", "m-typed", "Dexcom has one."),
+      // Still at it.
+      started("busy", "yapd:busy:0:m", "Halfway there.", { activeRunId: "run-busy" }),
+      // Told of already.
+      started("told", "yapd:told:0:m", "The fee table is right."),
+    ]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({
+          view: threads.map(({ thread }) => thread),
+          bounded: Object.fromEntries(threads.map(({ thread, bounded }) => [thread.id, bounded])),
+          started: threads.map(({ start }) => start),
+          power: { on: false, turns: 2 },
+        })
+        yield* made.journal.write({ at: now - 60_000, kind: "update", machine: "Rosie", thread: "told", project: "integration", said: "The fee table is right." })
+        yield* made.reconcileOn("Rosie")
+        yield* made.wait(20)
+        return made.finished
+      }),
+    )
+    expect(result).toEqual([{ key: "done:Rosie:run-glucose", message: "Apple hasn't shipped one.", answering: true }])
   })
 
   test("a question asked while yapd is off isn't worded then, and is asked once it's on", async () => {

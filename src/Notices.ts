@@ -8,7 +8,7 @@ import type { Entry, Journal } from "./Journal.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import type * as T3Actions from "./T3Actions.ts"
-import type * as T3Live from "./T3Live.ts"
+import * as T3Live from "./T3Live.ts"
 import * as Threads from "./Threads.ts"
 
 // What yapd brings up about T3 Code's threads of its own accord: what one waits
@@ -83,6 +83,8 @@ const ending = 24
 const lasting = 5 * 60 * 60_000
 /** How far back a limit said before is looked for: the longest a provider's holds. */
 const longest = 7 * 24 * 60 * 60_000
+/** How far back work yapd started is looked for, for a first turn that ended while yapd couldn't hear it. */
+const lately = 24 * 60 * 60_000
 
 /** When a limit said before resets, as it's kept with it, when that was known. */
 const Limit = Schema.Struct({ resets: Schema.String })
@@ -463,6 +465,15 @@ export const make = (options: {
   readonly settled: (requestId: string) => Effect.Effect<void>
   /** A machine's T3 Code caught up again: what waits on him there that was put by while its threads couldn't be seen is asked. */
   readonly returned: (machine: string) => Effect.Effect<void>
+  /**
+   * The work yapd started on a machine since then, by its thread, when, and
+   * the id of the message it started with. Without it, a first turn that
+   * ended while yapd couldn't hear it is never looked for.
+   */
+  readonly started?: (
+    machine: string,
+    since: number,
+  ) => Effect.Effect<ReadonlyArray<{ readonly at: number; readonly thread: string; readonly messageId: string | null }>>
   /** Turns shorter than this are taken as watched, as hooks' are. */
   readonly shortest: number
 }) =>
@@ -761,6 +772,42 @@ export const make = (options: {
         }
       })
 
+    /** The machines whose T3 Code caught up since yapd started: from then on, what it says tells of every turn that ends there. */
+    const caughtUp = new Set<string>()
+    /**
+     * The first turns of work yapd started on a machine lately that ended
+     * while yapd couldn't hear they did, as while it restarted: T3 Code's
+     * word came before its threads were followed, and its hook found nobody.
+     * Each is looked into as a turn no hook told of, whether yapd is on or
+     * not, as off keeps what it would say, and said once, under its run's
+     * key. Only while nothing of its thread was kept since it started, and
+     * only the turn its message began, once that's over. Looked for the
+     * first time the machine's T3 Code catches up, until that's done.
+     */
+    const opened = (machine: string) =>
+      Effect.gen(function* () {
+        const actions = threads.actions(machine)
+        if (options.started === undefined || Option.isNone(actions) || caughtUp.has(machine)) return
+        const now = yield* Clock.currentTimeMillis
+        const { turns } = yield* options.power
+        for (const { at, thread: id, messageId } of yield* options.started(machine, now - lately)) {
+          const ref = { machine, id }
+          const thread = yield* threads.find(ref)
+          if (Option.isNone(thread) || messageId === null) continue
+          const { latestRunId, latestRunCompletedAt } = thread.value
+          const over = latestRunCompletedAt === null ? Number.NaN : Date.parse(latestRunCompletedAt)
+          if (latestRunId === null || T3Live.busy(thread.value) || !(over > at)) continue
+          if ((yield* journal.byThread(machine, id, 1, ["update"])).length > 0) continue
+          const run = yield* actions.value.ran(id, latestRunId)
+          if (!Option.exists(run, ({ userMessageId }) => Option.contains(userMessageId, messageId))) continue
+          yield* Effect.logInfo("Looking into the first turn of work I started, which ended while I couldn't hear it").pipe(Effect.annotateLogs({ thread: thread.value.title }))
+          const since = generation(ref)
+          const current = Effect.sync(() => generation(ref) === since)
+          yield* FiberSet.run(running, ran(ref, latestRunId, turns, now, current).pipe(trouble, Effect.annotateLogs({ thread: thread.value.title })))
+        }
+        caughtUp.add(machine)
+      }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not look for the first turns of work I started", error)))
+
     return {
       /** Follows what happens to the threads on every machine yapd follows, for as long as yapd runs. */
       follow: Stream.runForEach(threads.changes, ({ machine, change }) => hear(machine, change)),
@@ -770,9 +817,11 @@ export const make = (options: {
        * What waits on him on one machine, each time its T3 Code has caught up,
        * as `lookBack` has it, once where it keeps work outside his projects is
        * known, so none of it is said as "No project": what was put by while it
-       * couldn't be seen, then what he never heard.
+       * couldn't be seen, then what he never heard. And, on or off, the first
+       * turns of work yapd started there that ended while it couldn't hear them.
        */
-      reconcileOn: (machine: string) => Effect.zipRight(threads.warm(machine), Effect.zipRight(options.returned(machine), reconciling((on) => on === machine))),
+      reconcileOn: (machine: string) =>
+        Effect.zipRight(threads.warm(machine), Effect.zipRight(Effect.zipRight(options.returned(machine), opened(machine)), reconciling((on) => on === machine))),
     }
   })
 
