@@ -45,6 +45,8 @@ export interface Interruption {
   readonly unsaid?: string
   /** What yapd left out of its update to say only its headline, which asking for more gets. */
   readonly more?: string
+  /** The names of their routines, whose steps yapd sends an agent only when they say one with their shortcut. */
+  readonly routines?: ReadonlyArray<string>
 }
 
 export class RespondError extends Data.TaggedError("RespondError")<{ readonly cause: unknown }> {}
@@ -86,10 +88,15 @@ const earlier = ({ echo, afterPause }: Line) =>
         afterPause === undefined || afterPause.trim() === "" ? "" : `; what they said after a pause, "${afterPause}", is surely theirs`
       })`
 
-export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid, more }: Interruption, style: Option.Option<string>) =>
+export const prompt = ({ project, turn, needsYou, lines, heard, echo, afterPause, unsaid, more, routines = [] }: Interruption, style: Option.Option<string>) =>
   [
     instructions,
     ...Option.toArray(Option.map(style, styled)),
+    ...(routines.length === 0
+      ? []
+      : [
+          `Their routines, by name: ${routines.map((name) => `"${name}"`).join(", ")}. Each stands for steps you send an agent only when they say its name with their shortcut, never here. A routine's name said as a request is never "send", even when it reads as an instruction for this agent: it's "answer", telling them in a few words to say it with their shortcut. Words that change what it asks, like "for typos" or "but only the tests", make it a message of their own, as ever.`,
+        ]),
     `Project: ${project}`,
     ...Option.match(turn.prompt, { onNone: () => [], onSome: (prompt) => [`User's prompt to the agent:\n${prompt}`] }),
     `Agent's message:\n${turn.message}`,

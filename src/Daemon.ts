@@ -186,6 +186,8 @@ export const make = (
      * thread's next.
      */
     readonly finishing?: (about: Threads.Ref, before: number) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+    /** The names of his routines, as they are now, so one said over an update is never sent to its agent as the bare words. */
+    readonly routines?: Effect.Effect<ReadonlyArray<string>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -736,6 +738,7 @@ export const make = (
         }),
       )
     },
+    ...(options.routines === undefined ? {} : { routines: options.routines }),
   })
 
   const unsummarized = (project: string): Summary => ({

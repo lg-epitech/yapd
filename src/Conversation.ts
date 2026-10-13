@@ -274,6 +274,12 @@ export const make = (options: {
    * worked out as ever.
    */
   readonly mute?: (update: Update, heard: string, voiced: number, echo: string | undefined) => Option.Option<Effect.Effect<string>>
+  /**
+   * The names of his routines, as they are now, whose steps only the
+   * shortcut sends: one said over an update is never sent to its agent as
+   * the bare words.
+   */
+  readonly routines?: Effect.Effect<ReadonlyArray<string>>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -811,8 +817,8 @@ export const make = (options: {
             const left = unsaid(text, fraction)
             /** What the model makes of what he said, as ever. */
             const responding = (heard: string, afterPause: string) =>
-              responder
-                .respond({
+              Effect.flatMap(options.routines ?? Effect.succeed<ReadonlyArray<string>>([]), (routines) =>
+                responder.respond({
                   project: update.project,
                   turn: update.turn,
                   needsYou: update.needsYou,
@@ -821,15 +827,16 @@ export const make = (options: {
                   ...(echo === undefined ? {} : { echo, ...(afterPause === "" ? {} : { afterPause }) }),
                   ...(left === "" ? {} : { unsaid: left }),
                   ...(more === "" ? {} : { more }),
-                })
-                .pipe(
-                  Effect.catchAll((error) =>
-                    Effect.logWarning("Could not reply", error).pipe(
-                      Effect.zipRight(persona.lines),
-                      Effect.map((lines): Reply => ({ intent: "answer", spoken: lines.misheard, message: "" })),
-                    ),
+                  ...(routines.length === 0 ? {} : { routines }),
+                }),
+              ).pipe(
+                Effect.catchAll((error) =>
+                  Effect.logWarning("Could not reply", error).pipe(
+                    Effect.zipRight(persona.lines),
+                    Effect.map((lines): Reply => ({ intent: "answer", spoken: lines.misheard, message: "" })),
                   ),
-                )
+                ),
+              )
             const { heard, afterPause, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard, voiced, afterPause) =>
               Option.match(options.mute?.(update, heard, voiced, echo) ?? Option.none(), {
                 onSome: (muting) => Effect.succeed<Reply | Muting>({ intent: "mute", spoken: "", message: "", muting }),

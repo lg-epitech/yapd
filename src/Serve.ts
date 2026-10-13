@@ -2,7 +2,7 @@ import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Schedule, Stre
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
-import { modeCommand, modeLines, ProviderBrain } from "./Brain.ts"
+import { modeCommand, modeLines, ProviderBrain, remembered as inMind } from "./Brain.ts"
 import * as ClaudeCode from "./ClaudeCode.ts"
 import * as CliLauncher from "./CliLauncher.ts"
 import * as Codex from "./Codex.ts"
@@ -207,6 +207,11 @@ export const serve = Effect.gen(function* () {
       announce: (spoken, entry, kept, about) =>
         Effect.flatMap(Deferred.await(noticing), (notices) => notices.announce(spoken, entry, Effect.succeed(true), entry.at, entry.key, Option.getOrUndefined(kept), about)),
     }),
+    // Each of his routines by the name it's known by, as the shortcut would send it, read as they are now: said over an update, one is
+    // never sent to its agent as the bare words.
+    routines: Effect.map(Effect.all([memories.list, Preferences.written(preferences)]), ([kept, written]) =>
+      inMind({ memories: { kept, written } }).flatMap(({ name }) => (name === undefined ? [] : [name])),
+    ),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */

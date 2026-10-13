@@ -54,7 +54,8 @@ const update: Conversation.Update = {
  * with `unplayable`, nothing but the update can be played, as when the audio helper goes down after it. With `afplay`,
  * what's said back plays like afplay, which can't say it's playing, and either plays to the end or can't play at all.
  * With `model`, replies are worked out by the provider's responder with that model instead, and the persona's
- * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines.
+ * lines are `lines`, or the plain ones. With `persona`, it's that one that picks and is told the lines. With `routines`,
+ * those are the names of his routines.
  */
 const conversation = (
   said: ReadonlyArray<string>,
@@ -68,6 +69,7 @@ const conversation = (
     readonly lines?: Persona.Lines
     readonly model?: Layer.Layer<Model>
     readonly persona?: Context.Tag.Service<Persona.Persona>
+    readonly routines?: ReadonlyArray<string>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -150,6 +152,7 @@ const conversation = (
       replied: Effect.sync(() => void replies++),
       saying: (_, line) => Effect.sync(() => void saying.push(line)),
       withholds: () => Effect.succeed(false),
+      ...(given.routines === undefined ? {} : { routines: Effect.succeed(given.routines) }),
     }).pipe(Effect.provide(context))
     const fiber = yield* Effect.fork(made.converse(update))
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
@@ -2398,6 +2401,25 @@ describe("more, and how yapd talks, over an update", () => {
     expect(prompt).toContain(`Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it`)
     expect(prompt).toContain(`Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.`)
     for (const heard of ["What did I miss?", "Catch me up.", "Anything else from rig?"]) expect(quickly(over(heard, "Retries back off now."))).toBeUndefined()
+  })
+
+  test("a routine's name said over an update is never for its agent as the bare words: the model is told his routines, and to have him say one with the shortcut", async () => {
+    const result = await scoped(
+      Effect.gen(function* () {
+        const { asked, layer } = scripted([{ intent: "answer", spoken: "Say that with your shortcut, sir.", message: "" }])
+        const { fiber, sent, speak, wait } = yield* conversation(["Ship it."], 0, [], "sent", { model: layer, routines: ["ship it", "review it"] })
+        yield* speak
+        yield* wait(20)
+        yield* Fiber.join(fiber)
+        return { asked, sent }
+      }),
+    )
+    expect(result.asked[0]).toContain(`Their routines, by name: "ship it", "review it".`)
+    expect(result.asked[0]).toContain(
+      `A routine's name said as a request is never "send", even when it reads as an instruction for this agent: it's "answer", telling them in a few words to say it with their shortcut.`,
+    )
+    expect(result.sent).toEqual([])
+    expect(Responder.prompt(over("Ship it."), Option.none())).not.toContain("Their routines")
   })
 })
 
