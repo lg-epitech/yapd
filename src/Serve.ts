@@ -17,6 +17,7 @@ import * as Icons from "./Icons.ts"
 import * as Journal from "./Journal.ts"
 import * as Latest from "./Latest.ts"
 import * as Ledger from "./Ledger.ts"
+import * as Memory from "./Memory.ts"
 import * as Modes from "./Modes.ts"
 import type * as Missed from "./Missed.ts"
 import * as Mutes from "./Mutes.ts"
@@ -109,6 +110,8 @@ export const serve = Effect.gen(function* () {
   const store = yield* Store.Store
   // What he asked to be told later, fired through the journal, in the same database.
   const reminders = Reminders.make(store, journal)
+  // What he asked yapd to keep in mind, which every prompt reads.
+  const memories = Memory.make(store)
   yield* Effect.forkScoped(
     Effect.flatMap(Clock.currentTimeMillis, (now) =>
       Effect.all([journal.prune(now - remembered), ledger.prune(now - done), reminders.prune(now - reminded)], { discard: true }),
@@ -263,6 +266,9 @@ export const serve = Effect.gen(function* () {
     naming,
     modes,
     reminders,
+    memories,
+    // Read each time, from the whole file, so a routine he adds is there for the next thing he says.
+    routines: Preferences.written(preferences),
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
   missing = Effect.map(assistant.missed, ({ groups }) => groups)
