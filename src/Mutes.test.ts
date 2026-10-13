@@ -325,4 +325,11 @@ describe("Mutes", () => {
     expect(Mutes.ending("", now)).toBeUndefined()
     expect(Mutes.ending("until he's back", now)).toBeUndefined()
   })
+
+  test("a time that isn't on the calendar is no time at all, never the day or hour it rolls over to", () => {
+    for (const when of ["2026-10-32T15:00", "2026-10-13T25:00", "2026-02-29T09:00", "2026-13-01T09:00", "2026-10-13T15:60", "2026-02-30T15:00:00Z"]) {
+      expect([when, Mutes.instant(when)]).toEqual([when, Number.NaN])
+    }
+    expect(Mutes.instant("2028-02-29T09:00")).toBe(new Date(2028, 1, 29, 9, 0).getTime())
+  })
 })
