@@ -354,6 +354,8 @@ export const make = (options: {
      * when it can't be played, `confirmed` once it's known to be, which with
      * afplay is only once it has played to the end, and `through` once it
      * has, before that wait: the user has heard it, whatever they say after.
+     * `heeding`, it plays through whatever's said, listening only for
+     * "Mute.", and doesn't wait.
      */
     const speak = (
       path: string,
@@ -365,10 +367,11 @@ export const make = (options: {
         readonly begun?: Effect.Effect<void>
         readonly confirmed?: Effect.Effect<void>
         readonly through?: Effect.Effect<void>
+        readonly heeding?: boolean
       } = {},
     ) =>
       Effect.gen(function* () {
-        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void } = given
+        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false } = given
         const playback = yield* audio.play(path, from)
         yield* begun
         if (playback.confirmed) yield* confirmed
@@ -380,8 +383,69 @@ export const make = (options: {
           yield* played
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* listen(playback, listening, text, from, wait, played)
+        return yield* (heeding ? heed(playback, listening, text, from, played) : listen(playback, listening, text, from, wait, played))
       }).pipe(Effect.scoped)
+
+    /**
+     * The microphone for a line nothing else he says over it has anywhere to
+     * go, listening only for "Mute.": none when that's no emergency off.
+     */
+    const heedful = (ear: Effect.Effect<Ear | undefined>) => (options.off === undefined ? Effect.succeed(undefined) : ear)
+
+    /**
+     * Plays a line through whatever's said over it, listening only for
+     * "Mute.", his emergency off, which turns yapd off as soon as he's said
+     * it: for a line nothing else he'd say has anywhere to go, like a notice,
+     * or the rest of one he's talked over too often with what wasn't meant for
+     * yapd, say for a TV. Nothing said over it ducks or stops it, and nothing
+     * else of what's said is kept or logged.
+     */
+    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>) =>
+      Effect.gen(function* () {
+        const { signals } = ear
+        const id = fresh()
+        const began = yield* Clock.currentTimeMillis
+        yield* playback.finished.pipe(
+          Effect.tap(() => through),
+          Effect.match({
+            onFailure: (error): Signal => ({ _tag: "Broke", id, error }),
+            onSuccess: (): Signal => ({ _tag: "Finished", id }),
+          }),
+          Effect.flatMap((signal) => Queue.offer(signals, signal)),
+          Effect.forkScoped,
+        )
+        const position = Effect.map(Clock.currentTimeMillis, (now) => Math.min(playback.duration, from + (now - began) / 1000))
+        /** How far into the line he began what he's saying, and whether that was while yapd's own voice could still get into the microphone. */
+        let onset: number | undefined
+        let echoing = false
+        while (true) {
+          const signal = yield* Queue.take(signals)
+          switch (signal._tag) {
+            case "Onset":
+              onset = yield* position
+              echoing = signal.echo
+              break
+            case "Utterance": {
+              // Heard out before what comes after, so it's never missed as the line ends.
+              const at = yield* position
+              const begun = onset ?? at
+              const echo = echoing ? between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) : undefined
+              onset = undefined
+              echoing = false
+              if (options.off !== undefined && halted(yield* unlogged(signal.audio), echo)) yield* options.off
+              break
+            }
+            case "Finished":
+              if (signal.id === id) return { _tag: "Finished" } satisfies Outcome
+              break
+            case "Broke":
+              if (signal.id === id) return yield* Effect.fail(signal.error)
+              break
+            default:
+              break
+          }
+        }
+      })
 
     const listen = (playback: Playback, ear: Ear, text: string, from: number, wait: Duration.DurationInput, through: Effect.Effect<void>) =>
       Effect.gen(function* () {
@@ -771,15 +835,18 @@ export const make = (options: {
               rendered.push(path)
               rest = { path, fiber: yield* Effect.forkScoped(voice.render(more, path)) }
             }
-            const listening = missed < misses ? ear : Effect.succeed(undefined)
+            // Past so much talk that wasn't meant for yapd, the rest plays through whatever's said, say for a TV, listening only for "Mute.".
+            // Only a line it listened over to the end listens on after it.
+            const heeding = missed >= misses
             const outcome: Outcome =
               ended === undefined
-                ? yield* speak(path, text, from, listening, {
+                ? yield* speak(path, text, from, heeding ? heedful(ear) : ear, {
                     // Noted only once it's known to play, so a line for going ahead that fails to render or play, or that a dictation cuts in before, never counts as the last one he heard.
                     confirmed: path === update.audio ? Effect.void : persona.said(text),
                     through: path === update.audio ? through : Effect.void,
+                    heeding,
                   })
-                : yield* harken(text, ended, listening, linger)
+                : yield* harken(text, ended, ear, linger)
             ended = undefined
             if (outcome._tag === "Finished") {
               if (pickUp()) continue
@@ -965,11 +1032,12 @@ export const make = (options: {
         let ended: number | undefined
         let lingered = false
         while (true) {
-          const listening = missed < misses ? ear : Effect.succeed(undefined)
+          // As for an update, past so much talk that wasn't meant for yapd, the rest plays through whatever's said, listening only for "Mute.".
+          const heeding = missed >= misses
           const outcome: Outcome =
             ended === undefined
-              ? yield* speak(said.audio, said.spoken, from, listening, { wait, begun, confirmed, through: said.through ?? Effect.void })
-              : yield* harken(said.spoken, ended, listening, wait)
+              ? yield* speak(said.audio, said.spoken, from, heeding ? heedful(ear) : ear, { wait, begun, confirmed, through: said.through ?? Effect.void, heeding })
+              : yield* harken(said.spoken, ended, ear, wait)
           ended = undefined
           begun = Effect.void
           confirmed = Effect.void
@@ -1032,10 +1100,22 @@ export const make = (options: {
      */
     const answer = (said: Answer) => exchange(said, said.followUp, linger)
 
+    /**
+     * Says something of yapd's own that nothing he'd say over it has anywhere
+     * to go, like a notice: it plays through whatever's said, listening only
+     * for "Mute.". Fails when it can't be played or breaks off.
+     */
+    const tell = (said: Pick<Answer, "audio" | "spoken" | "saying" | "confirmed">) =>
+      Effect.gen(function* () {
+        const ear = heedful(hearing(yield* Effect.scope))
+        yield* speak(said.audio, said.spoken, 0, ear, { begun: said.saying ?? Effect.void, confirmed: said.confirmed ?? Effect.void, heeding: true })
+      }).pipe(Effect.scoped)
+
     return {
       converse,
       ask,
       answer,
+      tell,
       /** Whether a follow-up to the session, or this particular update, is on its way. */
       sending: (session: string, update?: Update) => Effect.sync(() =>
         update === undefined ? [...sending.keys()].some((update) => update.session === session) : sending.has(update),

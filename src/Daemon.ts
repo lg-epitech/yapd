@@ -1760,11 +1760,11 @@ export const make = (
 
   /**
    * Says a notice. Only a question, or an answer that can be followed up, is
-   * listened to: whatever else they'd say to it has nowhere to go. What can't
-   * be played was never said, so it isn't what the user heard last; and a
-   * question that can't be asked in full, even one that breaks off midway,
-   * counts as never said and goes unanswered, to be asked again later or let
-   * go, rather than left open.
+   * listened to: whatever else they'd say to it has nowhere to go, so over
+   * anything else only "Mute." is heard. What can't be played was never
+   * said, so it isn't what the user heard last; and a question that can't be
+   * asked in full, even one that breaks off midway, counts as never said and
+   * goes unanswered, to be asked again later or let go, rather than left open.
    */
   const say = (said: Inbox.Said, dealtWith: Effect.Effect<void>, listening = true) =>
     Effect.gen(function* () {
@@ -1810,12 +1810,8 @@ export const make = (
         return
       }
       if (question === undefined) {
-        const playback = yield* audio.play(played)
-        yield* saying
-        if (playback.confirmed) yield* confirmed
-        yield* playback.finished
-        // afplay can't say it's playing, so that's known only now.
-        if (!playback.confirmed) yield* confirmed
+        // Nothing else he'd say over it has anywhere to go, so it plays through all he says but "Mute.".
+        yield* conversation.tell({ audio: played, spoken, saying, confirmed })
         yield* said.notice.heard ?? Effect.void
         return yield* dealtWith
       }

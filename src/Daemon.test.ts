@@ -5320,6 +5320,35 @@ describe("Daemon turned off by 'Mute.'", () => {
     expect(result.followUps).toEqual([])
   })
 
+  test("'Mute.' over a notice nothing else said over it is for, like a failure, turns yapd off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, notice, talk, flush, wait, played, stopped, responded } = yield* make("Mute.", { off: true })
+        yield* notice("f", "Tezos failed: rate limited.")
+        yield* wait(1)
+        yield* talk
+        yield* flush
+        return { on: (yield* made.power).on, played: [...played], stopped: [...stopped], responded: [...responded] }
+      }),
+    )
+    expect(result).toEqual({ on: false, played: ["Tezos failed: rate limited."], stopped: ["Tezos failed: rate limited."], responded: [] })
+  })
+
+  test("anything else said over such a notice neither stops it nor is worked out, as before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, notice, talk, wait, played, stopped, responded } = yield* make("Mute it.", { off: true })
+        const heard: Array<string> = []
+        yield* notice("f", "Tezos failed: rate limited.", { heard })
+        yield* wait(1)
+        yield* talk
+        yield* wait(10)
+        return { on: (yield* made.power).on, played: [...played], stopped: [...stopped], responded: [...responded], heard }
+      }),
+    )
+    expect(result).toEqual({ on: true, played: ["Tezos failed: rate limited."], stopped: [], responded: [], heard: ["f"] })
+  })
+
   test("'mute it' over an update still mutes its thread, and yapd stays on", async () => {
     const result = await run(
       Effect.gen(function* () {

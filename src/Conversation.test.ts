@@ -836,9 +836,12 @@ const overHelper = (
     readonly follow?: (heard: string, echo?: string, afterPause?: string) => boolean
     /** Whether Whisper fails on all it's given. */
     readonly failing?: boolean
+    /** Whether "Mute." turns yapd off, counted in `offs`, which here leaves it on. */
+    readonly off?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
+    let offs = 0
     const runtime = yield* Effect.runtime<never>()
     const runSync = Runtime.runSync(runtime)
     const commands: Array<string> = []
@@ -966,6 +969,7 @@ const overHelper = (
       replied: Effect.void,
       saying: () => Effect.void,
       withholds: () => Effect.succeed(false),
+      ...(options.off === true ? { off: Effect.sync(() => void offs++) } : {}),
     }).pipe(Effect.provide(context))
     // Lets the helper, the microphone and the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(async () => {
@@ -1010,6 +1014,7 @@ const overHelper = (
     yield* flush
     return {
       fiber,
+      offs: () => offs,
       commands,
       timeline,
       plays,
@@ -1514,6 +1519,34 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
       commands: ["play", "volume", "stop", "play", "volume", "stop", "play", "volume", "stop", "play"],
       transcribed: ["", "", ""],
       responded: [],
+    })
+  })
+
+  test("past three times talk that wasn't meant for it, the rest plays through whatever's said, but 'Mute.' still turns yapd off", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true })
+        yield* helper.wait(4)
+        for (let time = 0; time < 3; time++) {
+          yield* helper.talk(0.8, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.5)
+        }
+        // The TV again, and then him.
+        yield* helper.talk(0.8, 10)
+        yield* helper.quiet
+        const before = helper.offs()
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        yield* helper.wait(0.5)
+        return { commands: helper.commands, transcribed: helper.transcribed, responded: helper.responded, offs: [before, helper.offs()] }
+      }),
+    )
+    expect(result).toEqual({
+      commands: ["play", "volume", "stop", "play", "volume", "stop", "play", "volume", "stop", "play"],
+      transcribed: ["", "", "", "", "Mute."],
+      responded: [],
+      offs: [0, 1],
     })
   })
 
