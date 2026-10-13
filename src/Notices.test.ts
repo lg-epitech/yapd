@@ -260,6 +260,13 @@ const notices = (
         }),
       wait: (seconds: number) => TestClock.adjust(`${seconds} seconds`).pipe(Effect.zipRight(flush)),
       flush,
+      /** What waits is taken up to be said, then cut off by a dictation before its end and put back to be said again, as the daemon keeps it. */
+      cut: Effect.gen(function* () {
+        for (const notice of [...waiting.values()]) {
+          if (yield* notice.stale) waiting.delete(notice.id)
+          else yield* notice.saying ?? Effect.void
+        }
+      }),
       /** What waits is said in turn, and what comes of it, till nothing does. */
       speak: Effect.gen(function* () {
         while (waiting.size > 0) {
@@ -1781,6 +1788,39 @@ describe("Notices of usage", () => {
         const made = yield* notices({ view: [], bounded: {}, usage, queueing: true, holding: () => mode })
         yield* made.usage
         // It waits behind something being said, and he says goodnight.
+        mode = Option.some("quiet")
+        yield* made.speak
+        // Read again later that night.
+        yield* made.wait(16 * 60)
+        yield* made.usage
+        yield* made.speak
+        return { told: made.told, morning: (yield* made.journal.held(0, 200, { only: ["quiet"] })).map(({ said }) => said) }
+      }),
+    )
+    expect(result.told).toEqual([])
+    expect(result.morning).toEqual([expect.stringMatching(/^Claude's weekly limit is at 96 percent, sir\. It resets .*\.$/)])
+  })
+
+  test("a 95 percent warning cut off by a dictation, then taken up again once quiet began, is kept for the morning, never said that night", async () => {
+    const usage = () => [
+      {
+        instanceId: "claudeAgent",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        usageLimits: {
+          checkedAt: new Date(now).toISOString(),
+          windows: [{ id: "claude-weekly", kind: "weekly", label: "Weekly", usedPercent: 96, resetsAt: new Date(now + 3 * 24 * 60 * 60_000).toISOString() }],
+        },
+      },
+    ]
+    let mode = Option.none<"focus" | "quiet">()
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [], bounded: {}, usage, queueing: true, holding: () => mode })
+        yield* made.usage
+        // A dictation cuts it off as it's being said, and puts it back; he says goodnight before it's taken up again.
+        yield* made.cut
         mode = Option.some("quiet")
         yield* made.speak
         // Read again later that night.

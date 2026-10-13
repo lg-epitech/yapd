@@ -1030,12 +1030,24 @@ export const make = (options: {
             const entry = { at: now, kind: "notice" as const, said: spoken, key: key.used(who, id, level, hour) }
             const quiet = Effect.map(options.holding ?? Effect.succeedNone, Option.contains<Modes.Hold>("quiet"))
             // Kept for the digest, or for the morning in quiet: not something that needs him. While yapd is off, it's kept as what came in
-            // then is, for a catch-up alone, never brought up by the digest or the rundown once it's on.
+            // then is, for a catch-up alone, never brought up by the digest or the rundown once it's on. Kept already as it was taken up to be
+            // said, then cut off by a dictation and put back, it's held all the same while he's still to hear it.
             const hold = Effect.gen(function* () {
               const { on } = yield* options.power
               const held = !on ? "off" : level === 80 ? "progress" : "quiet"
               const claimed = yield* journal.claim({ ...entry, detail: { ...detail, held, priority: "done" } })
-              if (Option.isSome(claimed)) yield* Effect.logInfo(`Kept for later: ${spoken}`)
+              if (Option.isNone(claimed)) {
+                const since = (yield* Clock.currentTimeMillis) - longest
+                const waiting = (yield* journal.since(since, { kinds: ["notice"], most: 1000 })).filter(
+                  (kept) => kept.key === entry.key && kept.heardAt === undefined && (kept.detail as { readonly held?: unknown } | undefined)?.held === undefined,
+                )
+                if (waiting.length === 0) return
+                yield* journal.hold(
+                  waiting.map(({ id }) => id),
+                  held,
+                )
+              }
+              yield* Effect.logInfo(`Kept for later: ${spoken}`)
             })
             if (level === 80 || (yield* quiet)) yield* hold
             else {
