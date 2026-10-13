@@ -1136,7 +1136,8 @@ export const make = (options: {
                 // With the thread T3 Code knows it by, when it's tied to one, like the update itself.
                 ...(update.about === undefined ? { thread: update.session } : { machine: update.about.machine, thread: update.about.id }),
                 directory: update.thread.cwd,
-                ...(T3Actions.revealing(answer) ? {} : { said: answer }),
+                // What the model answered to what was held back as a secret may give it away in words nothing recognises as one.
+                ...(withheld || T3Actions.revealing(answer) ? {} : { said: answer }),
                 ...(withheld ? {} : { text: heard }),
                 detail: {
                   intent: reply.intent,

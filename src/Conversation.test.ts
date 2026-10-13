@@ -1190,8 +1190,9 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     const plain = await answered("Ask me that with your shortcut, sir.")
     // Over its first second, with what may have been its own voice, which isn't kept with it either.
     expect(plain.responded).toEqual([{ heard: secret, told: true }])
+    // Nor what the model answered to it, which may give it away in words nothing takes for a secret.
     expect(plain.journal.map(({ kind, text, said, detail }) => ({ kind, text, said, detail }))).toEqual([
-      { kind: "reply", text: undefined, said: "Ask me that with your shortcut, sir.", detail: { intent: "answer", withheld: true } },
+      { kind: "reply", text: undefined, said: undefined, detail: { intent: "answer", withheld: true } },
     ])
     expect(plain.lines.filter((line) => line.includes("sk-live"))).toEqual([])
     expect(plain.lines).toContain("Heard something that could give a secret away, so it's held back")

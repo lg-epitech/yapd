@@ -12345,6 +12345,36 @@ describe("Assistant memories", () => {
     expect(lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
   })
 
+  test("what the model answers to a secret held back is said, but kept and logged nowhere, in words nothing takes for one too, and so is saying it again", async () => {
+    const lines: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      lines.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    // Nothing in it looks like a secret, but it may give his away all the same.
+    const answer = "I won't keep the one that starts four f nine a, sir. Type it into T3 Code."
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "Could you repeat that?"
+              ? Brain.decision({ act: "again", how: "same", spoken: answer })
+              : Brain.decision({ act: "answer", spoken: answer }),
+          undefined,
+          { memories: true },
+        )
+        yield* made.dictate("The staging key is sk-live-4f9a8b7c6d5e.")
+        // Said again, as he asks for it, without the model and with it.
+        yield* made.dictate("Say that again.")
+        yield* made.dictate("Could you repeat that?")
+        return { spoken: made.spoken(), journal: JSON.stringify(yield* made.journal.since(0)) }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result.spoken).toEqual([answer, answer, answer])
+    expect(result.journal).not.toContain("four f nine a")
+    expect(lines.filter((line) => line.includes("four f nine a"))).toEqual([])
+    expect(lines.filter((line) => line.includes("held back as a secret"))).toEqual(Array(3).fill("Said what came of a request held back as a secret, so it isn't logged"))
+  })
+
   test("a secret said too faintly to be taken, over an answer or a question, is logged nowhere", async () => {
     const secret = "Remember that the staging key is sk-live-4f9a8b7c6d5e."
     const lines: Array<string> = []

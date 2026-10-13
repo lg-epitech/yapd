@@ -423,8 +423,9 @@ export const make = (
   const tell = (notice: Inbox.Notice, since?: number) => {
     /** Whether it was queued, after which it's done with only once it's taken out to be said, or dropped. */
     let queued = false
-    // What could give a secret away, like an answer saying back one he dictated, which the journal never keeps, is said, but never logged.
-    const revealing = T3Actions.revealing(notice.spoken)
+    // What could give a secret away, like an answer saying back one he dictated, which the journal never keeps, is said, but never logged,
+    // nor what came of a request held back as one, whatever its words.
+    const revealing = notice.withheld === true || T3Actions.revealing(notice.spoken)
     const what = revealing ? "something that could give a secret away" : `"${notice.spoken}"`
     return Effect.gen(function* () {
       const now = yield* switched
@@ -1871,9 +1872,11 @@ export const make = (
       const own = { path: said.audio, spoken: said.notice.spoken, used: Effect.void }
       if (instead === undefined || !(yield* instead.when)) return own
       const path = join(dir, `${crypto.randomUUID()}${extension}`)
+      // What could give a secret away, or came of a request held back as one, is logged nowhere, as for its own words.
+      const what = said.notice.withheld === true || T3Actions.revealing(instead.spoken) ? "something that could give a secret away" : `"${instead.spoken}"`
       return yield* Effect.acquireRelease(voice.render(instead.spoken, path).pipe(Effect.onError(() => removeFile(path))), () => removeFile(path)).pipe(
-        Effect.as({ path, spoken: instead.spoken, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${instead.spoken}`), instead.used ?? Effect.void) }),
-        Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say "${instead.spoken}" instead`, error), own)),
+        Effect.as({ path, spoken: instead.spoken, used: Effect.zipRight(Effect.logInfo(`Saying instead: ${what}`), instead.used ?? Effect.void) }),
+        Effect.catchAll((error) => Effect.as(Effect.logWarning(`Could not say ${what} instead`, error), own)),
       )
     })
 

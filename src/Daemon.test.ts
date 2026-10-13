@@ -1250,6 +1250,21 @@ describe("Daemon", () => {
     )
   })
 
+  test("what came of a request held back as a secret is said, but never logged, whatever its words", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, wait, played, logged } = yield* make()
+        const { turns } = yield* made.power
+        // Nothing in it looks like a secret, but it may give his away all the same.
+        const spoken = "I won't keep the one that starts four f nine a, sir."
+        yield* made.tell({ id: "n1", kind: "answer", priority: "needs-you", spoken, at: yield* Clock.currentTimeMillis, stale: Effect.succeed(false), withheld: true }, turns)
+        yield* wait(5)
+        return { played: [...played], logged: logged.filter((line) => line.includes("four f nine a") || line.includes("a secret away")) }
+      }),
+    )
+    expect(result).toEqual({ played: ["I won't keep the one that starts four f nine a, sir."], logged: ["Ready: something that could give a secret away"] })
+  })
+
   test("a reply after the thread was given something else since is held back with a spoken reason", async () => {
     const result = await run(
       Effect.gen(function* () {

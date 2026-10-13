@@ -157,9 +157,11 @@ export type Subject =
       readonly row: number
       /** The routines whose steps what was said of it holds, as code put them in: a model is only ever told of that by their names. */
       readonly routines?: ReadonlyArray<string>
+      /** Whether what was said of it came of a request held back as a secret, so it's kept and logged nowhere, said again or not. */
+      readonly withheld?: true
     }
   /** An update from a session T3 Code doesn't run, and what of it was said last, like an answer over it. */
-  | { readonly _tag: "Session"; readonly update: Conversation.Update; readonly said: string; readonly routines?: ReadonlyArray<string> }
+  | { readonly _tag: "Session"; readonly update: Conversation.Update; readonly said: string; readonly routines?: ReadonlyArray<string>; readonly withheld?: true }
   | {
       readonly _tag: "Answer"
       readonly said: string
@@ -180,6 +182,12 @@ export type Subject =
        * it said by their names.
        */
       readonly routines?: ReadonlyArray<string>
+      /**
+       * Whether it came of a request held back as a secret, like the model's
+       * answer to it, which may say it back in words nothing recognises: said
+       * again, it's kept and logged nowhere either.
+       */
+      readonly withheld?: true
     }
 
 /**
@@ -662,6 +670,9 @@ const along = (thought: Pick<Thought, "utterance" | "subject">, subject: Subject
  */
 const sends = (open: Pick<Open, "routine" | "decision">, gave: Brain.Decision, taken: Brain.Decision, situation: Brain.Situation) =>
   Brain.routinedBy(gave, situation) ?? (open.routine !== undefined && taken.text === open.decision.text ? open.routine : undefined)
+
+/** Whether what's said of something came of a request held back as a secret, whatever its words: then it's kept and logged nowhere. */
+const secretly = (subject: Subject) => subject._tag !== "Nothing" && subject.withheld === true
 
 /** The routines whose steps what's said of something holds, as its provenance is noted with it: none for most. */
 const routinesOf = (subject: Subject): { readonly routines?: ReadonlyArray<string> } =>
@@ -3725,12 +3736,11 @@ export const make = (options: {
       Effect.gen(function* () {
         const utterance = "utterance" in of ? of.utterance : of
         if (outcome.say === "") return
-        // Withheld as a secret, as note has it, what's said of it that could give it away, like the model's answer saying it back, is said,
-        // but kept and logged nowhere.
+        // Of a request held back as a secret, as note has it, or said again of one, what's said is said, but kept and logged nowhere,
+        // whatever its words: the model's answer may give the secret away in words nothing recognises as one.
         const words = "utterance" in of ? [of.utterance.heard, of.decision.rest] : "heard" in of ? [of.heard] : []
-        const withheld = outcome.withheld === true || words.some((said) => T3Actions.revealing(said))
-        const revealing = withheld && T3Actions.revealing(outcome.say)
-        const what = revealing ? "it" : `"${outcome.say}"`
+        const withheld = outcome.withheld === true || secretly(outcome.subject) || words.some((said) => T3Actions.revealing(said))
+        const what = withheld ? "it" : `"${outcome.say}"`
         // Turned off or on since, nothing about it is said, so nothing is noted as said. Off, only what answers what he asked by the
         // shortcut is said, never anything yapd would bring up of its own accord.
         const power = yield* options.power
@@ -3752,6 +3762,7 @@ export const make = (options: {
               : {}
             : { question: Brain.alone(open), open: open.id }),
           ...routinesOf(outcome.subject),
+          ...(withheld ? { withheld } : {}),
         }
         // Work that started has its own entry.
         const entry =
@@ -3761,13 +3772,15 @@ export const make = (options: {
                 at,
                 kind: "answer",
                 ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-                ...(revealing ? {} : { said: outcome.say }),
+                ...(withheld ? {} : { said: outcome.say }),
                 utterance: utterance.id,
                 ...(Object.keys(beside).length === 0 ? {} : { detail: beside }),
               })
-        yield* Effect.logInfo(revealing ? "Said something that could give a secret away, so it isn't logged" : `Said: ${outcome.say}`)
+        yield* Effect.logInfo(withheld ? "Said what came of a request held back as a secret, so it isn't logged" : `Said: ${outcome.say}`)
         const { missed, card } = outcome
-        const subject = "utterance" in of ? along(of, outcome.subject) : outcome.subject
+        // Said again, what came of a secret is kept and logged nowhere either.
+        const it = "utterance" in of ? along(of, outcome.subject) : outcome.subject
+        const subject: Subject = withheld && it._tag !== "Nothing" ? { ...it, withheld } : it
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
         let unsaid: Effect.Effect<void> = Effect.void
         // Its card goes up under the line "say that again" repeats, which can be less than what's said now, like without "I couldn't work out the rest", so it comes back with that line.
@@ -3796,6 +3809,7 @@ export const make = (options: {
             priority: "needs-you",
             spoken: outcome.say,
             ...(instead === undefined ? {} : { instead: { spoken: instead, when: off, used } }),
+            ...(withheld ? { withheld } : {}),
             at,
             // "It" means this once he's heard it, not while it waits behind something else he's hearing, and its card goes up as he hears of it.
             saying: Effect.flatMap(Clock.currentTimeMillis, (now) =>
@@ -3819,7 +3833,7 @@ export const make = (options: {
                   return kept.down ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns, request: utterance.id }))
                 }),
               ),
-              Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) && !(withheld && T3Actions.revealing(instead)) ? journal.reword(entry.value, instead) : Effect.void))),
+              Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) && !withheld ? journal.reword(entry.value, instead) : Effect.void))),
               // Why a machine can't be reached, once he's heard it, isn't said again until it's been back and gone down again.
               Effect.zipRight(threads.heard(outcome.say)),
             ),
@@ -3911,9 +3925,17 @@ export const make = (options: {
       Effect.gen(function* () {
         const { utterance } = thought
         const withheld = outcome.withheld === true || T3Actions.revealing(utterance.heard) || T3Actions.revealing(thought.decision.rest)
-        // Nor what the model would say of it, which may say it back, like "I won't keep sk-…, sir".
-        const decision = withheld ? { ...thought.decision, spoken: "", text: "", rest: "" } : thought.decision
-        const second = withheld && outcome.second !== undefined ? { ...outcome.second, spoken: "", text: "", rest: "" } : outcome.second
+        // Nor what the model would say of it, which may say it back, like "I won't keep sk-…, sir", nor its copy of what came of a secret,
+        // said again, like "say that again" after that.
+        const decision = withheld ? { ...thought.decision, spoken: "", text: "", rest: "" } : secretly(outcome.subject) ? { ...thought.decision, spoken: "" } : thought.decision
+        const second =
+          outcome.second === undefined
+            ? undefined
+            : withheld
+              ? { ...outcome.second, spoken: "", text: "", rest: "" }
+              : secretly(outcome.subject)
+                ? { ...outcome.second, spoken: "" }
+                : outcome.second
         const ms = (yield* Clock.currentTimeMillis) - began
         // Said back to what he missed, cutting it off or after it, it's part of catching up, so it never hides what he didn't hear
         // of that from the next "what did I miss?": heard to the end, it's heard, and never told again anyway.
