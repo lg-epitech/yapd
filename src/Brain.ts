@@ -2314,18 +2314,29 @@ const valued = String.raw`[^\s.,;:!?…]`
 const passGiven = String.raw`pass(?=(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|are|was|were|equals)\s+|(?:\s*[,.;]\s*|\s+[—–-]\s+|\s+)it['’]?s\s+)${valued}|(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$)`
 
 /**
+ * A pass as what's named, after "my", "the", "a", someone's or similar and a
+ * name or two at most, as in "hunter2 is my Gmail pass" or "my Gmail pass for
+ * work is …": where it ends, or what's after it is "is", "for" or the like.
+ * Never where it's a verb, as in "the Mina tests pass only on Node 22" or "the
+ * tests pass on rig", nor with another noun after it, as in "the CI pass rate
+ * is …", though "the tests pass." is taken for one too.
+ */
+const passNamed = String.raw`(?<=(?<![a-z0-9])(?:my|your|our|his|her|their|its|the|an?|[\w.-]+['’]s) (?:[\w.'’-]+ ){0,2})pass(?:es)?(?=\s*$|\s*[^\w\s-]|\s+-|\s+(?:is|are|was|were|for|to|at|from)(?![a-z0-9]))`
+
+/**
  * What names one in a fact he'd have kept, though an agent's question may
  * well mean something else by it: a PIN or a PAT, in any case; a lock's or a
  * safe's combination; or one as it's said out loud, or as Whisper writes it
- * down, like "P I N", "creds", "the Wi-Fi pass", a pass given its value, a
- * pwd or a pword, "my seed", "sign in", "the phrase for …" or a card's CVV.
+ * down, like "P I N", "creds", "the Wi-Fi pass", a pass given its value or
+ * named, as in "my Gmail pass for work", a pwd or a pword, "my seed", "sign
+ * in", "the phrase for …" or a card's CVV.
  * Never what tells a question that asks him to type one in, so "Which phrase
  * for the title?" is still his to answer by voice.
  */
 const alsoCredentials = new RegExp(
   String.raw`(?<![a-z0-9])(?:${[
     String.raw`pins?|pats?|(?:safe|lock|padlock|locker|vault)['’]?s? (?:combination|combo)s?|(?:combination|combo)s? (?:to|for|of|on) (?:\S+ ){0,3}?(?:safe|lock|padlock|locker|vault)s?`,
-    String.raw`(?<=(?<![a-z0-9])(?:wi[ -]?fi|the|my) )pass${ended}|${passGiven}`,
+    String.raw`(?<=(?<![a-z0-9])(?:wi[ -]?fi|the|my) )pass${ended}|${passGiven}|${passNamed}`,
     String.raw`pws?|pwds?|pwords?|passwds?|p(?:\. ?| )i(?:\. ?| )n\.?|creds|psks?|${asNoun("auth")}|(?<!random )${asNoun("seed")}`,
     String.raw`sign[ -]?in(?:s|to)?|log[ -]?in(?= (?:to|into)(?![a-z0-9]))|log into`,
     String.raw`bip[ -]?39|phrases?(?= for(?![a-z0-9]))|words(?= for my [a-z0-9])`,
