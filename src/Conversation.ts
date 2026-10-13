@@ -362,7 +362,8 @@ export const make = (options: {
      * has, before that wait: the user has heard it, whatever they say after.
      * `heeding`, it plays through whatever's said, listening only for
      * "Mute.", over it and the usual moment after it, whatever `wait` is,
-     * ducked while he talks over it when it `ducks`.
+     * ducked while he talks over it when it `ducks`, and that moment is cut
+     * short once something's `queued` to be said after it.
      */
     const speak = (
       path: string,
@@ -376,10 +377,11 @@ export const make = (options: {
         readonly through?: Effect.Effect<void>
         readonly heeding?: boolean
         readonly ducks?: boolean
+        readonly queued?: Effect.Effect<void>
       } = {},
     ) =>
       Effect.gen(function* () {
-        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false, ducks = false } = given
+        const { wait = linger, begun = Effect.void, confirmed = Effect.void, through = Effect.void, heeding = false, ducks = false, queued = Effect.never } = given
         const playback = yield* audio.play(path, from)
         yield* begun
         if (playback.confirmed) yield* confirmed
@@ -391,7 +393,7 @@ export const make = (options: {
           yield* played
           return { _tag: "Finished" } satisfies Outcome
         }
-        return yield* (heeding ? heed(playback, listening, text, from, played, ducks) : listen(playback, listening, text, from, wait, played))
+        return yield* (heeding ? heed(playback, listening, text, from, played, ducks, queued) : listen(playback, listening, text, from, wait, played))
       }).pipe(Effect.scoped)
 
     /**
@@ -413,11 +415,13 @@ export const make = (options: {
      * once what he said is heard out and isn't "Mute.": never the rest of a
      * line played through for a TV, which talk that goes on would keep
      * quiet, nor over its first seconds, while its own voice can still get
-     * into the microphone, which would dip it for nothing he said. What he's
+     * into the microphone, which would dip it for nothing he said. The
+     * moment after it is over at once, rather than holding up what's
+     * `queued` to be said next, which listens for "Mute." itself. What he's
      * still saying once that moment is over is heard out, for as long as it
      * could be "Mute.".
      */
-    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>, ducks: boolean) =>
+    const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>, ducks: boolean, queued: Effect.Effect<void>) =>
       Effect.gen(function* () {
         const { signals } = ear
         const id = fresh()
@@ -499,7 +503,8 @@ export const make = (options: {
               if (signal.id !== id) break
               if (ear.deaf) return { _tag: "Finished" } satisfies Outcome
               played = true
-              yield* Effect.sleep(linger).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })), Effect.forkScoped)
+              // Cut short as soon as something waits to be said next, which hears "Mute." itself: only what he's begun is heard out first.
+              yield* Effect.raceFirst(Effect.sleep(linger), queued).pipe(Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })), Effect.forkScoped)
               break
             case "Lingered":
               if (signal.id !== id) break
@@ -1192,9 +1197,11 @@ export const make = (options: {
      * to go, like a notice: it plays through whatever's said, ducked while
      * he talks but over its first seconds, listening only for "Mute.", over
      * it and the usual moment after it, so its `through` runs as soon as it's
-     * said to the end. Fails when it can't be played or breaks off.
+     * said to the end. That moment is over as soon as `queued` says
+     * something's waiting to be said next. Fails when it can't be played or
+     * breaks off.
      */
-    const tell = (said: Pick<Answer, "audio" | "spoken" | "saying" | "confirmed" | "through">) =>
+    const tell = (said: Pick<Answer, "audio" | "spoken" | "saying" | "confirmed" | "through"> & { readonly queued?: Effect.Effect<void> }) =>
       Effect.gen(function* () {
         const ear = heedful(hearing(yield* Effect.scope))
         yield* speak(said.audio, said.spoken, 0, ear, {
@@ -1203,6 +1210,7 @@ export const make = (options: {
           through: said.through ?? Effect.void,
           heeding: true,
           ducks: true,
+          ...(said.queued === undefined ? {} : { queued: said.queued }),
         })
       }).pipe(Effect.scoped)
 

@@ -1669,6 +1669,15 @@ export const make = (
       Effect.flatMap((hook) => (hook === undefined ? Effect.succeed(undefined) : waiting.reply(hook))),
     )
 
+  /** What's to be said next, if anything is: only answers while one is on its way, and while yapd is off only what he asked. */
+  const following = STM.gen(function* () {
+    const { on } = yield* TRef.get(power)
+    return Inbox.next(yield* TRef.get(inbox), !on || (yield* TRef.get(awaited)).length > 0)
+  })
+
+  /** Once something waits to be said next, which the moment after a notice then doesn't hold up. */
+  const queuedNext = STM.commit(STM.flatMap(following, (ready) => (ready === undefined ? STM.retry : STM.void)))
+
   /**
    * Nothing is read while the user dictates, only answers while one is on
    * its way, and while yapd is off only what he asked. Taken with when yapd
@@ -1677,10 +1686,9 @@ export const make = (
   const takeNext = STM.gen(function* () {
     const { on, turns } = yield* TRef.get(power)
     if (yield* Floor.dictating(floor)) return yield* STM.retry
-    const current = yield* TRef.get(inbox)
-    const ready = Inbox.next(current, !on || (yield* TRef.get(awaited)).length > 0)
+    const ready = yield* following
     if (ready === undefined) return yield* STM.retry
-    yield* TRef.set(inbox, Inbox.remove(current, ready.session))
+    yield* TRef.set(inbox, Inbox.remove(yield* TRef.get(inbox), ready.session))
     yield* TRef.set(floor.reading, true)
     yield* TRef.set(coming, false)
     return { ready, turns, on }
@@ -1811,10 +1819,10 @@ export const make = (
       }
       if (question === undefined) {
         // Nothing else he'd say over it has anywhere to go, so it plays through all he says, only ducked while he talks, but "Mute.",
-        // which it listens for a moment after it too: heard as soon as it's said to the end, so a dictation then neither puts it back
-        // nor finds it missed.
+        // which it listens for a moment after it too, unless something waits to be said next, which hears it itself: heard as soon as
+        // it's said to the end, so a dictation then neither puts it back nor finds it missed.
         const heard = Effect.zipRight(said.notice.heard ?? Effect.void, dealtWith).pipe(Effect.uninterruptible)
-        return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard })
+        return yield* conversation.tell({ audio: played, spoken, saying, confirmed, through: heard, queued: queuedNext })
       }
       const answer = (heard: string, voiced: number, echo?: string, afterPause?: string, unsaid?: string) =>
         question.answer(heard, voiced, echo, afterPause, unsaid).pipe(Effect.map(Option.map((proceed) => Effect.zipRight(dealtWith, proceed))))

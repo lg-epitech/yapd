@@ -5334,33 +5334,56 @@ describe("Daemon turned off by 'Mute.'", () => {
     expect(result).toEqual({ on: false, played: ["Tezos failed: rate limited."], stopped: ["Tezos failed: rate limited."], responded: [] })
   })
 
-  test.each([
-    ["said as it ends, heard out only once it has", true],
-    ["said just after it", false],
-  ] as const)("'Mute.' %s still turns yapd off, before what waits behind the notice is said", async (_, overlapping) => {
+  test("'Mute.' said as a notice ends, heard out only once it has, still turns yapd off, before what waits behind the notice is said", async () => {
     const result = await run(
       Effect.gen(function* () {
-        const { made, notice, finish, microphone, flush, wait, talk, played, journal } = yield* make("Mute.", { off: true })
+        const { made, notice, finish, microphone, flush, wait, played, journal } = yield* make("Mute.", { off: true })
         yield* notice("f", "Tezos failed: rate limited.")
         yield* finish("a", "The PR is ready.")
-        if (overlapping) {
-          // He begins half a second before it ends, and the silence that tells he's stopped comes once it has.
-          yield* wait(9.5)
-          yield* Queue.offerAll(microphone, Array.from({ length: 30 }, () => new Float32Array(512).fill(0.9)))
-          yield* flush
-          yield* wait(1)
-          yield* Queue.offerAll(microphone, Array.from({ length: defaults.silence }, () => new Float32Array(512)))
-          yield* flush
-        } else {
-          yield* wait(11)
-          yield* talk
-        }
+        // He begins half a second before it ends, and the silence that tells he's stopped comes once it has.
+        yield* wait(9.5)
+        yield* Queue.offerAll(microphone, Array.from({ length: 30 }, () => new Float32Array(512).fill(0.9)))
+        yield* flush
+        yield* wait(1)
+        yield* Queue.offerAll(microphone, Array.from({ length: defaults.silence }, () => new Float32Array(512)))
+        yield* flush
         const { on } = yield* made.power
         yield* wait(30)
         return { on, played: [...played], kept: yield* kept(journal) }
       }),
     )
     expect(result).toEqual({ on: false, played: ["Tezos failed: rate limited."], kept: [["yapd. The PR is ready.", undefined, "off"]] })
+  })
+
+  test("with nothing waiting behind a notice, 'Mute.' said a second after it still turns yapd off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, notice, wait, talk, played } = yield* make("Mute.", { off: true })
+        yield* notice("f", "Tezos failed: rate limited.")
+        yield* wait(11)
+        yield* talk
+        return { on: (yield* made.power).on, played: [...played] }
+      }),
+    )
+    expect(result).toEqual({ on: false, played: ["Tezos failed: rate limited."] })
+  })
+
+  test.each([
+    ["while it plays", 5],
+    ["a second after it ends", 11],
+  ] as const)("an answer queued behind a notice like 'Let me check.' %s is said as soon as it can be, never held for the moment after it", async (_, at) => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { notice, wait, played } = yield* make(undefined, { off: true, microphone: true })
+        yield* notice("c", "Let me check.", { answer: true })
+        yield* wait(at)
+        yield* notice("a", "Tezos is still running.", { answer: true })
+        // Once the notice has ended, or at once once it has, after the usual pause between lines.
+        yield* wait(Math.max(10, at) - at + 0.4)
+        return [...played]
+      }),
+    )
+    expect(result).toEqual(["Let me check.", "Tezos is still running."])
   })
 
   test("anything else said over such a notice neither stops it nor is worked out, as before", async () => {
