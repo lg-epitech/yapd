@@ -2252,6 +2252,10 @@ export const untidied = (rows: ReadonlyArray<Pick<Ledger.Row, "body"> & { readon
 /** Whether a step in the ledger tidied a thread, or took that back. */
 export const tidies = (row: Pick<Ledger.Row, "body">) => Option.isSome(tidyOf(row.body))
 
+/** Whether a step in the ledger archived a thread and dropped reminders he'd set on it, which taking that back brings back with it. */
+export const dropped = (row: Pick<Ledger.Row, "body" | "state">) =>
+  row.state === "sent" && Option.exists(tidyOf(row.body), (body) => body._tag === "Archive" && (body.reminders ?? []).length > 0)
+
 /** What a thread was called aloud as a step tidied it, as the ledger kept it. */
 export const tidiedAs = (row: Pick<Ledger.Row, "body">) => Option.getOrUndefined(Option.flatMap(tidyOf(row.body), ({ called }) => Option.fromNullable(called)))
 

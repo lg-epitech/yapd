@@ -3584,6 +3584,19 @@ export const make = (options: {
       })
 
     /**
+     * Whether the last thing done was an archive that dropped reminders he'd
+     * set on what it archived, of the thread he named if he did, since the
+     * last reminder he set or cancelled.
+     */
+    const droppedLately = (situation: Brain.Situation, named: Option.Option<Threads.Listed>) =>
+      Effect.gen(function* () {
+        const acted = Option.getOrUndefined(situation.acted)
+        if (acted === undefined || acted.kind !== "tidy" || Option.exists(situation.noted ?? Option.none(), ({ at }) => at >= acted.at)) return false
+        const rows = yield* ledger.steps(0, { kinds: ["tidy"], utterance: acted.utterance, step: acted.step })
+        return rows.some((row) => Hands.dropped(row) && Option.match(named, { onNone: () => true, onSome: ({ ref }) => ref.machine === row.machine && ref.id === row.thread }))
+      })
+
+    /**
      * Takes back what he just did, as the model said he meant it, never as
      * whether it filled in a thread: the reminder or offer he just set or
      * cancelled, of the thread he named if he did and it's of one, and
@@ -3592,13 +3605,18 @@ export const make = (options: {
      * stop, of the thread he named if he did, never a reminder, a memory or
      * a mute made since; and for no more than "scratch that", the newest
      * change he made, whatever thread the model filled in, so a message sent
-     * a minute before a reminder is never withdrawn in its place.
+     * a minute before a reminder is never withdrawn in its place. Reminders
+     * an archive just dropped come back with the thread, as taking that back
+     * brings both, never as a reminder he set or cancelled before it.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { situation } = thought
         const taking = Brain.undoes(plan.decision.how)
         if (taking === "thread") return yield* write(plan, thought, said, at)
+        if (taking === "reminder" && (yield* droppedLately(situation, plan.target))) {
+          return yield* write({ decision: { ...plan.decision, how: "tidy", target: "" }, target: Option.none() }, thought, said, at)
+        }
         // A reminder, a memory or the catch-up, only when he means that, never another.
         const changed = Option.filter(situation.noted ?? Option.none(), (last) => taking === "last" || Brain.changeOf(last) === taking)
         const last = Option.getOrUndefined(changed)
