@@ -118,6 +118,14 @@ Ask yapd to remind you of something later, however you put it: "remind me at thr
 
 yapd also says when a provider's limit passes 95 percent of a window, once a window, and keeps 80 percent for the next digest.
 
+## Memories and routines
+
+Ask yapd to keep something in mind, like "remember that rig's T3 Code runs the nightly", and it says "Noted, sir." It goes by it from then on as what's so, never as something to do: "what do you know about rig?" answers from it, and new work you start leans on it only where it needs to. It keeps your words as you said them, so one it can't find word for word in what it heard isn't kept, and it tells you. "Forget that one about rig" gives "Forgotten, sir: rig's T3 Code runs the nightly.", and "scratch that" right after keeping or forgetting one takes it back. A bare "forget it" still only stops yapd talking.
+
+A routine is steps sent to a thread whenever you say its name. "When I say review it, have Sol review it until it's clean" gives "Noted, sir. Review it: have Sol review it until it's clean.", so you hear exactly what's kept, and saying it again with other steps changes it and reads the new ones back. Then "review it" sends those steps, word for word, to the thread you're on, or to one you name, as any message you send goes: the same steps to the same thread within ten minutes ask you first. A name yapd already answers to, like "scratch that" or "yes", can't be one. You can also write routines in your [rules](#your-rules), and one there wins over one you said.
+
+yapd keeps forty at most, about four thousand characters in all, since everything you ask reads them; past that it asks you to forget something first, rather than leave any out. Nothing faint, said over yapd's own voice or that looks like a secret is kept, and it tells you why. Said over an update, these get you asked to use the shortcut. They're kept through restarts, and work while yapd is off.
+
 ## Dictating
 
 Press ctrl+option+cmd+space from any app and talk to yapd, then press it again to send, or Escape to drop it. A short rising sound says it's listening, a higher one that it's sent, a falling one that it's dropped. Take your time: pausing to think doesn't end it, only the shortcut does. What you said becomes [new work](#starting-new-work).
@@ -154,7 +162,7 @@ Work outside your projects needs a [T3 Code token](#where-follow-ups-go) and a T
 
 ### Your rules
 
-Put what yapd should go by in `~/.yapd/preferences.md`, in your own words. A model reads it with each request, so there's no format to follow, and changes apply to the next thing you dictate:
+Put what yapd should go by in `~/.yapd/preferences.md`, in your own words. A model reads it with each request, so there's no format to follow, but for [routines](#memories-and-routines), and changes apply to the next thing you dictate:
 
 ```md
 Fable on high for design work and hard bugs. Opus 5.5 on high for everyday features and fixes.
@@ -162,7 +170,13 @@ Fable on high for design work and hard bugs. Opus 5.5 on high for everyday featu
 A worktree for features and fixes. None for questions and anything that only reads.
 
 When I say "the rig" I mean rig.
+
+## Routines
+
+- ship it: Merge the PR once checks pass, then update the dev worktree and reinstall yapd.
 ```
+
+Routines go under a `## Routines` heading, one a line, as `- name: steps`, up to the next heading. Saying "ship it" then sends those steps, as you wrote them, to the thread you're on. Unlike the rest, they're read from the whole file, and can't be forgotten by voice.
 
 `YAPD_PREFERENCES` in your settings points to a file somewhere else. Keep it short, since every prompt waits on it being read: past 6,000 characters, the rest is left out.
 
