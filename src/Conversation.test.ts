@@ -1788,7 +1788,7 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
 
   test.each([
     ["while Whisper can't hear yet, its model still loading, it isn't asked", { unready: true, transcribing: 30 }, 0.6],
-    ["Whisper taking longer than 'Mute.' could be heard out in, it's taken for other talk", { transcribing: 10 }, 4.6],
+    ["Whisper taking longer than 'Mute.' could be heard out in, it's taken for other talk", { transcribing: 10 }, 4],
   ] as const)("over a notice, %s, so what's next is held up no longer", async (_, given, after) => {
     const result = await overHelperScoped(
       Effect.gen(function* () {

@@ -114,10 +114,12 @@ const curt = 2.5
 const breather = 500
 /**
  * How long before that pause, in milliseconds, what he's begun can be and
- * still be heard out once it's over: a "Mute." begun over the line's last
- * words. Begun any earlier and still going, it's other talk, like a TV's.
+ * still be heard out once it's over: as long as the silence that tells he's
+ * stopped, so a "Mute." begun over the line's last words, which that silence
+ * shows only once the line has ended, isn't cut in two. Begun any earlier
+ * and still going, it's other talk, like a TV's.
  */
-const brink = 300
+const brink = 700
 /**
  * How long, in milliseconds, a "Mute." begun just as that moment is over is
  * waited for, a few frames, so it isn't cut in two between the line and the
@@ -463,15 +465,6 @@ export const make = (options: {
         const { signals } = ear
         const id = fresh()
         const began = yield* Clock.currentTimeMillis
-        yield* playback.finished.pipe(
-          Effect.tap(() => through),
-          Effect.match({
-            onFailure: (error): Signal => ({ _tag: "Broke", id, error }),
-            onSuccess: (): Signal => ({ _tag: "Finished", id }),
-          }),
-          Effect.flatMap((signal) => Queue.offer(signals, signal)),
-          Effect.forkScoped,
-        )
         const position = Effect.map(Clock.currentTimeMillis, (now) => Math.min(playback.duration, from + (now - began) / 1000))
         /** How far into the line he began what he's saying, when by the clock, and whether that was while yapd's own voice could still get into the microphone. */
         let onset: number | undefined
@@ -483,6 +476,27 @@ export const make = (options: {
         let over: number | undefined
         /** When what he said last ended, or what he began came to nothing, by the clock. */
         let ended = Number.NEGATIVE_INFINITY
+        // The moment after it begins as soon as it's played to the end, however long what was said before takes to make out: over once
+        // something waits to be said next, which hears "Mute." itself, and the pause between lines is up, or else after the usual moment.
+        const after = Effect.raceFirst(Effect.sleep(linger), Effect.zipRight(Effect.sleep(breather), queued)).pipe(
+          Effect.zipRight(Clock.currentTimeMillis),
+          Effect.flatMap((at) =>
+            Effect.zipRight(
+              Effect.sync(() => {
+                over = at
+              }),
+              Queue.offer(signals, { _tag: "Lingered", id }),
+            ),
+          ),
+        )
+        yield* playback.finished.pipe(
+          Effect.tap(() => through),
+          Effect.matchEffect({
+            onFailure: (error) => Queue.offer(signals, { _tag: "Broke", id, error }),
+            onSuccess: () => Effect.zipRight(Queue.offer(signals, { _tag: "Finished", id }), after),
+          }),
+          Effect.forkScoped,
+        )
         /**
          * Whether what he began at `at` is heard out once that moment is over,
          * at `over`: begun in the pause between lines or just before it, or a
@@ -554,20 +568,6 @@ export const make = (options: {
               if (signal.id !== id) break
               if (ear.deaf) return { _tag: "Finished" } satisfies Outcome
               played = true
-              // Over once something waits to be said next, which hears "Mute." itself, and the pause between lines is up, or else after
-              // the usual moment: noted as it is, however long what was said before takes to make out, and woken up for.
-              yield* Effect.raceFirst(Effect.sleep(linger), Effect.zipRight(Effect.sleep(breather), queued)).pipe(
-                Effect.zipRight(Clock.currentTimeMillis),
-                Effect.flatMap((at) =>
-                  Effect.zipRight(
-                    Effect.sync(() => {
-                      over = at
-                    }),
-                    Queue.offer(signals, { _tag: "Lingered", id }),
-                  ),
-                ),
-                Effect.forkScoped,
-              )
               break
             case "Broke":
               if (signal.id === id) return yield* Effect.fail(signal.error)
