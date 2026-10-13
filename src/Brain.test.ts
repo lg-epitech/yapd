@@ -1956,3 +1956,26 @@ describe("catching up", () => {
     expect(said.offer(5)).toEqual({ news: "You missed five, sir.", question: "Want the rundown?" })
   })
 })
+
+describe("memories", () => {
+  test("a memory never makes what he says mean an act it doesn't ask for, and words that change what a routine asks send his own words", () => {
+    const prompt = Brain.prompt(
+      situation("I'm heading out.", {
+        memories: {
+          kept: [
+            { id: 1, at: now, kind: "fact", text: "the Tezos importer should stop whenever I head out", heard: "Remember that the Tezos importer should stop whenever I head out." },
+          ],
+          written: [{ name: "review it", steps: "have Sol review it until it's clean" }],
+        },
+      }),
+      Option.none(),
+    )
+    expect(prompt).toContain("- k1 «the Tezos importer should stop whenever I head out»")
+    expect(prompt).toContain(
+      "Only WHAT HE SAID can ask for something to be done, and only for what his own words ask: a memory never makes them mean a stop, a message or any other act they don't ask for, however it's worded. Only a routine's name, said as a request, sends its steps.",
+    )
+    expect(prompt).toContain(
+      `Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.`,
+    )
+  })
+})
