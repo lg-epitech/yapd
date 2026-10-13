@@ -4,21 +4,22 @@ import * as Switching from "./Switching.ts"
 
 /** A yapd that starts `on`, noting what each part did, in order. */
 const made = (on: boolean) => {
-  let power = { on }
+  let power = { on, turns: 0 }
   const done: Array<string> = []
   const note = (what: string) => Effect.sync(() => void done.push(what))
-  const turn = Switching.switcher({
+  const switcher = Switching.switcher({
     power: Effect.sync(() => power),
+    dictations: note("dictations"),
     drop: note("drop"),
     turn: (next) =>
       Effect.sync(() => {
         done.push(next ? "on" : "off")
-        power = { on: next }
+        power = { on: next, turns: power.turns + 1 }
       }),
     shortcut: note("shortcut"),
     back: note("back"),
   })
-  return { turn, done }
+  return { turn: switcher.turn, turns: switcher.turns, done }
 }
 
 describe("Switching yapd on and off", () => {
@@ -33,14 +34,27 @@ describe("Switching yapd on and off", () => {
     Effect.runSync(turn(true))
     Effect.runSync(turn(false))
     Effect.runSync(turn(false))
-    expect(done).toEqual(["shortcut", "back", "shortcut", "drop", "off", "shortcut"])
+    expect(done).toEqual(["shortcut", "back", "shortcut", "dictations", "drop", "off", "shortcut"])
   })
 
   test("really switching drops what's under way before the daemon turns, both ways", () => {
     const { turn, done } = made(false)
     Effect.runSync(turn(true))
     Effect.runSync(turn(false))
-    expect(done).toEqual(["drop", "on", "shortcut", "back", "shortcut", "drop", "off"])
+    expect(done).toEqual(["dictations", "drop", "on", "shortcut", "back", "shortcut", "dictations", "drop", "off"])
+  })
+
+  test("turned on by 'unmute', a dictation he pressed for right after is kept, and taken for one made once yapd is on", () => {
+    const { turn, turns, done } = made(false)
+    // He pressed for "unmute" as press 4, then again as press 5, before it was heard, so both were made while yapd was off.
+    Effect.runSync(turn(true, 4))
+    expect(done).toEqual(["drop", "on", "shortcut", "back"])
+    expect([turns(5, 0), turns(4, 0), turns(3, 0), turns(6, 1)]).toEqual([1, 0, 0, 1])
+    // Turned off and on from the menu since, it's still taken as made before then, so it's said before yapd was turned off, as ever.
+    Effect.runSync(turn(false))
+    Effect.runSync(turn(true))
+    expect(turns(5, 0)).toBe(1)
+    expect(done.slice(4)).toEqual(["shortcut", "dictations", "drop", "off", "dictations", "drop", "on", "shortcut", "back"])
   })
 })
 

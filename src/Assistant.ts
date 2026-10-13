@@ -700,10 +700,10 @@ export const make = (options: {
   /**
    * Turns yapd on or off as the menu does: "Mute." said by the shortcut turns
    * it off, and "unmute" or "turn on" said by it while it's off, on, with
-   * nothing worked out of either. Without it, they're worked out as anything
-   * else is.
+   * nothing worked out of either, by what the shortcut's press `press` began,
+   * when it was. Without it, they're worked out as anything else is.
    */
-  readonly turn?: (on: boolean) => Effect.Effect<void>
+  readonly turn?: (on: boolean, press?: number) => Effect.Effect<void>
   /** What he asked to be told later, which he sets and cancels by voice. Without them, that's something yapd can't do yet. */
   readonly reminders?: Reminders.Reminders
 }) =>
@@ -4103,7 +4103,7 @@ export const make = (options: {
           const switching = switches(utterance.heard, (yield* options.power).on)
           if (options.turn !== undefined && switching !== undefined) {
             yield* Effect.logInfo(switching ? `Turned on: he said ${once(utterance.heard)}` : "Turned off: he said mute")
-            const turning = yield* Effect.forkIn(options.turn(switching), scope)
+            const turning = yield* Effect.forkIn(options.turn(switching, press), scope)
             if (!switching) yield* Fiber.join(turning)
             return yield* Effect.as(kept?.arrived ?? Effect.void, Option.some(utterance.id))
           }
