@@ -144,6 +144,8 @@ export const serve = Effect.gen(function* () {
   const persona = yield* Persona.Persona
   /** What tells him what was held once he says he's back over an update, which the assistant does, once it's made. */
   const welcome = yield* Deferred.make<Effect.Effect<void>>()
+  /** What says notices, once it's made, which says a reminder on its own when the update it led is never said. */
+  const noticing = yield* Deferred.make<Effect.Effect.Success<ReturnType<typeof Notices.make>>>()
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
   // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
   const daemon = yield* Daemon.make({
@@ -194,8 +196,14 @@ export const serve = Effect.gen(function* () {
           }
         }),
       ),
-    // What he asked to hear once a thread finishes leads its update, named as the desk names it.
-    finishing: Reminders.finishing({ reminders, desk: (ref) => threads.desk(Option.none(), [ref], 1), lines: persona.lines }),
+    // What he asked to hear once a thread finishes leads its update, named as the desk names it, and is said on its own should that never be.
+    finishing: Reminders.finishing({
+      reminders,
+      desk: (ref) => threads.desk(Option.none(), [ref], 1),
+      lines: persona.lines,
+      announce: (spoken, entry, kept, about) =>
+        Effect.flatMap(Deferred.await(noticing), (notices) => notices.announce(spoken, entry, Effect.succeed(true), entry.at, entry.key, Option.getOrUndefined(kept), about)),
+    }),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
@@ -279,6 +287,7 @@ export const serve = Effect.gen(function* () {
     offered: assistant.offered,
     holding: modes.holding,
   })
+  yield* Deferred.succeed(noticing, notices)
   yield* Effect.forkScoped(notices.follow)
   // What he heard none of that was handed over to be said before the restart is said again, then what he set for a time is said as it
   // comes, one due while yapd was down at once.

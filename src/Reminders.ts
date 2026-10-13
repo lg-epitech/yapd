@@ -328,19 +328,28 @@ export const calling = (reminder: Pick<Reminder, "called" | "machine" | "thread"
  * The reminders to tell him of as a thread he watched finishes, with what's
  * said of each, as `finishing` gives them for an update about to be said:
  * never an offer, which is asked on its own, after. Each is fired as it's
- * taken, and dropped when it fired elsewhere meanwhile.
+ * taken, and dropped when it fired elsewhere meanwhile; fired, it's said on
+ * its own should the update it led never be.
  */
 export interface Leading {
   readonly line: string
   /** Fires it, kept unheard, held as yapd was off when `off`: its entry, or none when it fired elsewhere meanwhile. */
   readonly fire: (off: boolean) => Effect.Effect<Option.Option<Option.Option<number>>>
+  /** Says it on its own, under `kept`, the entry it was fired under, as when the update it led is dropped before he hears it. */
+  readonly apart: (kept: Option.Option<number>) => Effect.Effect<void>
 }
 
-/** What a finished turn's update is led by, for the thread it's about: the reminders he set on it finishing by `before`, when it came. */
+/**
+ * What a finished turn's update is led by, for the thread it's about: the
+ * reminders he set on it finishing by `before`, when it came. `announce`
+ * says one of yapd's own accord, kept under its entry's key, as notices are,
+ * under `kept`, the entry it was kept under already.
+ */
 export const finishing = (options: {
   readonly reminders: Reminders
   readonly desk: (ref: Threads.Ref) => Effect.Effect<Threads.Desk>
   readonly lines: Effect.Effect<Lines>
+  readonly announce: (spoken: string, entry: Entry & { readonly key: string }, kept: Option.Option<number>, about: Threads.Ref) => Effect.Effect<void>
 }) =>
   (about: Threads.Ref, before: number): Effect.Effect<ReadonlyArray<Leading>> =>
     Effect.gen(function* () {
@@ -363,6 +372,10 @@ export const finishing = (options: {
               said: line,
               detail: { reminder: reminder.id, ...(off ? { held: "off" } : {}) },
             }),
+          apart: (kept) =>
+            Effect.flatMap(Clock.currentTimeMillis, (at) =>
+              options.announce(line, { at, kind: "notice", machine: about.machine, thread: about.id, said: line, key: key(reminder.id), detail: { reminder: reminder.id } }, kept, about),
+            ),
         }
       })
     })

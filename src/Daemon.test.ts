@@ -6045,12 +6045,18 @@ describe("Daemon reminders", () => {
         const loader = { machine: "Rosie", id: "t-loader" }
         yield* mutes.mute({ key: Mutes.key.thread(loader) })
         yield* reminders.add({ at: -120_000, heard: "Tell me when the loader one finishes.", text: "", event: "finished", machine: "Rosie", thread: "t-loader", called: "the loader fix" })
-        const finishing = Reminders.finishing({ reminders, desk: () => Effect.succeed({ threads: [], away: [] }), lines: Effect.succeed(Persona.plain) })
+        const apart: Array<string> = []
+        const finishing = Reminders.finishing({
+          reminders,
+          desk: () => Effect.succeed({ threads: [], away: [] }),
+          lines: Effect.succeed(Persona.plain),
+          announce: (spoken) => Effect.sync(() => void apart.push(spoken)),
+        })
         const { made, wait, played } = yield* make(undefined, { journal, mutes, finishing })
         yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
         yield* wait(11)
         const kept = yield* journal.since(-200_000, { kinds: ["notice", "update"] })
-        return { played: [...played], kept: kept.map(({ kind, said, heardAt }) => [kind, said, heardAt !== undefined]), pending: (yield* reminders.pending).length }
+        return { played: [...played], kept: kept.map(({ kind, said, heardAt }) => [kind, said, heardAt !== undefined]), pending: (yield* reminders.pending).length, apart }
       }),
     )
     expect(result.played).toEqual(["The loader fix has finished, as you asked. yapd. The loader is fixed."])
@@ -6059,5 +6065,39 @@ describe("Daemon reminders", () => {
       ["update", "yapd. The loader is fixed.", true],
     ])
     expect(result.pending).toBe(0)
+    // Heard with its update, it's never said again on its own.
+    expect(result.apart).toEqual([])
+  })
+
+  test("a reminder that led an update dropped before he heard it, as its thread started again, is said on its own under the entry it fired under", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* Store.make(":memory:")
+        const journal = Journal.fromStore(store)
+        const reminders = Reminders.make(store, journal)
+        yield* reminders.add({ at: -120_000, heard: "Tell me when the loader one finishes, I need to call the bank.", text: "call the bank", event: "finished", machine: "Rosie", thread: "t-loader", called: "the loader fix" })
+        const apart: Array<{ readonly spoken: string; readonly key: string; readonly kept: boolean }> = []
+        const finishing = Reminders.finishing({
+          reminders,
+          desk: () => Effect.succeed({ threads: [], away: [] }),
+          lines: Effect.succeed(Persona.plain),
+          announce: (spoken, entry, kept) => Effect.sync(() => void apart.push({ spoken, key: entry.key, kept: Option.isSome(kept) })),
+        })
+        const { made, wait, played, finish, nextEvent } = yield* make(undefined, { journal, finishing })
+        // It waits behind something else being said, and the thread starts again meanwhile.
+        yield* finish("a", "Something else first.")
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* nextEvent("Ready: yapd. The loader")
+        yield* made.overtaken({ machine: "Rosie", id: "t-loader" })
+        yield* wait(11)
+        yield* wait(11)
+        const kept = yield* journal.since(-200_000, { kinds: ["notice"] })
+        return { played: [...played], apart, kept: kept.map(({ key, heardAt }) => [key, heardAt !== undefined]) }
+      }),
+    )
+    expect(result.played).toEqual(["yapd. Something else first."])
+    // Fired once, it's handed over once, on its own, under the entry it fired under, unheard until it's said.
+    expect(result.apart).toEqual([{ spoken: "The loader fix has finished. You asked me to remind you then: call the bank.", key: "remind:1", kept: true }])
+    expect(result.kept).toEqual([["remind:1", false]])
   })
 })
