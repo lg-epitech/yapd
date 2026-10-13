@@ -206,7 +206,8 @@ export const make = (options: {
             ...(options.missed === undefined ? {} : { unheard: unheardOf(machine, [id, ...sessions, ...(found.get(kept)?.all ?? [])]) }),
             // Every thread's, a subagent's by the thread it's part of: never a session's.
             ...(session || (part && head === undefined) ? {} : { subagents: reading.has(head ?? key) }),
-            ...(head === undefined ? {} : { head: { key: head, title: headTitle ?? reading.get(head)?.called ?? "A thread" } }),
+            // With whether that thread is muted, which its own mute taken off leaves it.
+            ...(head === undefined ? {} : { head: { key: head, title: headTitle ?? reading.get(head)?.called ?? "A thread", muted: muted.has(head) } }),
           } satisfies Server.Recent
         }),
       )
@@ -426,8 +427,10 @@ export const details = (options: {
       const ref = about.value._tag === "Thread" ? about.value.ref : undefined
       const found = ref === undefined ? Option.none<T3Live.Thread>() : yield* threads.find(ref)
       const row = (yield* latest.current).find((row) => row.key === key)
-      // One of T3 Code's own subagents, by the thread it's part of, as its row shows it, or up its chain as T3 Code has it now.
-      const head = row?.head ?? (ref === undefined || !Option.exists(found, Threads.subagent) ? undefined : yield* headOf(threads, ref))
+      // One of T3 Code's own subagents, by the thread it's part of, as its row shows it, or up its chain as T3 Code has it now, and
+      // whether that thread is muted now.
+      const up = row?.head ?? (ref === undefined || !Option.exists(found, Threads.subagent) ? undefined : yield* headOf(threads, ref))
+      const head = up === undefined ? undefined : { key: up.key, title: up.title, muted: Option.isSome(yield* mutes.muted([up.key])) }
       const mute = Option.getOrUndefined(yield* mutes.muted([key, ...(yield* latest.under(key)), ...(head === undefined ? [] : [head.key])]))
       if (row === undefined && Option.isNone(found) && mute === undefined) return Option.none<Server.Details>()
       // A session is kept under its agent and its own id for it.
