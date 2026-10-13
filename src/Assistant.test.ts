@@ -11700,7 +11700,9 @@ describe("Assistant memories", () => {
           (situation) => {
             const { heard } = situation.utterance
             if (heard === asked) return Brain.decision({ act: "remember", how: "routine", text: reworded ? "review it: have Sol review the work until it's clean" : "review it: have Sol review it until it's clean" })
-            if (heard === "When I say review it, have Opus review it twice.") return Brain.decision({ act: "remember", how: "routine", text: "review it: have Opus review it twice" })
+            if (heard === "When I say review it, have the agent open a PR, then two Codex agents review it on t3.") {
+              return Brain.decision({ act: "remember", how: "routine", text: "review it: have the agent open a PR, then two Codex agents review it on t3" })
+            }
             // A name put right, as speech recognition got it wrong, isn't his either, and would go to the agent as he never said it.
             if (heard === "When I say review it, have Saul review it until it's clean.") return Brain.decision({ act: "remember", how: "routine", text: "review it: have Sol review it until it's clean" })
             return undefined
@@ -11720,7 +11722,8 @@ describe("Assistant memories", () => {
         const echoed = { said: made.spoken().at(-1), kept: yield* kept() }
         yield* made.dictate(asked)
         const saved = { said: made.spoken().at(-1), kept: yield* kept() }
-        yield* made.dictate("When I say review it, have Opus review it twice.")
+        // Read back as it's kept, the agent and all, never as yapd words its own lines.
+        yield* made.dictate("When I say review it, have the agent open a PR, then two Codex agents review it on t3.")
         return { unsaved, corrected, echoed, saved, changed: { said: made.spoken().at(-1), kept: yield* kept() } }
       }),
     )
@@ -11728,7 +11731,10 @@ describe("Assistant memories", () => {
     expect(result.corrected).toEqual({ said: "I couldn't keep the steps in your own words, sir: I didn't hear 'Sol' from you, so I didn't save it.", kept: [] })
     expect(result.echoed).toEqual({ said: "I didn't keep that, sir: it may have been my own voice. Say it again?", kept: [] })
     expect(result.saved).toEqual({ said: "Noted, sir. Review it: have Sol review it until it's clean.", kept: ["review it: have Sol review it until it's clean"] })
-    expect(result.changed).toEqual({ said: "Changed, sir. Review it: have Opus review it twice.", kept: ["review it: have Opus review it twice"] })
+    expect(result.changed).toEqual({
+      said: "Changed, sir. Review it: have the agent open a PR, then two Codex agents review it on t3.",
+      kept: ["review it: have the agent open a PR, then two Codex agents review it on t3"],
+    })
   })
 
   test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {

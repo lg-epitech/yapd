@@ -2236,19 +2236,36 @@ const agents: ReadonlyArray<readonly [RegExp, string]> = [
   [new RegExp(`\\b${coding}(agents|sessions)\\b`, "gi"), "threads"],
 ]
 
+/** Words with what's said in place of some swapped in. */
+const swapped = (text: string, swaps: ReadonlyArray<readonly [RegExp, string]>) => swaps.reduce((said, [pattern, instead]) => said.replace(pattern, instead), text)
+
+/** Words without the spaces left where something was swapped for less, or for nothing. */
+const tidied = (text: string) =>
+  text
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+
 /**
  * What the model wrote, made fit to say: what can't be read aloud is said in
  * a word, the work is never put down to an agent or a session, and a handle
  * that slipped in becomes the thread's name, which is left as it is.
  */
 export const speakable = (text: string, desk: Threads.Desk) =>
-  [...unreadable, ...agents]
-    .reduce((said, [pattern, instead]) => said.replace(pattern, instead), text)
-    .replace(/(?<![\w/])t\d+(?![\w/])/g, (handle) => desk.threads.find((listed) => listed.handle === handle)?.called ?? "that one")
-    .replace(/\s+([,.;:!?])/g, "$1")
-    .replace(/\(\s*\)/g, "")
-    .replace(/\s{2,}/g, " ")
-    .trim()
+  tidied(
+    swapped(text, [...unreadable, ...agents]).replace(
+      /(?<![\w/])t\d+(?![\w/])/g,
+      (handle) => desk.threads.find((listed) => listed.handle === handle)?.called ?? "that one",
+    ),
+  )
+
+/**
+ * His own words read back to him, made fit to say: only what can't be read
+ * aloud is said in a word. Nothing else of them changes, never "the agent"
+ * nor a name like "t3", so he hears what's kept as it's kept.
+ */
+export const sayable = (text: string) => tidied(swapped(text, unreadable))
 
 /** Whether text has nothing in it only meant to be read, like a link, a path, a branch, an id, an address or a hash, so it can be said as it is. */
 export const readable = (text: string) => unreadable.every(([pattern]) => text.search(pattern) === -1)

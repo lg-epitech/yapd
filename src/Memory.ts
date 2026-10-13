@@ -3,7 +3,6 @@ import { Clock, Effect, Option } from "effect"
 import * as Brain from "./Brain.ts"
 import { addressed, type Lines } from "./Persona.ts"
 import type * as Store from "./Store.ts"
-import type * as Threads from "./Threads.ts"
 
 // What he asked yapd to keep in mind, by voice: facts about him and his work,
 // and routines, steps sent to a thread whenever he says their name. Each is
@@ -149,11 +148,8 @@ export const make = (store: Store.Store["Type"]): Memories => {
   }
 }
 
-/** A desk with nothing on it, for words said with no thread to name in them. */
-const nowhere: Threads.Desk = { threads: [], away: [] }
-
-/** His words as they can be said, without the mark that ends them, which the line puts back. */
-const words = (text: string) => Brain.speakable(text, nowhere).replace(/[.!?]+$/, "").trim()
+/** His words as they can be said, and as they're kept otherwise, without the mark that ends them, which the line puts back. */
+const words = (text: string) => Brain.sayable(text).replace(/[.!?]+$/, "").trim()
 
 /** A routine's name, to start a sentence. */
 const named = (name: string) => Brain.capital(words(name))
