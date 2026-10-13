@@ -1550,6 +1550,31 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     })
   })
 
+  test.each([
+    ["an update", {}],
+    ["a question", { ask: true }],
+    ["an answer", { answer: true }],
+  ] as const)("'Mute.' said on its own after a pause, while what someone else said over %s is still being worked out, turns yapd off", async (_, given) => {
+    const over = (before: string) =>
+      overHelperScoped(
+        Effect.gen(function* () {
+          const helper = yield* overHelper([[0.9, before], [0.95, "Mute."]], { responding: 5, off: true, ...given })
+          yield* helper.wait(4)
+          yield* helper.talk(0.9, 20)
+          yield* helper.quiet
+          // He says it while that's still being worked out.
+          yield* helper.wait(1)
+          yield* helper.talk(0.95, 10)
+          yield* helper.quiet
+          yield* helper.wait(0.1)
+          return { offs: helper.offs(), worked: [...helper.responded, ...helper.offered].map(({ heard }) => heard) }
+        }),
+      )
+    expect(await over("Are you coming to the standup?")).toEqual({ offs: 1, worked: ["Are you coming to the standup?"] })
+    // Trailed off into it, it's the rest of what he was saying, like a thread to mute, for the model to work out once he's done.
+    expect(await over("Can you…")).toEqual({ offs: 0, worked: ["Can you Mute."] })
+  })
+
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */
   const ending = (
     at: number,
