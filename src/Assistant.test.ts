@@ -12070,6 +12070,15 @@ describe("Assistant memories", () => {
       sent: [],
     })
     expect(await saving("Okay, remember that Rig uses C++ for the parser, thanks.", "rig uses C++ for the parser", "fact")).toMatchObject({ kept: ["Rig uses C++ for the parser"] })
+    // A word to yapd is left out only before what he asks, or once a pause sets it off: one that runs straight into his words is his, so
+    // the model's copy without it keeps nothing.
+    expect(await saving("When I say ping, ask Jarvis.", "ping: ask")).toEqual({ said: "I couldn't keep the steps in your own words, sir, so I didn't save it.", kept: [], sent: [] })
+    expect(await saving("When I say ping, ask Jarvis.", "ping: ask Jarvis")).toMatchObject({ kept: ["ping: ask Jarvis"] })
+    expect(await saving("When I say ping, ask the team, Jarvis.", "ping: ask the team")).toMatchObject({ kept: ["ping: ask the team"] })
+    expect(await saving("Remember that the magic word is please.", "the magic word is", "fact")).toMatchObject({ kept: [], sent: [] })
+    expect(await saving("Remember that the magic word is please.", "the magic word is please", "fact")).toMatchObject({ kept: ["the magic word is please"] })
+    expect(await saving("Remember that Jarvis runs on Rosie.", "runs on Rosie", "fact")).toMatchObject({ kept: [] })
+    expect(await saving("Remember that, Jarvis, rig runs the nightly. Okay.", "rig runs the nightly", "fact")).toMatchObject({ kept: ["rig runs the nightly"] })
   })
 
   test("a routine's steps go only when he says its whole name, whichever the model picks, said or in his preferences", async () => {

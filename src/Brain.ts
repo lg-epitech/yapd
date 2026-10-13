@@ -1969,9 +1969,16 @@ export const asSaid = (words: string, said: string) => {
   return kept !== "" && ` ${Ledger.digest(said)} `.includes(` ${kept} `)
 }
 
-/** Words to yapd that may come around all he asked for, as words compare, and are no part of it. */
-const asides = ["remember that", "remember", "note that", "please", "thanks", "thank you", "sir", "jarvis", "okay", "ok"]
-const aside = `(?:${asides.join("|")})`
+/**
+ * Words to yapd that may come around what he asks, never part of it when
+ * said before he asks it, or when a pause sets them off from his other
+ * words, like the "thanks" of ", thanks.": never the "Jarvis" of "ask
+ * Jarvis", nor the "please" of "the magic word is please".
+ */
+const asides = ["please", "thanks", "thank you", "sir", "jarvis", "okay", "ok"]
+
+/** What asks yapd to keep a fact in mind, like "remember that". */
+const keeping = ["remember that", "remember", "note that"]
 
 /**
  * Words as they compare once what they say is all that counts: in any case,
@@ -1988,8 +1995,11 @@ export const worded = (text: string) =>
     .replace(/\s+/gu, " ")
     .trim()
 
-/** What's between words as speech recognition writes them and no part of any: a space, or a mark that ends one, never a symbol like the "." of ".NET". */
-const gap = String.raw`\s|[,;:!?\u2026]|\.(?![\p{L}\p{N}])`
+/** A mark that ends a word, as speech recognition writes his pause, like a comma or a full stop, never a symbol like the "." of ".NET". */
+const pause = String.raw`[,;:!?\u2026]|\.(?![\p{L}\p{N}])`
+
+/** What's between words as speech recognition writes them and no part of any: a space, or a mark that ends one. */
+const gap = String.raw`\s|${pause}`
 
 /** Any of `phrases` in words as they're written, as whole words, whatever marks are between them. */
 const phrased = (phrases: ReadonlyArray<string>) =>
@@ -1999,51 +2009,86 @@ const phrased = (phrases: ReadonlyArray<string>) =>
 const only = (phrases: ReadonlyArray<string>) => new RegExp(`^(?:${gap}|${phrased(phrases)})*$`, "iu")
 
 /**
- * His words in `said` that the model's `words` say the same as, symbols and
- * all, as speech recognition wrote them: all of `said` but for as many words
- * to yapd at either end, `before` and `after` it, as the model left out,
- * never any other, nor the spaces and marks around it. None when no such
- * part of it says the same.
+ * All that may come before his words in what he said, as it's written: what
+ * `free` matches, then words to yapd only when a pause sets them off from
+ * his, like "Jarvis," but never the "Jarvis" of "Jarvis runs on Rosie".
  */
-const inHisWords = (said: string, words: string, before: ReadonlyArray<string>, after: ReadonlyArray<string>) => {
+const ahead = (free: string) => new RegExp(`^(?:${free})(?:(?:${gap}|${phrased(asides)})*(?:${pause}))?\\s*$`, "iu")
+
+/**
+ * All that may come after his words: marks, and words to yapd or `more`
+ * only when a pause sets them off from his, like ", thanks." but never the
+ * "please" of "the magic word is please", then `free` words.
+ */
+const behind = (more: ReadonlyArray<string>, free: ReadonlyArray<string> = []) =>
+  new RegExp(`^\\s*(?:(?:${pause})(?:${gap}|${phrased([...asides, ...more])})*)?(?:${[gap, ...free.map((word) => phrased([word]))].join("|")})*$`, "iu")
+
+/** Where each of his words starts and ends, as they're written, without a mark that only ends one, like a comma. */
+const edges = (said: string) => {
+  const words = Array.from(said.matchAll(/\S+/gu), (word) => ({ word: word[0], at: word.index }))
+  const [opening, closing] = [new RegExp(`^(?:${gap})+`, "u"), new RegExp(`(?:${gap})+$`, "u")]
+  return {
+    starts: words.map(({ word, at }) => at + word.length - word.replace(opening, "").length),
+    ends: words.map(({ word, at }) => at + word.replace(closing, "").length),
+  }
+}
+
+/**
+ * His words in `said` that the model's `words` say the same as, symbols and
+ * all, as speech recognition wrote them: all of `said` but for what's
+ * `before` and `after` it, never any other, nor the marks around it. None
+ * when no such part of it says the same. Where his words start and end is
+ * code's to say, never the model's.
+ */
+const inHisWords = (said: string, words: string, before: RegExp, after: RegExp) => {
   const wanted = worded(words)
-  const [leading, trailing] = [only(before), only(after)]
-  const breaks = [0, ...Array.from(said.matchAll(/\s+/gu), (space) => [space.index, space.index + space[0].length]).flat(), said.length]
-  const starts = breaks.filter((at) => leading.test(said.slice(0, at)))
-  const ends = breaks.filter((at) => trailing.test(said.slice(at)))
-  for (const start of starts) {
-    for (const end of ends) {
-      const part = said.slice(start, end)
-      if (end > start && worded(part) === wanted) return part.replace(new RegExp(`^(?:${gap})+|(?:${gap})+$`, "gu"), "")
+  const { starts, ends } = edges(said)
+  for (const start of starts.filter((at) => before.test(said.slice(0, at)))) {
+    for (const end of ends.filter((at) => after.test(said.slice(at)))) {
+      if (end > start && worded(said.slice(start, end)) === wanted) return said.slice(start, end)
     }
   }
   return undefined
 }
 
+/** A fact said: what may come before it, "remember that" and words to yapd before that, and after it, words to yapd a pause sets off. */
+const aroundFact = {
+  ahead: ahead(`(?:(?:${gap}|${phrased(asides)})*${phrased(keeping)})?(?:${gap})*`),
+  behind: behind(keeping),
+}
+
 /**
  * A fact as he said it, which the model's `fact` says the same as: all he
- * said but for a "remember that" and words to yapd around it, marks and
- * symbols kept. So what's kept is all he asked to be, never less of it, like
- * his "we never use C++" without its "never", nor more.
+ * said after a "remember that" and words to yapd before it, but for words to
+ * yapd a pause sets off from it, marks and symbols kept. So what's kept is
+ * all he asked to be, never less of it, like his "we never use C++" without
+ * its "never", or "the magic word is please" without its "please", nor more.
  */
-const spokenFact = (said: string, fact: string) => inHisWords(said, fact, asides, asides)
+const spokenFact = (said: string, fact: string) => inHisWords(said, fact, aroundFact.ahead, aroundFact.behind)
+
+/** A routine's steps said after its name, or before it: what may come before and after them, as for a fact, "then" and "so" too as they were. */
+const aroundSteps = {
+  after: { ahead: ahead(`(?:${gap}|${phrased(["then"])})*`), behind: behind([]) },
+  before: { ahead: ahead(`(?:${gap}|${phrased(["so"])})*`), behind: behind([], ["then"]) },
+}
 
 /**
  * A routine's steps as he said them, which the model's `steps` say the same
  * as: all he said after where he paused after its name, or before "when I
- * say" when he said its name last, but for words to yapd around them, marks
- * and symbols kept. None when he said no name, or nothing after it.
+ * say" when he said its name last, but for words to yapd a pause sets off
+ * from them, marks and symbols kept. None when he said no name, or nothing
+ * after it.
  */
 const spokenSteps = (said: string, steps: string) => {
   const found = calling.exec(said)
   if (found === null) return undefined
   const before = said.slice(0, found.index)
-  if (!only([...asides, "so"]).test(before)) return inHisWords(before, steps, [...asides, "so"], [...asides, "then"])
+  if (!only([...asides, ...keeping, "so"]).test(before)) return inHisWords(before, steps, aroundSteps.before.ahead, aroundSteps.before.behind)
   const after = said.slice(found.index + found[0].length)
   // From the first word of its name to his pause, as `spokenName` reads it.
   const named = after.slice(Math.max(0, after.search(/[\p{L}\p{N}]/u)))
-  const pause = named.search(/[,;:.?!]/u)
-  return pause < 0 ? undefined : inHisWords(named.slice(pause), steps, [...asides, "then"], asides)
+  const paused = named.search(/[,;:.?!]/u)
+  return paused < 0 ? undefined : inHisWords(named.slice(paused), steps, aroundSteps.after.ahead, aroundSteps.after.behind)
 }
 
 /**
@@ -2063,6 +2108,7 @@ export const wholeRoutine = (routine: { readonly name: string; readonly steps: s
   if (name === "" || steps === "") return false
   // Words as they compare are letters, digits and single spaces, which go into a pattern as they are.
   const called = `(?:when|whenever|if) i say ${name}`
+  const aside = `(?:${[...asides, ...keeping].join("|")})`
   const between = `(?: (?:${aside}|then))*`
   return new RegExp(`^(?:(?:${aside}|so) )*(?:${called}${between} ${steps}|${steps}${between} ${called})(?: ${aside})*$`, "u").test(Ledger.digest(said))
 }
