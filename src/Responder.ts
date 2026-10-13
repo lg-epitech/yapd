@@ -69,6 +69,7 @@ Reply with only a JSON object with the keys "intent", "spoken" and "message".
 - How you talk to them is for you, never the agent: focus, quiet, goodnight, being back, shorter updates or everything in full, like "let me focus till three", "I'm off to bed" or "stop giving me the short version". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 - Catching up is for you, never the agent: hearing what they missed or haven't heard, or what came in while they were away or had you off, however they put it, like "what did I miss?", "catch me up" or "anything else from rig?". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 - What they want you to keep in mind, or forget, is for you, never the agent: a fact, like "remember that rig's T3 Code runs the nightly", or steps for when they say a name, like "when I say review it, have Sol review it until it's clean". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
+- Tidying a thread in T3 Code is for you, never the agent: archiving, unarchiving, renaming, snoozing, settling or pinning it, or undoing that, like "archive this thread" or "snooze it till tomorrow". Never "send". It's "answer", telling them in a few words to ask you that with their shortcut.
 
 "spoken": what you say back. They're listening, not reading.
 ${aloud}

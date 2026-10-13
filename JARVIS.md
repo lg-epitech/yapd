@@ -86,6 +86,7 @@ Live on `dev` now: everything below, headline first, focus and quiet, off keepin
 - "Scratch that", or "undo the snooze", takes back the whole tidy, or only the thread you name: unarchived, unsnoozed or snoozed back to when it was, unsettled, unpinned, or renamed back. What T3 Code cleared as it was done is put back where it can be: a pin cleared a snooze still ahead and a settle, so taking the pin back snoozes and settles it again; a pin a settle cleared is pinned again. Unsettling marks it active by your hand, which yapd never calls as it was. Unarchiving, unsnoozing, unsettling or unpinning can't be taken back by voice: say what you want instead.
 - T3 Code's refusals are said plainly, never with its ids or times: "It's already archived.", "That time's already gone.", "It's waiting on you, so it can't be snoozed.", "It's still working, so it can't be settled."
 - After a restart, a tidy yapd couldn't confirm is said once for its whole step ("Before I restarted, I couldn't confirm the Tezos importer and the Tezos fees were archived, sir.") and never sent again.
+- Said over an update, like "archive this thread", gets you asked to use the shortcut, never sent to the agent.
 - What the model sees: ARCHIVED, the threads yapd archived in the last day and not unarchived since, by a1, a2…, which "unarchive" names; a thread you archived by hand in T3 Code isn't there. No new database step.
 
 ## Show me
