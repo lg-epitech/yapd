@@ -286,10 +286,10 @@ describe("Drafts", () => {
 
   test("a research request starts in the scratch project", async () => {
     const research = { about: "the glucose question", settled: "outside", evidence: "", project: "", model: "gpt-6-sol", effort: "", worktree: true, prompt: "Find out whether Apple shipped an API for third-party glucose sensors on the Watch, and tell me." } as const
-    const asked = (overrides: Partial<Decision>) =>
+    const asked = (overrides: Partial<Decision>, rigDown = false) =>
       run(
         Effect.gen(function* () {
-          const { dictate, started, spoken } = yield* drafts(() => decision({ ...research, ...overrides }), { lines: { ...Persona.plain, onIt: "Right away, sir.", address: "sir" } })
+          const { dictate, started, spoken } = yield* drafts(() => decision({ ...research, ...overrides }), { lines: { ...Persona.plain, onIt: "Right away, sir.", address: "sir" }, rigDown })
           yield* dictate("Find out whether Apple shipped an API for third-party glucose sensors on the Watch.")
           return { started, spoken: spoken() }
         }),
@@ -308,6 +308,8 @@ describe("Drafts", () => {
     expect(await asked({ settled: "named", evidence: "Apple", project: "No project", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
     // Outside and yet for a project, the writer contradicted itself, so it's asked about rather than started in either.
     expect(await asked({ evidence: "the Watch", project: "yapd", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
+    // A machine that couldn't say what it can start says why, as there's nothing for him to answer.
+    expect(await asked({ machine: "rig" }, true)).toEqual({ started: [], spoken: ["About the glucose question: I can't reach rig."] })
   })
 
   test("says what really started when that's not what was asked", () => {

@@ -116,16 +116,25 @@ export const resolve = (
  * Where work outside his projects starts, from a decision that it belongs to
  * none: T3 Code's scratch project on the machine he said, or else this one.
  * One without it, like a machine whose yapd or T3 Code is older, is asked
- * about, as which project it's for.
+ * about, as which project it's for. One that couldn't say what it can start
+ * isn't: why is said instead, as there's nothing for him to answer.
  */
-export const outside = (machines: ReadonlyArray<Machine>, listings: ReadonlyArray<Listing>, decision: Placing): Either.Either<Resolved, string> => {
+export const outside = (
+  machines: ReadonlyArray<Machine>,
+  listings: ReadonlyArray<Listing>,
+  decision: Placing,
+): Either.Either<Resolved, { readonly asking: boolean; readonly spoken: string }> => {
   const said = decision.machine.trim()
   const listing = listings.find(({ machine, here }) => (said === "" ? here : same(machine, said)))
   const machine = machines.find(({ name }) => name === listing?.machine)
   const catalog = Option.getOrUndefined(Option.flatMap(Option.fromNullable(listing), ({ catalog }) => catalog))
   const project = catalog?.projects.find(scratched)
+  if (listing?.reason !== undefined && catalog === undefined) return Either.left({ asking: false, spoken: listing.reason })
   if (machine === undefined || catalog === undefined || project === undefined) {
-    return Either.left(`I can't start work outside your projects on ${listing?.machine ?? said}. Which project is ${decision.about.trim() || "that"} for?`)
+    return Either.left({
+      asking: true,
+      spoken: `I can't start work outside your projects on ${listing?.machine ?? said}. Which project is ${decision.about.trim() || "that"} for?`,
+    })
   }
   return Either.right(placed({ project, catalog, machine }, decision))
 }
@@ -390,9 +399,13 @@ export const make = (options: {
                 return asking(`Which project is ${about || "that"} for?`)
               }
               const resolved = outside(options.machines, material.listings, decision)
+              if (Either.isLeft(resolved) && !resolved.left.asking) {
+                yield* Effect.logInfo(`Not starting outside the projects on ${decision.machine.trim() || "this machine"}: ${resolved.left.spoken} ${decision.why}`)
+                return { _tag: "Said", spoken: about === "" ? resolved.left.spoken : `About ${about}: ${resolved.left.spoken}`, failed: true } satisfies Outcome
+              }
               if (Either.isLeft(resolved)) {
                 yield* Effect.logInfo(`Asking, since there's nowhere to start work outside the projects on ${decision.machine.trim() || "this machine"}. ${decision.why}`)
-                return asking(resolved.left)
+                return asking(resolved.left.spoken)
               }
               return yield* launch(resolved.right, decision.spoken, decision.why, about, noted, step)
             }
