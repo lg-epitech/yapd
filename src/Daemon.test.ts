@@ -25,6 +25,7 @@ import * as Mutes from "./Mutes.ts"
 import * as Notices from "./Notices.ts"
 import * as Persona from "./Persona.ts"
 import { ProcessError } from "./Process.ts"
+import * as Reminders from "./Reminders.ts"
 import * as Store from "./Store.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as T3CodeServer from "./T3CodeServer.ts"
@@ -100,6 +101,8 @@ const make = (says?: string, options: {
   readonly quickly?: boolean
   /** The journal, when it's kept from before a restart, rather than one of its own. */
   readonly journal?: Journal.Journal["Type"]
+  /** What he asked to hear once a thread finishes. */
+  readonly finishing?: (about: Threads.Ref) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -266,6 +269,7 @@ const make = (says?: string, options: {
     ...(options.holding === undefined ? {} : { holding: options.holding }),
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.command === undefined ? {} : { command: options.command }),
+    ...(options.finishing === undefined ? {} : { finishing: options.finishing }),
     // This machine is Rosie, as yapd serves it.
     naming,
   }).pipe(Effect.provide(context))
@@ -6027,5 +6031,33 @@ describe("Daemon, one turn kept twice", () => {
     )
     expect(result.played).toEqual([couldnt])
     expect(result.skipped).toBe(false)
+  })
+})
+
+describe("Daemon reminders", () => {
+  test("a thread he asked to hear finish is said as one, the reminder then its update, however he muted it, and both are heard together", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* Store.make(":memory:")
+        const journal = Journal.fromStore(store)
+        const reminders = Reminders.make(store, journal)
+        const mutes = yield* Mutes.make(store)
+        const loader = { machine: "Rosie", id: "t-loader" }
+        yield* mutes.mute({ key: Mutes.key.thread(loader) })
+        yield* reminders.add({ at: -120_000, heard: "Tell me when the loader one finishes.", text: "", event: "finished", machine: "Rosie", thread: "t-loader", called: "the loader fix" })
+        const finishing = Reminders.finishing({ reminders, desk: () => Effect.succeed({ threads: [], away: [] }), lines: Effect.succeed(Persona.plain) })
+        const { made, wait, played } = yield* make(undefined, { journal, mutes, finishing })
+        yield* made.finished(unhooked("The loader is fixed.", "run-1", (yield* made.power).turns))
+        yield* wait(11)
+        const kept = yield* journal.since(-200_000, { kinds: ["notice", "update"] })
+        return { played: [...played], kept: kept.map(({ kind, said, heardAt }) => [kind, said, heardAt !== undefined]), pending: (yield* reminders.pending).length }
+      }),
+    )
+    expect(result.played).toEqual(["The loader fix has finished, as you asked. yapd. The loader is fixed."])
+    expect(result.kept).toEqual([
+      ["notice", "The loader fix has finished, as you asked.", true],
+      ["update", "yapd. The loader is fixed.", true],
+    ])
+    expect(result.pending).toBe(0)
   })
 })
