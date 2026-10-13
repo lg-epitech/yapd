@@ -384,6 +384,11 @@ export const make = (options: {
           case "start": {
             // Outside his projects by the writer's word, it goes where only that can start, checked by the catalog's mark alone.
             if (decision.settled === "outside") {
+              // Outside his projects and yet for one, the writer contradicted itself: that's no more settled than unclear.
+              if (decision.project.trim() !== "" || decision.evidence.trim() !== "") {
+                yield* Effect.logInfo(`Asking, since it was outside the projects and yet for "${decision.project}" by "${decision.evidence}". ${decision.why}`)
+                return asking(`Which project is ${about || "that"} for?`)
+              }
               const resolved = outside(options.machines, material.listings, decision)
               if (Either.isLeft(resolved)) {
                 yield* Effect.logInfo(`Asking, since there's nowhere to start work outside the projects on ${decision.machine.trim() || "this machine"}. ${decision.why}`)

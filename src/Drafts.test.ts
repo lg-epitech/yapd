@@ -306,6 +306,8 @@ describe("Drafts", () => {
       spoken: ["I can't start work outside your projects on rig. Which project is the glucose question for?"],
     })
     expect(await asked({ settled: "named", evidence: "Apple", project: "No project", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
+    // Outside and yet for a project, the writer contradicted itself, so it's asked about rather than started in either.
+    expect(await asked({ evidence: "the Watch", project: "yapd", machine: "" })).toEqual({ started: [], spoken: ["Which project is the glucose question for?"] })
   })
 
   test("says what really started when that's not what was asked", () => {
