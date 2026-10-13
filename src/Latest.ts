@@ -160,8 +160,8 @@ export const make = (options: {
           const by = sessions.map((own) => Mutes.key.session(machine, own))
           under.set(key, by)
           entries.set(key, { id: last.id, full: Missed.full(last) })
-          // One of T3 Code's own subagents', listed for the thread it's part of, which keeps it quiet when that's muted, and whose its
-          // subagents are read.
+          // One of T3 Code's own subagents', listed for the thread it's part of: muted when that thread is, and read when that thread's
+          // subagents are.
           const part = Missed.subagent(kept)
           const head = Mutes.headKept(kept)
           const of = Option.flatMap(Option.fromNullable(head), Mutes.parse)
