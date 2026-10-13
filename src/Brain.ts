@@ -1911,36 +1911,28 @@ export const asSaid = (words: string, said: string) => {
   return kept !== "" && ` ${Ledger.digest(said)} `.includes(` ${kept} `)
 }
 
-/** A word that turns around what follows it, as words compare: "don't" comes out of them as "don t". */
-const negation = / (?:not|never|no|without|nor|stop|dont|\p{L}+n t) /u
-
-/** What may follow a routine's steps that's no part of them: thanks, his calling yapd, or a word joining on the rest of his request. */
-const trailing = / (?:please|thanks|thank you|cheers|sir|jarvis|yapd|ok|okay|alright|all right|that s it|that s all|thats it|thats all|and|then|also)(?= )/g
+/** Words to yapd that may come around all he asked for, as words compare, and are no part of it. */
+const aside = "(?:remember that|remember|note that|please|thanks|thank you|sir|jarvis|okay|ok)"
 
 /**
- * Whether a routine's steps, his words as heard, are all he asked for under
- * its name: nothing that turns them around just before them, between its
- * name and them, like "don't" in "when I say ship, don't merge the PR", and
- * nothing after them, like "but only once the checks pass", but thanks, its
- * name, as in "… when I say ship", or the `rest` of his request. A check
- * that turns down, never one that keeps anything.
+ * Whether a routine is all he asked for, word for word: as words compare,
+ * what he said is "when", "whenever" or "if I say" and its name as the model
+ * gave it, then its steps, or its steps, then that, with nothing else but
+ * words to yapd around it, like "remember that", "so" before it or "thanks"
+ * after it, or between its name and its steps, like "then". So a "don't" or
+ * an "if the checks are green" that the steps leave out, or another request
+ * in the same breath, keeps nothing, never the part of it that's the steps;
+ * nor does a "so" or a "then" he trailed off on. A check that turns down,
+ * never one that keeps anything.
  */
-const wholeSteps = (steps: string, name: string, said: string, rest: string) => {
-  const his = ` ${Ledger.digest(said)} `
-  const kept = ` ${Ledger.digest(steps)} `
-  const at = his.indexOf(kept)
-  if (kept.trim() === "" || at < 0) return false
-  const before = his.slice(0, at + 1)
-  const called = Ledger.digest(name)
-  const from = called === "" ? -1 : before.lastIndexOf(` ${called} `)
-  // Without its name before them, the last few words before them.
-  const lead = from < 0 ? ` ${before.trim().split(" ").slice(-4).join(" ")} ` : before.slice(from + called.length + 1)
-  if (negation.test(lead)) return false
-  let after = his.slice(at + kept.length - 1)
-  const more = Ledger.digest(rest)
-  if (more !== "") after = after.replace(` ${more} `, " ")
-  if (called !== "") after = after.replace(new RegExp(` (?:when|whenever|if|once|any time|anytime|every time|each time) i (?:say|tell you) ${called} `), " ")
-  return after.replace(trailing, " ").trim() === ""
+export const wholeRoutine = (routine: { readonly name: string; readonly steps: string }, said: string) => {
+  const name = Ledger.digest(routine.name)
+  const steps = Ledger.digest(routine.steps)
+  if (name === "" || steps === "") return false
+  // Words as they compare are letters, digits and single spaces, which go into a pattern as they are.
+  const called = `(?:when|whenever|if) i say ${name}`
+  const between = `(?: (?:${aside}|then))*`
+  return new RegExp(`^(?:(?:${aside}|so) )*(?:${called}${between} ${steps}|${steps}${between} ${called})(?: ${aside})*$`, "u").test(Ledger.digest(said))
 }
 
 /**
@@ -1997,6 +1989,8 @@ const rememberLines = (lines: Pick<Lines, "address">) => {
   return {
     words: (missing?: string) => `I couldn't keep that in your own words${sir}${which(missing)} so I didn't save it.`,
     steps: (missing?: string) => `I couldn't keep the steps in your own words${sir}${which(missing)} so I didn't save it.`,
+    // His words, but with more than the steps, it's how to say it so they're all of it, by its name as he said it.
+    whole: (name?: string) => `I couldn't keep the steps in your own words${sir}. Say it as one request: when I say ${name ?? "its name"}, then the steps.`,
     written: `That one's in your preferences${sir}.`,
     answered: `That's something I already answer to${sir}.`,
   }
@@ -2189,13 +2183,11 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       // never kept, which he's told as it's done.
       const { utterance } = situation
       const heard = utterance.whole ?? utterance.heard
-      if (utterance.echo === undefined && heard !== "" && !asSaid(text, heard)) {
-        const missing = unheard(text, heard)
-        return { _tag: "Say", spoken: routine === undefined ? said.words(missing) : said.steps(missing) }
-      }
-      // His words, but not all he said of them, like "don't" before them, which saying its name would then send the opposite of.
-      if (routine !== undefined && utterance.echo === undefined && heard !== "" && !wholeSteps(routine.steps, routine.name, heard, choice.rest)) {
-        return { _tag: "Say", spoken: said.steps() }
+      if (utterance.echo === undefined && heard !== "" && routine === undefined && !asSaid(text, heard)) return { _tag: "Say", spoken: said.words(unheard(text, heard)) }
+      // A routine only as all he asked for, since its name sends its steps to an agent: steps that leave out a "don't" before them or an "if"
+      // between, or what else he asked for with them, are kept as nothing at all. He's told which words weren't his, or to say it on its own.
+      if (utterance.echo === undefined && heard !== "" && routine !== undefined && !wholeRoutine(routine, heard)) {
+        return { _tag: "Say", spoken: asSaid(text, heard) ? said.whole(asSaid(routine.name, heard) ? routine.name : undefined) : said.steps(unheard(text, heard)) }
       }
       if (routine !== undefined) {
         // The one in his preferences is the one, and a name yapd answers to already would never be heard as the routine's.

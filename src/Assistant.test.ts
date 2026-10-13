@@ -11836,36 +11836,53 @@ describe("Assistant memories", () => {
     expect(result.back).toEqual(["Deploy straight to production."])
   })
 
-  test("a routine whose steps leave out what he said with them, like a don't before them or a but after them, isn't saved, so its name never sends the opposite", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const made = yield* assistant(
-          (situation) => {
-            const { heard } = situation.utterance
-            if (heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
-            // His words, all of them, but not all he said of them.
-            const rest = heard.endsWith("and tell the Mina one to rebase.") ? "tell the Mina one to rebase" : ""
-            return Brain.decision({ act: "remember", how: "routine", text: "ship: merge the PR, then deploy", rest })
-          },
-          undefined,
-          { memories: true },
-        )
-        const kept = () => Effect.map(made.memories!.list, (all) => all.map(({ name, text }) => `${name}: ${text}`))
-        const saying = (heard: string) => Effect.zipRight(made.dictate(heard), Effect.map(kept(), (all) => ({ said: made.spoken().at(-1), kept: all })))
-        const negated = yield* saying("When I say ship, don't merge the PR, then deploy.")
-        const qualified = yield* saying("When I say ship, merge the PR, then deploy, but only once the checks pass.")
-        // Its name after its steps, thanks, or the rest of his request, are no part of them.
-        const named = yield* saying("Merge the PR, then deploy, when I say ship, thanks.")
-        const more = yield* saying("When I say ship, merge the PR, then deploy, and tell the Mina one to rebase.")
-        return { negated, qualified, named, more, sent: made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ text }) => text) }
-      }),
-    )
-    const refused = { said: "I couldn't keep the steps in your own words, sir, so I didn't save it.", kept: [] }
-    expect(result.negated).toEqual(refused)
-    expect(result.qualified).toEqual(refused)
-    expect(result.named).toEqual({ said: "Noted, sir. Ship: merge the PR, then deploy.", kept: ["ship: merge the PR, then deploy"] })
-    expect(result.more.kept).toEqual(["ship: merge the PR, then deploy"])
-    expect(result.sent).toEqual(["Rebase."])
+  test("a routine is kept only when its name and its steps are all he asked for, so its name never sends what he didn't ask for, and nothing of the rest is done", async () => {
+    /** What comes of his saying `heard`, which the model takes for keeping `text` in mind, as `how`, with the rest of it done after. */
+    const saving = (heard: string, text = "ship: merge the PR, then deploy", how = "routine") =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              if (situation.utterance.heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
+              // His words, all of them, but maybe not all he said of them.
+              const rest = heard.endsWith("and tell the Mina one to rebase.") ? "tell the Mina one to rebase" : ""
+              return Brain.decision({ act: "remember", how, text, rest })
+            },
+            undefined,
+            { memories: true },
+          )
+          yield* made.dictate(heard)
+          return {
+            said: made.spoken().at(-1),
+            kept: (yield* made.memories!.list).map(({ name, text }) => (name === undefined ? text : `${name}: ${text}`)),
+            sent: made.dispatched.filter(({ type }) => type === "message.dispatch").map(({ text }) => text),
+          }
+        }),
+      )
+    // Its name before its steps or after them, with a word to yapd around them, as he said them.
+    const kept = { said: "Noted, sir. Ship: merge the PR, then deploy.", kept: ["ship: merge the PR, then deploy"], sent: [] }
+    for (const heard of ["When I say ship, merge the PR, then deploy.", "Merge the PR, then deploy, when I say ship, thanks.", "Please, when I say ship, merge the PR, then deploy."]) {
+      expect([heard, await saving(heard)]).toEqual([heard, kept])
+    }
+    // His words, but not all he said of them: a don't or an if they leave out, or another request with them, which isn't done either.
+    const refused = "I couldn't keep the steps in your own words, sir. Say it as one request: when I say ship, then the steps."
+    for (const heard of [
+      "When I say ship, don't merge the PR, then deploy.",
+      "When I say ship, if the checks are green, merge the PR, then deploy.",
+      "When I say ship, merge the PR, then deploy, but only once the checks pass.",
+    ]) {
+      expect([heard, await saving(heard)]).toEqual([heard, { said: refused, kept: [], sent: [] }])
+    }
+    expect(await saving("When I say ship, merge the PR, then deploy, and tell the Mina one to rebase.")).toEqual({
+      said: `${refused} I left the rest: tell the Mina one to rebase.`,
+      kept: [],
+      sent: [],
+    })
+    // A fact is kept as his words wherever they are in what he said, with the rest of it done after.
+    expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toMatchObject({
+      kept: ["rig runs the nightly"],
+      sent: ["Rebase."],
+    })
   })
 
   test("a secret isn't remembered, nor kept in the journal, whatever else would turn it down", async () => {
