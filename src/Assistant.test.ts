@@ -14,6 +14,7 @@ import * as Latest from "./Latest.ts"
 import { type Catalog, LaunchError, type Request, type Started } from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
 import * as Memory from "./Memory.ts"
+import * as Missed from "./Missed.ts"
 import * as Modes from "./Modes.ts"
 import * as Mutes from "./Mutes.ts"
 import { Model, ModelError } from "./Model.ts"
@@ -11009,6 +11010,84 @@ describe("Assistant catching up", () => {
     )
     expect(result.spoken).toEqual(["Which network first?"])
     expect(result.heard).toEqual([false, false])
+  })
+
+  /** What the menu counts, as a catch-up of everything would tell it: what he hasn't heard, muted threads aside, by entry, oldest kept first. */
+  const counted = (made: Pick<Assistant.Assistant["Type"], "missed">) =>
+    Effect.map(made.missed, ({ groups }) => groups.flatMap(({ rows }) => rows.filter((row) => !Missed.muted(row)).map(({ id }) => id)).toSorted((one, other) => one - other))
+
+  test("clearing the catch-up sets aside all a catch-up would tell, never a thread's question or a muted thread's, and scratch that brings back only what's still set aside", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant((situation) => Brain.decision({ act: "catchup", how: situation.utterance.heard === "Clear the catch-up." ? "clear" : "" }), undefined, {
+          briefs: () => "The Tezos migration is done, sir.",
+        })
+        const { journal } = made
+        const off = yield* kept(journal, 90, tezos.id, "The Tezos migration is done.")
+        const held = yield* kept(journal, 60, mina.id, "The Mina tickets are filed.", { priority: "done", held: "focus" })
+        const failed = Option.getOrThrow(
+          yield* journal.write({ at: now - 50 * 60_000, kind: "notice", machine: "Rosie", thread: distractors[0]!.id, key: "fail:Rosie:r1", said: "The loader failed.", detail: { failure: "provider_error" } }),
+        )
+        const muted = yield* kept(journal, 30, distractors[1]!.id, "Docs swept.", { priority: "done", muted: true })
+        const question = Option.getOrThrow(
+          yield* journal.write({ at: now - 20 * 60_000, kind: "notice", machine: "Rosie", thread: distractors[2]!.id, key: "ask:Rosie:r2", said: "Which network first?", detail: { request: "Question" } }),
+        )
+        const before = yield* counted(made)
+        yield* made.dictate("Clear the catch-up.")
+        const cleared = { said: made.spoken().at(-1), counted: yield* counted(made) }
+        yield* made.dictate("Catch me up.")
+        const caughtUp = { said: made.spoken().at(-1), briefed: made.briefings.length }
+        // Heard since, as from the menu, it stays heard.
+        yield* made.wait(30)
+        yield* journal.markHeard([held], yield* TestClock.currentTimeMillis)
+        yield* made.wait(30)
+        yield* made.dictate("Scratch that.")
+        const back = { said: made.spoken().at(-1), counted: yield* counted(made) }
+        const heard = (yield* journal.rows([off, held, failed, muted, question])).map(({ heardAt }) => heardAt !== undefined)
+        return { ids: { off, failed, held }, before, cleared, caughtUp, back, heard }
+      }),
+    )
+    expect(result.before).toEqual([result.ids.off, result.ids.held, result.ids.failed])
+    expect(result.cleared).toEqual({ said: "Cleared, sir: three updates set aside.", counted: [] })
+    expect(result.caughtUp).toEqual({ said: "You're all caught up, sir.", briefed: 0 })
+    expect(result.back).toEqual({ said: "Brought them back, sir.", counted: [result.ids.off, result.ids.failed] })
+    // The thread's question still waits on him, and the muted thread's is still his to ask about.
+    expect(result.heard).toEqual([false, true, false, false, false])
+  })
+
+  test("clearing the catch-up from the menu says nothing and notes what it set aside, a faint word over an answer clears nothing, and with nothing in it, he's told so", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "What's going on?" ? Brain.decision({ act: "answer", spoken: "Two running, sir." }) : Brain.decision({ act: "catchup", how: "clear" }),
+          undefined,
+          { waiting: true },
+        )
+        const { journal } = made
+        const first = yield* kept(journal, 90, tezos.id, "The Tezos migration is done.")
+        yield* made.dictate("What's going on?")
+        const faint = yield* made.followUp("Clear the catch-up.", 0.2)
+        const kept1 = yield* counted(made)
+        const cleared = yield* made.clear
+        const said = made.spoken().length
+        const noted = (yield* journal.since(0, { kinds: ["action"] })).map(({ said, detail }) => ({ said, detail }))
+        const second = yield* kept(journal, 10, mina.id, "The Mina tickets are filed.")
+        yield* made.dictate("Scratch that.")
+        const back = { said: made.spoken().at(-1), counted: yield* counted(made) }
+        yield* made.dictate("Clear the catch-up.")
+        yield* made.dictate("Clear the catch-up.")
+        return { first, second, faint, kept: kept1, cleared, said, noted, back, nothing: made.spoken().slice(-2) }
+      }),
+    )
+    expect(result.faint).toBe(false)
+    expect(result.kept).toEqual([result.first])
+    expect(result.cleared).toBe(1)
+    expect(result.said).toBe(1)
+    expect(result.noted).toEqual([{ said: undefined, detail: { cleared: 1, ids: [result.first] } }])
+    // Only what it set aside comes back, never what came in since.
+    expect(result.back).toEqual({ said: "Brought it back, sir.", counted: [result.first, result.second] })
+    expect(result.nothing).toEqual(["Cleared, sir: two updates set aside.", "There's nothing to catch up on, sir."])
   })
 })
 
