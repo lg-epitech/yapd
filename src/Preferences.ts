@@ -28,6 +28,12 @@ export interface Routine {
 /** Quotes or backticks around a name, which aren't part of it. */
 const quoted = /^["'`\u201c\u2018]+|["'`\u201d\u2019]+$/g
 
+/** Whether a line is a heading, and if so whether it's that of his routines; undefined for any other line. */
+const headed = (line: string) => {
+  const heading = /^ {0,3}#{1,6}\s+(.*?)[\s#]*$/.exec(line)
+  return heading === null ? undefined : /^routines:?$/i.test(heading[1]!.trim())
+}
+
 /**
  * His routines: the lines under a "## Routines" heading, up to the next
  * heading, written "- name: steps", from the whole file, however long, so
@@ -38,9 +44,9 @@ export const routines = (text: string): ReadonlyArray<Routine> => {
   const found: Array<Routine> = []
   let under = false
   for (const line of text.split(/\r?\n/)) {
-    const heading = /^ {0,3}#{1,6}\s+(.*?)[\s#]*$/.exec(line)
-    if (heading !== null) {
-      under = /^routines:?$/i.test(heading[1]!.trim())
+    const heading = headed(line)
+    if (heading !== undefined) {
+      under = heading
       continue
     }
     const routine = under ? /^\s*[-*+]\s+([^:]+?)\s*:\s*(\S.*?)\s*$/.exec(line) : null
@@ -49,6 +55,23 @@ export const routines = (text: string): ReadonlyArray<Routine> => {
     if (name !== "" && !found.some((other) => other.name.toLowerCase() === name.toLowerCase())) found.push({ name, steps: routine[2]! })
   }
   return found
+}
+
+/**
+ * The file without his routines, from their heading up to the next heading,
+ * as `routines` reads them: what writes the prompt for new work never sends
+ * them, so it never sees them.
+ */
+export const unroutined = (text: string) => {
+  let under = false
+  return text
+    .split(/\r?\n/)
+    .filter((line) => {
+      under = headed(line) ?? under
+      return !under
+    })
+    .join("\n")
+    .trim()
 }
 
 /**
