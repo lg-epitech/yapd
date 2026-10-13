@@ -59,6 +59,16 @@ export type Ending =
 /** The key it's said once under, ever. */
 export const key = (id: number) => `remind:${id}`
 
+/**
+ * The key what's said once reminders went with their thread is said under,
+ * once each time they do: never one's own, which it's said under should it
+ * be brought back and come due.
+ */
+export const goneKey = (id: number, at: number) => `dropped:${id}:${at}`
+
+/** Whether a journal entry was kept for reminders that went with their thread. */
+export const gone = (kept: { readonly key?: string | undefined }) => kept.key?.startsWith("dropped:") === true
+
 /** The reminder a journal entry was kept for, if it was. */
 export const of = (kept: { readonly key?: string | undefined; readonly detail?: unknown }) => {
   const found = kept.key === undefined ? null : /^remind:(\d+)$/.exec(kept.key)

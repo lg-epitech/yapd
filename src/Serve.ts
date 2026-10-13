@@ -315,6 +315,7 @@ export const serve = Effect.gen(function* () {
     reminders,
     offered: assistant.offered,
     holding: modes.holding,
+    archiving: hands.archiving,
   })
   yield* Deferred.succeed(noticing, notices)
   yield* Effect.forkScoped(notices.follow)

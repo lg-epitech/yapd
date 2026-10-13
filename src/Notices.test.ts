@@ -100,6 +100,8 @@ const notices = (
     readonly holding?: () => Option.Option<"focus" | "quiet">
     /** Whether reading a thread fails now, as when T3 Code fails a moment. */
     readonly troubled?: (thread: string) => boolean
+    /** Waits while yapd archives a thread. */
+    readonly archiving?: (ref: Threads.Ref) => Effect.Effect<void>
   },
 ) =>
   Effect.gen(function* () {
@@ -220,6 +222,7 @@ const notices = (
       shortest: 60_000,
       ...(reminders === undefined ? {} : { reminders, offered: (reminder) => Effect.sync(() => void offers.push(reminder.propose ?? "")) }),
       ...(given.holding === undefined ? {} : { holding: Effect.sync(given.holding) }),
+      ...(given.archiving === undefined ? {} : { archiving: given.archiving }),
     }).pipe(Effect.provide(Layer.merge(persona, condenser(rewritten))))
     yield* Effect.forkScoped(made.follow)
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
@@ -1566,6 +1569,47 @@ describe("Notices of reminders", () => {
     expect(result.ids[1]).not.toBe(result.ids[0])
     expect(result.told).toHaveLength(2)
     expect(result.told[1]).toMatch(/: pick up the parcel\.$/)
+  })
+
+  /** Set on the Tezos importer, an hour ago, to call the bank in a minute. */
+  const onTezos = { ...bank(now + 60_000), machine: "Rosie", thread: "tezos", called: "the Tezos importer" }
+
+  test("one dropped as its thread went, then brought back as he takes back archiving it, is still said once it comes due", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration")
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos], bounded: {}, reminding: true })
+        const set = yield* made.reminders!.add(onTezos)
+        yield* made.hear({ _tag: "Removed", thread: tezos })
+        const dropped = [...made.told]
+        yield* made.reminders!.restore(set.id)
+        yield* made.wait(75)
+        yield* made.due
+        return { dropped, told: made.told.slice(dropped.length), pending: (yield* made.reminders!.pending).length }
+      }),
+    )
+    expect(result.dropped).toEqual(["The Tezos importer was archived or deleted, sir, so I dropped your reminder."])
+    expect(result.told).toEqual([expect.stringMatching(/: call the bank\.$/)])
+    expect(result.pending).toBe(0)
+  })
+
+  test("what he set on a thread yapd is archiving is left to that to drop and say, however soon T3 Code says it's gone", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration")
+    const result = await run(
+      Effect.gen(function* () {
+        const archived = yield* Deferred.make<void>()
+        const made = yield* notices({ view: [tezos], bounded: {}, reminding: true, archiving: (ref) => (ref.id === "tezos" ? Deferred.await(archived) : Effect.void) })
+        const set = yield* made.reminders!.add(onTezos)
+        // Gone before T3 Code answers the archive, which then drops it, and says so in its own line.
+        yield* made.hear({ _tag: "Removed", thread: tezos })
+        const meanwhile = (yield* made.reminders!.pending).length
+        yield* made.reminders!.cancel(set.id)
+        yield* Deferred.succeed(archived, undefined)
+        yield* made.flush
+        return { meanwhile, told: made.told }
+      }),
+    )
+    expect(result).toEqual({ meanwhile: 1, told: [] })
   })
 
   /** Set a minute before now, to hear when the Tezos one finishes, and to call Bob then when `text` says so. */

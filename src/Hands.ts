@@ -1,4 +1,4 @@
-import { Clock, Context, Duration, Effect, Either, Option, Schedule, Schema } from "effect"
+import { Clock, Context, Deferred, Duration, Effect, Either, Option, Schedule, Schema } from "effect"
 import * as Brain from "./Brain.ts"
 import * as Launcher from "./Launcher.ts"
 import * as Ledger from "./Ledger.ts"
@@ -250,6 +250,13 @@ export class Hands extends Context.Tag("yapd/Hands")<
      * so that, held back, they never are.
      */
     readonly keeps: (to: Threads.Ref, text: string) => Effect.Effect<boolean>
+    /**
+     * Waits while yapd archives a thread, till what he set on it is dropped
+     * with it and said in its line, or isn't, as T3 Code answers, so T3
+     * Code's word that it's gone, which can come first, finds nothing of
+     * that left to drop and tell of on its own.
+     */
+    readonly archiving: (ref: Threads.Ref) => Effect.Effect<void>
   }
 >() {}
 
@@ -1457,7 +1464,8 @@ export const make = (options: {
    * thread was, then sent once, as any step is. Worked out again, each is
    * what it came to. Archived, what he set on a thread goes with it, as it
    * would once T3 Code says it's gone, but said with it and kept in its row,
-   * to bring back should he take it back.
+   * to bring back should he take it back: T3 Code's word that it's gone,
+   * which can come before its answer, waits for that, as `archiving` has it.
    */
   const tidy = (step: Step, act: Extract<Act, { readonly _tag: "Tidy" }>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
@@ -1487,12 +1495,34 @@ export const make = (options: {
           ...(reminders === undefined ? {} : { reminders }),
           ...(sending._tag === "Archive" ? { working: thread !== undefined && occupied(thread) } : {}),
         })
-        const outcome = yield* once(at, "tidy", to, () => body, reached.right, wanted)
-        const dropped = outcome._tag === "Done" ? yield* dropping(reminders ?? []) : 0
+        const going = Effect.gen(function* () {
+          const outcome = yield* once(at, "tidy", to, () => body, reached.right, wanted)
+          return { outcome, dropped: outcome._tag === "Done" ? yield* dropping(reminders ?? []) : 0 }
+        })
+        const { outcome, dropped } = yield* sending._tag === "Archive" ? whileArchiving(to, going) : going
         each.push({ to, called, command: sending, outcome, ...(dropped === 0 ? {} : { reminders: dropped }) })
       }
       return { _tag: "Tidied", each, undone: false } satisfies Outcome
     })
+
+  /** The threads being archived, each with what's done once what he set on it is dropped with it, or isn't. */
+  const archivingNow = new Map<string, Deferred.Deferred<void>>()
+
+  /** Archives a thread by `effect`, which `archiving` waits for. */
+  const whileArchiving = <A, E, R>(to: Threads.Ref, effect: Effect.Effect<A, E, R>) => {
+    const at = `${to.machine}:${to.id}`
+    return Effect.acquireUseRelease(
+      Effect.tap(Deferred.make<void>(), (done) => Effect.sync(() => archivingNow.set(at, done))),
+      () => effect,
+      (done) =>
+        Effect.zipRight(
+          Effect.sync(() => {
+            if (archivingNow.get(at) === done) archivingNow.delete(at)
+          }),
+          Deferred.succeed(done, undefined),
+        ),
+    )
+  }
 
   /** Cancels what he set on a thread just archived, by id, and how many were still to come. */
   const dropping = (ids: ReadonlyArray<number>) =>
@@ -1792,6 +1822,11 @@ export const make = (options: {
       }),
     reconcile: reconciling(() => true),
     reconcileOn: reconciling,
+    archiving: (ref) =>
+      Effect.suspend(() => {
+        const done = archivingNow.get(`${ref.machine}:${ref.id}`)
+        return done === undefined ? Effect.void : Deferred.await(done)
+      }),
   }
 }
 

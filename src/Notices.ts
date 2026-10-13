@@ -537,6 +537,8 @@ export const make = (options: {
   readonly offered?: (reminder: Reminders.Reminder, kept: Option.Option<number>) => Effect.Effect<void>
   /** Focus or quiet, while one is on: in quiet, a limit nearly used up is kept for the morning. */
   readonly holding?: Effect.Effect<Option.Option<Modes.Hold>>
+  /** Waits while yapd archives a thread, which drops what he set on it and says so itself. */
+  readonly archiving?: (ref: Threads.Ref) => Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const { threads, journal } = options
@@ -801,11 +803,15 @@ export const make = (options: {
         return { spoken, along }
       })
 
-    /** A thread he set reminders on went: they're dropped, and he's told so once. */
+    /**
+     * A thread he set reminders on went: they're dropped, and he's told so
+     * once, unless yapd was archiving it, which drops them and says so itself.
+     */
     const dropping = (ref: Threads.Ref) =>
       Effect.gen(function* () {
         const reminders = options.reminders
         if (reminders === undefined) return
+        yield* options.archiving?.(ref) ?? Effect.void
         const set = yield* reminders.on(ref)
         const cancelled = (yield* Effect.forEach(set, ({ id }) => reminders.cancel(id))).flatMap(Option.toArray)
         const first = cancelled[0]
@@ -813,7 +819,7 @@ export const make = (options: {
         const line = (yield* reminderLines).dropped(first.called ?? "a thread", cancelled)
         const { turns } = yield* options.power
         const at = yield* Clock.currentTimeMillis
-        const key = Reminders.key(first.id)
+        const key = Reminders.goneKey(first.id, at)
         const entry = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, said: line, key, detail: { reminder: first.id, dropped: cancelled.map(({ id }) => id) } }
         yield* notify(undefined, line, entry, Effect.succeed(true), at, turns, key)
       })
@@ -1410,9 +1416,10 @@ export const make = (options: {
       }).pipe(Effect.catchAll((error) => Effect.logWarning("Could not say what you asked me to remind you of", error))),
       /**
        * What was handed over to be said before yapd restarted and he never
-       * heard, in the last twelve hours, but what was kept as yapd was off:
-       * said again under the entry it was kept under, an offer asked again.
-       * Nothing while yapd is off, which keeps it for catching up.
+       * heard, a reminder or that some went with their thread, in the last
+       * twelve hours, but what was kept as yapd was off: said again under
+       * the entry it was kept under, an offer asked again. Nothing while yapd
+       * is off, which keeps it for catching up.
        */
       retell: Effect.gen(function* () {
         if (options.reminders === undefined) return
@@ -1422,12 +1429,14 @@ export const make = (options: {
         for (const kept of yield* journal.since(now - pending, { kinds: ["notice"], most: 1000 })) {
           const id = Reminders.of(kept)
           const held = (kept.detail as { readonly held?: unknown } | undefined)?.held
-          if (id === undefined || kept.key === undefined || kept.heardAt !== undefined || held === "off") continue
-          firing.add(id)
-          const reminder = yield* options.reminders.get(id)
-          if (Option.exists(reminder, ({ propose, state }) => propose !== undefined && state === "fired") && options.offered !== undefined) {
-            yield* options.offered(Option.getOrThrow(reminder), Option.some(kept.id))
-            continue
+          if ((id === undefined && !Reminders.gone(kept)) || kept.key === undefined || kept.heardAt !== undefined || held === "off") continue
+          if (id !== undefined) {
+            firing.add(id)
+            const reminder = yield* options.reminders.get(id)
+            if (Option.exists(reminder, ({ propose, state }) => propose !== undefined && state === "fired") && options.offered !== undefined) {
+              yield* options.offered(Option.getOrThrow(reminder), Option.some(kept.id))
+              continue
+            }
           }
           const about = kept.machine === undefined || kept.thread === undefined ? undefined : { machine: kept.machine, id: kept.thread }
           yield* notify(about, kept.said ?? "", { ...kept, key: kept.key }, Effect.succeed(true), now, turns, kept.key, kept.id)
