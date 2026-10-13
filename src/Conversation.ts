@@ -42,9 +42,10 @@ type Signal =
   | Exclude<Endpointer.Event, { readonly _tag: "Onset" }>
   /**
    * Might be the user, or with `echo`, yapd's own voice getting into the
-   * microphone, as it can until the echo cancellation has learnt it.
+   * microphone, as it can until the echo cancellation has learnt it. `at` is
+   * when it came in, by the clock, however long it then waits to be looked at.
    */
-  | { readonly _tag: "Onset"; readonly echo: boolean }
+  | { readonly _tag: "Onset"; readonly echo: boolean; readonly at: number }
   /** The microphone stopped, like when the helper quits. */
   | { readonly _tag: "Deaf" }
   /** The rest carry the id of what sent them, so one that's no longer waited on is let go. */
@@ -93,7 +94,9 @@ const patience = "40 seconds"
 /**
  * How long after he began it what he's saying can still be "Mute.", in
  * milliseconds, even said again and again, and heard out once he's stopped:
- * what goes on longer, like a TV, is no reason to keep listening for it.
+ * what goes on longer, like a TV, is no reason to keep listening for it. Nor
+ * is anything listened for longer than that once the moment after a line
+ * played through for "Mute." alone is over.
  */
 const outburst = 4_000
 /**
@@ -103,11 +106,24 @@ const outburst = 4_000
 const curt = 2.5
 /**
  * How long the moment after a line played through for "Mute." alone lasts
- * once something waits to be said next, unless he's begun saying something:
- * it's the pause between lines, so a "Mute." begun as the line ended is heard,
- * and what's next starts hardly later than it would.
+ * once something waits to be said next, in milliseconds: it's the pause
+ * between lines, so a "Mute." begun as the line ended is heard, and what's
+ * next starts hardly later than it would. Once it's over, a "Mute." begun
+ * within as long after other talk ended is heard out too.
  */
-const breather: Duration.DurationInput = "500 millis"
+const breather = 500
+/**
+ * How long before that pause, in milliseconds, what he's begun can be and
+ * still be heard out once it's over: a "Mute." begun over the line's last
+ * words. Begun any earlier and still going, it's other talk, like a TV's.
+ */
+const brink = 300
+/**
+ * How long, in milliseconds, a "Mute." begun just as that moment is over is
+ * waited for, a few frames, so it isn't cut in two between the line and the
+ * microphone of what's said next.
+ */
+const beat = 100
 /** Volume while it's still unclear whether the user is talking. */
 const ducked = 0.25
 /** How far back to pick up after talk that wasn't meant for yapd. */
@@ -346,7 +362,7 @@ export const make = (options: {
               // As the frame came in, since by the time it's looked at, yapd may well have learnt its own voice.
               const echo = yield* audio.echo(frame)
               const event = endpointer.push(frame, yield* detect.value(frame), echo)
-              return event?._tag === "Onset" ? ({ _tag: "Onset", echo } satisfies Signal) : event
+              return event?._tag === "Onset" ? ({ _tag: "Onset", echo, at: yield* Clock.currentTimeMillis } satisfies Signal) : event
             }),
           ),
           Stream.runForEach((event) => (event === undefined ? Effect.void : Queue.offer(ear.signals, event))),
@@ -433,10 +449,13 @@ export const make = (options: {
      * of what's said is kept or logged: what's longer than "Mute." could be
      * isn't even transcribed. The moment after it is over after the pause
      * between lines once something's `queued` to be said next, which listens
-     * for "Mute." itself, unless he's begun saying something by then. What
-     * he's still saying once that moment is over is heard out, for as long as
-     * it could be "Mute.", and so is what's begun after it by the time it's
-     * made out, so his "Mute." right after other talk isn't missed.
+     * for "Mute." itself. Only what
+     * he'd begun by its end, in the pause between lines or just before it, is
+     * heard out then, for as long as it could be "Mute.", and what he begins a
+     * beat after, or right after he's stopped saying something else, so his
+     * "Mute." then is neither cut in two nor missed: but nothing is listened
+     * for longer than `outburst` once that moment is over, so talk that goes
+     * on, like a TV's, holds what's next up a few seconds at most.
      */
     const heed = (playback: Playback, ear: Ear, text: string, from: number, through: Effect.Effect<void>) =>
       Effect.gen(function* () {
@@ -461,38 +480,57 @@ export const make = (options: {
         let played = false
         /** When the usual moment after it was over too, by the clock. */
         let over: number | undefined
-        // Once it's all over, only what he's begun is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk that goes
-        // on, like a TV's, ends it as one gone deaf does. With nothing begun, only what's come in already is looked at, never waited for.
-        const next = Effect.suspend(() =>
-          over === undefined
-            ? Queue.take(signals)
-            : onset === undefined
-              ? Effect.map(Queue.poll(signals), Option.getOrElse((): Signal => ({ _tag: "Deaf" })))
-              : Effect.flatMap(Clock.currentTimeMillis, (now) =>
+        /** When what he said last ended, or what he began came to nothing, by the clock. */
+        let ended = Number.NEGATIVE_INFINITY
+        /**
+         * Whether what he began at `at` is heard out once that moment is over,
+         * at `over`: begun in the pause between lines or just before it, or a
+         * beat after, or right after what he said last ended, and never once
+         * `outburst` has passed since it was over.
+         */
+        const heeded = (at: number, over: number) => at >= over - breather - brink && at <= Math.min(Math.max(over + beat, ended + breather), over + outburst)
+        // Once it's all over, only what's heeded is waited for, while it could yet be "Mute.": a microphone gone quiet, or talk that goes
+        // on, like a TV's, ends it as one gone deaf does. What's come in already is looked at first, however long it waited.
+        const next = Effect.suspend(() => {
+          if (over === undefined) return Queue.take(signals)
+          const until =
+            onset === undefined
+              ? Math.min(Math.max(over + beat, ended + breather), over + outburst)
+              : heeded(since, over)
+                ? Math.min(since, over) + outburst
+                : over
+          return Effect.flatMap(
+            Queue.poll(signals),
+            Option.match({
+              onSome: (signal) => Effect.succeed(signal),
+              onNone: () =>
+                Effect.flatMap(Clock.currentTimeMillis, (now) =>
                   Queue.take(signals).pipe(
-                    Effect.timeout(Math.max(0, since + outburst - now)),
+                    Effect.timeout(Math.max(0, until - now)),
                     Effect.orElseSucceed((): Signal => ({ _tag: "Deaf" })),
                   ),
                 ),
-        )
+            }),
+          )
+        })
         while (true) {
           const signal = yield* next
           switch (signal._tag) {
-            case "Onset": {
-              const now = yield* Clock.currentTimeMillis
-              // Begun too long after that moment to be his "Mute." right after other talk, it's more of that talk, which holds nothing up.
-              if (over !== undefined && now > over + outburst) return { _tag: "Finished" } satisfies Outcome
+            case "Onset":
+              // Begun once that moment is over, but not heeded, it's more of other talk, like a TV's, which holds nothing up.
+              if (over !== undefined && !heeded(signal.at, over)) return { _tag: "Finished" } satisfies Outcome
               onset = yield* position
-              since = now
+              since = signal.at
               echoing = signal.echo
               break
-            }
             case "Abandoned":
               onset = undefined
               echoing = false
+              ended = yield* Clock.currentTimeMillis
               break
             case "Utterance": {
               // Heard out before what comes after, so it's never missed as the line ends.
+              ended = yield* Clock.currentTimeMillis
               const at = yield* position
               const begun = onset ?? at
               const echo = echoing ? between(text, playback.duration, begun - reach, Math.max(at, begun) + reach) : undefined
@@ -512,15 +550,19 @@ export const make = (options: {
               if (ear.deaf) return { _tag: "Finished" } satisfies Outcome
               played = true
               // Over once something waits to be said next, which hears "Mute." itself, and the pause between lines is up, or else after
-              // the usual moment: only what he's begun by then is heard out first.
+              // the usual moment: noted as it is, however long what was said before takes to make out, and woken up for.
               yield* Effect.raceFirst(Effect.sleep(linger), Effect.zipRight(Effect.sleep(breather), queued)).pipe(
-                Effect.zipRight(Queue.offer(signals, { _tag: "Lingered", id })),
+                Effect.zipRight(Clock.currentTimeMillis),
+                Effect.flatMap((at) =>
+                  Effect.zipRight(
+                    Effect.sync(() => {
+                      over = at
+                    }),
+                    Queue.offer(signals, { _tag: "Lingered", id }),
+                  ),
+                ),
                 Effect.forkScoped,
               )
-              break
-            case "Lingered":
-              if (signal.id !== id) break
-              over = yield* Clock.currentTimeMillis
               break
             case "Broke":
               if (signal.id === id) return yield* Effect.fail(signal.error)

@@ -1705,6 +1705,83 @@ describe("Over its first seconds, while yapd's own voice can still get into the 
     expect(result).toEqual({ transcribed: ["Is that the news?", "Mute."], offs: 1 })
   })
 
+  test.each([
+    [
+      "talk begun a while before the notice ended, like a TV's, and still going",
+      (helper: Effect.Effect.Success<ReturnType<typeof overHelper>>) =>
+        Effect.gen(function* () {
+          yield* helper.wait(4)
+          yield* helper.talk(0.8, 30)
+          yield* helper.wait(1)
+          yield* helper.finish
+          // The pause between lines.
+          yield* helper.wait(0.5)
+        }),
+    ],
+    [
+      "talk begun a while after other talk ended, while that's still being made out",
+      (helper: Effect.Effect.Success<ReturnType<typeof overHelper>>) =>
+        Effect.gen(function* () {
+          yield* helper.finish
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 10)
+          yield* helper.wait(0.4)
+          yield* helper.quiet
+          // A TV, begun most of a second after, as Whisper is still on what came before.
+          yield* helper.wait(0.8)
+          yield* helper.talk(0.85, 30)
+          yield* helper.wait(0.2)
+        }),
+    ],
+  ] as const)("once the moment after a notice is over with something waiting, %s, holds what's next up no longer", async (_, said) => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"], [0.85, "Back to you."]], { off: true, tell: true, queued: true, transcribing: 1 })
+        yield* said(helper)
+        return { done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ done: true, offs: 0 })
+  })
+
+  test("once the moment after a notice is over, talk that keeps starting again right after it stops is listened to for 'Mute.' four seconds at most", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.8, "Is that the news?"]], { off: true, tell: true, queued: true })
+        yield* helper.finish
+        for (let time = 0; time < 8; time++) {
+          yield* helper.wait(0.3)
+          yield* helper.talk(0.8, 10)
+          yield* helper.wait(0.2)
+          yield* helper.quiet
+        }
+        yield* helper.wait(0.3)
+        yield* helper.talk(0.8, 10)
+        yield* helper.wait(0.1)
+        const listening = Option.isNone(yield* Fiber.poll(helper.fiber))
+        // Four seconds after the pause between lines.
+        yield* helper.wait(0.1)
+        return { listening, done: Option.isSome(yield* Fiber.poll(helper.fiber)), offs: helper.offs() }
+      }),
+    )
+    expect(result).toEqual({ listening: true, done: true, offs: 0 })
+  })
+
+  test("a 'Mute.' begun a beat after the pause between lines that follows a notice is still heard, rather than cut in two", async () => {
+    const result = await overHelperScoped(
+      Effect.gen(function* () {
+        const helper = yield* overHelper([[0.95, "Mute."]], { off: true, tell: true, queued: true })
+        yield* helper.finish
+        yield* helper.wait(0.5)
+        yield* helper.wait(0.05)
+        yield* helper.talk(0.95, 10)
+        yield* helper.quiet
+        return helper.offs()
+      }),
+    )
+    expect(result).toBe(1)
+  })
+
   /** What's said as a line ends, `at` seconds into its `duration`, `frames` long, and what came of it. */
   const ending = (
     at: number,
