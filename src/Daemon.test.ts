@@ -4681,6 +4681,44 @@ describe("Daemon with threads muted", () => {
     expect((await kept("focus")).played).toEqual(["yapd. Apple hasn't shipped one.", "yapd. The fee table is right."])
   })
 
+  test("a research answer waiting to be said as quiet begins, or cut off by a dictation in quiet, is held for the morning, but not by focus", async () => {
+    const asked = "Find out whether Apple shipped an API for third-party glucose sensors on the Watch."
+    const answer = "Apple hasn't shipped one."
+    const kept = (how: "waiting" | "cut off", hold: "quiet" | "focus") =>
+      run(
+        Effect.gen(function* () {
+          let mode = Option.none<"focus" | "quiet">()
+          const { made, handle, finish, wait, dictate, played, journal } = yield* make(undefined, {
+            link: (session) => Effect.succeedSome({ machine: "Rosie", id: `t-${session}` }),
+            sent: (to, since) => Effect.succeed(to.id === "t-glucose" ? [{ at: 0, digest: Ledger.digest(asked), kind: "start" as const }].filter(({ at }) => at >= since) : []),
+            holding: Effect.sync(() => mode),
+          })
+          yield* wait(300)
+          yield* handle("claude", { hook_event_name: "UserPromptSubmit", session_id: "glucose", cwd: "/code/yapd", prompt: asked }, { project: "yapd", host: hostname() }, false)
+          yield* wait(60)
+          // Waiting behind another update, or being said itself.
+          if (how === "waiting") yield* finish("other", "Something long.")
+          yield* stopHere(handle, "glucose", answer)
+          yield* wait(1)
+          mode = Option.some(hold)
+          yield* made.hold(hold)
+          if (how === "cut off") {
+            const dictation = yield* dictate
+            yield* wait(2)
+            yield* Scope.close(dictation, Exit.void)
+          }
+          for (let i = 0; i < 3; i++) yield* wait(11)
+          const updates = yield* journal.since(0, { kinds: ["update"] })
+          return { played: [...played], held: updates.filter(({ said }) => said === `yapd. ${answer}`).map(heldFor) }
+        }),
+      )
+    expect(await kept("waiting", "quiet")).toEqual({ played: ["yapd. Something long."], held: ["quiet"] })
+    expect(await kept("cut off", "quiet")).toEqual({ played: [`yapd. ${answer}`], held: ["quiet"] })
+    // Focus never holds what he asked for.
+    expect(await kept("waiting", "focus")).toEqual({ played: ["yapd. Something long.", `yapd. ${answer}`], held: [undefined] })
+    expect(await kept("cut off", "focus")).toEqual({ played: [`yapd. ${answer}`, `yapd. ${answer}`], held: [undefined] })
+  })
+
   test("a session's mute, once its update is tied to a thread, mutes it and becomes the thread's", async () => {
     const result = await run(
       Effect.gen(function* () {

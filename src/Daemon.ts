@@ -277,6 +277,8 @@ export const make = (
    * like a follow-up.
    */
   const audible = new WeakSet<Conversation.Update>()
+  /** Updates that are the first turn of work yapd started, which answer what he asked, and which quiet alone holds, for the morning's rundown. */
+  const openings = new WeakSet<Conversation.Update>()
   /** Stops whose update was kept quiet, since he muted its thread, so he never heard what they told of. */
   const hushed = new WeakSet<Notices.Stop>()
   /** The Stop each hook's update is of. */
@@ -1099,6 +1101,7 @@ export const make = (
       if (finished.hooked) hooked.add(update)
       if (finished.stop !== undefined) stopOf.set(update, finished.stop)
       if (!mutable) audible.add(update)
+      if (opening) openings.add(update)
       // Said once ever: one already kept under its key was said, or held, before.
       const { fallback } = finished
       // Given way since to a Stop of its own, or its thread started again or went, it isn't said.
@@ -1735,13 +1738,22 @@ export const make = (
    */
   const quiet = (ready: Inbox.Ready) => ready.priority !== "needs-you" && ready.replay === undefined && !audible.has(ready.update)
 
-  /** Whether an update waiting to be read is muted now, or held by focus or quiet. */
+  /**
+   * Whether an update waiting to be read is one that quiet holds for the
+   * morning, though no mute keeps it quiet: the first turn of work yapd
+   * started, unless it needs him or he asked to hear it again.
+   */
+  const quietOnly = (ready: Inbox.Ready) => ready.priority !== "needs-you" && ready.replay === undefined && openings.has(ready.update)
+
+  /** Whether an update waiting to be read is muted now, or held by focus or quiet: the first turn of work yapd started, only by quiet. */
   const quieted = (ready: Inbox.Ready): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
     quiet(ready)
       ? Effect.flatMap(muting(Mutes.keysOf(ready.update, called)), (mute): Effect.Effect<Option.Option<"muted" | Modes.Hold>> =>
           Option.isSome(mute) ? Effect.succeedSome("muted") : holdingNow,
         )
-      : Effect.succeedNone
+      : quietOnly(ready)
+        ? Effect.map(holdingNow, Option.filter((mode): mode is "quiet" => mode === "quiet"))
+        : Effect.succeedNone
 
   /**
    * A thread was just muted under these keys: its updates waiting to be read
@@ -1766,17 +1778,23 @@ export const make = (
   /**
    * Focus or quiet just began: the updates waiting to be read that a mute
    * could keep quiet are dropped and kept as held for later, as `silence`
-   * keeps them, but never what needs him, one he asked to hear again, the
-   * line being said, or what yapd has to say for itself.
+   * keeps them, and, for quiet, the first turn of work yapd started too, as
+   * one that comes in quiet is held. Never what needs him, one he asked to
+   * hear again, the line being said, or what yapd has to say for itself.
    */
   const hold = (why: Modes.Hold): Effect.Effect<void> => drop(() => true, { _tag: "Held", why })
 
-  /** Drops the updates waiting to be read that a mute could keep quiet and `which` picks, kept as muted or held. */
+  /**
+   * Drops the updates waiting to be read that a mute could keep quiet and
+   * `which` picks, kept as muted or held, and, held by quiet, those quiet
+   * alone holds.
+   */
   const drop = (which: (entry: Inbox.Ready) => boolean, as: { readonly _tag: "Muted" } | { readonly _tag: "Held"; readonly why: Modes.Hold }): Effect.Effect<void> =>
     Effect.gen(function* () {
+      const dropping = (entry: Inbox.Ready) => quiet(entry) || (as._tag === "Held" && as.why === "quiet" && quietOnly(entry))
       const dropped = yield* STM.commit(
         TRef.modify(inbox, (current) => {
-          const quietened = [...current.values()].filter((entry): entry is Inbox.Ready => "update" in entry && quiet(entry) && which(entry))
+          const quietened = [...current.values()].filter((entry): entry is Inbox.Ready => "update" in entry && dropping(entry) && which(entry))
           return [quietened, quietened.reduce((left, entry) => Inbox.remove(left, entry.session), current)] as const
         }),
       )
