@@ -373,7 +373,9 @@ const assistant = (
       journal,
       store,
     })
-    const hands = Hands.make({ threads, ledger })
+    const reminders = given.reminders === true ? Reminders.make(store, journal) : undefined
+    // Archiving a thread drops what he set on it, as yapd serves it.
+    const hands = Hands.make({ threads, ledger, ...(reminders === undefined ? {} : { reminders }) })
     const started: Array<Request> = []
     /** What each dictation was to be heard listening for. */
     const expected: Array<ReadonlyArray<string>> = []
@@ -470,7 +472,6 @@ const assistant = (
     const mutes = given.muting === true ? yield* Mutes.make(store) : undefined
     const controls = mutes === undefined ? undefined : Mutes.controls({ mutes, journal, silence: (keys) => Effect.sync(() => void silenced.push(keys)) })
     const modes = given.modes === true ? yield* Modes.make({ settings: Settings.fromStore(store), journal }) : undefined
-    const reminders = given.reminders === true ? Reminders.make(store, journal) : undefined
     const memories = given.memories === true ? Memory.make(store) : undefined
     /** What each brief was asked to sum up, and each brief as it was asked. */
     const briefed: Array<ReadonlyArray<string>> = []
@@ -11855,5 +11856,116 @@ describe("Assistant memories", () => {
     expect(result.spoken.join(" ")).not.toContain("4 8 2 7")
     expect(result.journal).not.toContain("4f9a8b7c6d5e")
     expect(result.journal).not.toContain("4 8 2 7")
+  })
+})
+
+describe("Assistant tidying", () => {
+  /** Four of his threads about the Tezos importer, done with, and so idle. */
+  const tezosThreads = ["Tezos importer", "Tezos fees", "Tezos wallets", "Tezos docs"].map((title, index) =>
+    thread(`7e2a${index}000-1b2c-4d3e-8f4a-${String(index).padStart(12, "0")}`, title, "integration", {
+      latestRunCompletedAt: "2026-10-01T01:00:00.000Z",
+      updatedAt: new Date(now - (index + 1) * 60_000).toISOString(),
+    }),
+  )
+  const [importer, fees, wallets, docs] = tezosThreads as [T3Live.Thread, T3Live.Thread, T3Live.Thread, T3Live.Thread]
+  /** At work again, as T3 Code shows a thread whose run started. */
+  const working = (of: T3Live.Thread) => ({ ...of, activeRunId: "run-9", activityRunStatus: "running", latestRunStartedAt: "2026-10-01T02:18:30.000Z" })
+  /** What went to T3 Code to tidy, by its type, its id and the thread. */
+  const tidied = (dispatched: ReadonlyArray<Record<string, unknown>>) =>
+    dispatched.filter(({ type }) => String(type).startsWith("thread.")).map(({ type, commandId, threadId }) => ({ type, commandId: String(commandId).replace(/^yapd:u\w+:/, ""), threadId }))
+
+  test("archiving by voice can be undone by voice", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Archive") ? Brain.decision({ act: "tidy", how: "archive", target: handle(situation, mina), sure: "high" }) : undefined,
+          undefined,
+          { reminders: true },
+        )
+        // He'd asked to hear when it finishes.
+        yield* made.reminders!.add({ at: now, heard: "Tell me when the Mina one finishes.", text: "", event: "finished", machine: "Rosie", thread: mina.id, called: "the Mina tickets" })
+        yield* made.dictate("Archive the Mina tickets thread.")
+        const archived = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
+        // T3 Code archived it, which the shell then shows it as.
+        yield* made.becomes({ ...mina, archivedAt: "2026-10-01T02:18:01.000Z" })
+        yield* made.dictate("Scratch that.")
+        const restored = { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length }
+        yield* made.becomes(mina)
+        // Taken back already, it's never taken back twice.
+        yield* made.dictate("Scratch that.")
+        return { archived, restored, again: made.spoken().at(-1), sent: tidied(made.dispatched) }
+      }),
+    )
+    expect(result.archived).toEqual({ said: "Archived, sir: Open Mina SSV2 Bug Tickets. I dropped its reminder; scratch that to bring both back.", pending: 0 })
+    expect(result.restored).toEqual({ said: "Unarchived, sir: Open Mina SSV2 Bug Tickets. Its reminder is back.", pending: 1 })
+    expect(result.again).toBe("I couldn't take that back, sir: there's nothing more to take back.")
+    // Each once, under its own step's ids.
+    expect(result.sent).toEqual([
+      { type: "thread.archive", commandId: "0", threadId: mina.id },
+      { type: "thread.unarchive", commandId: "0:1", threadId: mina.id },
+    ])
+  })
+
+  test("tidying several threads asks once naming each, and a yes tidies exactly the ones he kept", async () => {
+    /** Archiving the four Tezos threads, said yes to as `yes` puts it, and what the model makes of a yes with more to it. */
+    const archiving = (yes: string, kept: ReadonlyArray<T3Live.Thread>) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) =>
+              situation.utterance.heard.startsWith("Archive")
+                ? Brain.decision({ act: "tidy", how: "archive", target: tezosThreads.map((one) => handle(situation, one)).join(", "), sure: "high" })
+                : Brain.decision({ act: "tidy", how: "archive", target: kept.map((one) => handle(situation, one)).join(", "), pending: "answers" }),
+            undefined,
+            { others: tezosThreads },
+          )
+          yield* made.dictate("Archive all the finished Tezos threads.")
+          const asked = { said: made.spoken().at(-1), sent: tidied(made.dispatched).length }
+          yield* made.answer(yes)
+          return { asked, said: made.spoken().at(-1), sent: tidied(made.dispatched) }
+        }),
+      )
+    const all = await archiving("Yes.", tezosThreads)
+    expect(all.asked).toEqual({ said: "That's four threads, sir: Tezos importer, Tezos fees, Tezos wallets and Tezos docs. Archive them all?", sent: 0 })
+    expect(all.said).toBe("Archived all four, sir.")
+    expect(all.sent).toEqual(tezosThreads.map((one, index) => ({ type: "thread.archive", commandId: `0:${index + 1}`, threadId: one.id })))
+    // One he left out isn't archived, nor is the yes taken for all four, or the first of them.
+    const some = await archiving("Yes, but not the Tezos fees.", [importer, wallets, docs])
+    expect(some.said).toBe("Archived all three, sir.")
+    expect(some.sent).toEqual([importer, wallets, docs].map((one, index) => ({ type: "thread.archive", commandId: `0:${index + 1}`, threadId: one.id })))
+  })
+
+  test("a busy thread isn't archived without his yes, nor one that got busy before it", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Archive the Tezos migration")
+              ? Brain.decision({ act: "tidy", how: "archive", target: handle(situation, tezos), sure: "high" })
+              : situation.utterance.heard.startsWith("Archive")
+                ? Brain.decision({ act: "tidy", how: "archive", target: [importer, fees, wallets].map((one) => handle(situation, one)).join(", "), sure: "high" })
+                : undefined,
+          undefined,
+          { others: tezosThreads },
+        )
+        // The Tezos migration is at work: archiving it stops that, so he's asked, and told so.
+        yield* made.dictate("Archive the Tezos migration.")
+        const busy = { said: made.spoken().at(-1), sent: tidied(made.dispatched).length }
+        yield* made.answer("Yes.")
+        const agreed = { said: made.spoken().at(-1), sent: tidied(made.dispatched) }
+        // Idle as he's asked, the Tezos fees gets going again before his yes: it's left out, and said.
+        yield* made.dictate("Archive the Tezos importer, fees and wallets.")
+        const asked = made.spoken().at(-1)
+        yield* made.becomes(working(fees))
+        yield* made.answer("Yes.")
+        return { busy, agreed, asked, said: made.spoken().at(-1), sent: tidied(made.dispatched).slice(1) }
+      }),
+    )
+    expect(result.busy).toEqual({ said: "Migrate Tezos Integration is still working, sir, and archiving it stops what it's doing. Archive it anyway?", sent: 0 })
+    expect(result.agreed).toEqual({ said: "Archived, sir: Migrate Tezos Integration.", sent: [{ type: "thread.archive", commandId: "0", threadId: tezos.id }] })
+    expect(result.asked).toBe("That's three threads, sir: Tezos importer, Tezos fees and Tezos wallets. Archive them all?")
+    expect(result.said).toBe("Archived both, sir. I left out Tezos fees: it's working again.")
+    expect(result.sent).toEqual([importer, wallets].map((one, index) => ({ type: "thread.archive", commandId: `0:${index + 1}`, threadId: one.id })))
   })
 })

@@ -425,6 +425,9 @@ const tidyings: Readonly<Record<Tidying, TidyCommand["_tag"]>> = {
   unpin: "Unpin",
 }
 
+/** Whether the brain's word for tidying is one of the ways a thread is tidied. */
+export const isTidying = (how: string): how is Tidying => Object.hasOwn(tidyings, how)
+
 /** What a tidy goes to T3 Code as: none for a rename with no title, or a snooze with no end. */
 const tidyCommand = (act: Extract<Act, { readonly _tag: "Tidy" }>): TidyCommand | undefined => {
   const tag = tidyings[act.what]

@@ -1085,7 +1085,7 @@ export const archivedBy = (handle: string, situation: Pick<Situation, "archived"
 }
 
 /** The handle in ARCHIVED of a thread yapd archived, while it's shown there. */
-const archivedAs = (ref: Threads.Ref, situation: Pick<Situation, "archived">) => {
+export const archivedAs = (ref: Threads.Ref, situation: Pick<Situation, "archived">) => {
   const index = situation.archived?.findIndex((one) => Threads.same(one.ref, ref)) ?? -1
   return index >= 0 && index < archivedShown ? archivedHandle(index) : undefined
 }

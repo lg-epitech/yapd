@@ -1008,7 +1008,7 @@ export const make = (options: {
         const pending = Option.match(open, { onNone: () => [], onSome: ({ candidates }) => candidates })
         // A reply is about what he just heard, which is on the desk already.
         const found = utterance.via === "reply" ? [] : yield* searching(utterance.heard)
-        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, reminders, kept, written] = yield* Effect.all([
+        const [shortlist, recent, spoke, usage, asked, coming, acted, mutes, muteChange, mode, reminders, kept, written, tidied] = yield* Effect.all([
           threads.desk(focus, pending, utterance.via === "reply" ? desk.reply : desk.asked, found, desk.named, utterance.heard),
           // Never what was held for later, which he was never told.
           journal.since(now - lately.span, { most: 2 * lately.most, kinds: ["update", "reply", "dictation", "answer", "started", "notice", "sent", "action", "brief"], held: false }),
@@ -1024,7 +1024,13 @@ export const make = (options: {
           options.reminders?.pending ?? Effect.succeed<ReadonlyArray<Reminders.Reminder>>([]),
           options.memories?.list ?? Effect.succeed<ReadonlyArray<Memory.Memory>>([]),
           options.routines ?? Effect.succeed<ReadonlyArray<Preferences.Routine>>([]),
+          // What yapd tidied for him lately, for what it archived that he can have back.
+          ledger.steps(now - day, { kinds: ["tidy", "undo"], states: ["sent"] }),
         ])
+        // What it archived, unless it's back since, as by his hand in T3 Code.
+        const archived = yield* Effect.filter(Hands.archives(tidied), ({ ref }) =>
+          Effect.map(threads.find(ref), (found) => !Option.exists(found, ({ archivedAt }) => archivedAt === null)),
+        )
         // What he hasn't heard, a thread at a time: what was never read out, however much he's spoken since, and what was cut off since
         // he last said something, other than catching up, which he may never have heard the answer to, or something only heard as noise,
         // like a cough taken for "Thank you.". Not what's waiting to be read, like an update his asking cut off: he's told of that as
@@ -1052,6 +1058,7 @@ export const make = (options: {
           reminders,
           noted: Option.filter(Option.fromNullable(noted), ({ at }) => now - at <= Duration.toMillis(scratchable)),
           memories: { kept, written },
+          archived,
           now,
           ...Option.match(seen, { onNone: () => ({}), onSome: ({ title }) => ({ showing: title }) }),
         } satisfies Brain.Situation
@@ -1748,6 +1755,7 @@ export const make = (options: {
       last: Option.Option<Ledger.Row>,
       step: number,
       asks?: Asks,
+      situation: Pick<Brain.Situation, "desk" | "archived"> = { desk: nowhere },
     ): Hands.Act | undefined => {
       const to = Option.map(target, ({ ref }) => ref)
       // Taking back a stop is letting it carry on, unless he means a message.
@@ -1772,8 +1780,26 @@ export const make = (options: {
         }
         case "stop":
           return Option.isNone(to) ? undefined : { _tag: "Stop", to: to.value }
-        case "undo":
-          return { _tag: "Undo", to, carry: decision.how === "carry" || (decision.how !== "message" && stopped) }
+        case "undo": {
+          // Taking back a message, or what tidying did, is only that, whatever came after.
+          const only = decision.how === "message" || decision.how === "tidy" ? decision.how : undefined
+          return { _tag: "Undo", to, carry: decision.how === "carry" || (only === undefined && stopped), ...(only === undefined ? {} : { only }) }
+        }
+        case "tidy": {
+          // Exactly the threads it names, each as it's called, never fewer: one not there is nothing done.
+          const named = Brain.tidyTargets(decision.target, situation)
+          const what = decision.how
+          if (Option.isNone(named) || named.value.length === 0 || !Hands.isTidying(what)) return undefined
+          const until = Brain.instant(decision.when)
+          if (what === "snooze" && Number.isNaN(until)) return undefined
+          return {
+            _tag: "Tidy",
+            to: named.value.map(({ ref, called }) => ({ ref, called })),
+            what,
+            ...(what === "rename" ? { title: decision.text.trim() } : {}),
+            ...(what === "snooze" ? { until: new Date(until).toISOString() } : {}),
+          }
+        }
         case "decide": {
           if (Option.isNone(to) || asks?._tag !== "Approval") return undefined
           // Allowed only with "approve" as his answer, however it came here, never a plain yes, nor with more after it, nor in the rest of a
@@ -1861,7 +1887,9 @@ export const make = (options: {
                         ? act.to[0]?.ref
                         : undefined
                       : act.to
-        const called = ref === undefined ? Option.none<string>() : naming(ref, situation)
+        // Tidying, it's always named, focus or not, as it was called when he asked, which an archived one is only known by.
+        const called =
+          act._tag === "Tidy" && act.to.length === 1 ? Option.fromNullable(act.to[0]?.called) : ref === undefined ? Option.none<string>() : naming(ref, situation)
         // In a question it's always named, since the question has to say what it's about.
         const name = (ref === undefined ? undefined : situation.desk.threads.find((listed) => Threads.same(listed.ref, ref))?.called) ?? "it"
         const subject: Subject = { _tag: "Answer", said: "", about: Option.fromNullable(ref) }
@@ -1966,9 +1994,9 @@ export const make = (options: {
               tidied: outcome.each.map(({ to, command, outcome }) => ({ ...to, command: command._tag, outcome: outcome._tag, ...("reason" in outcome ? { reason: outcome.reason } : {}) })),
               ...(outcome.undone ? { undone: true } : {}),
             })
-            const told: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
+            const first: Outcome = { say: line, subject: { ...subject, said: line }, kind: "done" }
             // None of it went, the rest of the request doesn't either.
-            return went ? yield* free(onward(thought, told, Option.fromNullable(ref), at.step + 1, said)) : unfinished(told, decision.rest, said, situation.desk)
+            return went ? yield* free(onward(thought, first, Option.fromNullable(ref), at.step + 1, said)) : unfinished(first, decision.rest, said, situation.desk)
           }
           case "Moot": {
             // Dealt with in T3 Code meanwhile: nothing's done, and he's told so, and the rest of the request still is.
@@ -2127,7 +2155,7 @@ export const make = (options: {
           yield* Effect.logInfo("Not doing it, since yapd was turned off after it was said")
           return quiet(thought.subject)
         }
-        const act = acted(plan.decision, plan.target, utterance, thought.situation.acted, at.step, asks)
+        const act = acted(plan.decision, plan.target, utterance, thought.situation.acted, at.step, asks, thought.situation)
         // A message with no words of its own to send, as when he began it over yapd's own voice, has him asked to say it again.
         if (act === undefined) return reply(plan.decision.act === "send" && Option.isSome(plan.target) && asks?._tag !== "Question" ? said.misheard : said.cantTell, thought.subject)
         // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
@@ -2232,6 +2260,8 @@ export const make = (options: {
           yield* Effect.logInfo("Doing what he asked instead of what I asked about")
           return yield* follow(checked, { ...thought, decision: instead }, said)
         }
+        // Tidying, never rebuilt from the first of the threads asked about: exactly those he agreed to.
+        if (agreed && open.decision.act === "tidy") return yield* retidying(open, thought, said)
         const decision = !agreed
           ? instead
           : filled(
@@ -2259,6 +2289,73 @@ export const make = (options: {
           )
         }
         return yield* follow(checked, { ...thought, decision }, said, { step: 0, twice: open.reminder === undefined })
+      })
+
+    /**
+     * His yes to tidying what he was asked about: exactly the threads he
+     * agreed to, every one asked about for a plain yes, or those he kept, as
+     * in "yes, but not the Tezos fees", never any other, in the order he
+     * heard them. Each is looked at again as it is now: one gone, or busy
+     * since, unless he was told it was and agreed to archive it as it is, is
+     * left out, and said, and the rest go, without asking again, which would
+     * only end in leaving them, as when he answers one asked while yapd was
+     * off long after.
+     */
+    const retidying = (open: Open, thought: Thought, said: Lines) =>
+      Effect.gen(function* () {
+        const { situation } = thought
+        const how = open.decision.how
+        const sir = addressed(said)
+        const rest = thought.decision.rest.trim() || open.decision.rest
+        const agreedTo =
+          thought.decision.target.trim() === ""
+            ? open.candidates
+            : Option.getOrElse(
+                Option.map(Brain.tidyTargets(thought.decision.target, situation), (named) => named.map(({ ref }) => ref)),
+                (): ReadonlyArray<Threads.Ref> => [],
+              )
+        const kept: Array<string> = []
+        const gone: Array<string> = []
+        const busy: Array<string> = []
+        for (const [index, ref] of open.candidates.entries()) {
+          if (!agreedTo.some((one) => Threads.same(one, ref))) continue
+          const called = open.tidying?.called[index] ?? "that thread"
+          if (how === "unarchive") {
+            const handle = Brain.archivedAs(ref, situation)
+            if (handle === undefined) gone.push(called)
+            else kept.push(handle)
+            continue
+          }
+          const listed = situation.desk.threads.find((one) => Threads.same(one.ref, ref))
+          if (listed === undefined) {
+            gone.push(called)
+            continue
+          }
+          // By its state now: busy since he was asked, it's left, unless he agreed to archive it busy as it was.
+          const told = (open.tidying?.working ?? []).some((one) => Threads.same(one, ref))
+          if ((how === "archive" || how === "settle") && Brain.occupied(listed) && !told) {
+            busy.push(called)
+            continue
+          }
+          kept.push(listed.handle)
+        }
+        const them = (names: ReadonlyArray<string>) => (names.length === 1 ? "it's" : "they're")
+        const left = [
+          ...(busy.length === 0 ? [] : [`I left out ${Brain.both(busy)}${sir}: ${them(busy)} working again.`]),
+          ...(gone.length === 0 ? [] : [`I left out ${Brain.both(gone)}${sir}: ${how === "unarchive" ? `${them(gone)} not archived any more` : `I can't find ${gone.length === 1 ? "it" : "them"} now`}.`]),
+        ].join(" ")
+        if (kept.length === 0) return unfinished(reply(left === "" ? said.cantTell : left, thought.subject), rest, said)
+        // Asked a while ago, its time may have gone by since.
+        if (how === "snooze" && Brain.instant(open.decision.when) <= (yield* Clock.currentTimeMillis)) {
+          return unfinished(reply(`That time's already gone${sir}.`, thought.subject), rest, said)
+        }
+        const decision = Brain.decision({ ...open.decision, target: kept.join(", "), sure: "high", others: "", pending: "answers", rest })
+        const target = Option.fromNullable(kept.length === 1 ? situation.desk.threads.find(({ handle }) => handle === kept[0]) : undefined)
+        if (left !== "") yield* Effect.logInfo(`Leaving out of it what's gone or busy since he was asked: ${[...busy, ...gone].join(", ")}`)
+        const outcome = yield* write({ decision, target }, { ...thought, decision }, said, { step: 0, twice: false })
+        if (left === "" || outcome.say === "") return outcome
+        const say = joined(outcome.say, left, said)
+        return { ...outcome, say, subject: outcome.subject._tag !== "Nothing" && outcome.subject.said === outcome.say ? { ...outcome.subject, said: say } : outcome.subject }
       })
 
     /**
@@ -3184,6 +3281,7 @@ export const make = (options: {
               : write(plan, thought, said, at, asks),
           )
         case "stop":
+        case "tidy":
           return write(plan, thought, said, at)
         case "undo":
           return undoing(plan, thought, said, at)
@@ -3310,11 +3408,24 @@ export const make = (options: {
         case "Say":
           return Effect.succeed(unfinished(reply(checked.spoken, thought.subject), thought.decision.rest, said, thought.situation.desk))
         case "Ask":
-          return opening(checked.open, thought.utterance)
+          return Effect.map(opening(checked.open, thought.utterance), (outcome) => listing(outcome, checked.open))
         case "Do":
           return perform(checked.plan, thought, said, at)
       }
     }
+
+    /** A question about tidying several threads, with a card listing each, for an app to show as it's asked. */
+    const listing = (outcome: Outcome, open: Omit<Open, "id" | "version" | "at">): Outcome =>
+      outcome.kind !== "question" || open.tidying === undefined || open.tidying.called.length < 2
+        ? outcome
+        : {
+            ...outcome,
+            card: {
+              kind: "list",
+              title: `${Brain.capital(open.decision.how)} these?`,
+              markdown: open.tidying.called.map((name) => `- ${Show.plainly(name)}`).join("\n"),
+            },
+          }
 
     /** Acting on it, with the turn already held. */
     const acting = (thought: Thought): Effect.Effect<Outcome> =>
@@ -4124,6 +4235,17 @@ export const make = (options: {
         if (!offer) {
           const reason = row.reason ?? Hands.unconfirmable
           const called = Option.fromNullable(listed?.called)
+          // Threads one step tidied are said together, once, each named as it was called then, unless something came of one since.
+          if (Hands.tidies(row)) {
+            const along = restarted.filter((other) => !other.offer && other.row.utterance === row.utterance && other.row.step === row.step && Hands.tidies(other.row))
+            restarted.splice(0, restarted.length, ...restarted.filter((other) => !along.includes(other)))
+            const still = yield* Effect.filter(along, ({ row: other }) =>
+              Effect.map(ledger.get(other.commandId), (now) => !(other.state !== "sent" && Option.exists(now, ({ state }) => state === "sent"))),
+            )
+            const rows = [row, ...still.map(({ row: other }) => other)].map((one) => ({ ...one, called: Hands.tidiedAs(one) ?? listed?.called ?? "a thread" }))
+            yield* telling(Hands.untidied(rows, said), reason)
+            continue
+          }
           yield* telling(row.kind === "message" ? Hands.unoffered(said, called, reason) : Hands.unsure(row, said, called, reason), reason)
           continue
         }
