@@ -1669,6 +1669,28 @@ describe("Notices of reminders", () => {
     expect(result.heard).toEqual([true])
   })
 
+  test("a reminder riding on a failure waiting to be said has gone off, so what's said of the failure never tells of one he cancelled", async () => {
+    const tezos = thread("tezos", "Migrate Tezos Integration", { status: "failed", latestRunId: "run-1", lastErrorClass: "provider_error" })
+    const bounded = {
+      tezos: { runs: [{ id: "run-1", status: "failed", ordinal: 1, startedAt: minutes(5) }], turnItems: [failure("run-1", "provider_error", "API Error: 500 Internal server error")] },
+    }
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* notices({ view: [tezos], bounded, reminding: true, queueing: true })
+        const bob = yield* made.reminders!.add(tezosDone("call Bob"))
+        yield* made.hear(ended(tezos, "run-1"))
+        yield* made.wait(10)
+        // He cancels it while the failure waits behind something else being said.
+        const cancelled = yield* made.reminders!.cancel(bob.id)
+        yield* made.speak
+        return { cancelled: Option.isSome(cancelled), told: made.told, heard: yield* remindersHeard(made.journal) }
+      }),
+    )
+    expect(result.cancelled).toBe(false)
+    expect(result.told).toEqual(["Migrate Tezos Integration failed, sir: the model provider had an error. You asked me to remind you then: call Bob."])
+    expect(result.heard).toEqual([true])
+  })
+
   test("what he set on a thread finishing that ended while yapd couldn't hear it goes by how its run ended: a failure says why, and one he stopped keeps it for its next", async () => {
     const over = new Date(now - 30_000).toISOString()
     const tezos = thread("tezos", "Migrate Tezos Integration", { status: "interrupted", latestRunId: "run-1", latestRunCompletedAt: over })

@@ -461,10 +461,10 @@ export interface Finished {
   readonly answering?: boolean
 }
 
-/** What he set on a thread finishing, said with what's said of its failure, as that's claimed to be said. */
+/** What he set on a thread finishing, fired as it's handed over with what's said of its failure, to be said with it. */
 interface Along {
-  /** Fires them, as what they go with is claimed: their entries, heard with it. */
-  readonly fire: Effect.Effect<ReadonlyArray<number>>
+  /** The entries they were fired under, heard with it once it's said. */
+  readonly entries: ReadonlyArray<number>
   /** What they'd go with isn't said after all: each is said on its own. */
   readonly apart: Effect.Effect<void>
 }
@@ -574,9 +574,10 @@ export const make = (options: {
      * off, or was turned off or on since `turns`, it's kept under its key
      * unheard and nothing is said: what came in while it was off is told
      * only in a catch-up, and its key keeps it from being said later. So
-     * is one dropped unsaid as yapd is turned off. What goes `along` with it
-     * is fired once it's claimed, and heard with it; when it isn't said after
-     * all, or kept as yapd is off, each is said, or kept, on its own.
+     * is one dropped unsaid as yapd is turned off. What goes `along` with it,
+     * fired as it was handed over, goes with it once it's claimed, and is
+     * heard with it; when it isn't said after all, or kept as yapd is off,
+     * each is said, or kept, on its own.
      */
     const notify = (
       ref: Threads.Ref | undefined,
@@ -590,7 +591,7 @@ export const make = (options: {
       along?: Along,
     ) => {
       let claimed: Option.Option<Option.Option<number>> | undefined = kept === undefined ? undefined : Option.some(Option.some(kept))
-      /** The entries of what goes along with it, once they're fired as it's claimed. */
+      /** The entries of what goes along with it, once it's claimed. */
       let also: ReadonlyArray<number> | undefined
       /** What goes along with it, said on its own instead, once. */
       let parted = false
@@ -625,12 +626,12 @@ export const make = (options: {
             spoken,
             at,
             // Claimed once, the first time it comes up still worth saying: put back after a dictation, it's still this one's to say.
-            // What goes along with it is fired once it is, and said on its own once it's found not to be said after all.
+            // What goes along with it goes with it once it is, and is said on its own once it's found not to be said after all.
             stale: Effect.gen(function* () {
               if (!(yield* still)) return yield* Effect.as(apart, true)
               if (claimed === undefined) claimed = yield* journal.claim(entry)
               if (Option.isNone(claimed)) return yield* Effect.as(apart, true)
-              if (also === undefined) also = along === undefined ? [] : yield* along.fire
+              if (also === undefined) also = along?.entries ?? []
               return false
             }),
             ...(ref === undefined ? {} : { saying: options.mention(ref, spoken) }),
@@ -728,14 +729,15 @@ export const make = (options: {
         : Effect.asVoid(FiberSet.run(running, Effect.zipRight(Effect.sleep(settling), fired(ref, "finished", before, why)).pipe(trouble)))
 
     /**
-     * What he set on a thread finishing by `before`, as its run failed: said
-     * with what's said of the failure, `line`, followed by what each asked to
-     * be reminded of, which is what's given to be said, and fired only once
-     * that's claimed to be said, to be heard with it. When it isn't said
-     * after all, as when a limit was said for another thread already or the
-     * thread started again, or is kept as yapd is off, each is said, or kept,
-     * on its own, with why it stopped. Nothing else hands one over meanwhile.
-     * An offer is asked all the same, in its turn.
+     * What he set on a thread finishing by `before`, as its run failed: fired
+     * as it's handed over with what's said of the failure, `line`, as any
+     * reminder is as it's handed over, so what's said tells only of those
+     * still to come then, followed by what each asked to be reminded of, to
+     * be heard with it, and one he cancels while it waits has gone off. When
+     * it isn't said after all, as when a limit was said for another thread
+     * already or the thread started again, or is kept as yapd is off, each is
+     * said, or kept, on its own, with why it stopped, under the entry it was
+     * fired under. An offer is asked all the same, in its turn.
      */
     const failedToo = (ref: Threads.Ref, line: string, why: string, before: number, turns: number) =>
       Effect.gen(function* () {
@@ -749,29 +751,25 @@ export const make = (options: {
         const called = yield* callingNow(riding)
         const said = yield* reminderLines
         const own = (reminder: Reminders.Reminder) => said.failed(reminder, called(reminder), why)
-        /** The entry each was fired under, once it was. */
-        const kept = new Map<number, Option.Option<number>>()
+        // Off, or turned off or on since, what it goes with is kept for catching up, and so is each, as any reminder handed over then is.
+        const power = yield* options.power
+        const off = !power.on || power.turns !== turns
+        const at = yield* Clock.currentTimeMillis
+        /** Each that was still to come, with the entry it was fired under. */
+        const kept: Array<readonly [Reminders.Reminder, Option.Option<number>]> = []
+        for (const reminder of riding) {
+          // Kept in its own words, as it's said on its own after a restart when he never heard it.
+          const entry = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, said: own(reminder), detail: { reminder: reminder.id, ...(off ? { held: "off" } : {}) } }
+          const fired = yield* reminders.fire(reminder, entry)
+          // Cancelled meanwhile, it may be brought back, and handed over then.
+          if (Option.isNone(fired)) firing.delete(reminder.id)
+          else kept.push([reminder, Option.flatten(fired)])
+        }
+        if (kept.length === 0) return { spoken: line, along: undefined }
         const along: Along = {
-          fire: Effect.gen(function* () {
-            const at = yield* Clock.currentTimeMillis
-            for (const reminder of riding) {
-              // Kept in its own words, as it's said on its own after a restart when he never heard it.
-              const fired = yield* reminders.fire(reminder, { at, kind: "notice", machine: ref.machine, thread: ref.id, said: own(reminder), detail: { reminder: reminder.id } })
-              // Cancelled meanwhile, it may be brought back, and handed over then.
-              if (Option.isNone(fired)) firing.delete(reminder.id)
-              else kept.set(reminder.id, Option.flatten(fired))
-            }
-            return [...kept.values()].flatMap(Option.toArray)
-          }),
+          entries: kept.flatMap(([, row]) => Option.toArray(row)),
           apart: Effect.gen(function* () {
-            for (const reminder of riding) {
-              const row = kept.get(reminder.id)
-              if (row === undefined) {
-                firing.delete(reminder.id)
-                yield* remind(reminder, own(reminder))
-                continue
-              }
-              // Fired with it already, it's said under the entry it was fired under.
+            for (const [reminder, row] of kept) {
               const at = yield* Clock.currentTimeMillis
               const key = Reminders.key(reminder.id)
               const entry = { at, kind: "notice" as const, machine: ref.machine, thread: ref.id, said: own(reminder), key, detail: { reminder: reminder.id } }
@@ -779,7 +777,7 @@ export const make = (options: {
             }
           }),
         }
-        const spoken = [line, ...riding.map(said.also).filter((also) => also !== "")].join(" ")
+        const spoken = [line, ...kept.map(([reminder]) => said.also(reminder)).filter((also) => also !== "")].join(" ")
         return { spoken, along }
       })
 
