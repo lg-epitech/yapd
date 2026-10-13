@@ -161,7 +161,8 @@ export const group = (rows: ReadonlyArray<Kept>, desk: Threads.Desk): ReadonlyAr
   return sorted.map((all) => {
     const first = all[0]!
     const on = listed(desk, first)
-    const project = all.findLast((kept) => kept.project !== undefined)?.project
+    // Outside his projects, kept with none, it isn't named by one.
+    const project = all.findLast((kept) => kept.project !== undefined && kept.project.trim() !== "")?.project
     return tally({ machine: first.machine, thread: first.thread, project, ...(on === undefined ? {} : { called: on.called }), handle: on?.handle ?? `u${++own}` }, all)
   })
 }

@@ -2147,7 +2147,7 @@ export const past = (at: number, now: number) => {
 const missedShown = 15
 
 /** What a thread he missed is called, for the model and in a brief: as the desk calls it, or by its project. */
-export const missedName = (group: Pick<Missed.Group, "called" | "project">) => group.called ?? group.project ?? "a session"
+export const missedName = (group: Pick<Missed.Group, "called" | "project">) => group.called || group.project || "a session"
 
 /** How he missed what he did of a thread, in a few words each: what needs him, what came while yapd was off, and so on. */
 const how = (group: Missed.Group) =>
