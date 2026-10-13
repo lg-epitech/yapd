@@ -13,7 +13,7 @@ import { addressed, type Lines, unaddressed } from "./Persona.ts"
 import type * as Preferences from "./Preferences.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
-import { agreed, enough, gist, hallucinated, type Line, morePlease, noted } from "./Responder.ts"
+import { agreed, enough, gist, hallucinated, halts, type Line, morePlease, noted, wakes } from "./Responder.ts"
 import * as T3Actions from "./T3Actions.ts"
 import * as Threads from "./Threads.ts"
 
@@ -2089,8 +2089,9 @@ export const unheard = (words: string, said: string) => {
  * Whether yapd answers to a phrase said on its own without the model, like
  * "say that again", "scratch that", "yes", "focus" or "mute it", which a
  * routine called the same would never be heard for, or would take the place
- * of: with a question open, "ship it" is a yes to it. So no routine is ever
- * called that, said or written.
+ * of: with a question open, "ship it" is a yes to it; nor "Mute." or "turn
+ * on", which turn yapd off or on. So no routine is ever called that, said or
+ * written.
  */
 export const answersTo = (phrase: string) => {
   const said = gist(phrase)
@@ -2100,6 +2101,8 @@ export const answersTo = (phrase: string) => {
   ]
   return (
     said === "" ||
+    halts(phrase) ||
+    wakes(phrase) ||
     closed.some((set) => set.has(said)) ||
     shows.has(said) ||
     ordinals.some(([pattern]) => pattern.test(said)) ||

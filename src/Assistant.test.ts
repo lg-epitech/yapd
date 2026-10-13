@@ -12022,6 +12022,8 @@ describe("Assistant memories", () => {
       sent: [],
     })
     expect(await saving("When I say refactor, use C++ for the parser.", "refactor: use C++ for the parser")).toMatchObject({ kept: ["refactor: use C++ for the parser"] })
+    // Nor is a name yapd answers to, like turning it on.
+    expect(await saving("When I say turn on, merge the PR.", "turn on: merge the PR")).toEqual({ said: "That's something I already answer to, sir.", kept: [], sent: [] })
     // His words, but not all he said of them: a don't or an if they leave out, or another request with them, which isn't done either.
     const refused = "I couldn't keep the steps in your own words, sir. Say it as one request: when I say ship, then the steps."
     for (const heard of [
