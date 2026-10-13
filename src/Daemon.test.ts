@@ -4726,6 +4726,55 @@ describe("Daemon with threads muted", () => {
     expect(result).toEqual({ waited: true, hooked: false, played: [answer] })
   })
 
+  test("the first turn of work yapd started whose Stop comes just as T3 Code's word is handed on waits for what comes of it, and is said from that word when it's dropped", async () => {
+    const asked = "Find out whether Apple shipped an API for glucose sensors."
+    const answer = "Apple hasn't shipped one."
+    const glucose = { machine: "Rosie", id: "t-glucose" }
+    const start = { at: 0, digest: Ledger.digest(asked), kind: "start" as const, messageId: "yapd:u1:0:m" }
+    const result = await run(
+      Effect.gen(function* () {
+        const { handle, made, wait, played, flush } = yield* make(undefined, {
+          // Just restarted, T3 Code takes too long to say which thread the hook is of.
+          link: () => Effect.as(Effect.sleep("5 seconds"), Option.some(glucose)),
+          sent: (to, since) => Effect.succeed(Threads.same(to, glucose) ? [start].filter(({ at }) => at >= since) : []),
+          trivialMessages: [answer],
+        })
+        yield* wait(600)
+        const at = yield* Clock.currentTimeMillis
+        const ran: Notices.Finished["run"] = {
+          status: "completed",
+          final: answer,
+          others: [],
+          natives: ["s-glucose"],
+          previous: Option.none(),
+          userMessageId: Option.some(start.messageId),
+          startedAt: at - 30_000,
+        }
+        // T3 Code's word finds no Stop yet, which comes, with no prompt seen, as after a restart, just before it's handed on.
+        const hooked = Notices.hooked(yield* made.stopped(["s-glucose"]), ran, ran.startedAt)
+        yield* stopHere(handle, "s-glucose", answer)
+        const handing = yield* Effect.fork(
+          made.finished({
+            ...unhooked(answer, "run-1", (yield* made.power).turns),
+            about: glucose,
+            project: "",
+            turn: { prompt: Option.some(asked), message: answer },
+            at,
+            run: ran,
+            answering: true,
+          }),
+        )
+        yield* flush
+        const waited = Option.isNone(yield* Fiber.poll(handing))
+        yield* wait(4)
+        yield* Fiber.join(handing)
+        yield* wait(11)
+        return { hooked, waited, played: [...played] }
+      }),
+    )
+    expect(result).toEqual({ hooked: false, waited: true, played: [answer] })
+  })
+
   test("a slight reply to a message yapd sent, its hook tied to its thread, stays skipped: T3 Code's word leaves it to its hook", async () => {
     const message = "Switch to the Dexcom table."
     const reply = "Done, switched."

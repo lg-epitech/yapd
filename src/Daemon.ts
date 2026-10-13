@@ -1424,17 +1424,38 @@ export const make = (
    * said or skipped, or its thread started again or went. It's the thread's
    * own session to yapd, and a reply to it can only go through T3 Code. The
    * turn is its, or its Stop's, as decided with the event lock held, so
-   * neither is said once the other is.
+   * neither is said once the other is. For a turn of work yapd sent, a Stop
+   * of its own whose update is still being got ready may yet tell of
+   * nothing, which leaves it to T3 Code's word after all: what comes of it is
+   * waited for, without the lock, and it's decided again.
    */
-  const finished = (input: Notices.Finished) =>
+  const finished = (input: Notices.Finished): Effect.Effect<void> =>
+    Effect.flatMap(handing(input), (undecided) =>
+      undecided.length === 0 ? Effect.void : Effect.zipRight(Effect.forEach(undecided, Deferred.await, { discard: true }), finished(input)),
+    )
+
+  /** What `finished` does with the event lock held, giving the Stops it's left to whose updates are still being got ready, if any. */
+  const handing = (input: Notices.Finished) =>
     Effect.gen(function* () {
+      const none: ReadonlyArray<Deferred.Deferred<void>> = []
       // Not what notices about the thread go under, so neither takes the other's place.
       const session = `finished:${input.about.machine}:${input.about.id}`
-      if (!(yield* input.current)) return yield* Effect.logInfo("Not saying a turn no hook told of, since its thread started again")
-      // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands.
-      if (Notices.hooked(stopsOf(input.run.natives), input.run, input.run.startedAt)) return yield* Effect.logInfo("Left to its hook")
+      if (!(yield* input.current)) return yield* Effect.as(Effect.logInfo("Not saying a turn no hook told of, since its thread started again"), none)
+      // A Stop of its own came, said or skipped, even since T3 Code's word was looked into: what it said, or why it wasn't, stands, once
+      // it's known for a turn of work yapd sent.
+      const hooks = Notices.hooking(stopsOf(input.run.natives), input.run, input.run.startedAt)
+      if (hooks.length > 0) {
+        const undecided = Notices.sent(input.run)
+          ? yield* Effect.filter(
+              hooks.flatMap((stop) => Option.toArray(Option.fromNullable(deciding.get(stop)))),
+              (decided) => Effect.negate(Deferred.isDone(decided)),
+            )
+          : none
+        if (undecided.length > 0) return undecided
+        return yield* Effect.as(Effect.logInfo("Left to its hook"), none)
+      }
       // Heard of twice, as after a reconnect, it's said the once, and the one on its way isn't put aside for it.
-      if (fallbacks.has(input.key)) return
+      if (fallbacks.has(input.key)) return none
       const at = yield* Clock.currentTimeMillis
       for (const [key, kept] of fallbacks) if (at - kept.at > forgotten) fallbacks.delete(key)
       const fallback: Fallback = {
@@ -1496,6 +1517,7 @@ export const make = (
           prompted: { text: Option.getOrUndefined(input.turn.prompt), at: input.run.startedAt },
         }),
       )
+      return none
     }).pipe(events.withPermits(1))
 
   /**
