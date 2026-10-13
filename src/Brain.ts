@@ -403,7 +403,8 @@ export const agrees = (open: Pick<Assistant.Open, "decision" | "candidates">, de
     return (
       among &&
       (decided.how.trim() === "" || decided.how === asked.how) &&
-      (decided.text.trim() === "" || words(decided.text) === words(asked.text)) &&
+      // A title symbols and all, so his "C++ parser" to "C parser?" is never a yes to it.
+      (decided.text.trim() === "" || calledAs(decided.text) === calledAs(asked.text)) &&
       (decided.when.trim() === "" || instant(decided.when) === instant(asked.when))
     )
   }

@@ -2394,14 +2394,16 @@ export const make = (options: {
         const handle = Option.match(target, { onNone: () => "", onSome: ({ handle }) => handle })
         // A routine's name is the steps it sends, which is what was asked about when they're what went.
         const given = Brain.resolved(thought.decision, situation)
-        // What he left out is what was asked about: its words, as for "no, the Mina one", and its thread, as for "no, stop it instead".
+        // What he left out is what was asked about: its words, as for "no, the Mina one", and its thread, as for "no, stop it instead", or
+        // "no, C++ parser" to renaming it to "C parser", a new title for it, checked again as his words.
         const answered = filled(given, open)
         if (answered === undefined) {
           yield* forgo(open, "Its words may have been my own voice.")
           return yield* unworded(open, thought, said)
         }
+        const renamed = answered.act === "tidy" && answered.how === "rename" && open.decision.act === "tidy" && open.decision.how === "rename"
         const instead =
-          answered.target === "" && handle !== "" && (answered.act === "send" || answered.act === "stop")
+          answered.target === "" && handle !== "" && (answered.act === "send" || answered.act === "stop" || renamed)
             ? { ...answered, target: handle, sure: "high" as const, others: "" }
             : answered
         const timed =

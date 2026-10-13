@@ -13727,6 +13727,31 @@ describe("Assistant tidying", () => {
     expect(result.answers).toEqual([{ [colour.id]: message, [extras.id]: ["Alpha"] }])
   })
 
+  test("a new title he gives to the one read back to him, like his \"C++ parser\" to \"C parser?\", is never a yes to it: it's renamed to his, only when it's his words", async () => {
+    /** The model's "C parser" for his "C++ parser" read back, then his `answer`, which the model takes for the title "C++ parser". */
+    const renaming = (answer: string) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant((situation) => {
+            const { heard } = situation.utterance
+            if (heard.startsWith("Rename")) return Brain.decision({ act: "tidy", how: "rename", target: handle(situation, mina), text: "C parser", sure: "high" })
+            if (heard.startsWith("No")) return Brain.decision({ act: "tidy", how: "rename", text: "C++ parser", sure: "high", pending: "answers" })
+            return undefined
+          })
+          yield* made.dictate("Rename the Mina tickets to C++ parser.")
+          const asked = made.spoken().at(-1)
+          yield* made.answer(answer)
+          const titles = made.dispatched.filter(({ type }) => type === "thread.metadata.update").map(({ title }) => title)
+          return { asked, said: made.spoken().at(-1), titles }
+        }),
+      )
+    const his = await renaming("No, C++ parser, with the plus signs.")
+    expect(his.asked).toBe("Rename Open Mina SSV2 Bug Tickets to C parser, sir?")
+    expect(his.titles).toEqual(["C++ parser"])
+    // Not his words, it's left, never renamed to the model's.
+    expect((await renaming("No, the one with the plus signs.")).titles).toEqual([])
+  })
+
   test("a busy thread isn't archived without his yes, nor one that got busy before it", async () => {
     const result = await run(
       Effect.gen(function* () {
