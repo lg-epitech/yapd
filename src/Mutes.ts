@@ -207,18 +207,37 @@ export const aboutSubagents = (heard: string) => {
   )
 }
 
+/** Words that ask what was said, how much or since when, rather than name a thread, like "everything" or "from this morning". */
+const catchingUp: ReadonlySet<string> = new Set([
+  "what", "everything", "all", "anything", "something", "every", "each", "latest", "last", "newest", "recent", "recently", "new", "again", "since",
+  "from", "missed", "unheard", "heard", "today", "yesterday", "tonight", "morning", "afternoon", "evening", "earlier", "ago", "before", "after",
+  "while", "said", "say", "says", "findings", "results", "updates", "update", "so", "far", "hour", "hours", "minutes", "week", "day", "days",
+  "lunch", "away", "off", "back",
+])
+
+/** How many words a thread's name has at most, said as he asks for its subagents. */
+const named = 6
+
 /**
- * Whether he asks, as a whole, to have a thread's subagents read to him, by
- * its name or as "its", like "read me the Tezos migration's subagents" or
- * "read me the subagents of the Tezos migration": which thread is the
- * model's to tell. Never what they said, like "read me what its subagents
- * said" or "read me its subagents' findings".
+ * Whether he asks, as a whole, to have a thread's subagents read to him, as
+ * "its" or by a few words of its name and nothing more, like "read me the
+ * Tezos migration's subagents" or "read me the subagents of the Tezos
+ * migration": which thread is the model's to tell. Never what they said or
+ * since when, like "read me what its subagents said", "read me everything
+ * from the Tezos migration's subagents" or "read me the subagents of the
+ * Tezos migration from this morning", nor them again, which are the model's.
  */
 export const readsSubagents = (heard: string) => {
   const said = gist(heard)
-  const asks = "^(?:(?:can|could|would|will) you )?(?:read|start reading)(?: me| us)? (?!what\\b)"
-  const after = "(?: (?:too|again|aloud|out loud|from now on))?$"
-  return new RegExp(`${asks}(?:its|their|.+(?:'s|s'|')) subagents${after}`).test(said) || new RegExp(`${asks}(?:the )?subagents of .+$`).test(said)
+  const asks = "^(?:(?:can|could|would|will) you )?(?:read|start reading)(?: me| us)? "
+  const after = "(?: (?:too|aloud|out loud|from now on))?$"
+  if (new RegExp(`${asks}(?:its|their) subagents${after}`).test(said)) return true
+  const name =
+    new RegExp(`${asks}([\\p{L}\\p{N} ]+?)(?:'s|s'|') subagents${after}`, "u").exec(said)?.[1] ??
+    new RegExp(`${asks}(?:the )?subagents of ([\\p{L}\\p{N} ]+?)${after}`, "u").exec(said)?.[1]
+  if (name === undefined) return false
+  const words = name.split(" ")
+  return words.length <= named && !words.some((word) => catchingUp.has(word))
 }
 
 /** A thread whose subagents he has read to him. */

@@ -2547,8 +2547,15 @@ const checking = (choice: Decision, situation: Situation, lines: Lines): Checked
   // Catching up only reads what yapd kept, which has a machine that's away too: a thread it names is one on the desk, one only in what
   // he missed, by its own handle, or one he muted that isn't on the desk, by its handle in MUTED.
   if (choice.act === "catchup") {
-    // "Read me the Tezos migration's subagents", in his own words, is having them read to him from now on, never only what they said.
-    if (choice.how === "subagents" && situation.utterance.echo === undefined && Mutes.readsSubagents(situation.utterance.heard)) {
+    // "Read me the Tezos migration's subagents", in his own words and nothing more, is having them read to him from now on, never only
+    // what they said; anything else, or a catch-up of them since when, or of a project, is the model's.
+    if (
+      choice.how === "subagents" &&
+      choice.when === "" &&
+      choice.text === "" &&
+      situation.utterance.echo === undefined &&
+      Mutes.readsSubagents(situation.utterance.heard)
+    ) {
       return checking({ ...choice, act: "mute", when: "" }, situation, lines)
     }
     if (choice.target === "") return doing({ decision: choice, target: Option.none() })

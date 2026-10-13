@@ -1662,10 +1662,27 @@ describe("Brain", () => {
         const checked = read(heard)
         expect([heard, checked._tag === "Do" ? checked.plan.decision : checked]).toMatchObject([heard, { act: "mute", how: "subagents", target: tezosHandle(), when: "" }])
       }
-      for (const heard of ["What did the Tezos migration's subagents say?", "Read me what the Tezos migration's subagents said.", "Read me the Tezos migration's subagents' findings."]) {
+      // Anything more than asking for them, like what they said, since when or again, is the model's: a catch-up, as it decided.
+      for (const heard of [
+        "What did the Tezos migration's subagents say?",
+        "Read me what the Tezos migration's subagents said.",
+        "Read me the Tezos migration's subagents' findings.",
+        "Read me everything from the Tezos migration's subagents.",
+        "Read me the latest from the Tezos migration's subagents.",
+        "Read me the subagents of the Tezos migration from this morning.",
+        "Read me the subagents of the Tezos migration again.",
+        "Read me its subagents again.",
+      ]) {
         const checked = read(heard)
         expect([heard, checked._tag === "Do" ? checked.plan.decision : checked]).toMatchObject([heard, { act: "catchup", how: "subagents" }])
       }
+      // A catch-up of them since when the model gave is never made a setting, nor its time dropped.
+      const since = Brain.check(
+        Brain.decision({ act: "catchup", how: "subagents", target: tezosHandle(), when: "2026-10-08T09:00" }),
+        situation("Read me the Tezos migration's subagents."),
+        lines,
+      )
+      expect(since._tag === "Do" ? since.plan.decision : since).toMatchObject({ act: "catchup", how: "subagents", when: "2026-10-08T09:00" })
     })
 
     test("the model is told which threads' subagents are read, only while any are, and that reading them lasts until he says otherwise", () => {
