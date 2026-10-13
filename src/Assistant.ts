@@ -413,13 +413,15 @@ const joining = "1 second"
  * again on his yes, and whether it's done quietly: the step before was said
  * on its own already, so only what didn't go, or a question, is said of it.
  * `besides` is the line for going ahead the step before says in the same
- * breath, which its own is kept from being.
+ * breath, which its own is kept from being. `working`, tidying, the threads
+ * he agreed to archive at work or waiting on him, told it stops that.
  */
 interface Stepping {
   readonly step: number
   readonly twice: boolean
   readonly quietly?: boolean
   readonly besides?: string
+  readonly working?: ReadonlyArray<Threads.Ref>
 }
 
 const quiet = (subject: Subject): Outcome => ({ say: "", subject, kind: "none" })
@@ -1745,15 +1747,15 @@ export const make = (options: {
 
     /**
      * What a decision to change a thread asks of the hands, if it says enough
-     * to do it, from what he said, `utterance`. `last` is the last thing done,
-     * which taking back means.
+     * to do it, from what he said, `utterance`, as the step `at` is. `last` is
+     * the last thing done, which taking back means.
      */
     const acted = (
       decision: Brain.Decision,
       target: Option.Option<Threads.Listed>,
       utterance: Pick<Utterance, "heard" | "echo">,
       last: Option.Option<Ledger.Row>,
-      step: number,
+      at: Pick<Stepping, "step" | "working">,
       asks?: Asks,
       situation: Pick<Brain.Situation, "desk" | "archived"> = { desk: nowhere },
     ): Hands.Act | undefined => {
@@ -1801,6 +1803,7 @@ export const make = (options: {
             what,
             ...(what === "rename" ? { title: decision.text.trim() } : {}),
             ...(what === "snooze" ? { until: new Date(until).toISOString() } : {}),
+            ...(at.working === undefined || at.working.length === 0 ? {} : { working: at.working }),
           }
         }
         case "decide": {
@@ -1809,7 +1812,7 @@ export const make = (options: {
           // request, whose words are the model's; for the rest of the thread's work only when he said so, whatever the model took it for;
           // never for always.
           const allowing = decision.how === "accept" || decision.how === "session"
-          if (allowing && (step > 0 || decision.rest.trim() !== "" || !Brain.approving(utterance.heard))) return undefined
+          if (allowing && (at.step > 0 || decision.rest.trim() !== "" || !Brain.approving(utterance.heard))) return undefined
           const allowed: Hands.Decision | undefined =
             decision.how === "decline" ? "decline" : decision.how === "session" && Brain.forSession(utterance.heard) ? "acceptForSession" : allowing ? "accept" : undefined
           return allowed === undefined ? undefined : { _tag: "Decide", to: to.value, requestId: asks.requestId, decision: allowed }
@@ -2158,7 +2161,7 @@ export const make = (options: {
           yield* Effect.logInfo("Not doing it, since yapd was turned off after it was said")
           return quiet(thought.subject)
         }
-        const act = acted(plan.decision, plan.target, utterance, thought.situation.acted, at.step, asks, thought.situation)
+        const act = acted(plan.decision, plan.target, utterance, thought.situation.acted, at, asks, thought.situation)
         // A message with no words of its own to send, as when he began it over yapd's own voice, has him asked to say it again.
         if (act === undefined) return reply(plan.decision.act === "send" && Option.isSome(plan.target) && asks?._tag !== "Question" ? said.misheard : said.cantTell, thought.subject)
         // Answered now, however it was asked, what a thread waits on him for is never asked again of yapd's own accord, like a copy put
@@ -2355,7 +2358,8 @@ export const make = (options: {
         const decision = Brain.decision({ ...open.decision, target: kept.join(", "), sure: "high", others: "", pending: "answers", rest })
         const target = Option.fromNullable(kept.length === 1 ? situation.desk.threads.find(({ handle }) => handle === kept[0]) : undefined)
         if (left !== "") yield* Effect.logInfo(`Leaving out of it what's gone or busy since he was asked: ${[...busy, ...gone].join(", ")}`)
-        const outcome = yield* write({ decision, target }, { ...thought, decision }, said, { step: 0, twice: false })
+        // Only those he was told were busy are archived as they are: any other found busy as it's about to go is left too.
+        const outcome = yield* write({ decision, target }, { ...thought, decision }, said, { step: 0, twice: false, working: open.tidying?.working ?? [] })
         if (left === "" || outcome.say === "") return outcome
         const say = joined(outcome.say, left, said)
         return { ...outcome, say, subject: outcome.subject._tag !== "Nothing" && outcome.subject.said === outcome.say ? { ...outcome.subject, said: say } : outcome.subject }

@@ -11907,6 +11907,37 @@ describe("Assistant tidying", () => {
     ])
   })
 
+  test("unarchiving by voice a thread yapd archived brings back what archiving it dropped, as taking it back does", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard.startsWith("Archive")
+              ? Brain.decision({ act: "tidy", how: "archive", target: handle(situation, mina), sure: "high" })
+              : situation.utterance.heard.startsWith("Unarchive")
+                ? Brain.decision({ act: "tidy", how: "unarchive", target: Brain.archivedHandle(0), sure: "high" })
+                : undefined,
+          undefined,
+          { reminders: true },
+        )
+        yield* made.reminders!.add({ at: now, heard: "Tell me when the Mina one finishes.", text: "", event: "finished", machine: "Rosie", thread: mina.id, called: "the Mina tickets" })
+        yield* made.dictate("Archive the Mina tickets thread.")
+        // T3 Code archived it, which the shell then shows it as.
+        yield* made.becomes({ ...mina, archivedAt: "2026-10-01T02:18:01.000Z" })
+        yield* made.dictate("Unarchive the Mina tickets.")
+        return { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).length, sent: tidied(made.dispatched) }
+      }),
+    )
+    expect(result).toEqual({
+      said: "Unarchived, sir: Open Mina SSV2 Bug Tickets. Its reminder is back.",
+      pending: 1,
+      sent: [
+        { type: "thread.archive", commandId: "0", threadId: mina.id },
+        { type: "thread.unarchive", commandId: "0", threadId: mina.id },
+      ],
+    })
+  })
+
   test("tidying several threads asks once naming each, and a yes tidies exactly the ones he kept", async () => {
     /** Archiving the four Tezos threads, said yes to as `yes` puts it, and what the model makes of a yes with more to it. */
     const archiving = (yes: string, kept: ReadonlyArray<T3Live.Thread>) =>
@@ -12006,5 +12037,37 @@ describe("Assistant tidying", () => {
     expect(result.asked).toBe("That's three threads, sir: Tezos importer, Tezos fees and Tezos wallets. Archive them all?")
     expect(result.said).toBe("Archived both, sir. I left out Tezos fees: it's working again.")
     expect(result.sent).toEqual([importer, wallets].map((one, index) => ({ type: "thread.archive", commandId: `0:${index + 1}`, threadId: one.id })))
+  })
+
+  test("a thread that gets busy while what he said is worked out isn't archived, alone or one of several he said yes to", async () => {
+    /** What happens as the model works out what he said. */
+    let meanwhile: Effect.Effect<void> = Effect.void
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "Archive the Tezos docs."
+              ? Brain.decision({ act: "tidy", how: "archive", target: handle(situation, docs), sure: "high" })
+              : situation.utterance.heard.startsWith("Archive")
+                ? Brain.decision({ act: "tidy", how: "archive", target: [importer, fees, wallets].map((one) => handle(situation, one)).join(", "), sure: "high" })
+                : Brain.decision({ act: "tidy", how: "archive", target: [importer, wallets].map((one) => handle(situation, one)).join(", "), pending: "answers" }),
+          undefined,
+          { others: tezosThreads, deciding: Effect.suspend(() => meanwhile) },
+        )
+        // Idle as what he said is read, the Tezos docs gets going before it's archived.
+        meanwhile = made.becomes(working(docs))
+        yield* made.dictate("Archive the Tezos docs.")
+        const alone = { said: made.spoken().at(-1), sent: tidied(made.dispatched).length }
+        meanwhile = Effect.void
+        yield* made.dictate("Archive the Tezos importer, fees and wallets.")
+        // Idle as his yes is read, the Tezos wallets gets going before it's archived.
+        meanwhile = made.becomes(working(wallets))
+        yield* made.answer("Yes, but not the Tezos fees.")
+        return { alone, said: made.spoken().at(-1), sent: tidied(made.dispatched) }
+      }),
+    )
+    expect(result.alone).toEqual({ said: "I left Tezos docs, sir: it's started working.", sent: 0 })
+    expect(result.said).toBe("Archived one of the two, sir. I left Tezos wallets: it's started working.")
+    expect(result.sent).toEqual([{ type: "thread.archive", commandId: "0:1", threadId: importer.id }])
   })
 })
