@@ -12414,7 +12414,7 @@ describe("Assistant memories", () => {
   })
 
   test("a pass named, as in my Gmail pass, isn't remembered nor shown the model after, while tests that pass are", async () => {
-    const refused = ["hunter2 is my Gmail pass", "my Gmail pass for work is hunter2", "the VPN's pass is hunter2"]
+    const refused = ["hunter2 is my Gmail pass", "my Gmail pass for work is hunter2", "the VPN's pass is hunter2", "hunter2 is my AWS pass"]
     const kept = [
       "the Mina tests pass only on Node 22",
       "the tests pass on rig",
