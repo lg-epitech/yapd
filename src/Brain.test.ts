@@ -1992,4 +1992,39 @@ describe("memories", () => {
     expect(forget("medium")).toEqual({ _tag: "Say", spoken: lines.cantTell })
     expect(forget("high")).toMatchObject({ _tag: "Do" })
   })
+
+  const routines = { kept: [], written: [{ name: "ship", steps: "merge the PR" }] }
+  const handleOf = (listed: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === listed.id)?.handle ?? ""
+
+  test("a routine's steps go as a message, or an answer, in his own words, never written out for what he said without its name, nor as an answer by its handle", () => {
+    const check = (heard: string, given: Partial<Brain.Decision> & Pick<Brain.Decision, "act">) =>
+      Brain.check(Brain.decision({ how: given.act === "send" ? "now" : "", ...given }), situation(heard, { memories: routines }), lines)
+    const refused = { _tag: "Say" as const, spoken: lines.cantTell }
+    // His own plain message goes, as any he says does, whatever a routine's steps say.
+    expect(check("Tell the Tezos one to merge the PR.", { act: "send", target: handleOf(tezos), text: "merge the PR" })).toMatchObject({ _tag: "Do" })
+    expect(check("Tell the std one to merge the PR.", { act: "reply", target: handleOf(std), text: "merge the PR" })).toMatchObject({ _tag: "Do" })
+    // Steps he never said, for what he said without the routine's name, never go.
+    expect(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "merge the PR" })).toEqual(refused)
+    expect(check("Tell the std one to wrap it up.", { act: "reply", target: handleOf(std), text: "merge the PR" })).toEqual(refused)
+    // Nor does an answer to a thread's question by a routine's handle, which would go as "p1", even with its name said.
+    expect(check("Tell the std one to ship.", { act: "reply", target: handleOf(std), text: "p1" })).toEqual(refused)
+  })
+
+  test("a routine's steps written out without its name go as what yapd asked about only in what answers its question", () => {
+    const target = handleOf(tezos)
+    const again: Assistant.Open = {
+      ...which([ref(tezos)]),
+      kind: "resend",
+      decision: Brain.decision({ act: "send", target, text: "merge the PR", how: "now" }),
+      asked: "I sent that a minute ago, sir. Again?",
+    }
+    const check = (heard: string, pending: Brain.Decision["pending"]) =>
+      Brain.check(
+        Brain.decision({ act: "send", target, text: "merge the PR", how: "now", pending }),
+        situation(heard, { memories: routines, open: Option.some(again), desk: desk([ref(tezos)]) }),
+        lines,
+      )
+    expect(check("Yes, send it again.", "answers")).toMatchObject({ _tag: "Do" })
+    expect(check("Wrap the Tezos one up.", "replaces")).toEqual({ _tag: "Say", spoken: lines.cantTell })
+  })
 })

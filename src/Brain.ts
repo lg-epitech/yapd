@@ -1882,15 +1882,21 @@ const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "
   asSaid(name, utterance.whole ?? utterance.heard) && (utterance.whole === undefined || asSaid(name, utterance.heard))
 
 /**
- * Whether the model wrote a routine's steps out as a message, as words
- * compare, for what he said without its whole name, which they'd go for as
- * if he had. Never words yapd holds, checked as they were first asked for:
- * those of the question open, like "Again?" about them, nor those of an offer
- * he set, which comes due with nothing heard.
+ * Whether the model wrote a routine's steps out as a message, or as his
+ * answer to a thread's question, as words compare, for what he said without
+ * its whole name, which they'd go for as if he had. Never his own words, said
+ * in this part of what he said, word for word, like "tell the Tezos one to
+ * merge the PR" with a routine "ship: merge the PR"; nor words yapd holds,
+ * checked as they were first asked for: those of the question open, like
+ * "Again?" about them, only in what answers it, which an answer leaving them
+ * out has filled in from it; nor those of an offer he set, which comes due
+ * with nothing heard.
  */
 const unnamed = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">) => {
   const words = Ledger.digest(choice.text)
-  if (words === "" || situation.utterance.heard === "" || Option.exists(situation.open, ({ decision }) => Ledger.digest(decision.text) === words)) return false
+  const { heard } = situation.utterance
+  if (words === "" || heard === "" || asSaid(choice.text, heard)) return false
+  if (choice.pending === "answers" && Option.exists(situation.open, ({ decision }) => Ledger.digest(decision.text) === words)) return false
   return remembered(situation).some(({ kind, name, text }) => kind === "routine" && name !== undefined && Ledger.digest(text) === words && !nameSaid(name, situation.utterance))
 }
 
@@ -1898,12 +1904,15 @@ const unnamed = (choice: Decision, situation: Pick<Situation, "memories" | "utte
  * A message, or an offer, whose words the model gave as a routine's handle,
  * with the routine's steps in their place, exactly as they're kept, never as
  * the model would write them; none for a handle that's no routine, or for one
- * whose name he didn't say, nor for its steps written out without it.
- * Anything else is as it was.
+ * whose name he didn't say, nor for its steps written out without it. None
+ * for an answer to a thread's question by a handle, which is only ever his
+ * own words or the option he picked, nor for one that's a routine's steps
+ * written out without its name. Anything else is as it was.
  */
 const routining = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">): Option.Option<Decision> => {
-  if (choice.act !== "send" && choice.act !== "offer") return Option.some(choice)
+  if (choice.act !== "send" && choice.act !== "offer" && choice.act !== "reply") return Option.some(choice)
   if (!routineHandle(choice.text)) return unnamed(choice, situation) ? Option.none() : Option.some(choice)
+  if (choice.act === "reply") return Option.none()
   return Option.map(
     Option.filter(rememberedBy(choice.text, situation), ({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, situation.utterance)),
     ({ text }) => ({ ...choice, text }),
