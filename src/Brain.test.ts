@@ -2163,12 +2163,19 @@ describe("memories", () => {
     expect(check("Tell the std one a1.", { act: "reply", target: handleOf(std), text: "A1." })).toEqual({ _tag: "Say", spoken: lines.cantTell })
   })
 
-  test("a new title is his as he said it, symbols and all, so the model's \"C parser\" for his \"C++ parser\" is read back to him before it's renamed", () => {
-    const rename = (text: string) => Brain.check(Brain.decision({ act: "tidy", how: "rename", target: handleOf(mina), sure: "high", text }), situation("Rename Mina to C++ parser."), lines)
+  test("a new title is his as he said it, symbols and all, whatever quotes he put around it, so the model's \"C parser\" for his \"C++ parser\" is read back to him before it's renamed", () => {
+    const rename = (text: string, heard = "Rename Mina to C++ parser.") =>
+      Brain.check(Brain.decision({ act: "tidy", how: "rename", target: handleOf(mina), sure: "high", text }), situation(heard), lines)
     const unsaid = rename("C parser")
     expect(unsaid._tag === "Ask" ? unsaid.open.asked : unsaid).toBe("Rename Open Mina SSV2 Bug Tickets to C parser, sir?")
     const his = rename("C++ parser")
     expect(his._tag === "Do" ? his.plan.decision.text : his).toBe("C++ parser")
+    for (const heard of ['Rename Mina to "C++ parser".', "Rename Mina to \u201cC++ parser\u201d."]) {
+      const quoted = rename("C++ parser", heard)
+      expect(quoted._tag === "Do" ? quoted.plan.decision.text : quoted).toBe("C++ parser")
+      const unquoted = rename("C parser", heard)
+      expect(unquoted._tag === "Ask" ? unquoted.open.asked : unquoted).toBe("Rename Open Mina SSV2 Bug Tickets to C parser, sir?")
+    }
   })
 
   test("a routine's name is his as he said it, symbols and all, so the model's \"C\" for his \"C++\" keeps nothing, and saying \"C++\" never sends one called \"C\"", () => {

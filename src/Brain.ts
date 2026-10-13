@@ -2213,12 +2213,13 @@ export const asSaid = (words: string, said: string) => {
 
 /**
  * Whether words are his as he said them, as `asSaid` has it, but symbols and
- * all, as `worded` compares them, so the model's "C parser" is never his
- * "C++ parser", nor its "NET" his ".NET".
+ * all, as `calledAs` compares them, whatever quotes he put around them, so
+ * the model's "C parser" is never his "C++ parser", nor its "NET" his ".NET",
+ * yet his quoted "C++ parser" is.
  */
 const wordForWord = (words: string, said: string) => {
-  const kept = worded(words)
-  return kept !== "" && ` ${worded(said)} `.includes(` ${kept} `)
+  const kept = calledAs(words)
+  return kept !== "" && ` ${calledAs(said)} `.includes(` ${kept} `)
 }
 
 /**
