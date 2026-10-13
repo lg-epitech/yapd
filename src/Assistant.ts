@@ -241,6 +241,12 @@ export interface Open {
    * picked, whatever else he set, cancelled or went off meanwhile.
    */
   readonly reminders?: ReadonlyArray<number>
+  /**
+   * For tidying threads: what each of the candidates was called as he was
+   * asked, to name one gone by his yes, and those he was told are busy, which
+   * his yes agrees to archive as they are. Any other busy by then is left out.
+   */
+  readonly tidying?: { readonly called: ReadonlyArray<string>; readonly working: ReadonlyArray<Threads.Ref> }
 }
 
 /** What the user meant, worked out, not yet acted on. */
@@ -2215,7 +2221,7 @@ export const make = (options: {
           handle !== "" &&
           instead.target === handle &&
           Ledger.digest(instead.text) === Ledger.digest(open.decision.text)
-        const agreed = Brain.agrees(open, given, situation.desk)
+        const agreed = Brain.agrees(open, given, situation)
         if (!agreed && !timed) {
           yield* forgo(open, "He asked for something else instead.")
           const checked = Brain.check(instead, situation, said)
@@ -3384,7 +3390,7 @@ export const make = (options: {
         // A routine's name is the steps it sends, so saying it again to "Again?" about them is a yes too.
         const resolved = Brain.resolved(decision, decided.situation)
         const same = open.kind === "resend" ? { ...resolved, how: "" } : resolved
-        const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, same, decided.situation.desk)
+        const repeated = Brain.yesNo(open.kind) && decision.target !== "" && Brain.agrees(open, same, decided.situation)
         // What a thread waits on him for is only answered for that thread: naming another, like "approve the Mina one instead", is
         // something new, which the model's pick of thread stands for, and leaves the one asked about waiting.
         const named = decided.situation.desk.threads.find(({ handle }) => handle === decision.target)
