@@ -1123,6 +1123,17 @@ export const archivedBy = (handle: string, situation: Pick<Situation, "archived"
   return Option.fromNullable(index >= 0 && index < archivedShown ? situation.archived?.[index] : undefined)
 }
 
+/**
+ * The thread yapd archived that a decision names by its handle in ARCHIVED,
+ * as of one on the desk: only when the model's sure of it, or fairly sure
+ * and it's the one he's on about.
+ */
+export const archivedSurely = (choice: Pick<Decision, "target" | "sure">, situation: Pick<Situation, "archived" | "subject">): Option.Option<Archived> =>
+  Option.filter(
+    archivedBy(choice.target, situation),
+    ({ ref }) => choice.sure === "high" || (choice.sure === "medium" && Option.exists(about(situation.subject), (focus) => Threads.same(focus, ref))),
+  )
+
 /** The handle in ARCHIVED of a thread yapd archived, while it's shown there. */
 export const archivedAs = (ref: Threads.Ref, situation: Pick<Situation, "archived">) => {
   const index = situation.archived?.findIndex((one) => Threads.same(one.ref, ref)) ?? -1
@@ -3012,14 +3023,15 @@ const writing = (
     undoes(choice.how) === "catchup" ||
     (undoes(choice.how) === "reminder" && !Option.exists(situation.noted ?? Option.none(), ({ about }) => Option.isSome(about)))
   if (choice.act === "undo" && (undoes(choice.how) === "last" || unthreaded || (Option.isNone(target) && (choice.target.trim() === "" || undoes(choice.how) !== "thread")))) {
-    return { _tag: "Do", plan: { decision: { ...choice, target: "" }, target: Option.none() } }
+    // A reminder of a thread yapd archived, by its handle in ARCHIVED, keeps it: what an archive dropped comes back with that thread alone.
+    const archived = undoes(choice.how) === "reminder" && Option.isSome(archivedBy(choice.target, situation)) ? choice.target.trim() : ""
+    return { _tag: "Do", plan: { decision: { ...choice, target: archived }, target: Option.none() } }
   }
   // Taking back what was done to a thread he names that yapd archived, by its handle in ARCHIVED, is of that thread alone, as of one on
   // the desk: a handle that's neither is never taken for none, which would take back every thread of the tidy.
   if (choice.act === "undo" && Option.isNone(target)) {
     const archived = archivedBy(choice.target, situation)
-    const on = Option.exists(archived, ({ ref }) => Option.exists(about(situation.subject), (focus) => Threads.same(focus, ref)))
-    if (Option.isSome(archived) && (choice.sure === "high" || (choice.sure === "medium" && on))) return { _tag: "Do", plan: { decision: choice, target: Option.none() } }
+    if (Option.isSome(archivedSurely(choice, situation))) return { _tag: "Do", plan: { decision: choice, target: Option.none() } }
     return Option.isNone(archived) && candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }
   }
   if (Option.isNone(target)) return candidates.length >= 2 ? ask(candidates) : { _tag: "Say", spoken: lines.cantTell }

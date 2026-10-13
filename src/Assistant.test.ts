@@ -13508,6 +13508,47 @@ describe("Assistant tidying", () => {
     expect({ pending: since.pending, sent: since.sent }).toEqual({ pending: 0, sent: ["thread.archive"] })
   })
 
+  test("taking back the reminder an archive of several dropped, of the one he names by its handle in ARCHIVED, unarchives that one alone, and only when the model's sure which", async () => {
+    /** The Tezos importer and fees, each with a reminder on it, archived together, then the fees' reminder asked back, the model `sure` it's that one. */
+    const undoing = (sure: Brain.Sure) =>
+      run(
+        Effect.gen(function* () {
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard.startsWith("Archive")) {
+                return Brain.decision({ act: "tidy", how: "archive", target: [importer, fees].map((one) => handle(situation, one)).join(", "), sure: "high" })
+              }
+              if (heard === "Bring back the reminder for the Tezos fees.") {
+                const index = (situation.archived ?? []).findIndex(({ ref }) => ref.id === fees.id)
+                return Brain.decision({ act: "undo", how: "reminder", target: index < 0 ? "" : Brain.archivedHandle(index), sure })
+              }
+              return undefined
+            },
+            undefined,
+            { others: tezosThreads, reminders: true },
+          )
+          for (const [one, called] of [[importer, "the Tezos importer"], [fees, "the Tezos fees"]] as const) {
+            yield* made.reminders!.add({ at: now, heard: `Tell me when ${called} finishes.`, text: "", event: "finished", machine: "Rosie", thread: one.id, called })
+          }
+          yield* made.dictate("Archive the Tezos importer and fees.")
+          yield* made.answer("Yes.")
+          // T3 Code archived them, which the shell then shows them as.
+          for (const one of [importer, fees]) yield* made.becomes({ ...one, archivedAt: "2026-10-01T02:18:01.000Z" })
+          yield* made.dictate("Bring back the reminder for the Tezos fees.")
+          return { said: made.spoken().at(-1), pending: (yield* made.reminders!.pending).map(({ thread }) => thread), sent: tidied(made.dispatched) }
+        }),
+      )
+    const archived = [importer, fees].map((one, index) => ({ type: "thread.archive", commandId: `0:${index + 1}`, threadId: one.id }))
+    // Never the importer, nor its reminder, with it.
+    expect(await undoing("high")).toEqual({
+      said: "Unarchived, sir: Tezos fees. Its reminder is back.",
+      pending: [fees.id],
+      sent: [...archived, { type: "thread.unarchive", commandId: "0:1", threadId: fees.id }],
+    })
+    expect(await undoing("medium")).toEqual({ said: "I couldn't tell which one you meant, sir.", pending: [], sent: archived })
+  })
+
   test("tidying several threads asks once naming each, and a yes tidies exactly the ones he kept", async () => {
     /** Archiving the four Tezos threads, said yes to as `yes` puts it, and what the model makes of a yes with more to it. */
     const archiving = (yes: string, kept: ReadonlyArray<T3Live.Thread>) =>

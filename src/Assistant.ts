@@ -3588,12 +3588,12 @@ export const make = (options: {
      * set on what it archived, of the thread he named if he did, since the
      * last reminder he set or cancelled.
      */
-    const droppedLately = (situation: Brain.Situation, named: Option.Option<Threads.Listed>) =>
+    const droppedLately = (situation: Brain.Situation, named: Option.Option<Threads.Ref>) =>
       Effect.gen(function* () {
         const acted = Option.getOrUndefined(situation.acted)
         if (acted === undefined || acted.kind !== "tidy" || Option.exists(situation.noted ?? Option.none(), ({ at }) => at >= acted.at)) return false
         const rows = yield* ledger.steps(0, { kinds: ["tidy"], utterance: acted.utterance, step: acted.step })
-        return rows.some((row) => Hands.dropped(row) && Option.match(named, { onNone: () => true, onSome: ({ ref }) => ref.machine === row.machine && ref.id === row.thread }))
+        return rows.some((row) => Hands.dropped(row) && Option.match(named, { onNone: () => true, onSome: (ref) => ref.machine === row.machine && ref.id === row.thread }))
       })
 
     /**
@@ -3607,15 +3607,23 @@ export const make = (options: {
      * change he made, whatever thread the model filled in, so a message sent
      * a minute before a reminder is never withdrawn in its place. Reminders
      * an archive just dropped come back with the thread, as taking that back
-     * brings both, never as a reminder he set or cancelled before it.
+     * brings both, never as a reminder he set or cancelled before it: of the
+     * thread yapd archived he named, by its handle in ARCHIVED, that thread
+     * alone, only when the model's sure which, never every thread of it.
      */
     const undoing = (plan: Brain.Plan, thought: Thought, said: Lines, at: Stepping): Effect.Effect<Outcome> =>
       Effect.gen(function* () {
         const { situation } = thought
         const taking = Brain.undoes(plan.decision.how)
         if (taking === "thread") return yield* write(plan, thought, said, at)
-        if (taking === "reminder" && (yield* droppedLately(situation, plan.target))) {
-          return yield* write({ decision: { ...plan.decision, how: "tidy", target: "" }, target: Option.none() }, thought, said, at)
+        const archived = taking === "reminder" ? Brain.archivedBy(plan.decision.target, situation) : Option.none()
+        const named = Option.orElse(Option.map(plan.target, ({ ref }) => ref), () => Option.map(archived, ({ ref }) => ref))
+        if (taking === "reminder" && (yield* droppedLately(situation, named))) {
+          if (Option.isSome(archived) && Option.isNone(Brain.archivedSurely(plan.decision, situation))) {
+            return unfinished(reply(said.cantTell, thought.subject), plan.decision.rest, said, situation.desk)
+          }
+          const target = Option.isSome(archived) ? plan.decision.target.trim() : ""
+          return yield* write({ decision: { ...plan.decision, how: "tidy", target }, target: Option.none() }, thought, said, at)
         }
         // A reminder, a memory or the catch-up, only when he means that, never another.
         const changed = Option.filter(situation.noted ?? Option.none(), (last) => taking === "last" || Brain.changeOf(last) === taking)
