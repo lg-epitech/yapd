@@ -2424,7 +2424,7 @@ const tidyMany = (choice: Decision, all: ReadonlyArray<Threads.Listed>, situatio
   const kept = all.filter((listed) => !left.includes(listed))
   const out = left.length === 0 ? undefined : said.left(choice.how, names(left), sir)
   const [first] = kept
-  if (first === undefined || out !== undefined && kept.length === 0) return { _tag: "Say", spoken: out ?? lines.cantTell }
+  if (first === undefined) return { _tag: "Say", spoken: out ?? lines.cantTell }
   if (kept.length === 1) return tidyConfirm(choice, { ref: first.ref, called: Reminders.named(first), listed: first }, situation, lines, out)
   const counted = `That's ${count(kept.length)} threads${out === undefined ? sir : ""}: ${both(names(kept))}.`
   const until = choice.how === "snooze" ? ` until ${snoozing(choice.when, now)}` : ""
@@ -2495,9 +2495,13 @@ const tidying = (
     const all = handles.flatMap((handle) => Option.toArray(Option.fromNullable(desk.threads.find((listed) => listed.handle === handle))))
     return all.length === handles.length ? tidyMany(choice, all, situation, lines) : { _tag: "Say", spoken: lines.cantTell }
   }
-  if (Option.isNone(target) || choice.sure === "low") return writing(choice, target, candidates, situation, lines, ask)
-  const listed = target.value
-  if (choice.how === "settle" && listed.state === "question") return { _tag: "Say", spoken: said.asking(Reminders.named(listed)) }
+  // The one it names, however it wrote it, like with a comma after it.
+  const one = handles.length === 1 ? Option.fromNullable(desk.threads.find(({ handle }) => handle === handles[0])) : target
+  const among = Option.isSome(one) && !candidates.some(({ handle }) => handle === one.value.handle) ? [one.value, ...candidates] : candidates
+  if (Option.isNone(one) || choice.sure === "low") return writing(choice, one, among, situation, lines, ask)
+  const listed = one.value
+  // T3 Code won't settle one waiting on him till he answers it, nor one at work, or with something in its queue.
+  if (choice.how === "settle" && (listed.state === "question" || listed.state === "approval")) return { _tag: "Say", spoken: said.asking(Reminders.named(listed)) }
   if (choice.how === "settle" && occupied(listed)) return { _tag: "Say", spoken: said.working(Reminders.named(listed)) }
   // His words, never the model's: a title that isn't in all he said, word for word, is read back to him first.
   const heard = utterance.whole ?? utterance.heard
@@ -2505,7 +2509,7 @@ const tidying = (
   if (choice.sure === "medium" || unsaid || (choice.how === "archive" && occupied(listed))) {
     return tidyConfirm(choice, { ref: listed.ref, called: Reminders.named(listed), listed }, situation, lines)
   }
-  return writing(choice, target, candidates, situation, lines, ask)
+  return writing({ ...choice, target: listed.handle }, one, among, situation, lines, ask)
 }
 
 // ---------------------------------------------------------------- speaking

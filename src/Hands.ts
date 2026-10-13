@@ -1410,7 +1410,7 @@ export const make = (options: {
       const row = last.value
       if (row.kind === "stop") return yield* refused("It was a stop, which carrying on takes back.")
       if (row.kind === "start") return yield* refused("Starting work can't be taken back yet.")
-      if (row.kind === "tidy") return yield* untidy(step, row, wanted)
+      if (row.kind === "tidy") return yield* untidy(step, row, to, wanted)
       const messageId = row.messageId
       if (row.kind !== "message" || messageId === null) return yield* refused("There's nothing more to take back.")
       if (row.state !== "sent" && row.state !== "unknown") return yield* refused("It never went, so there's nothing to take back.")
@@ -1533,15 +1533,21 @@ export const make = (options: {
    * Takes back the tidy just done, every thread of it, as far as T3 Code
    * lets it: the way back from what went to each, under ids of this step,
    * then what T3 Code cleared as it was tidied that can be put back, as
-   * `putBack` has it. Each taken back is noted so, and never taken back
-   * twice. Unarchived, what archiving it dropped comes back; what it stopped
-   * never starts again, which is never claimed, nor is unsettling it ever
-   * taken for leaving it as T3 Code would have it on its own.
+   * `putBack` has it; only the thread he named of it, `to`, when he named
+   * one. Each taken back is noted so, and never taken back twice.
+   * Unarchived, what archiving it dropped comes back; what it stopped never
+   * starts again, which is never claimed, nor is unsettling it ever taken
+   * for leaving it as T3 Code would have it on its own.
    */
-  const untidy = (step: Step, last: Ledger.Row, wanted: Effect.Effect<boolean>) =>
+  const untidy = (step: Step, last: Ledger.Row, to: Option.Option<Threads.Ref>, wanted: Effect.Effect<boolean>) =>
     Effect.gen(function* () {
       const refused = (reason: string) => failing({ _tag: "Refused", reason } satisfies Outcome, "take a tidy back")
-      const rows = yield* ledger.steps(0, { kinds: ["tidy"], utterance: last.utterance, step: last.step })
+      const rows = yield* ledger.steps(0, {
+        kinds: ["tidy"],
+        utterance: last.utterance,
+        step: last.step,
+        ...Option.match(to, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
+      })
       const now = yield* Clock.currentTimeMillis
       const going = rows.flatMap((row) =>
         (row.state === "sent" || row.state === "unknown") && row.reason !== takenBack
