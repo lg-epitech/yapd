@@ -2087,9 +2087,10 @@ export const make = (options: {
         const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
         yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
-        // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
+        // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said,
+        // and one of his routines' steps in it by its name alone.
         const thinking = yield* job(
-          think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on }), [
+          think(utterance, along(thought, { _tag: "Answer", said: first.say, about: on, ...routinesOf(first.subject) }), [
             // All he said, still with what of it may have been yapd's own voice, so none of that is taken for more he asked.
             { speaker: "user", text: thought.utterance.heard, ...overItself(thought.utterance.echo, thought.utterance.afterPause) },
             // Nothing said of the step before, like a thanks, is nothing to show. One of his routines' steps in it, by its name alone.

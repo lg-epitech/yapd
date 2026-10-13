@@ -12640,5 +12640,34 @@ describe("Assistant memories", () => {
       expect(result.prompt).not.toContain(steps)
       expect(result.prompt).toContain("What you just told him about t1 was of his routine «review it», whose steps you never see.")
     })
+
+    test("read word for word in a catch-up he asked for with more after it, it's shown by its name alone as what's next is worked out", async () => {
+      const due = `At 9:58 PM you wanted me to offer to tell Open Mina SSV2 Bug Tickets: ${steps}, sir.`
+      const asked = "What did I miss? Then tell the Tezos one to rebase."
+      const result = await run(
+        Effect.gen(function* () {
+          const prompts: Array<string> = []
+          const made = yield* assistant(
+            (situation) => {
+              const { heard } = situation.utterance
+              if (heard === defining) return Brain.decision({ act: "remember", how: "routine", text: `review it: ${steps}` })
+              if (heard === asked) return Brain.decision({ act: "catchup", rest: "Then tell the Tezos one to rebase." })
+              prompts.push(Brain.prompt(situation, Option.none()))
+              return Brain.decision({ act: "answer", spoken: "Yes, sir." })
+            },
+            undefined,
+            { memories: true },
+          )
+          yield* made.dictate(defining)
+          yield* made.journal.write({ at: now, kind: "notice", machine: "Rosie", thread: mina.id, said: due, detail: { reminder: 1, held: "off", routines: ["review it"] } })
+          yield* made.dictate(asked)
+          return { caught: made.spoken().at(-1), prompts }
+        }),
+      )
+      expect(result.caught).toContain(due)
+      expect(result.prompts).toHaveLength(1)
+      expect(result.prompts[0]).not.toContain(steps)
+      expect(result.prompts[0]).toContain("What you just told him about t1 was of his routine «review it», whose steps you never see.")
+    })
   })
 })
