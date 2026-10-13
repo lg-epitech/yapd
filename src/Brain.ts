@@ -2033,10 +2033,10 @@ const ahead = (free: string) => new RegExp(`^(?:${free})(?:(?:${gap}|${phrased(a
 const behind = (more: ReadonlyArray<string>, free: ReadonlyArray<string> = []) =>
   new RegExp(`^\\s*(?:(?:${pause})(?:${gap}|${phrased([...asides, ...more])})*)?(?:${[gap, ...free.map((word) => phrased([word]))].join("|")})*$`, "iu")
 
-/** Where each of his words starts and ends, as they're written, without a mark that only ends one, like a comma. */
+/** Where each of his words starts and ends, as they're written, without a mark that only ends one, like a comma, which alone is no word. */
 const edges = (said: string) => {
-  const words = Array.from(said.matchAll(/\S+/gu), (word) => ({ word: word[0], at: word.index }))
   const [opening, closing] = [new RegExp(`^(?:${gap})+`, "u"), new RegExp(`(?:${gap})+$`, "u")]
+  const words = Array.from(said.matchAll(/\S+/gu), (word) => ({ word: word[0], at: word.index })).filter(({ word }) => word.replace(opening, "") !== "")
   return {
     starts: words.map(({ word, at }) => at + word.length - word.replace(opening, "").length),
     ends: words.map(({ word, at }) => at + word.replace(closing, "").length),
@@ -2137,25 +2137,26 @@ const spokenSteps = (said: string, steps: string) => {
 }
 
 /**
- * Whether the model's `words`, all his, are all of a part of what he said
- * that stands apart from the rest of it: after "remember that", a pause or an
- * "and", or at its start, and before a pause, an "and" or its end. So he's
- * told to say it as one request only when what the model left out is all
- * outside it, never words of his within it, like the "never" of "we never use
- * C++", which he's told it couldn't keep as he said it.
+ * Whether the model's fact, all his words, is all of what he said as a fact
+ * but for more of his outside it: right after "remember that", or at the
+ * start, and to the end, or, with a `rest` the model took for another
+ * request, to a pause or an "and". So he's told to say it as one request
+ * only when what the model left out is all outside it, like a request before
+ * "remember that", never words of his within it, like the "never" of "we
+ * never use C++", which he's told it couldn't keep as he said it.
  */
-const standsApart = (said: string, words: string) => {
-  const wanted = worded(words)
+const standsApart = (said: string, fact: string, rest: string) => {
+  const wanted = worded(fact)
   const { starts, ends } = edges(said)
+  const end = rest.trim() === "" ? aroundFact.behind : apart.end
   return starts.some(
-    (start) =>
-      apart.start.test(said.slice(0, start)) && ends.some((end) => end > start && apart.end.test(said.slice(end)) && worded(said.slice(start, end)) === wanted),
+    (start) => apart.start.test(said.slice(0, start)) && ends.some((at) => at > start && end.test(said.slice(at)) && worded(said.slice(start, at)) === wanted),
   )
 }
 
-/** Where a part of what he said may start apart from what's before it, and end apart from what's after it. */
+/** Where a fact may start apart from more of his before it, after "remember that", and end apart from another request after it. */
 const apart = {
-  start: new RegExp(`(?:^|${phrased(keeping)}|${pause}|${phrased(joiners)})(?:${gap})*$`, "iu"),
+  start: new RegExp(`(?:^|${phrased(keeping)})(?:${gap})*(?:(?:${gap}|${phrased(asides)})*(?:${pause}))?\\s*$`, "iu"),
   end: new RegExp(`^\\s*(?:$|${pause}|${phrased(joiners)})`, "iu"),
 }
 
@@ -2476,7 +2477,7 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
         if (routine !== undefined) return { _tag: "Say", spoken: said.steps(missing) }
         // All of it his, symbols and all, but with more of his around it, which saying it on its own keeps; not all he said within it,
         // like a "never", which he's told isn't kept as he said it.
-        return { _tag: "Say", spoken: missing === undefined && standsApart(heard, text) ? said.alone : said.words(missing) }
+        return { _tag: "Say", spoken: missing === undefined && standsApart(heard, text, choice.rest) ? said.alone : said.words(missing) }
       }
       return doing({ decision: { ...choice, target: "", text: routine === undefined ? his : `${routine.name}: ${his}` }, target: Option.none() })
     }
