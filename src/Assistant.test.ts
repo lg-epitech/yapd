@@ -11983,16 +11983,15 @@ describe("Assistant memories", () => {
     expect(result.back).toEqual(["Deploy straight to production."])
   })
 
-  test("a routine is kept only when its name and its steps are all he asked for, so its name never sends what he didn't ask for, and nothing of the rest is done", async () => {
-    /** What comes of his saying `heard`, which the model takes for keeping `text` in mind, as `how`, with the rest of it done after. */
-    const saving = (heard: string, text = "ship: merge the PR, then deploy", how = "routine") =>
+  test("a routine is kept only when its name and its steps are all he asked for, so its name never sends what he didn't ask for, and nothing of the rest is done but after all of a fact", async () => {
+    /** What comes of his saying `heard`, which the model takes for keeping `text` in mind, as `how`, with the `rest` of it done after. */
+    const saving = (heard: string, text = "ship: merge the PR, then deploy", how = "routine", rest = heard.endsWith("and tell the Mina one to rebase.") ? "tell the Mina one to rebase" : "") =>
       run(
         Effect.gen(function* () {
           const made = yield* assistant(
             (situation) => {
               if (situation.utterance.heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
               // His words, all of them, but maybe not all he said of them.
-              const rest = heard.endsWith("and tell the Mina one to rebase.") ? "tell the Mina one to rebase" : ""
               return Brain.decision({ act: "remember", how, text, rest })
             },
             undefined,
@@ -12068,11 +12067,27 @@ describe("Assistant memories", () => {
     const unsaved = { said: "I couldn't keep that in your own words, sir, so I didn't save it.", kept: [], sent: [] }
     expect(await saving("Remember that we never use C++ for the parser.", "use C++ for the parser", "fact")).toEqual(unsaved)
     expect(await saving("Actually, remember that rig runs the nightly.", "rig runs the nightly", "fact")).toEqual({ said: alone, kept: [], sent: [] })
+    // Another request after it is done as ever when it's all the model's rest, his words after an "and" or a comma, and the fact all he
+    // said before them; otherwise nothing is kept, nor anything of the rest done.
     expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toEqual({
-      said: `${alone} I left the rest: tell the Mina one to rebase.`,
+      said: "Noted, sir. On it: Open Mina SSV2 Bug Tickets.",
+      kept: ["rig runs the nightly"],
+      sent: ["Rebase."],
+    })
+    expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact", "and tell the Mina one to rebase")).toMatchObject({
+      kept: ["rig runs the nightly"],
+    })
+    expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact", "tell the Mina one to rebase onto main")).toEqual({
+      said: `${alone} I left the rest: tell the Mina one to rebase onto main.`,
       kept: [],
       sent: [],
     })
+    expect(await saving("Remember that rig runs the nightly on Fridays, and tell the Mina one to rebase.", "rig runs the nightly", "fact")).toEqual({
+      said: `${unsaved.said} I left the rest: tell the Mina one to rebase.`,
+      kept: [],
+      sent: [],
+    })
+    expect(await saving("Remember that rig runs the nightly and tell the Mina one to rebase.", "rig runs the nightly", "fact", "the Mina one to rebase")).toMatchObject({ kept: [], sent: [] })
     expect(await saving("Okay, remember that Rig uses C++ for the parser, thanks.", "rig uses C++ for the parser", "fact")).toMatchObject({ kept: ["Rig uses C++ for the parser"] })
     // A word to yapd is left out only before what he asks, or once a pause sets it off: one that runs straight into his words is his, so
     // the model's copy without it keeps nothing.

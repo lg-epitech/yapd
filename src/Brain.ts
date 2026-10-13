@@ -2077,6 +2077,40 @@ const aroundFact = {
  */
 const spokenFact = (said: string, fact: string) => inHisWords(said, fact, aroundFact.ahead, aroundFact.behind)
 
+/** What joins another request on after a fact: only spaces, a comma, a semicolon or a full stop, and "and", "then" or "also", with one of those. */
+const joinedOn = {
+  only: new RegExp(`^(?:${gap}|${phrased(joiners)})*$`, "iu"),
+  any: new RegExp(`[,;]|\\.(?![\\p{L}\\p{N}])|${phrased(joiners)}`, "iu"),
+  first: new RegExp(`^\\s*${phrased(joiners)}`, "iu"),
+  // After the other request, as after a routine's steps: words to yapd a pause sets off.
+  after: behind([]),
+}
+
+/**
+ * A fact he said with another request after it, as he said it: when the
+ * model's `rest` is all he said after an "and", "then", "also" or a comma,
+ * word for word, and its `fact` all he said between "remember that" and
+ * there, as `spokenFact` takes it, so where the fact ends is what he said,
+ * never the model's say. None otherwise, so the fact kept is never less than
+ * he said of it, nor is the rest more than he asked after it.
+ */
+const spokenFactThen = (said: string, fact: string, rest: string) => {
+  const wanted = worded(rest)
+  if (wanted === "") return undefined
+  const { starts, ends } = edges(said)
+  // The rest's own "and", as the model may keep it, joins it on as one before it does.
+  const joined = joinedOn.first.test(rest)
+  const restStarts = starts.filter((start) => ends.some((end) => end > start && joinedOn.after.test(said.slice(end)) && worded(said.slice(start, end)) === wanted))
+  for (const start of restStarts) {
+    for (const end of ends.filter((at) => at <= start)) {
+      const between = said.slice(end, start)
+      const his = joinedOn.only.test(between) && (joined || joinedOn.any.test(between)) ? spokenFact(said.slice(0, end), fact) : undefined
+      if (his !== undefined) return his
+    }
+  }
+  return undefined
+}
+
 /** A routine's steps said after its name, or before it: what may come before and after them, as for a fact, "then" and "so" too as they were. */
 const aroundSteps = {
   after: { ahead: ahead(`(?:${gap}|${phrased(["then"])})*`), behind: behind([]) },
@@ -2433,9 +2467,10 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       // About him, never a thread. What's kept is his words, never the model's: a routine's steps as he said them after its name's pause,
       // or before "when I say", and a fact as all he said but for a "remember that" and words to yapd around it, every mark and symbol
       // kept. The model's words only have to say the same, symbols and all, so its "C" for his "C++" keeps nothing, as does a fact said
-      // with more than it, like another request in the same breath, or a "never" it leaves out.
+      // with more than it, like a "never" it leaves out, or another request in the same breath, unless that's all the rest the model
+      // gave, his words after an "and" or a comma, and the fact all he said before it.
       if (utterance.echo !== undefined || heard === "") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
-      const his = routine === undefined ? spokenFact(heard, text) : spokenSteps(heard, text)
+      const his = routine === undefined ? (spokenFact(heard, text) ?? spokenFactThen(heard, text, choice.rest)) : spokenSteps(heard, text)
       if (his === undefined) {
         const missing = unheard(text, heard)
         if (routine !== undefined) return { _tag: "Say", spoken: said.steps(missing) }
