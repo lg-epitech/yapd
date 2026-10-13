@@ -3,6 +3,7 @@ import { Clock, Effect, Option } from "effect"
 import * as Brain from "./Brain.ts"
 import { digest } from "./Ledger.ts"
 import { addressed, type Lines } from "./Persona.ts"
+import type * as Preferences from "./Preferences.ts"
 import type * as Store from "./Store.ts"
 
 // What he asked yapd to keep in mind, by voice: facts about him and his work,
@@ -11,7 +12,9 @@ import type * as Store from "./Store.ts"
 // prompt, so there's only so much of it, and nothing is ever left out of a
 // prompt to make room: past that, he's told to forget something first. It's
 // information, never something to do: only a routine's name, said, sends its
-// steps, as any message he sends goes.
+// steps, as any message he sends goes. A routine in his preferences is the one
+// for its name: one kept by voice called the same is kept still, but goes
+// nowhere and counts toward nothing until that line goes.
 
 export type Kind = "fact" | "routine"
 
@@ -74,8 +77,12 @@ const memory = (row: Row): Memory => ({
 /** How much of what's kept one takes up. */
 const size = (kept: Pick<Memory, "name" | "text">) => kept.text.length + (kept.name?.length ?? 0)
 
+/** Whether one is a routine kept by voice that one in his preferences, by its names in lowercase, is called the same as, in any case. */
+const shadowed = (theirs: ReadonlySet<string>) => (kept: Pick<Memory, "kind" | "name">) =>
+  kept.kind === "routine" && kept.name !== undefined && theirs.has(kept.name.toLowerCase())
+
 export interface Memories {
-  /** What's kept, oldest first. */
+  /** What's kept, oldest first, but a routine kept by voice that one in his preferences is called the same as, which is the one. */
   readonly list: Effect.Effect<ReadonlyArray<Memory>>
   /**
    * Keeps one, if there's room: a routine called as one kept already, in any
@@ -96,8 +103,10 @@ export interface Memories {
   readonly restore: (id: number) => Effect.Effect<Option.Option<Kept>, Store.StoreError>
 }
 
-/** The memories kept in `store`. */
-export const make = (store: Store.Store["Type"]): Memories => {
+/** The memories kept in `store`, beside his routines `written` in his preferences, read as they are now. */
+export const make = (store: Store.Store["Type"], written: Effect.Effect<ReadonlyArray<Preferences.Routine>> = Effect.succeed([])): Memories => {
+  /** Whether one kept by voice is a routine one in his preferences is called the same as, as they are now. */
+  const hidden = Effect.map(written, (routines) => shadowed(new Set(routines.map(({ name }) => name.toLowerCase()))))
   const find = (database: Database, id: number) => Option.map(Option.fromNullable(database.query<Row, [number]>("select * from memories where id = ?").get(id)), memory)
   /** The routine kept now under a name, told by its letters whatever their case, as the index tells it. */
   const called = (database: Database, name: string) =>
@@ -117,41 +126,55 @@ export const make = (store: Store.Store["Type"]): Memories => {
       memory,
     )
   }
-  /** Whether there's room for one more, `leaving` aside, which it takes the place of. */
-  const room = (database: Database, adding: Pick<Memory, "name" | "text">, leaving: Option.Option<Memory>) => {
+  /**
+   * Whether there's room for one more, `leaving` aside, which it takes the
+   * place of, as is what `hides`: a routine one in his preferences is called
+   * the same as, which counts toward nothing.
+   */
+  const room = (database: Database, adding: Pick<Memory, "kind" | "name" | "text">, leaving: Option.Option<Memory>, hides: (kept: Pick<Memory, "kind" | "name">) => boolean) => {
     const kept = database
       .query<Row, []>("select * from memories where forgotten_at is null")
       .all()
-      .filter(({ id }) => !Option.exists(leaving, (left) => left.id === id))
-    return kept.length < most && kept.reduce((sum, row) => sum + size({ name: row.name ?? undefined, text: row.text }), 0) + size(adding) <= longest
+      .map(memory)
+      .filter((row) => !hides(row) && !Option.exists(leaving, (left) => left.id === row.id))
+    const counted = hides(adding) ? [] : [adding]
+    return kept.length + counted.length <= most && [...kept, ...counted].reduce((sum, row) => sum + size(row), 0) <= longest
   }
   const retire = (database: Database, id: number, at: number) => database.query("update memories set forgotten_at = ? where id = ? and forgotten_at is null").run(at, id)
   return {
-    list: store
-      .transaction((database: Database) => database.query<Row, []>("select * from memories where forgotten_at is null order by id").all().map(memory))
-      .pipe(Effect.catchAll((error) => Effect.logWarning("Could not read what you asked me to remember", error).pipe(Effect.as<ReadonlyArray<Memory>>([])))),
+    list: Effect.flatMap(hidden, (hides) =>
+      store.transaction((database: Database) =>
+        database
+          .query<Row, []>("select * from memories where forgotten_at is null order by id")
+          .all()
+          .map(memory)
+          .filter((kept) => !hides(kept)),
+      ),
+    ).pipe(Effect.catchAll((error) => Effect.logWarning("Could not read what you asked me to remember", error).pipe(Effect.as<ReadonlyArray<Memory>>([])))),
     add: (asked) =>
-      store.transaction((database: Database): Kept => {
-        // Said again, as when he didn't hear it was noted, it's kept once.
-        const kept = asked.kind === "fact" ? same(database, asked.text) : Option.none<Memory>()
-        if (Option.isSome(kept)) return { _tag: "Kept", memory: kept.value, retired: Option.none() }
-        const taken = asked.kind === "routine" && asked.name !== undefined ? called(database, asked.name) : Option.none<Memory>()
-        if (!room(database, asked, taken)) return { _tag: "Full" }
-        // Retired first, since only one routine is kept under a name.
-        if (Option.isSome(taken)) retire(database, taken.value.id, asked.at)
-        const id = Number(
-          database
-            .query("insert into memories (at, kind, name, text, heard, utterance) values (?, ?, ?, ?, ?, ?)")
-            .run(asked.at, asked.kind, asked.kind === "routine" ? (asked.name ?? null) : null, asked.text, asked.heard, asked.utterance ?? null).lastInsertRowid,
-        )
-        return { _tag: "Kept", memory: Option.getOrThrow(find(database, id)), retired: Option.flatMap(taken, (left) => find(database, left.id)) }
-      }),
+      Effect.flatMap(hidden, (hides) =>
+        store.transaction((database: Database): Kept => {
+          // Said again, as when he didn't hear it was noted, it's kept once.
+          const kept = asked.kind === "fact" ? same(database, asked.text) : Option.none<Memory>()
+          if (Option.isSome(kept)) return { _tag: "Kept", memory: kept.value, retired: Option.none() }
+          const taken = asked.kind === "routine" && asked.name !== undefined ? called(database, asked.name) : Option.none<Memory>()
+          if (!room(database, asked, taken, hides)) return { _tag: "Full" }
+          // Retired first, since only one routine is kept under a name.
+          if (Option.isSome(taken)) retire(database, taken.value.id, asked.at)
+          const id = Number(
+            database
+              .query("insert into memories (at, kind, name, text, heard, utterance) values (?, ?, ?, ?, ?, ?)")
+              .run(asked.at, asked.kind, asked.kind === "routine" ? (asked.name ?? null) : null, asked.text, asked.heard, asked.utterance ?? null).lastInsertRowid,
+          )
+          return { _tag: "Kept", memory: Option.getOrThrow(find(database, id)), retired: Option.flatMap(taken, (left) => find(database, left.id)) }
+        }),
+      ),
     forget: (id) =>
       Effect.flatMap(Clock.currentTimeMillis, (now) =>
         store.transaction((database: Database) => (retire(database, id, now).changes === 0 ? Option.none<Memory>() : find(database, id))),
       ),
     restore: (id) =>
-      Effect.flatMap(Clock.currentTimeMillis, (now) =>
+      Effect.flatMap(Effect.zip(Clock.currentTimeMillis, hidden), ([now, hides]) =>
         store.transaction((database: Database): Option.Option<Kept> => {
           const forgotten = Option.filter(find(database, id), ({ forgottenAt }) => forgottenAt !== undefined)
           if (Option.isNone(forgotten)) return Option.none()
@@ -159,7 +182,7 @@ export const make = (store: Store.Store["Type"]): Memories => {
           const kept = back.kind === "fact" ? same(database, back.text) : Option.none<Memory>()
           if (Option.isSome(kept)) return Option.some({ _tag: "Kept", memory: kept.value, retired: Option.none() })
           const taken = back.kind === "routine" && back.name !== undefined ? called(database, back.name) : Option.none<Memory>()
-          if (!room(database, back, taken)) return Option.some({ _tag: "Full" })
+          if (!room(database, back, taken, hides)) return Option.some({ _tag: "Full" })
           if (Option.isSome(taken)) retire(database, taken.value.id, now)
           database.query("update memories set forgotten_at = null where id = ?").run(id)
           return Option.some({ _tag: "Kept", memory: Option.getOrThrow(find(database, id)), retired: Option.flatMap(taken, (left) => find(database, left.id)) })

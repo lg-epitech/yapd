@@ -471,14 +471,15 @@ const assistant = (
     const controls = mutes === undefined ? undefined : Mutes.controls({ mutes, journal, silence: (keys) => Effect.sync(() => void silenced.push(keys)) })
     const modes = given.modes === true ? yield* Modes.make({ settings: Settings.fromStore(store), journal }) : undefined
     const reminders = given.reminders === true ? Reminders.make(store, journal) : undefined
-    const memories = given.memories === true ? Memory.make(store) : undefined
+    const routines = Effect.sync(() => given.routines ?? [])
+    const memories = given.memories === true ? Memory.make(store, routines) : undefined
     /** What each brief was asked to sum up, and each brief as it was asked. */
     const briefed: Array<ReadonlyArray<string>> = []
     const briefings: Array<Brain.Brief> = []
     const made = yield* Assistant.make({
       ...(modes === undefined ? {} : { modes }),
       ...(reminders === undefined ? {} : { reminders }),
-      ...(memories === undefined ? {} : { memories, routines: Effect.succeed(given.routines ?? []) }),
+      ...(memories === undefined ? {} : { memories, routines }),
       // This Mac is Rosie.
       ...(mutes === undefined || controls === undefined
         ? {}
@@ -11806,6 +11807,33 @@ describe("Assistant memories", () => {
       said: "Changed, sir. Review it: have the agent open a PR, then two Codex agents review it on t3.",
       kept: ["review it: have the agent open a PR, then two Codex agents review it on t3"],
     })
+  })
+
+  test("a routine kept by voice that one in his preferences is called the same as goes nowhere and counts toward nothing, kept still for when that line goes", async () => {
+    const routines: Array<Preferences.Routine> = [{ name: "Land it", steps: "Merge the PR once checks pass." }]
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) =>
+            situation.utterance.heard === "Remember that rig runs the nightly." ? Brain.decision({ act: "remember", how: "fact", text: "rig runs the nightly" }) : undefined,
+          undefined,
+          { memories: true, routines },
+        )
+        const memories = made.memories!
+        const at = yield* TestClock.currentTimeMillis
+        // Kept by voice before he wrote one called the same in his preferences, with as much else as is kept.
+        yield* memories.add({ at, kind: "routine", name: "land it", text: "Deploy straight to production.", heard: "When I say land it, deploy straight to production." })
+        for (let index = 1; index < Memory.most; index++) yield* memories.add({ at, kind: "fact", text: `fact ${index}`, heard: `Remember fact ${index}.` })
+        const listed = (yield* memories.list).length
+        yield* made.dictate("Remember that rig runs the nightly.")
+        const said = made.spoken().at(-1)
+        routines.splice(0)
+        return { listed, said, back: (yield* memories.list).filter(({ kind }) => kind === "routine").map(({ text }) => text) }
+      }),
+    )
+    expect(result.listed).toBe(Memory.most - 1)
+    expect(result.said).toBe("Noted, sir.")
+    expect(result.back).toEqual(["Deploy straight to production."])
   })
 
   test("a routine whose steps leave out what he said with them, like a don't before them or a but after them, isn't saved, so its name never sends the opposite", async () => {

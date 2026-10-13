@@ -113,8 +113,8 @@ export const serve = Effect.gen(function* () {
   const store = yield* Store.Store
   // What he asked to be told later, fired through the journal, in the same database.
   const reminders = Reminders.make(store, journal)
-  // What he asked yapd to keep in mind, which every prompt reads.
-  const memories = Memory.make(store)
+  // What he asked yapd to keep in mind, which every prompt reads: never a routine kept by voice that one in his preferences is called the same as.
+  const memories = Memory.make(store, routines)
   yield* Effect.forkScoped(
     Effect.flatMap(Clock.currentTimeMillis, (now) =>
       Effect.all([journal.prune(now - remembered), ledger.prune(now - done), reminders.prune(now - reminded)], { discard: true }),
