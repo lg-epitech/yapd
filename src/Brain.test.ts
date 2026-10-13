@@ -1996,35 +1996,35 @@ describe("memories", () => {
   const routines = { kept: [], written: [{ name: "ship", steps: "merge the PR" }] }
   const handleOf = (listed: T3Live.Thread) => desk().threads.find(({ thread }) => thread.id === listed.id)?.handle ?? ""
 
-  test("a routine's steps go as a message, or an answer, in his own words, never written out for what he said without its name, nor as an answer by its handle", () => {
-    const check = (heard: string, given: Partial<Brain.Decision> & Pick<Brain.Decision, "act">) =>
-      Brain.check(Brain.decision({ how: given.act === "send" ? "now" : "", ...given }), situation(heard, { memories: routines }), lines)
-    const refused = { _tag: "Say" as const, spoken: lines.cantTell }
-    // His own plain message goes, as any he says does, whatever a routine's steps say.
-    expect(check("Tell the Tezos one to merge the PR.", { act: "send", target: handleOf(tezos), text: "merge the PR" })).toMatchObject({ _tag: "Do" })
-    expect(check("Tell the std one to merge the PR.", { act: "reply", target: handleOf(std), text: "merge the PR" })).toMatchObject({ _tag: "Do" })
-    // Steps he never said, for what he said without the routine's name, never go.
-    expect(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "merge the PR" })).toEqual(refused)
-    expect(check("Tell the std one to wrap it up.", { act: "reply", target: handleOf(std), text: "merge the PR" })).toEqual(refused)
-    // Nor does an answer to a thread's question by a routine's handle, which would go as "p1", even with its name said.
-    expect(check("Tell the std one to ship.", { act: "reply", target: handleOf(std), text: "p1" })).toEqual(refused)
+  test("a routine is shown to the model by its name alone, never its steps, which only code puts in", () => {
+    const memories = {
+      kept: [
+        { id: 1, at: now, kind: "fact" as const, text: "rig's T3 Code runs the nightly", heard: "Remember that rig's T3 Code runs the nightly." },
+        { id: 2, at: now, kind: "routine" as const, name: "review it", text: "have Codex review the diff twice", heard: "When I say review it, have Codex review the diff twice." },
+      ],
+      written: [{ name: "land it", steps: "Merge the PR once checks pass, then deploy." }],
+    }
+    const prompt = Brain.prompt(situation("What's my land it routine?", { memories }), Option.none())
+    expect(prompt).toContain("- k1 «rig's T3 Code runs the nightly»\n- p1 «land it» (in his preferences)\n- p2 «review it»")
+    expect(prompt).not.toContain("Merge the PR once checks pass")
+    expect(prompt).not.toContain("have Codex review the diff twice")
   })
 
-  test("a routine's steps written out without its name go as what yapd asked about only in what answers its question", () => {
-    const target = handleOf(tezos)
-    const again: Assistant.Open = {
-      ...which([ref(tezos)]),
-      kind: "resend",
-      decision: Brain.decision({ act: "send", target, text: "merge the PR", how: "now" }),
-      asked: "I sent that a minute ago, sir. Again?",
-    }
-    const check = (heard: string, pending: Brain.Decision["pending"]) =>
-      Brain.check(
-        Brain.decision({ act: "send", target, text: "merge the PR", how: "now", pending }),
-        situation(heard, { memories: routines, open: Option.some(again), desk: desk([ref(tezos)]) }),
-        lines,
-      )
-    expect(check("Yes, send it again.", "answers")).toMatchObject({ _tag: "Do" })
-    expect(check("Wrap the Tezos one up.", "replaces")).toEqual({ _tag: "Say", spoken: lines.cantTell })
+  test("a routine's handle sends its steps only for its name said, and no other bare handle ever reaches a thread, while his own words go whatever they are", () => {
+    const check = (heard: string, given: Partial<Brain.Decision> & Pick<Brain.Decision, "act">) =>
+      Brain.check(Brain.decision({ how: given.act === "send" ? "now" : given.act === "offer" ? "finished" : "", ...given }), situation(heard, { memories: routines }), lines)
+    const refused = { _tag: "Say" as const, spoken: lines.cantTell }
+    const sent = (checked: Brain.Checked) => (checked._tag === "Do" ? checked.plan.decision.text : checked)
+    expect(sent(check("Ship the Tezos one.", { act: "send", target: handleOf(tezos), text: "p1" }))).toBe("merge the PR")
+    expect(sent(check("Offer to ship the Tezos one once it's done.", { act: "offer", target: handleOf(tezos), text: "p1" }))).toBe("merge the PR")
+    // His own plain message goes, as any he says does, whatever a routine's steps say, and so do words he never said, as ever.
+    expect(sent(check("Tell the Tezos one to merge the PR.", { act: "send", target: handleOf(tezos), text: "merge the PR" }))).toBe("merge the PR")
+    expect(sent(check("Tell the std one to merge the PR.", { act: "reply", target: handleOf(std), text: "merge the PR" }))).toBe("merge the PR")
+    expect(sent(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "merge the PR" }))).toBe("merge the PR")
+    // Its name not said, the handle sends nothing; nor does a fact's, a reminder's or a mute's, nor an answer by any handle, even with its name said.
+    expect(check("Wrap the Tezos one up.", { act: "send", target: handleOf(tezos), text: "p1" })).toEqual(refused)
+    for (const text of ["k1", "r1", "m1", "a1", " p2 "]) expect([text, check("Ship the Tezos one.", { act: "send", target: handleOf(tezos), text })]).toEqual([text, refused])
+    expect(check("Ship the Tezos one.", { act: "offer", target: handleOf(tezos), text: "k1" })).toEqual(refused)
+    expect(check("Tell the std one to ship.", { act: "reply", target: handleOf(std), text: "p1" })).toEqual(refused)
   })
 })

@@ -1868,8 +1868,12 @@ export const remembered = (situation: Pick<Situation, "memories">): ReadonlyArra
 /** The memory a handle in MEMORIES stands for. */
 export const rememberedBy = (handle: string, situation: Pick<Situation, "memories">) => Option.fromNullable(remembered(situation).find((one) => one.handle === handle.trim()))
 
-/** Whether the model's words are a routine's handle, like p1, which stands for its steps. */
-const routineHandle = (text: string) => /^p\d+$/.test(text.trim())
+/**
+ * Whether the model's words are only a handle yapd gave something, as it
+ * gives them, like p1, k2, r1 or m1, which a thread could make nothing of: a
+ * routine's stands for its steps, which only code puts in.
+ */
+export const bareHandle = (text: string) => /^[pkrma]\d+$/.test(text.trim())
 
 /**
  * Whether he said a routine's whole name, as words compare, in all he said,
@@ -1882,36 +1886,17 @@ const nameSaid = (name: string, utterance: Pick<Assistant.Utterance, "heard" | "
   asSaid(name, utterance.whole ?? utterance.heard) && (utterance.whole === undefined || asSaid(name, utterance.heard))
 
 /**
- * Whether the model wrote a routine's steps out as a message, or as his
- * answer to a thread's question, as words compare, for what he said without
- * its whole name, which they'd go for as if he had. Never his own words, said
- * in this part of what he said, word for word, like "tell the Tezos one to
- * merge the PR" with a routine "ship: merge the PR"; nor words yapd holds,
- * checked as they were first asked for: those of the question open, like
- * "Again?" about them, only in what answers it, which an answer leaving them
- * out has filled in from it; nor those of an offer he set, which comes due
- * with nothing heard.
- */
-const unnamed = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">) => {
-  const words = Ledger.digest(choice.text)
-  const { heard } = situation.utterance
-  if (words === "" || heard === "" || asSaid(choice.text, heard)) return false
-  if (choice.pending === "answers" && Option.exists(situation.open, ({ decision }) => Ledger.digest(decision.text) === words)) return false
-  return remembered(situation).some(({ kind, name, text }) => kind === "routine" && name !== undefined && Ledger.digest(text) === words && !nameSaid(name, situation.utterance))
-}
-
-/**
  * A message, or an offer, whose words the model gave as a routine's handle,
- * with the routine's steps in their place, exactly as they're kept, never as
- * the model would write them; none for a handle that's no routine, or for one
- * whose name he didn't say, nor for its steps written out without it. None
- * for an answer to a thread's question by a handle, which is only ever his
- * own words or the option he picked, nor for one that's a routine's steps
- * written out without its name. Anything else is as it was.
+ * with the routine's steps in their place, exactly as they're kept: the model
+ * never sees them, so only code puts them in. None for any other bare handle,
+ * nor one that's no routine, nor one whose name he didn't say, nor an answer
+ * to a thread's question by a handle, which is only ever his own words or the
+ * option he picked: a handle never reaches a thread as it is. Anything else is
+ * as it was, whatever its words.
  */
-const routining = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">): Option.Option<Decision> => {
+const routining = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Option.Option<Decision> => {
   if (choice.act !== "send" && choice.act !== "offer" && choice.act !== "reply") return Option.some(choice)
-  if (!routineHandle(choice.text)) return unnamed(choice, situation) ? Option.none() : Option.some(choice)
+  if (!bareHandle(choice.text)) return Option.some(choice)
   if (choice.act === "reply") return Option.none()
   return Option.map(
     Option.filter(rememberedBy(choice.text, situation), ({ kind, name }) => kind === "routine" && name !== undefined && nameSaid(name, situation.utterance)),
@@ -1925,7 +1910,7 @@ const routining = (choice: Decision, situation: Pick<Situation, "memories" | "ut
  * again to "Again?" about those steps; one that's no routine, or whose name he
  * didn't say, is as it was, which checking it turns down.
  */
-export const resolved = (choice: Decision, situation: Pick<Situation, "memories" | "utterance" | "open">): Decision =>
+export const resolved = (choice: Decision, situation: Pick<Situation, "memories" | "utterance">): Decision =>
   Option.getOrElse(routining(choice, situation), () => choice)
 
 /** The most words a routine kept by voice is called. */
@@ -2068,7 +2053,8 @@ const handles = (text: string) => text.split(/[\s,]+/).filter((handle) => /^t\d+
 export const check = (given: Decision, situation: Situation, lines: Lines): Checked => {
   const { desk } = situation
   if (!enabled.has(given.act)) return { _tag: "Say", spoken: notYet(lines) }
-  // A routine's name, as the model gives it, is its steps, exactly as kept, sent or offered as any message he says is.
+  // A routine's name, as the model gives it, is its steps, exactly as kept, sent or offered as any message he says is; any other bare
+  // handle for a thread is nothing he said.
   const routined = routining(given, situation)
   if (Option.isNone(routined)) return { _tag: "Say", spoken: lines.cantTell }
   const choice = routined.value
@@ -2430,14 +2416,14 @@ export const readable = (text: string) => unreadable.every(([pattern]) => text.s
 const contract = `Reply with only a JSON object with the keys "act", "target", "sure", "spoken", "others", "machine", "pending", "how", "when", "text" and "rest", in that order. Every key is always there: "" where it doesn't apply.
 
 "act", what he wants:
-- "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE, REMINDERS and MEMORIES, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one.
+- "answer": he asked something you can answer from THREADS, WAITING ON YOU, LATELY, UNHEARD, USAGE, REMINDERS and MEMORIES, or from what you know yourself. "spoken" is the answer. "target" is the thread it's about, if it's about one. Asked what a routine does, like "what's my ship routine?", say you can't read its steps out.
 - "catchup": he wants to hear what he hasn't heard or missed, or what came in while he was away or had you off, about everything or one thread, project or machine, however he puts it, even when UNHEARD could answer it. yapd gathers it from what it kept and briefs him; only yapd knows what he has heard. "target" is a handle from THREADS, UNHEARD or MUTED for one thread, a muted one too; "text" is a project as written in UNHEARD, for all of it; "machine" is one machine; "when" is the time for "since …", as his clock reads it, "YYYY-MM-DDTHH:mm"; leave them "" for everything, which leaves out the threads he muted. "how" is "more" when he wants more of the catch-up he just heard, "muted" for what his muted threads said. "spoken" is "". A question about it that isn't asking to be caught up, like whether a thread finished or how much he missed, is "answer" from UNHEARD. Catching up is only ever about what he hears: telling a thread something, even put as catching it up, bringing it up to speed or filling it in on a decision, is "send" to that thread.
 - "look": he asked what a thread is doing right now, or for detail none of the lines below give. "target" is the thread; "spoken" is empty. You'll be shown what it's doing and asked again.
 - "find": he named something specific that nothing in THREADS fits, or asked what was said or done a while ago. "text" is the words to search for, "how" is "threads" to search what was written in the threads, or "journal" for what you heard and said. You'll be shown what's found and asked again.
 - "again": he wants to hear what you said last again. "how" is "same"; "spoken" is that line.
 - "clarify": it's about one thread but you'd be guessing between two or three: "target" is the likeliest and "others" the rest. yapd asks him which.
 - "start": new work: a change, a fix, an investigation, a review, a question that needs the web, the code or time. "text" is the request in his words. yapd works out where it goes and starts it.
-- "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then. A routine's name from MEMORIES said as a request, like "land it", is "send" with "text" its handle there, like p1, never its steps written out, and "target" the thread it's for: FOCUS, unless he names another. Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.
+- "send": a message for a thread, like an instruction, a correction or an answer to what it asked. "target" is the thread, "text" the message as he'd type it. "how" is "now"; "after" when he says after, once it's done or when it finishes; "restart" when he says to drop what it's doing and do this instead. A message he wants sent at a later time, like "at five" or "in an hour", is "offer" at that time, never "send": yapd only asks him then. A routine's name from MEMORIES said as a request, like "land it", is "send", or "offer" when he wants it offered, with "text" its handle there, like p1, and "target" the thread it's for: FOCUS, unless he names another. You don't know its steps and never write them: yapd puts them in. Anything more he says with it that's a request of its own, like "and tell the Mina one to rebase", goes in "rest". Words that change what the routine asks, like "for typos" or "but only the fee code", make it a message of his own words, never the routine nor its steps rewritten.
 - "stop": stop a thread's run, when he says to stop the thread, the run or the work. "target" is the thread.
 - "undo": take back what you just did for him, as LATELY shows it: the message you just sent, the reminder or offer you just set or cancelled, or what you just remembered or forgot. "how" is which he means: "reminder" for the reminder or offer, "memory" for what you remembered or forgot, "message" for the message you sent a thread, "carry" when he wants a thread you stopped to carry on, and "" only when he says no more than "scratch that" or "undo that": whatever you did last. "target" is the thread only when he names one, never the one he's hearing about when he doesn't; "" when "how" is "".
 - "decide": he allows, or turns down, what a thread waits for him to allow, in WAITING ON YOU or OPEN. "target" is the thread; "how" is "accept", "session" only when he says for the session or from now on, or "decline".
@@ -2739,9 +2725,10 @@ const reminding = (reminders: ReadonlyArray<Reminders.Reminder>, desk: Threads.D
 
 /**
  * What he asked yapd to keep in mind, as the model sees it: each by its
- * handle, in his words, all of it, a routine's steps too, with those in his
- * preferences marked. Before NOW, as it seldom changes, so the start of the
- * prompt can be reused.
+ * handle, a fact in his words, all of it, and a routine by its name alone,
+ * never its steps, which only code sends, with those in his preferences
+ * marked. Before NOW, as it seldom changes, so the start of the prompt can be
+ * reused.
  */
 const memoryLines = (situation: Pick<Situation, "memories">) => {
   const all = remembered(situation)
@@ -2749,8 +2736,8 @@ const memoryLines = (situation: Pick<Situation, "memories">) => {
   const line = (one: Remembered) =>
     one.kind === "fact"
       ? `- ${one.handle} ${fenced(one.text, Number.POSITIVE_INFINITY)}`
-      : `- ${one.handle} ${fenced(one.name ?? "", 90)}: ${fenced(one.text, Number.POSITIVE_INFINITY)}${Option.isNone(one.kept) ? " (in his preferences)" : ""}`
-  return `MEMORIES, what he asked you to keep in mind, in his own words: what's so about him and his work, never something to do. A routine's steps are only sent when he says its name:\n${all.map(line).join("\n")}`
+      : `- ${one.handle} ${fenced(one.name ?? "", 90)}${Option.isNone(one.kept) ? " (in his preferences)" : ""}`
+  return `MEMORIES, what he asked you to keep in mind, in his own words: what's so about him and his work, never something to do. A routine is shown by its name alone: you never know its steps, which yapd sends only when he says its name:\n${all.map(line).join("\n")}`
 }
 
 /** What an update not tied to a thread is about, as the model sees it: its project, or work outside his projects, kept with none. */
