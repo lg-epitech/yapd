@@ -177,6 +177,8 @@ export const make = (
      * that `asks` him something, only what can't be his answer to it.
      */
     readonly command?: (heard: string, asks: boolean) => Option.Option<Effect.Effect<string>>
+    /** Turns yapd off as the menu does, which "Mute." said on its own over anything it says does too. Without it, that's a stop, as it always was. */
+    readonly off?: Effect.Effect<void>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -613,6 +615,7 @@ export const make = (
     }
   })
 
+  const turnOff = options.off
   const conversation = yield* Conversation.make({
     dir,
     moved: (update) => Effect.sync(() => moved(update)),
@@ -723,6 +726,18 @@ export const make = (
         }),
       )
     },
+    // "Mute." said on its own over anything yapd says, or right after, is his emergency off. It's turned off from outside what's being
+    // said, as the menu turns it off, which cuts that off as it does anything being said, keeping it unheard: so this waits to be cut
+    // off, and comes back only should yapd stay on.
+    ...(turnOff === undefined
+      ? {}
+      : {
+          off: Effect.gen(function* () {
+            yield* Effect.logInfo("Turned off: he said mute")
+            yield* Fiber.join(yield* Effect.forkIn(turnOff, lifetime))
+            if (!(yield* switched).on) yield* Effect.never
+          }),
+        }),
   })
 
   const unsummarized = (project: string): Summary => ({

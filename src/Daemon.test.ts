@@ -100,6 +100,8 @@ const make = (says?: string, options: {
   readonly quickly?: boolean
   /** The journal, when it's kept from before a restart, rather than one of its own. */
   readonly journal?: Journal.Journal["Type"]
+  /** Whether "Mute." said on its own turns yapd off, as yapd serves it. */
+  readonly off?: boolean
 } = {}) => Effect.gen(function* () {
   /** What each rendered file says, and what was played, in order. */
   const rendered = new Map<string, string>()
@@ -255,6 +257,8 @@ const make = (says?: string, options: {
     })),
   )
   const context = yield* Layer.build(layer)
+  /** Turning yapd off as the menu does, once it's made. */
+  let switchOff: Effect.Effect<void> = Effect.void
   const made = yield* Daemon.make({
     ...(options.link === undefined ? {} : { link: options.link }),
     ...(options.hands === undefined ? {} : { hands: options.hands }),
@@ -266,9 +270,12 @@ const make = (says?: string, options: {
     ...(options.holding === undefined ? {} : { holding: options.holding }),
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.command === undefined ? {} : { command: options.command }),
+    // As the menu turns it off, which yapd serves with more around it.
+    ...(options.off === true ? { off: Effect.suspend(() => switchOff) } : {}),
     // This machine is Rosie, as yapd serves it.
     naming,
   }).pipe(Effect.provide(context))
+  switchOff = made.turn(false)
   handle = made.handle
   const { speak: read, tell } = made
   yield* Effect.forkScoped(read)
@@ -5225,6 +5232,111 @@ describe("Daemon with threads muted", () => {
     )
     expect(Option.isSome(result.first)).toBe(true)
     expect(result.second).toEqual(Option.none())
+  })
+})
+
+describe("Daemon turned off by 'Mute.'", () => {
+  /** The updates kept, what each said, when it was heard, and why it was held, if it was. */
+  const kept = (journal: Journal.Journal["Type"]) =>
+    Effect.map(journal.since(0, { kinds: ["update"] }), (rows) => rows.map(({ said, heardAt, detail }) => [said, heardAt, (detail as { held?: string }).held]))
+
+  test("a bare 'Mute.' over an update turns yapd off at once, with no model call, and keeps it and what waits unheard", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, finish, talk, flush, wait, played, responded, followUps, journal, logged } = yield* make("Mute.", { off: true })
+        yield* finish("a", "The PR is ready.")
+        yield* finish("b", "The tests pass.")
+        yield* wait(1)
+        yield* talk
+        yield* flush
+        // With no time gone by for anything to be worked out.
+        const { on } = yield* made.power
+        yield* wait(30)
+        return { on, played: [...played], responded: [...responded], followUps: [...followUps], kept: yield* kept(journal), logged: logged.filter((line) => line.startsWith("Turned")) }
+      }),
+    )
+    expect(result.on).toBe(false)
+    expect(result.responded).toEqual([])
+    expect(result.followUps).toEqual([])
+    expect(result.played).toEqual(["yapd. The PR is ready."])
+    expect(result.kept).toEqual([
+      ["yapd. The PR is ready.", undefined, "off"],
+      ["yapd. The tests pass.", undefined, "off"],
+    ])
+    expect(result.logged).toEqual(["Turned off: he said mute", "Turned off"])
+  })
+
+  test("'Mute, mute.' said over yapd's first seconds, while its own voice can still get into the microphone, turns it off", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, finish, talk, flush, wait, responded, journal } = yield* make("Mute, mute.", { off: true, echoing: 30 })
+        yield* finish("a", "The PR is ready.")
+        yield* wait(1)
+        yield* talk
+        yield* flush
+        const { on } = yield* made.power
+        yield* wait(30)
+        return { on, responded: [...responded], kept: yield* kept(journal) }
+      }),
+    )
+    expect(result.on).toBe(false)
+    expect(result.responded).toEqual([])
+    expect(result.kept).toEqual([["yapd. The PR is ready.", undefined, "off"]])
+  })
+
+  test("'Mute.' over yapd's first seconds of a line about muting may be its own voice, so it's only a stop, and yapd stays on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, finish, talk, wait, followUps } = yield* make("Mute.", { off: true, echoing: 30, quickly: true })
+        yield* finish("a", "I muted the flaky alerts.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        return { on: (yield* made.power).on, followUps: [...followUps] }
+      }),
+    )
+    expect(result.on).toBe(true)
+    expect(result.followUps).toEqual([])
+  })
+
+  test("'Mute.' over an agent's question being asked turns yapd off and gives what answers it nothing, so nothing reaches the agent", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { made, notice, talk, flush, wait, followUps } = yield* make("Mute.", { off: true, microphone: true })
+        const answers: Array<string> = []
+        const question: Array<string> = []
+        yield* notice("q", "The Tezos migration asks: keep the historical rounding, or recompute?", { question, answers })
+        yield* wait(1)
+        yield* talk
+        yield* flush
+        const { on } = yield* made.power
+        yield* wait(30)
+        return { on, answers, question, followUps: [...followUps] }
+      }),
+    )
+    expect(result.on).toBe(false)
+    expect(result.answers).toEqual([])
+    expect(result.question).toEqual([])
+    expect(result.followUps).toEqual([])
+  })
+
+  test("'mute it' over an update still mutes its thread, and yapd stays on", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const mutes = yield* muting
+        const { made, finish, talk, wait, played, responded, followUps } = yield* make("Mute it.", { mutes, off: true })
+        yield* finish("noisy", "Still going.")
+        yield* wait(1)
+        yield* talk
+        yield* wait(11)
+        return { on: (yield* made.power).on, played: [...played], responded: [...responded], followUps: [...followUps], mutes: (yield* mutes.list).map(({ key }) => key) }
+      }),
+    )
+    expect(result.on).toBe(true)
+    expect(result.played).toEqual(["yapd. Still going.", "Muted it. I'll still tell you if it needs you."])
+    expect(result.responded).toEqual([])
+    expect(result.followUps).toEqual([])
+    expect(result.mutes).toEqual([sessionKey("noisy")])
   })
 })
 

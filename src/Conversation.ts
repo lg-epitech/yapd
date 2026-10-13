@@ -7,7 +7,7 @@ import * as Endpointer from "./Endpointer.ts"
 import { plain, RelayError, type Thread } from "./Relay.ts"
 import { Journal } from "./Journal.ts"
 import { Persona } from "./Persona.ts"
-import { agreed, gist, type Line, noted, type Reply, Responder } from "./Responder.ts"
+import { agreed, gist, halts, type Line, noted, type Reply, Responder } from "./Responder.ts"
 import type * as Threads from "./Threads.ts"
 import { Transcriber } from "./Transcriber.ts"
 import { Vad } from "./Vad.ts"
@@ -274,6 +274,13 @@ export const make = (options: {
    * worked out as ever.
    */
   readonly mute?: (update: Update, heard: string, voiced: number, echo: string | undefined) => Option.Option<Effect.Effect<string>>
+  /**
+   * Turns yapd off as the menu does, for "Mute." said on its own over
+   * anything it says, or right after: his emergency off. Turning off cuts off
+   * what's being said, so this comes back only should yapd stay on. Without
+   * it, "Mute." is a stop, as it always was.
+   */
+  readonly off?: Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const lifetime = yield* Effect.scope
@@ -287,6 +294,14 @@ export const make = (options: {
 
     let ids = 0
     const fresh = () => ++ids
+
+    /**
+     * Whether what he said is his emergency off, with nothing to work out of
+     * it, wherever he said it: only not when what yapd was saying around
+     * when he began, while its own voice could still get into the
+     * microphone, was about muting, as that "mute" may be its own.
+     */
+    const halted = (heard: string, echo: string | undefined) => options.off !== undefined && halts(heard) && !/mute/i.test(echo ?? "")
 
     /** Starts listening, if there's a microphone. That's only known once something plays. */
     const open = (scope: Scope.Scope) =>
@@ -831,11 +846,15 @@ export const make = (options: {
                   ),
                 )
             const { heard, afterPause, reply } = yield* settle(outcome.ear, first, outcome.audio, unlogged, !unsure, (heard, voiced, afterPause) =>
-              Option.match(options.mute?.(update, heard, voiced, echo) ?? Option.none(), {
-                onSome: (muting) => Effect.succeed<Reply | Muting>({ intent: "mute", spoken: "", message: "", muting }),
-                onNone: () => responding(heard, afterPause),
-              }),
+              halted(heard, echo)
+                ? Effect.succeed<Reply | Muting>({ intent: "dismiss", spoken: "", message: "" })
+                : Option.match(options.mute?.(update, heard, voiced, echo) ?? Option.none(), {
+                    onSome: (muting) => Effect.succeed<Reply | Muting>({ intent: "mute", spoken: "", message: "", muting }),
+                    onNone: () => responding(heard, afterPause),
+                  }),
             )
+            // "Mute." turns yapd off at once, which cuts this off, with nothing of it noted or sent. Should yapd stay on, it's a stop.
+            if (options.off !== undefined && halted(heard, echo)) yield* options.off
             // Muting its thread is done, and said, once he's stopped.
             const muted = reply.intent === "mute" ? yield* reply.muting : undefined
             const answer = muted ?? reply.spoken
@@ -961,12 +980,20 @@ export const make = (options: {
           // What it hadn't said yet when he began, a moment before, so what he could have heard of it is known, like a question's options:
           // never from where it stopped, which takes him for having heard what it said as he was already talking. Nothing once all of it was.
           const left = outcome.at < outcome.duration ? unsaid(said.spoken, Math.max(0, outcome.onset - reaction) / outcome.duration) : ""
-          const reply =
+          const settled =
             itself || first === ""
-              ? Option.none()
-              : (yield* settle(outcome.ear, first, outcome.audio, hear, !unsure, (heard, voiced, afterPause) =>
-                  respond(heard, voiced, echo, echo === undefined || afterPause === "" ? undefined : afterPause, left === "" ? undefined : left),
-                )).reply
+              ? undefined
+              : yield* settle(outcome.ear, first, outcome.audio, hear, !unsure, (heard, voiced, afterPause) =>
+                  halted(heard, echo)
+                    ? Effect.succeed(Option.none<Effect.Effect<void>>())
+                    : respond(heard, voiced, echo, echo === undefined || afterPause === "" ? undefined : afterPause, left === "" ? undefined : left),
+                )
+          // "Mute." turns yapd off at once, which cuts this off: it's no answer, nor anything to follow up. Should yapd stay on, nothing came of it.
+          if (settled !== undefined && options.off !== undefined && halted(settled.heard, echo)) {
+            yield* options.off
+            return false
+          }
+          const reply = settled?.reply ?? Option.none()
           if (Option.isSome(reply)) {
             // They've answered or followed it up, so it's taken in even if a dictation starts right now.
             yield* Effect.uninterruptible(reply.value)

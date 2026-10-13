@@ -281,6 +281,8 @@ const assistant = (
     readonly modes?: boolean
     /** What the model briefs him with on what was held or what he missed, from what it's given, or none when it can't be asked. */
     readonly briefs?: (held: ReadonlyArray<Journal.Kept>, brief: Brain.Brief) => string | undefined
+    /** Where yapd turned on or off as the menu does goes, which "Mute." and, while it's off, "unmute" by the shortcut do: nothing does without it. */
+    readonly turning?: Array<boolean>
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -465,8 +467,11 @@ const assistant = (
     /** What each brief was asked to sum up, and each brief as it was asked. */
     const briefed: Array<ReadonlyArray<string>> = []
     const briefings: Array<Brain.Brief> = []
+    /** Turning yapd on or off as the menu does, once it's made, which drops what's under way for what he asked before. */
+    let switching = (_: boolean): Effect.Effect<void> => Effect.void
     const made = yield* Assistant.make({
       ...(modes === undefined ? {} : { modes }),
+      ...(given.turning === undefined ? {} : { turn: (on: boolean) => Effect.suspend(() => switching(on)) }),
       // This Mac is Rosie.
       ...(mutes === undefined || controls === undefined
         ? {}
@@ -525,6 +530,14 @@ const assistant = (
         ),
       ),
     )
+    switching = (on) =>
+      Effect.zipRight(
+        made.drop,
+        Effect.sync(() => {
+          given.turning?.push(on)
+          power = { on, turns: power.turns + 1 }
+        }),
+      )
     // Lets the fibers catch up on what the test did, since the clock only moves when told to.
     const flush = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
     /** Lets the fibers catch up until `ready` says they have, like a command T3 Code was sent, however slowly they run. */
@@ -10956,6 +10969,53 @@ describe("Assistant turned off and on", () => {
   const kept = (journal: Journal.Journal["Type"], minutesAgo: number, said: string, detail: Record<string, unknown> = { priority: "done", held: "off" }) =>
     journal.write({ at: now - minutesAgo * 60_000, kind: "update", machine: "Rosie", thread: tezos.id, project: "integration", said, detail })
   const unheard = (journal: Journal.Journal["Type"]) => Effect.map(journal.unheard(0, 100), (rows) => rows.map(({ said }) => said))
+
+  test("'Mute.' by the shortcut turns yapd off as the menu does, with nothing worked out or said, and closes the question it asked", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const turning: Array<boolean> = []
+        const { dictate, seen, spoken, open } = yield* assistant(
+          (situation) => Brain.decision({ act: "clarify", target: handle(situation, tezos), others: handle(situation, mina), sure: "low" }),
+          undefined,
+          { turning },
+        )
+        yield* dictate("Which migration is running?")
+        const asked = { open: Option.isSome(yield* open), spoken: spoken().length }
+        const before = seen.length
+        yield* dictate("Mute.")
+        return { turning, asked, worked: seen.length - before, spoken: spoken().length, open: Option.isSome(yield* open) }
+      }),
+    )
+    expect(result.turning).toEqual([false])
+    expect(result.asked).toEqual({ open: true, spoken: 1 })
+    expect(result.worked).toBe(0)
+    expect(result.spoken).toBe(1)
+    expect(result.open).toBe(false)
+  })
+
+  test("while off, 'unmute' or 'turn it on' by the shortcut turns yapd on; while on, a bare 'unmute' is worked out as before", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const turning: Array<boolean> = []
+        const { heard, toggle, seen, flush } = yield* assistant(() => Brain.decision({ act: "answer", spoken: "Nothing's muted, sir." }), undefined, { turning })
+        const say = (words: string, turns: number) =>
+          Effect.gen(function* () {
+            yield* heard({ heard: words, via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns })
+            yield* flush
+          })
+        yield* say("Unmute.", 1)
+        const on = { turning: [...turning], worked: seen.map(({ utterance }) => utterance.heard) }
+        yield* toggle(false)
+        yield* say("Unmute.", 2)
+        yield* toggle(false)
+        yield* say("Jarvis, turn it on.", 4)
+        return { on, turning, worked: seen.map(({ utterance }) => utterance.heard) }
+      }),
+    )
+    expect(result.on).toEqual({ turning: [], worked: ["Unmute."] })
+    expect(result.turning).toEqual([true, true])
+    expect(result.worked).toEqual(["Unmute."])
+  })
 
   test("turned on with what came in while it was off, it offers the catch-up once, and a yes gives it", async () => {
     const result = await run(

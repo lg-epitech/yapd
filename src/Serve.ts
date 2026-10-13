@@ -132,6 +132,9 @@ export const serve = Effect.gen(function* () {
   const persona = yield* Persona.Persona
   /** What tells him what was held once he says he's back over an update, which the assistant does, once it's made. */
   const welcome = yield* Deferred.make<Effect.Effect<void>>()
+  /** Turning yapd on or off as the menu does, once that's made, for "Mute." said to it, and "unmute" by the shortcut while it's off. */
+  const switches = yield* Deferred.make<(on: boolean) => Effect.Effect<void>>()
+  const power = (on: boolean) => Effect.flatMap(Deferred.await(switches), (turn) => turn(on))
   // Hooks on this machine are tied to the thread they came from, so what's said of each is kept with it, and what he says over it goes to it.
   // Another machine's are tied to theirs there for what's kept, shown and muted of them only.
   const daemon = yield* Daemon.make({
@@ -182,6 +185,7 @@ export const serve = Effect.gen(function* () {
           }
         }),
       ),
+    off: power(false),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
@@ -240,6 +244,7 @@ export const serve = Effect.gen(function* () {
     controls,
     naming,
     modes,
+    turn: power,
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
   missing = Effect.map(assistant.missed, ({ groups }) => groups)
@@ -312,6 +317,17 @@ export const serve = Effect.gen(function* () {
     back: Effect.all([assistant.back, notices.reconcile], { discard: true }),
   })
   const switching = yield* Effect.makeSemaphore(1)
+  /**
+   * Turns yapd on or off as the menu does, one at a time, so what's
+   * remembered is what's in effect. Noted as of when it was asked, so it
+   * comes before what turning off keeps.
+   */
+  const toggle = (on: boolean) =>
+    Effect.flatMap(Clock.currentTimeMillis, (at) =>
+      Effect.zipRight(settings.remember(on), turn(on)).pipe(Effect.zipRight(journal.write({ at, kind: "action", detail: { on } }))),
+    ).pipe(switching.withPermits(1))
+  // By voice, nothing waits on it to say what went wrong, so that's logged.
+  yield* Deferred.succeed(switches, (on) => toggle(on).pipe(Effect.catchAllCause((cause) => Effect.logWarning(`Could not turn ${on ? "on" : "off"}`, cause))))
   // The shortcut waits for this, so nothing is dictated before yapd knows it's on.
   if (yield* settings.on) yield* turn(true)
   else {
@@ -358,11 +374,7 @@ export const serve = Effect.gen(function* () {
   yield* Server.serve(yield* Config.port, {
     handle: daemon.handle,
     state: Show.stated(state, show),
-    // One at a time, so what's remembered is what's in effect. Noted as of when it was asked, so it comes before what turning off keeps.
-    turn: (on) =>
-      Effect.flatMap(Clock.currentTimeMillis, (at) =>
-        Effect.zipRight(settings.remember(on), turn(on)).pipe(Effect.zipRight(journal.write({ at, kind: "action", detail: { on } }))),
-      ).pipe(switching.withPermits(1)),
+    turn: toggle,
     // Ended from the menu, focus or quiet offers the rundown, as when its time runs out.
     mode: (mode, until) =>
       Effect.gen(function* () {

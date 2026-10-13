@@ -145,6 +145,23 @@ export const enough: ReadonlySet<string> = new Set([
   "stop", "quiet", "be quiet", "shut up", "silence", "mute", "skip", "skip it", "next", "enough", "that's enough", "never mind",
 ])
 
+/** What's said, as it's compared, each word once, so what Whisper heard again and again, like "Stop, stop.", is as if said once. */
+export const once = (heard: string) => [...new Set(gist(heard).split(" "))].join(" ")
+
+/**
+ * "Mute." on its own, however many times Whisper heard it: his emergency off,
+ * which turns yapd off at once wherever he says it, as the menu does, with
+ * nothing worked out of it. Never "mute it" or "mute the Tezos one", which
+ * mute a thread.
+ */
+export const halts = (heard: string) => once(heard) === "mute"
+
+/** Turning yapd back on, in so many words, which only said by the shortcut while it's off turns it on: on, "unmute" is about a thread. */
+const turningOn: ReadonlySet<string> = new Set(["unmute", "un mute", "turn on", "turn it on", "turn yourself on", "turn back on"])
+
+/** Whether what he said is only to turn yapd back on. */
+export const wakes = (heard: string) => turningOn.has(once(heard))
+
 /** What Whisper writes for near-silence, which nobody said. */
 export const hallucinated: ReadonlySet<string> = new Set(["you", "thank you", "bye", "see you again", "kid", "thanks for watching"])
 
