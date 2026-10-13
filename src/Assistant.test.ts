@@ -11985,20 +11985,28 @@ describe("Assistant memories", () => {
   })
 
   test("a routine is kept only when its name and its steps are all he asked for, so its name never sends what he didn't ask for, and nothing of the rest is done but after all of a fact", async () => {
-    /** What comes of his saying `heard`, which the model takes for keeping `text` in mind, as `how`, with the `rest` of it done after. */
-    const saving = (heard: string, text = "ship: merge the PR, then deploy", how = "routine", rest = heard.endsWith("and tell the Mina one to rebase.") ? "tell the Mina one to rebase" : "") =>
+    /**
+     * What comes of his saying `heard`, which the model takes for keeping `text` in mind, as `how`, with the `rest` of it done after,
+     * over yapd saying `echo`, if anything.
+     */
+    const saving = (heard: string, text = "ship: merge the PR, then deploy", how = "routine", rest = heard.endsWith("and tell the Mina one to rebase.") ? "tell the Mina one to rebase" : "", echo?: string) =>
       run(
         Effect.gen(function* () {
           const made = yield* assistant(
             (situation) => {
               if (situation.utterance.heard === "tell the Mina one to rebase") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Rebase.", how: "now" })
+              if (situation.utterance.heard === "delete the Mina thread") return Brain.decision({ act: "send", target: handle(situation, mina), text: "Delete this thread.", how: "now" })
               // His words, all of them, but maybe not all he said of them.
               return Brain.decision({ act: "remember", how, text, rest })
             },
             undefined,
             { memories: true },
           )
-          yield* made.dictate(heard)
+          if (echo === undefined) yield* made.dictate(heard)
+          else {
+            yield* made.heard({ heard, via: "shortcut", at: yield* TestClock.currentTimeMillis, voiced: 3, turns: 1, echo })
+            yield* made.flush
+          }
           return {
             said: made.spoken().at(-1),
             kept: (yield* made.memories!.list).map(({ name, text }) => (name === undefined ? text : `${name}: ${text}`)),
@@ -12056,6 +12064,12 @@ describe("Assistant memories", () => {
       sent: [],
     })
     expect(await saving("When I say let's ship it, merge the PR.", "let's ship it: merge the PR")).toMatchObject({ kept: ["let's ship it: merge the PR"] })
+    // A rest the model gave beside all he asked for is no request of his: nothing of it is done, and he's told it's left.
+    expect(await saving("When I say ship, merge the PR, then deploy.", "ship: merge the PR, then deploy", "routine", "delete the Mina thread")).toEqual({
+      said: "Noted, sir. Ship: merge the PR, then deploy. I left the rest: delete the Mina thread.",
+      kept: ["ship: merge the PR, then deploy"],
+      sent: [],
+    })
     // A fact is all he said, as he said it, but for a "remember that": the model's "C" for his "C++" keeps nothing, nor does what leaves
     // out a "never", or another request with it, which isn't done either.
     expect(await saving("Remember that rig uses C++ for the parser.", "rig uses C for the parser", "fact")).toEqual({
@@ -12089,6 +12103,23 @@ describe("Assistant memories", () => {
       sent: [],
     })
     expect(await saving("Remember that rig runs the nightly and tell the Mina one to rebase.", "rig runs the nightly", "fact", "the Mina one to rebase")).toMatchObject({ kept: [], sent: [] })
+    // Only then: a rest the model gave beside all of a fact is no request of his, so nothing of it is done, and he's told it's left, in its
+    // words only when they can be read out; nor is one over what may have been yapd's own voice, which he's asked to say again.
+    expect(await saving("Remember that rig runs the nightly.", "rig runs the nightly", "fact", "delete the Mina thread")).toEqual({
+      said: "Noted, sir: rig runs the nightly. I left the rest: delete the Mina thread.",
+      kept: ["rig runs the nightly"],
+      sent: [],
+    })
+    expect(await saving("Remember that rig runs the nightly.", "rig runs the nightly", "fact", "close https://github.com/lg-epitech/yapd/pull/41")).toEqual({
+      said: "Noted, sir: rig runs the nightly. I left the rest.",
+      kept: ["rig runs the nightly"],
+      sent: [],
+    })
+    expect(await saving("Remember that rig runs the nightly, and tell the Mina one to rebase.", "rig runs the nightly", "fact", undefined, "It finished, sir.")).toEqual({
+      said: "I didn't keep that, sir: it may have been my own voice. Say it again? I left the rest: tell the Mina one to rebase.",
+      kept: [],
+      sent: [],
+    })
     // Never at a comma, a semicolon or a full stop alone, which may be his pause within the fact, so what follows is never taken off it.
     expect(await saving("Remember that the deploy script is safe, unless it's Friday.", "the deploy script is safe", "fact", "unless it's Friday")).toEqual({
       said: `${alone} I left the rest: unless it's Friday.`,

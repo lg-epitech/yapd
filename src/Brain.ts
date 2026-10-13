@@ -199,6 +199,12 @@ export interface Brief {
 export interface Plan {
   readonly decision: Decision
   readonly target: Option.Option<Threads.Listed>
+  /**
+   * The rest the model gave that isn't done, taken out of the decision's,
+   * which he's told was left: one beside all he asked to be kept in mind,
+   * which is no request of his.
+   */
+  readonly left?: string
 }
 
 /** What a decision comes to once checked: done, asked about, or answered with a reason. */
@@ -2477,16 +2483,25 @@ export const check = (given: Decision, situation: Situation, lines: Lines): Chec
       // to yapd a pause sets off, every mark and symbol kept. The model's words only have to say the same, symbols and all, so its "C" for
       // his "C++" keeps nothing, as does a fact said with more than it, like a "never" it leaves out, or another request in the same
       // breath, unless that's all the rest the model gave, his words after an "and", "then" or "also", and the fact all he said before it.
-      if (utterance.echo !== undefined || heard === "") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
-      const his = routine === undefined ? (spokenFact(heard, text) ?? spokenFactThen(heard, text, choice.rest)) : spokenSteps(heard, text)
-      if (his === undefined) {
-        const missing = unheard(text, heard)
-        if (routine !== undefined) return { _tag: "Say", spoken: said.steps(missing) }
-        // All of it his, symbols and all, but with more of his around it, which saying it on its own keeps; not all he said within it,
-        // like a "never", which he's told isn't kept as he said it.
-        return { _tag: "Say", spoken: missing === undefined && standsApart(heard, text, choice.rest) ? said.alone : said.words(missing) }
+      // That split is the only way a rest goes on: beside all he asked to be kept, or over what may have been yapd's own voice, the model's
+      // rest is taken out before anything's done, and he's told it was left.
+      const alone = (kept: string): Checked => ({
+        _tag: "Do",
+        plan: { decision: { ...choice, target: "", text: kept, rest: "" }, target: Option.none(), ...(choice.rest.trim() === "" ? {} : { left: choice.rest }) },
+      })
+      if (utterance.echo !== undefined || heard === "") return alone(choice.text)
+      if (routine !== undefined) {
+        const steps = spokenSteps(heard, text)
+        return steps === undefined ? { _tag: "Say", spoken: said.steps(unheard(text, heard)) } : alone(`${routine.name}: ${steps}`)
       }
-      return doing({ decision: { ...choice, target: "", text: routine === undefined ? his : `${routine.name}: ${his}` }, target: Option.none() })
+      const fact = spokenFact(heard, text)
+      if (fact !== undefined) return alone(fact)
+      const split = spokenFactThen(heard, text, choice.rest)
+      if (split !== undefined) return doing({ decision: { ...choice, target: "", text: split }, target: Option.none() })
+      // All of it his, symbols and all, but with more of his around it, which saying it on its own keeps; not all he said within it,
+      // like a "never", which he's told isn't kept as he said it.
+      const missing = unheard(text, heard)
+      return { _tag: "Say", spoken: missing === undefined && standsApart(heard, text, choice.rest) ? said.alone : said.words(missing) }
     }
     case "show":
       switch (choice.how) {

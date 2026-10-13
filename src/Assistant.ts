@@ -1728,12 +1728,13 @@ export const make = (options: {
      * asked for goes without a word. `desk` is the one the rest was worked out
      * against, which a handle in it is named by; none names nothing. Held
      * back as a secret, the rest is his words too, which may be what gave it
-     * away, so it's said to be left without them, never read out or noted.
+     * away, so it's said to be left without them, never read out or noted;
+     * `unsaid`, it's said to be left without them too.
      */
-    const unfinished = (outcome: Outcome, rest: string, said: Lines, desk: Threads.Desk = nowhere): Outcome => {
+    const unfinished = (outcome: Outcome, rest: string, said: Lines, desk: Threads.Desk = nowhere, unsaid = false): Outcome => {
       const left = Brain.speakable(rest, desk).replace(/[.!?]+$/, "")
       if (left === "") return outcome
-      const line = outcome.withheld === true ? `I left the rest${addressed(said)}.` : `I left the rest${addressed(said)}: ${left}.`
+      const line = outcome.withheld === true || unsaid ? `I left the rest${addressed(said)}.` : `I left the rest${addressed(said)}: ${left}.`
       return { ...retold(outcome, (say) => joined(say, line, said)), kind: outcome.kind === "none" ? "answer" : outcome.kind }
     }
 
@@ -3194,10 +3195,14 @@ export const make = (options: {
             (outcome) => onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said),
           )
         case "remember":
-          // Kept, then the rest of the request, done now; but nothing more of what may give a secret away, which he's told is left, without its words.
-          return Effect.flatMap(remembering(plan, thought, said), (outcome) =>
-            outcome.withheld === true ? Effect.succeed(unfinished(outcome, decision.rest, said, thought.situation.desk)) : onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said),
-          )
+          // Kept, then the rest of the request code split off the fact, done now. Nothing more of what may give a secret away, which he's told is
+          // left, without its words, nor a rest the model gave beside all he asked to be kept, which he's told is left, in its words only when
+          // they can be read out.
+          return Effect.flatMap(remembering(plan, thought, said), (outcome) => {
+            if (outcome.withheld === true) return Effect.succeed(unfinished(outcome, plan.left ?? decision.rest, said, thought.situation.desk))
+            if (plan.left !== undefined) return Effect.succeed(unfinished(outcome, plan.left, said, thought.situation.desk, !Brain.readable(plan.left)))
+            return onward(thought, outcome, Brain.about(outcome.subject), at.step + 1, said)
+          })
         case "answer":
           return answer(decision.spoken, target, thought, said, at.step)
         case "look":
