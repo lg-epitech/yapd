@@ -2305,55 +2305,28 @@ const asNoun = (word: string) => String.raw`(?<=(?<![a-z0-9])(?:the|my|your|our|
 const valued = String.raw`[^\s.,;:!?…]`
 
 /**
- * A pass given its value, whatever's before it: "my Gmail pass is …", "the
- * Netflix pass: …", "the VPN pass's …", "my Gmail pass, it's …", or one word
- * after a comma or a dash at the end, "my Gmail pass, …". Never one with
- * another noun after it, as in "the CI pass rate is …", though "the bus pass
- * is in my wallet" is taken for one too.
+ * The word "pass" or "passes", however it's meant, as in "hunter2 is my
+ * Windows pass", "my Teams pass is …" or "the nightly build passes", since
+ * nothing short of a guess tells one named from tests that pass: he says "the
+ * tests work on Node 22" instead. Never a pass rate or a pass count.
  */
-const passGiven = String.raw`pass(?=(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|are|was|were|equals)\s+|(?:\s*[,.;]\s*|\s+[—–-]\s+|\s+)it['’]?s\s+)${valued}|(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$)`
-
-/**
- * A pass as what's named, after "my", "the", "a", someone's or similar and a
- * name or two at most, as in "hunter2 is my Gmail pass" or "my Gmail pass for
- * work is …": where it ends, or what's after it is "is", "for" or the like.
- * Never with another noun after it, as in "the CI pass rate is …".
- */
-const passNamed = new RegExp(
-  String.raw`(?<=(?<![a-z0-9])(?:my|your|our|his|her|their|its|the|an?|[\w.-]+['’]s) (?:[\w.'’-]+ ){0,2})pass(?:es)?(?=\s*$|\s*[^\w\s-]|\s+-|\s+(?:is|are|was|were|for|to|at|from)(?![a-z0-9]))`,
-  "gi",
-)
-
-/**
- * Whether the word just before a pass makes it a verb, being a plural, as in
- * "the Mina tests pass for Node 22" or "the checks pass on rig", though "his",
- * "its" and "the VPN's" aren't one, nor a name in capitals, as he or Whisper
- * wrote it, as in "my AWS pass" or "the SMS pass", which only its case tells
- * apart from a plural.
- */
-const pluralBefore = (before: string) => {
-  const word = /(?<![\w.'’-])(?!(?:his|its) )[\w.-]*[^\Ws]s(?= $)/i.exec(before)?.[0]
-  return word !== undefined && !/^[A-Z]{2,}$/.test(word)
-}
-
-/** Whether what's said names a pass, as in "hunter2 is my AWS pass", rather than tells of tests that pass. */
-const namesPass = (words: string) => [...words.matchAll(passNamed)].some(({ index }) => !pluralBefore(words.slice(0, index)))
+const pass = String.raw`pass(?:es)?(?![ -](?:rate|count)s?(?![a-z0-9]))`
 
 /**
  * What names one in a fact he'd have kept, though an agent's question may
  * well mean something else by it: a PIN or a PAT, in any case; a lock's or a
  * safe's combination; or one as it's said out loud, or as Whisper writes it
- * down, like "P I N", "creds", "the Wi-Fi pass", a pass given its value, as
- * in "my Gmail pass is …", a pwd or a pword, "my seed", "sign in", "the
- * phrase for …", a card's CVV, or a name given a value of 8
- * characters or more, as in "sessionid=5f6ca267…" or "API_KEY=…".
+ * down, like "P I N", "creds", any pass, as in "the Wi-Fi pass is …" or "the
+ * tests pass", a pwd or a pword, "my seed", "sign in", "the phrase for …", a
+ * card's CVV, or a name given a value of 8 characters or more, as in
+ * "sessionid=5f6ca267…" or "API_KEY=…".
  * Never what tells a question that asks him to type one in, so "Which phrase
  * for the title?" is still his to answer by voice.
  */
 const alsoCredentials = new RegExp(
   String.raw`(?<![a-z0-9])(?:${[
     String.raw`pins?|pats?|(?:safe|lock|padlock|locker|vault)['’]?s? (?:combination|combo)s?|(?:combination|combo)s? (?:to|for|of|on) (?:\S+ ){0,3}?(?:safe|lock|padlock|locker|vault)s?`,
-    String.raw`(?<=(?<![a-z0-9])(?:wi[ -]?fi|the|my) )pass${ended}|${passGiven}`,
+    pass,
     String.raw`pws?|pwds?|pwords?|passwds?|p(?:\. ?| )i(?:\. ?| )n\.?|creds|psks?|${asNoun("auth")}|(?<!random )${asNoun("seed")}`,
     String.raw`sign[ -]?in(?:s|to)?|log[ -]?in(?= (?:to|into)(?![a-z0-9]))|log into`,
     String.raw`bip[ -]?39|phrases?(?= for(?![a-z0-9]))|words(?= for my [a-z0-9])`,
@@ -2435,7 +2408,7 @@ const givesValue = (words: string) => T3Actions.revealing(words) || given.some((
  * similar, even one that isn't secret, like the name of his password manager.
  */
 const mentionsCredential = (words: string) =>
-  T3Actions.namesCredential(words) || alsoCredentials.test(words) || namesPass(words) || mentionsVague(words)
+  T3Actions.namesCredential(words) || alsoCredentials.test(words) || mentionsVague(words)
 
 /**
  * Whether what he asked to be kept in mind may give a secret away, in all he

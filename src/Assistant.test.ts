@@ -12413,16 +12413,16 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain("hunter2")
   })
 
-  test("a pass named, as in my Gmail pass, isn't remembered nor shown the model after, while tests that pass are", async () => {
-    const refused = ["hunter2 is my Gmail pass", "my Gmail pass for work is hunter2", "the VPN's pass is hunter2", "hunter2 is my AWS pass"]
-    const kept = [
+  test("a fact with the word pass, as in my Windows pass or tests that pass, isn't remembered nor shown the model after, while a pass rate is", async () => {
+    const refused = [
+      "hunter2 is my Windows pass",
+      "my Windows pass for work is hunter2",
+      "my Teams pass is hunter2",
+      // Tests that pass too, since nothing short of a guess tells them from a pass named.
       "the Mina tests pass only on Node 22",
-      "the tests pass on rig",
-      "the CI pass rate is 98%",
-      "the Mina tests pass for Node 22",
-      "the Mina tests pass at work",
-      "the checks pass to the next stage",
+      "the nightly build passes",
     ]
+    const kept = ["the CI pass rate is 98%", "the Mina tests only work on Node 22"]
     const result = await run(
       Effect.gen(function* () {
         const made = yield* assistant(
