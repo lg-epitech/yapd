@@ -53,6 +53,12 @@ export interface Utterance {
    * known, as for what he dictates.
    */
   readonly unsaid?: string
+  /**
+   * For the rest of a request, worked out apart from what came before it in
+   * the same breath: all of what he said, as he said it, to keep beside what
+   * the model made of it; "" when some of it may have been yapd's own voice.
+   */
+  readonly whole?: string
 }
 
 /** What's known of yapd's own voice in what he said back: what it was saying around when he began, and only with that, what he said after a pause. */
@@ -1975,7 +1981,7 @@ export const make = (options: {
       Effect.gen(function* () {
         // What he went on to say after, which yapd's own voice was never in.
         const { echo: _, afterPause: __, ...before } = thought.utterance
-        const utterance: Utterance = { ...before, heard: thought.decision.rest }
+        const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
         yield* Effect.logInfo(`Then: ${utterance.heard}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
@@ -2910,8 +2916,8 @@ export const make = (options: {
         const asked: Reminders.Asked = {
           at: now,
           utterance: thought.utterance.id,
-          // His words as he said them, unless some of them may have been yapd's own voice, which never stand for his.
-          heard: ownWords(thought.utterance),
+          // His words as he said them, all of them for the rest of a request, unless some may have been yapd's own voice, which never stand for his.
+          heard: thought.utterance.whole ?? ownWords(thought.utterance),
           text: offer ? "" : decision.text.trim(),
           ...(offer ? { propose: decision.text.trim() } : {}),
           ...(event === undefined ? { due: Brain.instant(decision.when) } : { event }),
