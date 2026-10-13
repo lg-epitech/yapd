@@ -12414,8 +12414,15 @@ describe("Assistant memories", () => {
   })
 
   test("a pass named, as in my Gmail pass, isn't remembered nor shown the model after, while tests that pass are", async () => {
-    const refused = ["hunter2 is my Gmail pass", "my Gmail pass for work is hunter2"]
-    const kept = ["the Mina tests pass only on Node 22", "the tests pass on rig", "the CI pass rate is 98%"]
+    const refused = ["hunter2 is my Gmail pass", "my Gmail pass for work is hunter2", "the VPN's pass is hunter2"]
+    const kept = [
+      "the Mina tests pass only on Node 22",
+      "the tests pass on rig",
+      "the CI pass rate is 98%",
+      "the Mina tests pass for Node 22",
+      "the Mina tests pass at work",
+      "the checks pass to the next stage",
+    ]
     const result = await run(
       Effect.gen(function* () {
         const made = yield* assistant(
@@ -12441,6 +12448,37 @@ describe("Assistant memories", () => {
     expect(result.kept).toEqual(kept)
     for (const prompt of result.told) expect(prompt).not.toContain("hunter2")
     expect(result.journal).not.toContain("hunter2")
+  })
+
+  test("a cookie, or a name given a value as long as a secret's, isn't remembered nor shown the model after, while a cookie banner is", async () => {
+    const value = "5f6ca26793c444a689346465c7406cf8"
+    const refused = [`my session cookie is sessionid=${value}`, `my session cookie is ${value}`, `the Mina staging session is sessionid=${value}`]
+    const kept = "the Mina site needs a cookie banner"
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const text = [...refused, kept].find((fact) => situation.utterance.heard === `Remember that ${fact}.`)
+            return text === undefined ? Brain.decision({ act: "answer", spoken: "Nothing else, sir." }) : Brain.decision({ act: "remember", how: "fact", text })
+          },
+          undefined,
+          { memories: true },
+        )
+        const said: Array<string | undefined> = []
+        const told: Array<string> = []
+        for (const fact of [...refused, kept]) {
+          yield* made.dictate(`Remember that ${fact}.`)
+          said.push(made.spoken().at(-1))
+          yield* made.dictate("Anything else?")
+          told.push(Brain.prompt(made.seen.at(-1)!, Option.none()))
+        }
+        return { said, told, kept: (yield* made.memories!.list).map(({ text }) => text), journal: JSON.stringify(yield* made.journal.since(0)) }
+      }),
+    )
+    expect(result.said.slice(0, refused.length)).toEqual(refused.map(() => "I won't keep that, sir. It looks like a secret."))
+    expect(result.kept).toEqual([kept])
+    for (const prompt of result.told) expect(prompt).not.toContain(value)
+    expect(result.journal).not.toContain(value)
   })
 
   test("a routine whose steps only name a code, a key, a login or the like is kept, while one that gives a value isn't, nor kept in the journal", async () => {

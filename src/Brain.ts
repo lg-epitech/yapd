@@ -2317,11 +2317,11 @@ const passGiven = String.raw`pass(?=(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|are|was|we
  * A pass as what's named, after "my", "the", "a", someone's or similar and a
  * name or two at most, as in "hunter2 is my Gmail pass" or "my Gmail pass for
  * work is …": where it ends, or what's after it is "is", "for" or the like.
- * Never where it's a verb, as in "the Mina tests pass only on Node 22" or "the
- * tests pass on rig", nor with another noun after it, as in "the CI pass rate
- * is …", though "the tests pass." is taken for one too.
+ * Never where it's a verb, after a plural, as in "the Mina tests pass for Node
+ * 22" or "the checks pass on rig", though "the VPN's pass" is one, nor with
+ * another noun after it, as in "the CI pass rate is …".
  */
-const passNamed = String.raw`(?<=(?<![a-z0-9])(?:my|your|our|his|her|their|its|the|an?|[\w.-]+['’]s) (?:[\w.'’-]+ ){0,2})pass(?:es)?(?=\s*$|\s*[^\w\s-]|\s+-|\s+(?:is|are|was|were|for|to|at|from)(?![a-z0-9]))`
+const passNamed = String.raw`(?<=(?<![a-z0-9])(?:my|your|our|his|her|their|its|the|an?|[\w.-]+['’]s) (?:[\w.'’-]+ ){0,2})(?<!(?<![\w.'’-])(?!(?:his|its) )[\w.-]*[^\Ws]s )pass(?:es)?(?=\s*$|\s*[^\w\s-]|\s+-|\s+(?:is|are|was|were|for|to|at|from)(?![a-z0-9]))`
 
 /**
  * What names one in a fact he'd have kept, though an agent's question may
@@ -2329,7 +2329,8 @@ const passNamed = String.raw`(?<=(?<![a-z0-9])(?:my|your|our|his|her|their|its|t
  * safe's combination; or one as it's said out loud, or as Whisper writes it
  * down, like "P I N", "creds", "the Wi-Fi pass", a pass given its value or
  * named, as in "my Gmail pass for work", a pwd or a pword, "my seed", "sign
- * in", "the phrase for …" or a card's CVV.
+ * in", "the phrase for …", a card's CVV, or a name given a value of 8
+ * characters or more, as in "sessionid=5f6ca267…" or "API_KEY=…".
  * Never what tells a question that asks him to type one in, so "Which phrase
  * for the title?" is still his to answer by voice.
  */
@@ -2343,24 +2344,27 @@ const alsoCredentials = new RegExp(
     String.raw`security (?:questions?|answers?)|cv[vc]2?s?|card numbers?`,
     // A URL with its user and password in it, by the user's name, as in "postgres://admin:…@rig".
     String.raw`[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+(?=:[^\s/@]+@)`,
+    // A name given a value as long as a secret's, as in "sessionid=5f6ca267…".
+    String.raw`[\w.-]+=\S{8,}`,
   ].join("|")})(?![a-z0-9])`,
   "i",
 )
 
 /**
  * A word that's often one, and as often something else, with the word after
- * it, which may say what else: a key, a token, a secret, a code or a
- * combination. A code an app's name ends in, like T3 Code's, is never one.
+ * it, which may say what else: a key, a token, a secret, a code, a
+ * combination or a cookie. A code an app's name ends in, like T3 Code's, is
+ * never one.
  */
 const vague = new RegExp(
-  String.raw`(?<![a-z0-9])((?:${T3Actions.codeApps}) (?=code))?(key|token|secret|code|combination|combo)(s?)(?![a-z0-9])(?=(?:[ -]([a-z]+))?)`,
+  String.raw`(?<![a-z0-9])((?:${T3Actions.codeApps}) (?=code))?(key|token|secret|code|combination|combo|cookie)(s?)(?![a-z0-9])(?=(?:[ -]([a-z]+))?)`,
   "gi",
 )
 
 /**
- * What a key, a token, a secret or a code is when the word after it says so,
- * like "key bindings", "token budget", "secret sauce" or "code review". Kept
- * short, since anything else is taken for one, even "key words", which a
+ * What a key, a token, a secret, a code or a cookie is when the word after it
+ * says so, like "key bindings", "token budget", "secret sauce", "code review"
+ * or "cookie banner". Kept short, since anything else is taken for one, even "key words", which a
  * recovery phrase is too.
  */
 const somethingElse: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -2368,6 +2372,7 @@ const somethingElse: Readonly<Record<string, ReadonlySet<string>>> = {
   token: new Set(["budget", "budgets", "limit", "limits", "count", "counts", "usage", "window", "windows"]),
   secret: new Set(["sauce"]),
   code: new Set(["base", "bases", "review", "reviews", "style", "path", "paths"]),
+  cookie: new Set(["banner", "banners", "consent", "policy"]),
 }
 
 /**
