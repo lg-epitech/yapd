@@ -1735,8 +1735,15 @@ export const remindedBy = (handle: string, situation: Pick<Situation, "reminders
 /** How far off a reminder can be set. */
 export const furthest = 30 * 24 * 60 * 60_000
 
-/** How soon a reminder can be set for, at least: one sooner would be said before what set it. */
+/** How soon a reminder is due at the soonest: one sooner would be said before what set it. */
 const soonest = 30_000
+
+/**
+ * When a reminder at a time the model gave falls due: the time is to the
+ * minute, as NOW is given, so the next minute may be only seconds off, which
+ * is put back to `soonest` from `now`.
+ */
+export const dueAt = (when: string, now: number) => Math.max(instant(when), now + soonest)
 
 /** What's said of what can't be done about a reminder. */
 const reminderLines = (lines: Pick<Lines, "address">) => {
@@ -1887,7 +1894,8 @@ export const check = (choice: Decision, situation: Situation, lines: Lines): Che
         // Only a time of day it can tell, to come, and not too far off: whether it's the one he meant is the model's.
         const due = instant(choice.when)
         if (Number.isNaN(due) || !/T\d{2}:\d{2}/.test(choice.when)) return { _tag: "Say", spoken: said.when }
-        if (due - situation.now < soonest) return { _tag: "Say", spoken: said.past }
+        // To the minute, as NOW is given: gone only once it's come, so "in a minute" said late in one is never taken for the past.
+        if (due <= situation.now) return { _tag: "Say", spoken: said.past }
         if (due - situation.now > furthest) return { _tag: "Say", spoken: said.tooFar }
         if (choice.act === "remind") return doing({ decision: { ...choice, target: "" }, target: Option.none() })
       }

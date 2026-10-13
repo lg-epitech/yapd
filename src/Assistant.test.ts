@@ -11340,6 +11340,24 @@ describe("Assistant reminders", () => {
     expect(result.last).toBe("On it, sir.")
   })
 
+  test("in a minute, said late in one, is the next minute to the model, kept for half a minute on rather than taken for the past", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => (situation.utterance.heard.startsWith("Remind me") ? Brain.decision({ act: "remind", how: "at", when: local(situation.now + 60_000), text: "check the oven" }) : undefined),
+          undefined,
+          { reminders: true },
+        )
+        // Forty seconds into the minute, the next one is twenty seconds off.
+        yield* made.wait(40)
+        yield* made.dictate("Remind me in a minute to check the oven.")
+        return { said: made.spoken().at(-1), due: (yield* made.reminders!.pending).map(({ due, at }) => (due ?? 0) - at) }
+      }),
+    )
+    expect(result.said).toMatch(/^I'll remind you at .*, sir: check the oven\.$/)
+    expect(result.due).toEqual([30_000])
+  })
+
   test("scratch that, or undo that, right after a reminder cancels it, not the last message, unless he names that", async () => {
     const result = await run(
       Effect.gen(function* () {

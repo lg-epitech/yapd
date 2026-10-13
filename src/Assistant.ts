@@ -2920,7 +2920,7 @@ export const make = (options: {
           heard: thought.utterance.whole ?? ownWords(thought.utterance),
           text: offer ? "" : decision.text.trim(),
           ...(offer ? { propose: decision.text.trim() } : {}),
-          ...(event === undefined ? { due: Brain.instant(decision.when) } : { event }),
+          ...(event === undefined ? { due: Brain.dueAt(decision.when, now) } : { event }),
           ...(listed === undefined ? {} : { machine: listed.ref.machine, thread: listed.ref.id, called }),
         }
         const kept = yield* reminders.add(asked).pipe(Effect.either)
