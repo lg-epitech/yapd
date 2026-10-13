@@ -2959,18 +2959,24 @@ export const make = (options: {
       })
       const project = decision.text.trim()
       const machine = decision.machine.trim()
-      // What a thread's subagents said, which a subagent's own update means too, by the thread it's part of.
+      // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
+      const at = decision.when.trim() === "" ? Number.NaN : Brain.instant(decision.when)
+      const since = at > situation.now ? Number.NaN : at
+      // What a thread's subagents said, which a subagent's own update means too, by the thread it's part of, since when he said too.
       if (decision.how === "subagents") {
         const { subject } = situation
         const head = Option.match(target, {
           onNone: () => (subject._tag === "Session" ? subject.update.subagent?.head : undefined),
           onSome: ({ ref, called }) => ({ ref, called }),
         })
-        if (head !== undefined) return { subagents: head.ref, named: head.called === undefined ? "its subagents" : `the subagents of ${head.called}` }
+        if (head !== undefined) {
+          return {
+            subagents: head.ref,
+            ...(Number.isNaN(since) ? {} : { since }),
+            named: head.called === undefined ? "its subagents" : `the subagents of ${head.called}`,
+          }
+        }
       }
-      // A time to come, as when the model took his clock for another's, is no window at all: everything is gathered rather than nothing.
-      const at = decision.when.trim() === "" ? Number.NaN : Brain.instant(decision.when)
-      const since = at > situation.now ? Number.NaN : at
       const named =
         Option.getOrUndefined(Option.map(target, ({ called }) => called)) ??
         (group === undefined ? undefined : Brain.missedName(group)) ??
@@ -4789,8 +4795,13 @@ export const make = (options: {
               priority: "done",
               spoken,
               at: now,
-              // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell.
-              stale: Effect.zipWith(holding, journal.held(oldest), (mode, still) => Option.isSome(mode) || !still.some(({ id }) => covered.includes(id))),
+              // Heard since, every one of them, like from the menu or what he missed, it has nothing left to tell. Any of it kept quiet since,
+              // like a thread he muted or one whose subagents he no longer has read, it's never said, so none of that is: what else it
+              // covers is still held, for the next.
+              stale: Effect.map(
+                Effect.all([holding, journal.held(oldest), journal.rows(covered)]),
+                ([mode, still, rows]) => Option.isSome(mode) || rows.some(Missed.muted) || !still.some(({ id }) => covered.includes(id)),
+              ),
               saying: Effect.gen(function* () {
                 // Only now, so what one that's never said would have covered comes up in the next.
                 yield* options.modes?.briefed(until) ?? Effect.void

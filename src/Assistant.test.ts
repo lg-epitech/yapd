@@ -10773,6 +10773,31 @@ describe("Assistant modes", () => {
     expect(result).toEqual({ fresh: false, focused: true, kept: 0, unheard: ["integration's review pass 7 is running."], briefedAt: 0 })
   })
 
+  test("a digest waiting its turn as what it tells of a thread's subagents is kept quiet is never said, and the rest it covers is still held for the next", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { digest, notices, modes, journal } = yield* assistant(() => undefined, undefined, {
+          modes: true,
+          waiting: true,
+          briefs: () => "The Sol review is on pass 7, sir, and Mina's tickets are filed.",
+        })
+        const detail = { held: "progress", subagent: true, head: tezos.id, session: "codex:s-review" }
+        const child = yield* Effect.map(
+          journal.write({ at: now - 30 * 60_000, kind: "update", machine: "Rosie", thread: "t-review", project: "integration", said: "The Sol review is on pass 7.", detail }),
+          Option.getOrThrow,
+        )
+        yield* held(journal, now - 10 * 60_000, "Mina's tickets are filed.", "progress")
+        yield* digest(yield* journal.held(0))
+        const told = notices().at(-1)!
+        const fresh = yield* told.stale
+        // No longer reading the Tezos migration's subagents, as the daemon keeps quiet what of them was held.
+        yield* journal.mute([child])
+        return { fresh, stale: yield* told.stale, held: yield* unheard(journal), kept: (yield* journal.since(0, { kinds: ["brief"] })).length, briefedAt: yield* modes!.briefedAt }
+      }),
+    )
+    expect(result).toEqual({ fresh: false, stale: true, held: ["Mina's tickets are filed."], kept: 0, briefedAt: 0 })
+  })
+
   test("a digest the model can't sum up says nothing, and leaves what was held unheard", async () => {
     const result = await run(
       Effect.gen(function* () {
@@ -11035,6 +11060,23 @@ describe("Assistant catching up", () => {
       expect(shown).not.toContain("release blocker")
       expect(shown).not.toContain("flaky tests")
     }
+  })
+
+  test("a catch-up of a thread's subagents since when he said tells only what they kept since then", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const { dictate, spoken, journal } = yield* assistant(
+          (situation) => Brain.decision({ act: "catchup", how: "subagents", target: handle(situation, tezos), when: new Date(now - 15 * 60_000).toISOString() }),
+          undefined,
+          { briefs: (rows) => rows.map(({ said }) => said).join(" ") },
+        )
+        yield* kept(journal, 30, "t-review", "The review is on pass 6.", { priority: "done", session: "codex:s-review", subagent: true, head: tezos.id, muted: true })
+        yield* kept(journal, 10, "t-lint", "Lint is clean.", { priority: "done", session: "codex:s-lint", subagent: true, head: tezos.id, muted: true })
+        yield* dictate("What did the Tezos migration's subagents say in the last fifteen minutes?")
+        return spoken()
+      }),
+    )
+    expect(result).toEqual(["Lint is clean."])
   })
 
   test("a since the model put in the future, as when it took his clock for another's, gathers everything rather than nothing", async () => {
