@@ -2301,20 +2301,32 @@ const ended = String.raw`(?=\s*$|\s*[^\w\s-]| (?:is|are|was|were|for|to|on|at|in
 /** A word as a noun, after "the", "my" or similar and a name or two at most, as in "the Sentry auth is …" or "my seed.". */
 const asNoun = (word: string) => String.raw`(?<=(?<![a-z0-9])(?:the|my|your|our|its) (?:[\w.'’-]+ ){0,2})${word}${ended}`
 
+/** A word of a value, as it starts: not where a sentence or a clause ends. */
+const valued = String.raw`[^\s.,;:!?…]`
+
+/**
+ * A pass given its value, whatever's before it: "my Gmail pass is …", "the
+ * Netflix pass: …", "the VPN pass's …", "my Gmail pass, it's …", or one word
+ * after a comma or a dash at the end, "my Gmail pass, …". Never one with
+ * another noun after it, as in "the CI pass rate is …", though "the bus pass
+ * is in my wallet" is taken for one too.
+ */
+const passGiven = String.raw`pass(?=(?:['’]s\s+|\s*[:=]\s*|\s+(?:is|are|was|were|equals)\s+|(?:\s*[,.;]\s*|\s+[—–-]\s+|\s+)it['’]?s\s+)${valued}|(?:\s*,\s*|\s+[—–-]\s+)${valued}+\s*[.!?…]?\s*$)`
+
 /**
  * What names one in a fact he'd have kept, though an agent's question may
  * well mean something else by it: a PIN or a PAT, in any case; a lock's or a
  * safe's combination; or one as it's said out loud, or as Whisper writes it
- * down, like "P I N", "creds", "the Wi-Fi pass", "my seed", "sign in", "the
- * phrase for …" or a card's CVV. Never what tells a question that asks him to
- * type one in, so "Which phrase for the title?" is still his to answer by
- * voice.
+ * down, like "P I N", "creds", "the Wi-Fi pass", a pass given its value, a
+ * pwd or a pword, "my seed", "sign in", "the phrase for …" or a card's CVV.
+ * Never what tells a question that asks him to type one in, so "Which phrase
+ * for the title?" is still his to answer by voice.
  */
 const alsoCredentials = new RegExp(
   String.raw`(?<![a-z0-9])(?:${[
     String.raw`pins?|pats?|(?:safe|lock|padlock|locker|vault)['’]?s? (?:combination|combo)s?|(?:combination|combo)s? (?:to|for|of|on) (?:\S+ ){0,3}?(?:safe|lock|padlock|locker|vault)s?`,
-    String.raw`(?<=(?<![a-z0-9])(?:wi[ -]?fi|the|my) )pass${ended}`,
-    String.raw`pws?|p(?:\. ?| )i(?:\. ?| )n\.?|creds|psks?|${asNoun("auth")}|(?<!random )${asNoun("seed")}`,
+    String.raw`(?<=(?<![a-z0-9])(?:wi[ -]?fi|the|my) )pass${ended}|${passGiven}`,
+    String.raw`pws?|pwds?|pwords?|passwds?|p(?:\. ?| )i(?:\. ?| )n\.?|creds|psks?|${asNoun("auth")}|(?<!random )${asNoun("seed")}`,
     String.raw`sign[ -]?in(?:s|to)?|log[ -]?in(?= (?:to|into)(?![a-z0-9]))|log into`,
     String.raw`bip[ -]?39|phrases?(?= for(?![a-z0-9]))|words(?= for my [a-z0-9])`,
     String.raw`security (?:questions?|answers?)|cv[vc]2?s?|card numbers?`,
@@ -2360,9 +2372,6 @@ const mentionsVague = (words: string) =>
 
 /** What names something only he should know, like a password, a PIN, a key or a token, or a code or phrase that stands for one. */
 const credential = String.raw`(?:pass(?:word|code|phrase)|pin(?: code)?|secret|token|(?:api|access|private) key|key|recovery code|seed phrase|(?:2fa|two[ -]factor|backup) code)s?`
-
-/** A word of a value, as it starts: not where a sentence or a clause ends. */
-const valued = String.raw`[^\s.,;:!?…]`
 
 /**
  * A credential given with its value, whatever's said between of whose or

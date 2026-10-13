@@ -12383,6 +12383,36 @@ describe("Assistant memories", () => {
     for (const value of ["hunter2", "fennel42", "8kq2zz", "4827", "apple banana", "12 34 56", "abandon ability"]) expect(result.journal).not.toContain(value)
   })
 
+  test("a pass given its value, whatever's before it, or a pwd, isn't remembered nor shown the model after, while a pass rate is", async () => {
+    const refused = ["my Gmail pass is hunter2", "my VPN pwd is hunter2", "the Netflix pass: hunter2", "my VPN pwd's hunter2"]
+    const kept = "the CI pass rate is 98%"
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const text = [...refused, kept].find((fact) => situation.utterance.heard === `Remember that ${fact}.`)
+            return text === undefined ? Brain.decision({ act: "answer", spoken: "Nothing else, sir." }) : Brain.decision({ act: "remember", how: "fact", text })
+          },
+          undefined,
+          { memories: true },
+        )
+        const said: Array<string | undefined> = []
+        const told: Array<string> = []
+        for (const fact of [...refused, kept]) {
+          yield* made.dictate(`Remember that ${fact}.`)
+          said.push(made.spoken().at(-1))
+          yield* made.dictate("Anything else?")
+          told.push(Brain.prompt(made.seen.at(-1)!, Option.none()))
+        }
+        return { said, told, kept: (yield* made.memories!.list).map(({ text }) => text), journal: JSON.stringify(yield* made.journal.since(0)) }
+      }),
+    )
+    expect(result.said.slice(0, refused.length)).toEqual(refused.map(() => "I won't keep that, sir. It looks like a secret."))
+    expect(result.kept).toEqual([kept])
+    for (const prompt of result.told) expect(prompt).not.toContain("hunter2")
+    expect(result.journal).not.toContain("hunter2")
+  })
+
   test("a routine whose steps only name a code, a key, a login or the like is kept, while one that gives a value isn't, nor kept in the journal", async () => {
     const routines: Readonly<Record<string, string>> = {
       "When I say ship, push the code, then sign in to Vercel and rotate the deploy key.": "ship: push the code, then sign in to Vercel and rotate the deploy key",
