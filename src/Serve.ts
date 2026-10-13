@@ -412,7 +412,7 @@ export const serve = Effect.gen(function* () {
   if (yield* settings.on) yield* switcher.turn(true)
   else {
     yield* switcher.turn(false)
-    yield* Effect.logInfo("yapd is off, until it's turned on from the menu bar or the API")
+    yield* Effect.logInfo('yapd is off, until it\'s turned on from the menu bar, the API, or by saying "unmute" with the shortcut')
   }
 
   /** What the user said to yapd, as heard now, with how many times yapd had been turned on or off as it was said. */
