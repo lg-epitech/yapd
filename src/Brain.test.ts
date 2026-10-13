@@ -2163,6 +2163,44 @@ describe("memories", () => {
     expect(check("Tell the std one a1.", { act: "reply", target: handleOf(std), text: "A1." })).toEqual({ _tag: "Say", spoken: lines.cantTell })
   })
 
+  test("several unarchived at once are what yapd just archived taken back only when they're all of that step and the model's sure, and otherwise he's told how", () => {
+    /** Three threads archived, the newest two in the step yapd just did, the oldest the day before. */
+    const thread = (n: number) => ({ machine: "Rosie", id: `f00dcafe-0000-4000-8000-00000000000${n}` })
+    const step = { utterance: "u0", step: 0 }
+    const archived: ReadonlyArray<Brain.Archived> = [
+      { ref: thread(1), called: "the Tezos fees", at: now - 30_000, step },
+      { ref: thread(2), called: "the Tezos importer", at: now - 30_000, step },
+      { ref: thread(3), called: "the Mina fees", at: now - 20 * 60 * 60_000, step: { utterance: "u9", step: 0 } },
+    ]
+    const acted: Ledger.Row = {
+      commandId: "yapd:u0:0:2",
+      messageId: null,
+      ...step,
+      kind: "tidy",
+      machine: "Rosie",
+      thread: thread(2).id,
+      body: { _tag: "Archive", called: "the Tezos importer" },
+      digest: null,
+      state: "sent",
+      how: null,
+      reason: null,
+      at: now - 30_000,
+    }
+    const unarchive = (target: string, sure: Brain.Sure = "high", shown: Partial<Brain.Situation> = { archived, acted: Option.some(acted) }) =>
+      Brain.check(Brain.decision({ act: "tidy", how: "unarchive", target, sure }), situation("Unarchive them.", shown), lines)
+    const undone = unarchive("a2, a1")
+    expect(undone._tag === "Do" ? undone.plan.decision : undone).toMatchObject({ act: "undo", how: "tidy", target: "", sure: "high" })
+    const told = { _tag: "Say" as const, spoken: "I can only unarchive one thread at a time. Say bring them back to undo the archive, sir." }
+    // One more than the step, the same one twice, or the model unsure, it's never taken back.
+    expect(unarchive("a1, a2, a3")).toEqual(told)
+    expect(unarchive("a1, a01")).toEqual(told)
+    expect(unarchive("a1, a2", "medium")).toEqual(told)
+    // With nothing just archived to take back, it's one at a time.
+    const one = { _tag: "Say" as const, spoken: "I can only do that to one thread at a time, sir." }
+    expect(unarchive("a1, a2", "high", { archived })).toEqual(one)
+    expect(unarchive("a1, a2", "high", { archived, acted: Option.some({ ...acted, kind: "message" }) })).toEqual(one)
+  })
+
   test("a new title is his as he said it, symbols and all, whatever quotes he put around it, so the model's \"C parser\" for his \"C++ parser\" is read back to him before it's renamed", () => {
     const rename = (text: string, heard = "Rename Mina to C++ parser.") =>
       Brain.check(Brain.decision({ act: "tidy", how: "rename", target: handleOf(mina), sure: "high", text }), situation(heard), lines)

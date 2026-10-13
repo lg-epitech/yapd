@@ -148,6 +148,8 @@ export interface Archived {
   readonly ref: Threads.Ref
   readonly called: string
   readonly at: number
+  /** The step of his request that archived it, as the ledger has it, which taking that back brings back with the others it archived. */
+  readonly step?: Pick<Ledger.Row, "utterance" | "step">
 }
 
 /** What he asked yapd to keep in mind: what's kept by voice, and the routines he wrote in his preferences. */
@@ -3114,6 +3116,24 @@ const writing = (
   return ask(candidates)
 }
 
+/**
+ * The threads in ARCHIVED that what yapd just did archived, in one step of
+ * his request, as the ledger has it, while that's what "scratch that" means:
+ * none when it's anything else, or none of them are there.
+ */
+const archiveStep = (situation: Pick<Situation, "acted" | "archived">): ReadonlyArray<Archived> =>
+  Option.match(situation.acted, {
+    onNone: () => [],
+    onSome: (acted) =>
+      acted.kind !== "tidy"
+        ? []
+        : (situation.archived ?? []).slice(0, archivedShown).filter(({ step }) => step !== undefined && step.utterance === acted.utterance && step.step === acted.step),
+  })
+
+/** Whether threads named in ARCHIVED are every one of `step` and no other, each once or more, with none named that isn't there. */
+const sameThreads = (named: ReadonlyArray<Option.Option<Archived>>, step: ReadonlyArray<Archived>) =>
+  named.every((one) => Option.exists(one, (archived) => step.includes(archived))) && step.every((archived) => named.some((one) => Option.contains(one, archived)))
+
 /** The ways of tidying a thread, as the model names them. */
 const tidyings: ReadonlySet<string> = new Set(["archive", "unarchive", "rename", "snooze", "unsnooze", "settle", "unsettle", "pin", "unpin"])
 
@@ -3135,6 +3155,8 @@ const tidyLines = (lines: Pick<Lines, "address">) => {
   const sir = addressed(lines)
   return {
     one: `I can only do that to one thread at a time${sir}.`,
+    /** Several to unarchive, while what yapd just did is archiving some of them, which taking that back brings back. */
+    back: `I can only unarchive one thread at a time. Say bring them back to undo the archive${sir}.`,
     many: (n: number) => `That's ${count(n)} threads${sir}. I only tidy ${count(tidiedAtMost)} at a time by voice.`,
     when: `I couldn't tell when you meant${sir}.`,
     past: `That time's already gone${sir}.`,
@@ -3256,8 +3278,9 @@ const tidyMany = (choice: Decision, all: ReadonlyArray<Threads.Listed>, situatio
 /**
  * Whether tidying goes ahead, by what's there and nothing else: one of the
  * nine ways, every thread it names on the desk, or in ARCHIVED to unarchive
- * one, several only to archive, settle or snooze them, six at most, a snooze
- * to a time to come within a month. Whether a thread is busy is its state's
+ * one, several only to archive, settle or snooze them, six at most, or to
+ * unarchive all yapd just archived together, which is taking that back, a
+ * snooze to a time to come within a month. Whether a thread is busy is its state's
  * to say, never his words: one T3 Code won't settle as it is is said so, and
  * archiving one stops it, which he's asked about. One thread goes ahead as
  * any write does, but only fairly sure of it, or with a title that isn't all
@@ -3277,6 +3300,15 @@ const tidying = (
   if (murmured(choice, utterance)) return { _tag: "Do", plan: { decision: { ...choice, act: "resume" }, target: Option.none() } }
   if (!tidyings.has(choice.how)) return { _tag: "Say", spoken: lines.cantTell }
   const handles = tidyHandles(choice.target)
+  // Several unarchived at once that are all yapd just archived in one step are that taken back, reminders and all, as for "bring them
+  // back", only when the model's sure, and none left out nor any more; any other several, he's told how to take an archive back.
+  if (handles.length > 1 && choice.how === "unarchive") {
+    const step = archiveStep(situation)
+    if (choice.sure === "high" && step.length > 0 && sameThreads(handles.map((handle) => archivedBy(handle, situation)), step)) {
+      return { _tag: "Do", plan: { decision: { ...choice, act: "undo", how: "tidy", target: "", text: "", when: "", others: "" }, target: Option.none() } }
+    }
+    return { _tag: "Say", spoken: step.length > 0 ? said.back : said.one }
+  }
   if (handles.length > 1 && !listable.has(choice.how)) return { _tag: "Say", spoken: said.one }
   if (handles.length > tidiedAtMost) return { _tag: "Say", spoken: said.many(handles.length) }
   if (choice.how === "snooze") {

@@ -471,12 +471,15 @@ const tidyBody = (
 
 /**
  * The threads yapd archived for him, as the ledger has it, newest first, each
- * as it was called then: archived, and not unarchived since, by his word or
- * as he took it back. Not those he archived by hand in T3 Code.
+ * as it was called then, and the step of his request that archived it:
+ * archived, and not unarchived since, by his word or as he took it back. Not
+ * those he archived by hand in T3 Code.
  */
-export const archives = (rows: ReadonlyArray<Ledger.Row>): ReadonlyArray<Tidied & { readonly at: number }> =>
+export const archives = (
+  rows: ReadonlyArray<Ledger.Row>,
+): ReadonlyArray<Tidied & { readonly at: number; readonly step: Pick<Ledger.Row, "utterance" | "step"> }> =>
   standing(rows)
-    .map(({ row, body }) => ({ ref: refOf(row), called: body.called ?? "a thread", at: row.at }))
+    .map(({ row, body }) => ({ ref: refOf(row), called: body.called ?? "a thread", at: row.at, step: { utterance: row.utterance, step: row.step } }))
     .toSorted((one, other) => other.at - one.at)
 
 /** Each archive yapd did that still stands, as the ledger has it, a thread at a time: the last that went, with no unarchive since. */
