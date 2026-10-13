@@ -2,14 +2,67 @@ import { Clock, Effect, Option, Schema } from "effect"
 import { inEnglish, type Turn } from "../../src/Condenser.ts"
 import type { Model } from "../../src/Model.ts"
 import { afterOnIt, type Lines, withOnIt } from "../../src/Persona.ts"
-import { agreed, callingOff, enough, gist, type Line, morePlease, noted, question } from "../../src/Words.ts"
+import type { Line } from "../../src/Words.ts"
 
 // The Responder as it was at M4's batch 1, frozen: its prompt, its replies
-// without the model and how it asks the model, so the eval can run it beside
-// what replaces it and both see the same day's speed. Only the words it
-// shares with what reads what he says, in Words.ts, and how a line is put in
-// English and around "On it", come from yapd as it is now. Never change it:
-// a change to the Responder is what the eval measures against this.
+// without the model, the words it knows them by and how it asks the model,
+// so the eval can run it beside what replaces it and both see the same day's
+// speed. Only how a line is put in English and around "On it" come from yapd
+// as it is now. Never change it: a change to the Responder, or to the words
+// in Words.ts, is what the eval measures against this.
+
+// The words of Words.ts it worked out replies by, as they were then.
+
+/** What only fills a pause or asks nicely, which is never what was said. */
+const padding = ["uh", "um", "erm", "oh", "ah", "hmm", "sir", "please"]
+
+/** What he calls yapd, which is only how he addresses it, unless it's all he said. */
+const names = ["jarvis", "yapd"]
+
+/**
+ * What's said, as it's compared: lowercase words, without the "um", "sir" and
+ * "Jarvis" around them. A name said on its own is kept, since "Yapd." can be
+ * the answer to which project, and is never silence.
+ */
+const gist = (heard: string) => {
+  const words = heard
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}' ]+/gu, " ")
+    .split(/\s+/)
+    .filter((word) => word !== "" && !padding.includes(word))
+  const said = words.filter((word) => !names.includes(word))
+  return (said.length > 0 ? said : words).join(" ")
+}
+
+/** Hearing enough, however it's put. Said to any update, it never goes to the agent. */
+const enough: ReadonlySet<string> = new Set([
+  "stop", "quiet", "be quiet", "shut up", "silence", "mute", "skip", "skip it", "next", "enough", "that's enough", "never mind",
+])
+
+/** Calling it off, said on its own to an update: hearing enough of it, never something for yapd to forget, which is asked with the shortcut. */
+const callingOff: ReadonlySet<string> = new Set(["forget it", "forget about it"])
+
+/** Taking an update in. Said to one that asked something, they could be the answer, so the model judges those. */
+const noted: ReadonlySet<string> = new Set([
+  "thanks", "thank you", "thanks a lot", "cheers", "got it", "ok", "okay", "ok thanks", "okay thanks", "cool", "great", "good",
+  "very good", "perfect", "nice", "sounds good", "alright", "all right", "noted", "understood", "awesome", "fine", "good job",
+  "well done", "excellent", "brilliant", "lovely", "good to know", "ok cool", "okay cool", "great thanks", "perfect thanks",
+])
+
+/** Asking for the rest of an update yapd said only the headline of. */
+const morePlease: ReadonlySet<string> = new Set(["more", "tell me more", "more please", "details", "more details", "what else", "the details"])
+
+/** Going ahead with what was asked. Only ever taken as that after a question. */
+const agreed: ReadonlySet<string> = new Set([
+  "yes", "yeah", "yep", "yup", "sure", "go ahead", "do it", "yes do it", "yes go ahead", "go for it", "yes go for it",
+  "absolutely", "of course", "yes of course", "yeah do it", "yeah go ahead", "sure go ahead", "ok do it", "okay do it",
+  "ok go ahead", "okay go ahead", "yes yes", "yeah yeah", "sounds good do it", "sounds good go ahead", "yes that's fine",
+  "yes it's fine", "yes ship it", "ship it", "merge it", "yes merge it", "go on", "proceed", "yes proceed", "do both",
+  "yes do both", "yes both", "both",
+])
+
+/** Whether a line ends asking something, whatever quotes or brackets close it. */
+const question = /\?\s*["')\]]*\s*$/
 
 export const Intent = Schema.Literal("dismiss", "answer", "send", "resume")
 export type Intent = typeof Intent.Type
