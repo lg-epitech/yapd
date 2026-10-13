@@ -257,6 +257,26 @@ const stopped = (run: Pick<T3Actions.Ran, "failure">, thread: T3Live.Thread) => 
   return kind === "usage_limit" ? `it hit ${provider(thread.modelSelection.instanceId)}'s limit.` : reason(run.failure, thread)
 }
 
+/**
+ * How the turn a Stop told of ended, for what he set on its thread finishing:
+ * as its run has it, when that's the Stop's own by its last words, which
+ * finished, failed, with why, or that he stopped; otherwise it can't be told.
+ */
+export const ended = (stop: Stop, run: T3Actions.Ran, thread: T3Live.Thread): Reminders.Ending => {
+  if (whose(stop, run) !== "own") return { _tag: "Unknown" }
+  switch (run.status) {
+    case "completed":
+    case "waiting":
+      return { _tag: "Finished" }
+    case "failed":
+      return { _tag: "Failed", why: stopped(run, thread) }
+    case "interrupted":
+      return { _tag: "Stopped" }
+    default:
+      return { _tag: "Unknown" }
+  }
+}
+
 /** What a request is said to want when it can't be read, or the model can't say. */
 const unworded = (kind: string) => (kind === "user_input" ? "has a question for you" : "wants your go-ahead on something")
 

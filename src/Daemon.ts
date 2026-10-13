@@ -183,9 +183,16 @@ export const make = (
      * about to be said: its update is led by them, as one, and said whatever
      * he muted or holds, an answer to what he asked. Offers are asked apart.
      * Only those set by `before`, as the turn came: one set since is for the
-     * thread's next.
+     * thread's next. Each says how the turn `ended`, read only when there's
+     * one.
      */
-    readonly finishing?: (about: Threads.Ref, before: number) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+    readonly finishing?: (about: Threads.Ref, before: number, ended: Effect.Effect<Reminders.Ending>) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
+    /**
+     * How the turn a Stop hook told of ended, as its thread's run has it, for
+     * what he set on its finishing to say: never finished when that can't be
+     * read, as on a machine whose T3 Code yapd can't see.
+     */
+    readonly ending?: (about: Threads.Ref, stop: Notices.Stop) => Effect.Effect<Reminders.Ending>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -1107,7 +1114,15 @@ export const make = (
       const { answers, told } = Option.isSome(tied) ? yield* asked(tied.value, finished) : { answers: Option.none<"start" | "sent">(), told: false }
       const opening = Option.contains(answers, "start")
       // What he asked to hear once it finishes leads it, as one: then it's what he asked for, however slight, and never kept quiet or held.
-      const reminders = Option.isSome(tied) && options.finishing !== undefined ? yield* options.finishing(tied.value, arrivedAt) : []
+      // Saying how its turn ended: a turn T3 Code said finished did; a hook's goes by its run, and is never said to have finished when
+      // that can't be read. One he stopped leaves it for the thread's next.
+      const ended = (about: Threads.Ref): Effect.Effect<Reminders.Ending> =>
+        finished.fallback !== undefined
+          ? Effect.succeed({ _tag: "Finished" })
+          : finished.stop !== undefined && options.ending !== undefined
+            ? options.ending(about, finished.stop)
+            : Effect.succeed({ _tag: "Unknown" })
+      const reminders = Option.isSome(tied) && options.finishing !== undefined ? yield* options.finishing(tied.value, arrivedAt, ended(tied.value)) : []
       const reminded = reminders.length > 0
       // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
       // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.

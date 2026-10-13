@@ -1720,6 +1720,28 @@ describe("Notices of reminders", () => {
     expect(result.told).toEqual(["Fix the std build stopped, sir, before finishing: the model provider had an error."])
     expect(result.pending).toEqual(["tezos"])
   })
+
+  test("how a Stop's turn ended, for what he set on its finishing, is read only from its own run: a failure says why, and nothing else can tell", () => {
+    const std = thread("std", "Fix the std build", { status: "failed", latestRunId: "run-2", lastErrorClass: "provider_error" })
+    const failed: T3Actions.Ran = {
+      id: "run-2",
+      status: "failed",
+      startedAt: Option.some(now - 60_000),
+      userMessageId: Option.none(),
+      prompt: Option.none(),
+      said: "The provider failed, so I stopped.",
+      final: "The provider failed, so I stopped.",
+      others: [],
+      failure: Option.some({ class: "provider_error", message: "API Error: 500 Internal server error", resetAt: null }),
+      natives: [],
+      previous: Option.none(),
+    }
+    const stop = (message: string): Notices.Stop => ({ at: now, message })
+    expect(Notices.ended(stop("The provider failed, so I stopped."), failed, std)).toEqual({ _tag: "Failed", why: "the model provider had an error." })
+    // In words that aren't its run's, as when the thread is on another run by now, it can't be told how it went.
+    expect(Notices.ended(stop("The build is green again."), failed, std)).toEqual({ _tag: "Unknown" })
+    expect(Notices.ended(stop("The provider failed, so I stopped."), { ...failed, status: "running" }, std)).toEqual({ _tag: "Unknown" })
+  })
 })
 
 describe("Notices of usage", () => {
