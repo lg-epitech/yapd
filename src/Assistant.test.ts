@@ -13562,6 +13562,43 @@ describe("Assistant tidying", () => {
     expect(result.importer).toEqual({ said: "Unpinned, sir: Tezos importer.", sent: ["thread.pin", "thread.unpin"] })
   })
 
+  test("taking back an archive while a part of a question holds his dictated answer unarchives it, and the answer stays for the rest", async () => {
+    const cloud = waitingOn({ id: "q1", kind: "user_input" })
+    const message = "Hold off on the deploy until I've checked the fees."
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(
+          (situation) => {
+            const { heard } = situation.utterance
+            if (heard === "Archive the Mina tickets thread.") return Brain.decision({ act: "tidy", how: "archive", target: handle(situation, mina), sure: "high" })
+            if (heard === "Undo the archive.") return Brain.decision({ act: "undo", how: "tidy" })
+            return Brain.decision({ act: "send", target: handle(situation, cloud), text: message, how: "now" })
+          },
+          undefined,
+          { others: [cloud], items: card("q1", [colour, extras]) },
+        )
+        yield* made.dictate("Archive the Mina tickets thread.")
+        // T3 Code archived it, which the shell then shows it as.
+        yield* made.becomes({ ...mina, archivedAt: "2026-10-01T02:18:01.000Z" })
+        yield* asked(made, cloud)
+        yield* made.answer("Later.")
+        yield* made.dictate("Tell the cloud one: hold off on the deploy until I've checked the fees.")
+        const before = made.spoken().length
+        yield* made.answer("Undo the archive.")
+        const back = { said: made.spoken().slice(before), sent: tidied(made.dispatched).map(({ type }) => type), open: Option.isSome(yield* made.open) }
+        yield* made.answer("Alpha.")
+        return { back, answers: answered(made.dispatched) }
+      }),
+    )
+    // Never withdrawn: the rest of the question is asked again after, and what he dictated goes with it.
+    expect(result.back).toEqual({
+      said: ["Unarchived, sir: Open Mina SSV2 Bug Tickets.", "Here's the last question on Cloud deployment discovery, sir: Which test extras should run? Any of Alpha, Beta and Gamma?"],
+      sent: ["thread.archive", "thread.unarchive"],
+      open: true,
+    })
+    expect(result.answers).toEqual([{ [colour.id]: message, [extras.id]: ["Alpha"] }])
+  })
+
   test("a busy thread isn't archived without his yes, nor one that got busy before it", async () => {
     const result = await run(
       Effect.gen(function* () {
