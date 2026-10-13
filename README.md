@@ -66,6 +66,7 @@ The app only uses yapd's [API](docs/api.md), so you can make your own, on Linux 
 
 Say anything while yapd is talking and it stops. The model that writes the summaries then works out what you meant:
 
+- "Mute." on its own turns yapd off at once, as Turn Off in the menu does, with no model and not a word back, over its first seconds too, and by the [shortcut](#dictating). What was waiting stays unheard for your catch-up, and nothing reaches an agent: one whose question it was reading still waits on you in T3 Code. Turn it back on from the menu, or press the shortcut and say "unmute" or "turn on". "Mute it" still mutes the thread.
 - "Got it", "sounds good" or "quiet" and it stays quiet. Agreeing only goes to the agent when it asked you something, and "leave it as it is" never does.
 - "Mute it" keeps that thread's progress and finished work to yourself, for good or "for an hour", while anything that needs you still comes through, and asking what it said catches you up on it. "Unmute it", "what's muted?" and "unmute everything" work too, by the shortcut as well, and "scratch that" takes a mute back. Nothing about it reaches the agent.
 - "More" over a headline, or just after it, says the rest at once.
