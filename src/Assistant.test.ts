@@ -12039,6 +12039,23 @@ describe("Assistant memories", () => {
     expect(result.journal).not.toContain("4 8 2 7")
   })
 
+  test("a secret the model's answer says back is said, but kept in the journal and logged nowhere", async () => {
+    const lines: Array<string> = []
+    const logger = Logger.make(({ message }) => {
+      lines.push((Array.isArray(message) ? message : [message]).join(" "))
+    })
+    const result = await run(
+      Effect.gen(function* () {
+        const made = yield* assistant(() => Brain.decision({ act: "answer", spoken: "I won't keep sk-live-4f9a8b7c6d5e, sir. Type it into T3 Code." }), undefined, { memories: true })
+        yield* made.dictate("The staging key is sk-live-4f9a8b7c6d5e.")
+        return { spoken: made.spoken(), journal: JSON.stringify(yield* made.journal.since(0)) }
+      }).pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger))),
+    )
+    expect(result.spoken).toEqual(["I won't keep sk-live-4f9a8b7c6d5e, sir. Type it into T3 Code."])
+    expect(result.journal).not.toContain("4f9a8b7c6d5e")
+    expect(lines.filter((line) => line.includes("4f9a8b7c6d5e"))).toEqual([])
+  })
+
   test("a secret to remember in the rest of a request isn't kept in the journal, even worked out after the step before is said", async () => {
     const rest = "remember that the staging key is sk-live-4f9a8b7c6d5e"
     let slow = false

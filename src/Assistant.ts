@@ -74,6 +74,9 @@ const overItself = (echo?: string, afterPause?: string): Pick<Utterance, "echo" 
  */
 const ownWords = (said: { readonly heard: string; readonly echo?: string }) => (said.echo === undefined ? said.heard : "")
 
+/** His words as they're logged: never what could give a secret away, which is kept out of the log, as out of the journal. */
+const logged = (words: string) => (T3Actions.revealing(words) ? "something that could give a secret away" : words)
+
 /** What a thread asks of the user, which a short answer can settle. */
 export type Asks =
   | {
@@ -2000,7 +2003,7 @@ export const make = (options: {
         // What he went on to say after, which yapd's own voice was never in.
         const { echo: _, afterPause: __, ...before } = thought.utterance
         const utterance: Utterance = { ...before, heard: thought.decision.rest, whole: thought.utterance.whole ?? ownWords(thought.utterance) }
-        yield* Effect.logInfo(`Then: ${utterance.heard}`)
+        yield* Effect.logInfo(`Then: ${logged(utterance.heard)}`)
         // Working it out has no effect, so it carries on whether or not what's said waits for it, until yapd is turned off, which stops it like the rest of the request.
         // "It" is the step before as it'll be said, part of catching up when that is, so what the rest comes to is too, however late it's said.
         const thinking = yield* job(
@@ -3592,7 +3595,7 @@ export const make = (options: {
           turn.withPermits(1)(
             Effect.gen(function* () {
               if (given.instead !== undefined && (yield* given.instead.moot)) return yield* given.instead.late
-              yield* Effect.logInfo(`Heard: ${thought.utterance.heard}`)
+              yield* Effect.logInfo(`Heard: ${logged(thought.utterance.heard)}`)
               const outcome = yield* acting(thought)
               yield* note(thought, outcome, thought.utterance.at)
               yield* deliver(outcome, thought)
@@ -3616,11 +3619,17 @@ export const make = (options: {
       Effect.gen(function* () {
         const utterance = "utterance" in of ? of.utterance : of
         if (outcome.say === "") return
+        // Withheld as a secret, as note has it, what's said of it that could give it away, like the model's answer saying it back, is said,
+        // but kept and logged nowhere.
+        const words = "utterance" in of ? [of.utterance.heard, of.decision.rest] : "heard" in of ? [of.heard] : []
+        const withheld = outcome.withheld === true || words.some((said) => T3Actions.revealing(said))
+        const revealing = withheld && T3Actions.revealing(outcome.say)
+        const what = revealing ? "it" : `"${outcome.say}"`
         // Turned off or on since, nothing about it is said, so nothing is noted as said. Off, only what answers what he asked by the
         // shortcut is said, never anything yapd would bring up of its own accord.
         const power = yield* options.power
-        if (power.turns !== utterance.turns) return yield* Effect.logInfo(`Not saying "${outcome.say}", since yapd was turned off`)
-        if (!power.on && !("utterance" in of || "heard" in of)) return yield* Effect.logInfo(`Not saying "${outcome.say}", since yapd is off`)
+        if (power.turns !== utterance.turns) return yield* Effect.logInfo(`Not saying ${what}, since yapd was turned off`)
+        if (!power.on && !("utterance" in of || "heard" in of)) return yield* Effect.logInfo(`Not saying ${what}, since yapd is off`)
         const at = yield* Clock.currentTimeMillis
         const open = outcome.kind === "question" && asking !== undefined ? asking.open : undefined
         const about = outcome.subject._tag === "Answer" ? outcome.subject.about : Option.none<Threads.Ref>()
@@ -3636,7 +3645,7 @@ export const make = (options: {
                 at,
                 kind: "answer",
                 ...Option.match(about, { onNone: () => ({}), onSome: ({ machine, id }) => ({ machine, thread: id }) }),
-                said: outcome.say,
+                ...(revealing ? {} : { said: outcome.say }),
                 utterance: utterance.id,
                 // The question on its own too, apart from the news before it, and for a catch-up, what it told him of.
                 ...(open === undefined
@@ -3645,7 +3654,7 @@ export const make = (options: {
                     : {}
                   : { detail: { question: Brain.alone(open), open: open.id } }),
               })
-        yield* Effect.logInfo(`Said: ${outcome.say}`)
+        yield* Effect.logInfo(revealing ? "Said something that could give a secret away, so it isn't logged" : `Said: ${outcome.say}`)
         const { missed, card } = outcome
         const subject = "utterance" in of ? along(of, outcome.subject) : outcome.subject
         /** Puts back what "it" meant, and whether he'd heard the question, from before it started being said. */
@@ -3699,7 +3708,7 @@ export const make = (options: {
                   return kept.down ? Effect.void : Effect.asVoid(options.show.put(card, { said: line, turns: utterance.turns, request: utterance.id }))
                 }),
               ),
-              Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) ? journal.reword(entry.value, instead) : Effect.void))),
+              Effect.zipRight(Effect.suspend(() => (reworded && instead !== undefined && Option.isSome(entry) && !(withheld && T3Actions.revealing(instead)) ? journal.reword(entry.value, instead) : Effect.void))),
               // Why a machine can't be reached, once he's heard it, isn't said again until it's been back and gone down again.
               Effect.zipRight(threads.heard(outcome.say)),
             ),
@@ -3791,8 +3800,9 @@ export const make = (options: {
       Effect.gen(function* () {
         const { utterance } = thought
         const withheld = outcome.withheld === true || T3Actions.revealing(utterance.heard) || T3Actions.revealing(thought.decision.rest)
-        const decision = withheld ? { ...thought.decision, text: "", rest: "" } : thought.decision
-        const second = withheld && outcome.second !== undefined ? { ...outcome.second, text: "", rest: "" } : outcome.second
+        // Nor what the model would say of it, which may say it back, like "I won't keep sk-…, sir".
+        const decision = withheld ? { ...thought.decision, spoken: "", text: "", rest: "" } : thought.decision
+        const second = withheld && outcome.second !== undefined ? { ...outcome.second, spoken: "", text: "", rest: "" } : outcome.second
         const ms = (yield* Clock.currentTimeMillis) - began
         // Said back to what he missed, cutting it off or after it, it's part of catching up, so it never hides what he didn't hear
         // of that from the next "what did I miss?": heard to the end, it's heard, and never told again anyway.
@@ -4170,10 +4180,10 @@ export const make = (options: {
       return Effect.gen(function* () {
         // Checked again once it's its turn: yapd may have been turned off and on while it waited behind another.
         if (yield* outdated(utterance.turns)) {
-          yield* Effect.logInfo(`Not worked out, since yapd was turned off after it was said: ${utterance.heard}`)
+          yield* Effect.logInfo(`Not worked out, since yapd was turned off after it was said: ${logged(utterance.heard)}`)
           return Option.none<string>()
         }
-        yield* Effect.logInfo(`Heard: ${utterance.heard}`)
+        yield* Effect.logInfo(`Heard: ${logged(utterance.heard)}`)
         // Whatever comes of it is said, so the speaker gets ready while it's worked out.
         yield* options.coming
         const began = yield* Clock.currentTimeMillis
