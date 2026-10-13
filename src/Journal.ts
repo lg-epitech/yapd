@@ -126,7 +126,8 @@ export class Journal extends Context.Tag("yapd/Journal")<
     readonly hold: (ids: ReadonlyArray<number>, why: Held) => Effect.Effect<void>
     /**
      * The updates held for later since `at` that he hasn't heard, and that
-     * aren't muted, oldest first, the latest `most` of them, held for the
+     * aren't muted, and notices held for a digest, like a limit four-fifths
+     * used, oldest first, the latest `most` of them, held for the
      * reasons `which` counts, or for any. One that came before `at`, but was
      * only held since, like one waiting to be said as focus began, counts as
      * held since. Never one a newer entry about the same turn took the place of.
@@ -291,9 +292,10 @@ const holding = (which: Holding = {}) => {
  * Whether a row is one he's never to lose track of while it's unheard: kept
  * as yapd was off, a notice of a failure or a limit, what needs him, or what
  * he's to hear whatever he muted, like the answer to what he asked a thread.
+ * Never a notice only held for a digest, like a limit four-fifths used.
  */
 const unmissable =
-  "(json_extract(detail, '$.held') = 'off' or kind = 'notice' or json_extract(detail, '$.priority') = 'needs-you' or coalesce(json_extract(detail, '$.audible'), 0) = 1)"
+  "(json_extract(detail, '$.held') = 'off' or (kind = 'notice' and coalesce(json_extract(detail, '$.priority'), '') != 'done') or json_extract(detail, '$.priority') = 'needs-you' or coalesce(json_extract(detail, '$.audible'), 0) = 1)"
 
 /**
  * Whether a row tells him something he still has to hear: never one asking
@@ -484,7 +486,7 @@ export const fromStore = (
           const reasons = holding(which)
           return database
             .query<Row, Array<string | number>>(
-              `select * from journal where kind = 'update' and heard_at is null and ${heldBack} and ${quiet} = 0 and ${standing}${reasons.sql} and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
+              `select * from journal where (kind = 'update' or (kind = 'notice' and json_extract(detail, '$.priority') = 'done')) and heard_at is null and ${heldBack} and ${quiet} = 0 and ${standing}${reasons.sql} and max(at, coalesce(json_extract(detail, '$.heldAt'), at)) >= ?
                order by at desc, id desc limit ?`,
             )
             .all(...reasons.values, at, most)

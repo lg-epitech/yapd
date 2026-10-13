@@ -692,9 +692,11 @@ const Limits = Schema.Struct({
       usageLimits: Schema.optional(
         Schema.NullOr(
           Schema.Struct({
+            checkedAt: Schema.optional(Schema.NullOr(Schema.String)),
             windows: Schema.optionalWith(
               Schema.Array(
                 Schema.Struct({
+                  id: Schema.optional(Schema.NullOr(Schema.String)),
                   kind: Schema.String,
                   label: Schema.String,
                   usedPercent: Schema.Number,
@@ -716,6 +718,8 @@ const Scratch = Schema.Struct({ scratchWorkspaceRoot: Schema.optional(Schema.Str
 
 /** One of a provider's limits: "session", "weekly", "monthly" or "other", as T3 Code labels it, and how long it lasts when it says. */
 export interface Window {
+  /** T3 Code's own id for it, which stays the same from one window to the next. */
+  readonly id?: string | undefined
   readonly kind: string
   readonly label: string
   readonly minutes: number | undefined
@@ -723,8 +727,8 @@ export interface Window {
   readonly resetsAt: string | undefined
 }
 
-/** What T3 Code says each provider has used of its limits. */
-export type Usage = ReadonlyArray<{ readonly provider: string; readonly windows: ReadonlyArray<Window> }>
+/** What T3 Code says each provider has used of its limits, and when it last checked, when it says. */
+export type Usage = ReadonlyArray<{ readonly provider: string; readonly checkedAt?: string | undefined; readonly windows: ReadonlyArray<Window> }>
 
 /** Why T3 Code wouldn't, in words that can be read out. */
 export const reason = (error: Server.Trouble | Server.Refusal) =>
@@ -875,7 +879,9 @@ export const make = (reach: Effect.Effect<Server.Transport, Server.Trouble>) => 
             : [
                 {
                   provider: displayName ?? instanceId,
-                  windows: usageLimits.windows.map(({ kind, label, windowDurationMins, usedPercent, resetsAt }) => ({
+                  ...(usageLimits.checkedAt === undefined || usageLimits.checkedAt === null ? {} : { checkedAt: usageLimits.checkedAt }),
+                  windows: usageLimits.windows.map(({ id, kind, label, windowDurationMins, usedPercent, resetsAt }) => ({
+                    ...(id === undefined || id === null ? {} : { id }),
                     kind,
                     label,
                     minutes: windowDurationMins ?? undefined,

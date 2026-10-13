@@ -48,8 +48,8 @@ export const switches = 1000
 
 const detail = (kept: Kept) => (typeof kept.detail === "object" && kept.detail !== null ? (kept.detail as Record<string, unknown>) : {})
 
-/** Whether a row needs him: an update that asks something of him, or a notice of a failure or a limit. */
-export const needs = (kept: Kept) => kept.kind === "notice" || detail(kept).priority === "needs-you"
+/** Whether a row needs him: an update that asks something of him, or a notice of a failure or a limit, but not one only held for a digest. */
+export const needs = (kept: Kept) => (kept.kind === "notice" && detail(kept).priority !== "done") || detail(kept).priority === "needs-you"
 
 /** Whether a row is said whatever he muted: what needs him, the answer to what he asked its thread, or a turn yapd couldn't sum up. */
 export const audible = (kept: Kept) => needs(kept) || detail(kept).audible === true

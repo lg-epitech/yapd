@@ -3975,7 +3975,7 @@ export const make = (options: {
       const off = Missed.off(yield* journal.switched(now - Missed.week, Missed.switches))
       if (off === undefined || off.to !== undefined) return 0
       const missed = yield* Missed.gather(journal, { now, spoke: now, coming: yield* beingTold, desk: nowhere })
-      const rows = missed.groups.flatMap(({ rows }) => rows).filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || kept.kind === "notice"))
+      const rows = missed.groups.flatMap(({ rows }) => rows).filter((kept) => !Missed.muted(kept) && (Missed.whileOff(kept) || (kept.kind === "notice" && Missed.needs(kept))))
       const since = off.before ?? now - Missed.week
       const heldAt = (kept: Kept) => (kept.detail as { readonly heldAt?: unknown } | undefined)?.heldAt
       return rows.some((kept) => Math.max(kept.at, Number(heldAt(kept) ?? kept.at) || kept.at) >= since) ? rows.length : 0

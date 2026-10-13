@@ -5,6 +5,7 @@ import { Condenser, english } from "./Condenser.ts"
 import * as Hands from "./Hands.ts"
 import type { Notice } from "./Inbox.ts"
 import type { Entry, Journal } from "./Journal.ts"
+import type * as Modes from "./Modes.ts"
 import { addressed, type Lines, Persona } from "./Persona.ts"
 import * as Questions from "./Questions.ts"
 import * as Reminders from "./Reminders.ts"
@@ -65,6 +66,8 @@ export const key = {
   failed: (machine: string, runId: string) => `fail:${machine}:${runId}`,
   /** One provider's limit, until `window` it resets at, however many threads hit it. */
   limited: (provider: string, window: string) => `limit:${provider}:${window}`,
+  /** How much of one of a provider's windows is used, at `level` percent, once a window, which `resets` names to the hour. */
+  used: (provider: string, window: string, level: number, resets: string) => `usage:${provider}:${window}:${level}:${resets}`,
   done: (machine: string, runId: string) => `done:${machine}:${runId}`,
 }
 
@@ -115,6 +118,10 @@ export const window = (resets: Option.Option<string>, at: number) =>
       onSome: (reset) => new Date(reset).toISOString().slice(0, 16),
     },
   )
+
+/** Whether two reads of when a window resets are the same window: within the hour, as T3 Code's can move a little from one read to the next. */
+const sameWindow = (one: string | undefined, other: string | undefined) =>
+  one === undefined || other === undefined ? one === other : Math.abs(Date.parse(one) - Date.parse(other)) < 60 * 60_000
 
 /** What reads like a sentence once said: no code, paths or markup. */
 const sayable = /^[\p{L}\p{N} ,.'’&:;!?()%+-]+$/u
@@ -487,6 +494,8 @@ export const make = (options: {
   readonly reminders?: Reminders.Reminders
   /** An offer he set came due, to be asked in its turn, with the entry it was kept under. Without it, it's told in words. */
   readonly offered?: (reminder: Reminders.Reminder, kept: Option.Option<number>) => Effect.Effect<void>
+  /** Focus or quiet, while one is on: in quiet, a limit nearly used up is kept for the morning. */
+  readonly holding?: Effect.Effect<Option.Option<Modes.Hold>>
 }) =>
   Effect.gen(function* () {
     const { threads, journal } = options
@@ -820,6 +829,101 @@ export const make = (options: {
         )
       })
 
+    /** Whether a limit of this provider that a thread hit was said and still holds, which says more than how much of it is used. */
+    const limitHolds = (who: string) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const said = yield* journal.since(now - longest, { kinds: ["notice"], most: 1000 })
+        return said.some(
+          (entry) =>
+            entry.key !== undefined &&
+            entry.key.startsWith(key.limited(who, "")) &&
+            Option.match(
+              Option.filter(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)), (reset) => !Number.isNaN(reset)),
+              { onNone: () => now - entry.at < lasting, onSome: (reset) => now < reset },
+            ),
+        )
+      })
+
+    /**
+     * Says how much of a provider's window is used once it passes 95 percent,
+     * or keeps it for the digest at 80, each once a window, however often
+     * it's read, across restarts too: a window that's said, whose reset is
+     * still ahead, isn't again, even when when it resets moves a little. 95 is
+     * kept for the morning in quiet, said in focus as at any other time, and
+     * not while a limit a thread hit holds, which says more; said, what 80
+     * said of the same window is put by. What was kept of a window that has
+     * reset since is put by too, so a catch-up never tells of it.
+     */
+    const using = (usage: Threads.Usage) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const kept = (yield* journal.since(now - longest, { kinds: ["notice"], most: 1000 })).filter((entry) => entry.key?.startsWith("usage:") === true)
+        const resetOf = (entry: (typeof kept)[number]) => Option.getOrUndefined(Option.map(decodeLimit(entry.detail), ({ resets }) => Date.parse(resets)))
+        // What's kept of a window that has reset since tells of nothing now.
+        const over = kept.filter((entry) => {
+          const reset = resetOf(entry)
+          return entry.heardAt === undefined && reset !== undefined && !Number.isNaN(reset) && reset <= now
+        })
+        yield* journal.markHeard(
+          over.map(({ id }) => id),
+          now,
+        )
+        const said = yield* persona.lines
+        const sir = addressed(said)
+        for (const { provider: name, windows } of usage.providers) {
+          const who = provider(name)
+          for (const window of windows) {
+            const reset = window.resetsAt === undefined ? Number.NaN : Date.parse(window.resetsAt)
+            if (!Number.isNaN(reset) && reset <= now) continue
+            const level = window.usedPercent >= 95 ? 95 : window.usedPercent >= 80 ? 80 : undefined
+            if (level === undefined) continue
+            const id = window.id ?? `${window.kind}:${window.label}`
+            const same = (entry: (typeof kept)[number], at: number) => entry.key?.startsWith(`usage:${who}:${id}:${at}:`) === true
+            // Said for this window already, while its reset is still ahead, or for as long as the shortest lasts when nobody said when.
+            const told = kept.some((entry) => {
+              if (!same(entry, level)) return false
+              const was = resetOf(entry)
+              return was === undefined || Number.isNaN(was) ? now - entry.at < lasting : now < was
+            })
+            if (told) continue
+            if (level === 95 && (yield* limitHolds(who))) continue
+            const { whose, name: windowName } = Brain.windowed(window)
+            const resets = window.resetsAt === undefined ? undefined : Brain.clock(window.resetsAt, now)
+            const spoken = `${who}'s ${whose === "its" ? "" : `${whose.replace(/'s$/, "")} `}${windowName} limit is at ${Math.round(window.usedPercent)} percent${sir}.${
+              resets === undefined ? "" : ` It resets ${resets}.`
+            }`
+            const detail = { usage: { provider: who, window: id, level }, ...(window.resetsAt === undefined ? {} : { resets: window.resetsAt }) }
+            const hour = Number.isNaN(reset) ? new Date(now).toISOString().slice(0, 13) : new Date(reset).toISOString().slice(0, 13)
+            const entry = { at: now, kind: "notice" as const, said: spoken, key: key.used(who, id, level, hour) }
+            const quiet = level === 95 && Option.contains(yield* (options.holding ?? Effect.succeedNone), "quiet")
+            if (level === 80 || quiet) {
+              // Kept for the digest, or for the morning in quiet: not something that needs him.
+              const claimed = yield* journal.claim({ ...entry, detail: { ...detail, held: level === 80 ? "progress" : "quiet", priority: "done" } })
+              if (Option.isSome(claimed)) yield* Effect.logInfo(`Kept for later: ${spoken}`)
+            } else {
+              // Only while it's still as high, in the same window, by the time it's said.
+              const still = Effect.map(threads.usage, (now) =>
+                Option.exists(now, ({ providers }) =>
+                  providers.some(
+                    (each) => provider(each.provider) === who && each.windows.some((other) => (other.id ?? `${other.kind}:${other.label}`) === id && other.usedPercent >= 95 && sameWindow(other.resetsAt, window.resetsAt)),
+                  ),
+                ),
+              )
+              const { turns } = yield* options.power
+              yield* notify(undefined, spoken, { ...entry, detail }, still, now, turns, entry.key)
+            }
+            // What 80 said of the same window is put by once 95 is.
+            if (level === 95) {
+              yield* journal.markHeard(
+                kept.filter((entry) => same(entry, 80) && entry.heardAt === undefined).map(({ id }) => id),
+                now,
+              )
+            }
+          }
+        }
+      })
+
     /** Says a run failed, with why, or that it hit its provider's limit, once for every thread that does until it resets. */
     const failed = (ref: Threads.Ref, run: T3Actions.Ran, thread: T3Live.Thread, called: string, project: string, turns: number, at: number) =>
       Effect.gen(function* () {
@@ -983,6 +1087,10 @@ export const make = (options: {
        */
       announce: (spoken: string, entry: Entry & { readonly key: string }, still: Effect.Effect<boolean>, at: number, id: string, kept?: number, ref?: Threads.Ref) =>
         Effect.flatMap(options.power, ({ turns }) => notify(ref, spoken, entry, still, at, turns, id, kept)),
+      /** How much of each provider's limits is used, said or kept once a window as it passes 95 or 80 percent, as `using` has it. */
+      usage: Effect.flatMap(threads.usage, (usage) => (Option.isNone(usage) ? Effect.void : using(usage.value))).pipe(
+        Effect.catchAll((error) => Effect.logWarning("Could not look at how much of your limits is used", error)),
+      ),
       /**
        * Hands over what he set for a time that's come, each once, to be said,
        * or for an offer, asked; while yapd is off, kept unheard. Its line

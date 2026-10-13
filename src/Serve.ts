@@ -96,6 +96,8 @@ const done = 90 * 24 * 60 * 60_000
 const reminded = 30 * 24 * 60 * 60_000
 /** How often what he asked to be reminded of at a time is looked at: a poll, so a restart, the Mac sleeping or its clock changing are all the same. */
 const reminding = "15 seconds"
+/** How often how much of his limits is used is looked at. */
+const usage = "5 minutes"
 
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
@@ -275,11 +277,14 @@ export const serve = Effect.gen(function* () {
     shortest: (yield* Config.minSeconds) * 1000,
     reminders,
     offered: assistant.offered,
+    holding: modes.holding,
   })
   yield* Effect.forkScoped(notices.follow)
   // What he heard none of that was handed over to be said before the restart is said again, then what he set for a time is said as it
   // comes, one due while yapd was down at once.
   yield* Effect.forkScoped(Effect.zipRight(notices.retell, notices.due.pipe(Effect.repeat(Schedule.spaced(reminding)))))
+  // How much of his limits is used, asked of this Mac's T3 Code every few minutes, said or kept once a window as it passes 95 or 80 percent.
+  yield* Effect.forkScoped(Effect.zipRight(threads.refreshUsage, notices.usage).pipe(Effect.repeat(Schedule.spaced(usage))))
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
   // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it. Each machine's once its own
   // T3 Code has, so one that's down holds up none of the rest, and this one's takes in what went to a machine yapd no longer follows.
