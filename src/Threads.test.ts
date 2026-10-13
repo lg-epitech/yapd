@@ -50,6 +50,8 @@ const linking = (
   sessions: Readonly<Record<string, ReadonlyArray<string>>>,
   /** Rig's own threads and their sessions, when they aren't the same as here. */
   rig: { readonly view: Option.Option<T3Live.View>; readonly sessions: Readonly<Record<string, ReadonlyArray<string>>> } = { view, sessions },
+  /** What each read waits on before T3 Code answers it, by the number it is among all reads. */
+  answering: (read: number) => Effect.Effect<void> = () => Effect.void,
 ) =>
   Effect.gen(function* () {
     const reads: Array<string> = []
@@ -59,7 +61,10 @@ const linking = (
           const id = decodeURIComponent(path.split("/").at(-2) ?? "")
           reads.push(name === "Rosie" ? id : `${name} ${id}`)
           const providerThreads = (sessions[id] ?? []).map((nativeId) => ({ nativeThreadRef: { driver: "claudeAgent", nativeId, strength: "strong" } }))
-          return Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie)
+          return Effect.zipRight(
+            answering(reads.length - 1),
+            Schema.decodeUnknown(schema)({ projection: { runs: [], messages: [], turnItems: [], providerThreads } }).pipe(Effect.orDie),
+          )
         }) as Server.Transport["api"],
         // With no scratch project to tell of.
         call: (<A, I>(method: string, _: unknown, schema: Schema.Schema<A, I>) =>
@@ -363,6 +368,49 @@ describe("Threads", () => {
     // Rig's are found in rig's T3 Code, the same way.
     expect(result.rig).toEqual({ linked: subagentOf("rig"), promising: true })
     expect(result.reads).toEqual(["jarvis", "review", "rig jarvis", "rig review"])
+  })
+
+  test("a subagent's hook whose session another hook's lookup read meanwhile is still tied to it, and not worth waiting on", async () => {
+    const worktree = { worktreePath: "/worktrees/yapd/jarvis" }
+    const of = (parent: string) => ({ ...worktree, lineage: { parentThreadId: parent, relationshipToParent: "subagent" } })
+    const jarvis = thread("jarvis", "Reimagine Yapd as a Jarvis Companion", "2026-10-08T20:00:00.000Z", worktree)
+    // Two reviews of it at work, the second the newer.
+    const first = thread("first", "Sol review: release blockers", "2026-10-08T21:00:00.000Z", { ...of("jarvis"), activeRunId: "run-1" })
+    const second = thread("second", "Sol review: the docs", "2026-10-08T21:10:00.000Z", { ...of("jarvis"), activeRunId: "run-2" })
+    const result = await Effect.gen(function* () {
+      const reading = yield* Deferred.make<void>()
+      const held = yield* Deferred.make<void>()
+      // The first read, the second review's hook's of the thread, takes until the other hook's lookup is done.
+      const answering = (read: number) => (read === 0 ? Effect.zipRight(Deferred.succeed(reading, undefined), Deferred.await(held)) : Effect.void)
+      const { threads, reads } = yield* linking(
+        Option.some(viewing(jarvis, first, second)),
+        { jarvis: ["s-jarvis"], first: ["s-first"], second: ["s-second"] },
+        undefined,
+        answering,
+      )
+      const hook = (session: string) =>
+        Effect.gen(function* () {
+          const promising = yield* Deferred.make<void>()
+          const linked = yield* threads.link("Rosie", session, "/worktrees/yapd/jarvis/src", promising)
+          return { linked, promising: yield* Deferred.isDone(promising) }
+        })
+      const late = yield* Effect.fork(hook("s-second"))
+      yield* Deferred.await(reading)
+      // The first review's hook reads both reviews, the newest first, so the second's session is known before its own hook is done.
+      const early = yield* hook("s-first")
+      yield* Deferred.succeed(held, undefined)
+      return { early, late: yield* Fiber.join(late), reads }
+    }).pipe(Effect.scoped, Effect.runPromise)
+    const subagentOf = (id: string, called: string) =>
+      Option.some<Threads.Linked>({
+        _tag: "Subagent",
+        child: { machine: "Rosie", id },
+        called,
+        head: Option.some({ ref: { machine: "Rosie", id: "jarvis" }, called: "Reimagine Yapd as a Jarvis Companion" }),
+      })
+    expect(result.early).toEqual({ linked: subagentOf("first", "Sol review: release blockers"), promising: true })
+    expect(result.late).toEqual({ linked: subagentOf("second", "Sol review: the docs"), promising: false })
+    expect(result.reads).toEqual(["jarvis", "jarvis", "second", "first"])
   })
 
   test("a subagent is part of the first thread up its chain that isn't one: never a fork's source, and none once its chain is broken", () => {

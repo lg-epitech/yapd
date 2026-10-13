@@ -759,10 +759,13 @@ export const make = (options: {
               head: Option.map(top, (top): Head => ({ ref: { machine: from, id: top.id }, called: named(top) })),
             })
           })
-        // Known already, as its own or a subagent's: what a subagent's hook says is its provider's to talk to, so it's only ever tied to it
-        // for what's kept, shown and muted of it.
-        const owner = threads.get(owners.get(on(from, session)) ?? "")
-        if (owner !== undefined) return yield* subagent(owner) ? part(owner) : owned(owner)
+        /** The thread it's behind once one was read for it, by this lookup or by another hook's meanwhile. */
+        const known = () => Option.fromNullable(threads.get(owners.get(on(from, session)) ?? ""))
+        // As its own or a subagent's: what a subagent's hook says is its provider's to talk to, so it's only ever tied to it for what's
+        // kept, shown and muted of it.
+        const tied = (thread: T3Live.Thread) => (subagent(thread) ? part(thread) : owned(thread))
+        const owner = known()
+        if (Option.isSome(owner)) return yield* tied(owner.value)
         const here = yield* resolved(at, cwd)
         // In its directory, or one it holds, since the agent may have gone into a folder of it: the nearest first, then the newest.
         const near = (which: ReadonlyArray<T3Live.Thread>) =>
@@ -792,12 +795,13 @@ export const make = (options: {
               for (const native of found.right) owners.set(on(from, native), thread.id)
               if (found.right.includes(session)) return Option.some(thread)
             }
-            return Option.none<T3Live.Thread>()
+            // Another hook's lookup may have read its thread meanwhile, one this lookup then passed over as read already.
+            return known()
           })
         const unread = (thread: T3Live.Thread) => read.get(on(from, thread.id)) !== thread.updatedAt
         const candidates = yield* near([...threads.values()].filter((thread) => !subagent(thread)))
         const top = yield* among(candidates.filter(unread))
-        if (Option.isSome(top)) return yield* owned(top.value)
+        if (Option.isSome(top)) return yield* tied(top.value)
         // Then T3 Code's own subagents there, which work in the worktree of the thread they're part of: only those at work, or done in the
         // last few minutes, since more than a hundred can share one, and never one its provider made inside its parent's own session.
         const working = (thread: T3Live.Thread) => T3Live.busy(thread) || now - (time(thread.latestRunCompletedAt) ?? Number.NEGATIVE_INFINITY) <= lately
@@ -806,7 +810,7 @@ export const make = (options: {
         // Worth waiting on: one of them is still to be read.
         if (toRead.length > 0 && promising !== undefined) yield* Deferred.succeed(promising, undefined)
         const helper = yield* among(toRead)
-        if (Option.isSome(helper)) return yield* part(helper.value)
+        if (Option.isSome(helper)) return yield* tied(helper.value)
         return yield* unlinked(
           candidates.length === 0 && helpers.length === 0
             ? "no thread in T3 Code works in this directory or one holding it"
