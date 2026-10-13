@@ -1,4 +1,4 @@
-import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Stream } from "effect"
+import { Clock, Context, Deferred, Effect, Layer, Logger, Option, Schedule, Stream } from "effect"
 import { hostname } from "node:os"
 import * as Assistant from "./Assistant.ts"
 import { Activity, DeviceAudio } from "./Audio.ts"
@@ -26,6 +26,7 @@ import { ProviderModel } from "./Model.ts"
 import * as Persona from "./Persona.ts"
 import * as Preferences from "./Preferences.ts"
 import * as Relay from "./Relay.ts"
+import * as Reminders from "./Reminders.ts"
 import * as Remote from "./Remote.ts"
 import { ProviderResponder } from "./Responder.ts"
 import * as Server from "./Server.ts"
@@ -91,6 +92,10 @@ const Relays = Layer.effect(
 const remembered = 365 * 24 * 60 * 60_000
 /** How long what yapd did to threads is kept. */
 const done = 90 * 24 * 60 * 60_000
+/** How long a reminder is kept once it's said or cancelled. */
+const reminded = 30 * 24 * 60 * 60_000
+/** How often what he asked to be reminded of at a time is looked at: a poll, so a restart, the Mac sleeping or its clock changing are all the same. */
+const reminding = "15 seconds"
 
 export const serve = Effect.gen(function* () {
   const started = yield* Clock.currentTimeMillis
@@ -99,8 +104,13 @@ export const serve = Effect.gen(function* () {
   const everywhere = yield* machines(Tunnel.masters(tunnels))
   const journal = yield* Journal.Journal
   const ledger = yield* Ledger.Ledger
+  const store = yield* Store.Store
+  // What he asked to be told later, fired through the journal, in the same database.
+  const reminders = Reminders.make(store, journal)
   yield* Effect.forkScoped(
-    Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.zipRight(journal.prune(now - remembered), ledger.prune(now - done))),
+    Effect.flatMap(Clock.currentTimeMillis, (now) =>
+      Effect.all([journal.prune(now - remembered), ledger.prune(now - done), reminders.prune(now - reminded)], { discard: true }),
+    ),
   )
   const token = yield* Config.t3codeToken
   const live = yield* T3Live.T3Live
@@ -120,12 +130,12 @@ export const serve = Effect.gen(function* () {
     actions: Option.map(token, (token) => T3Actions.make(T3CodeServer.connect(token))),
     others,
     journal,
-    store: yield* Store.Store,
+    store,
   })
   const hands = Hands.make({ threads, ledger, started })
   const naming = yield* Journal.naming
   // What he muted, kept quiet whoever tells of it, until he unmutes it.
-  const mutes = yield* Mutes.make(yield* Store.Store)
+  const mutes = yield* Mutes.make(store)
   const settings = yield* Settings.Settings
   // How yapd talks, focus and quiet holding for later what a mute would keep quiet, kept across restarts.
   const modes = yield* Modes.make({ settings, journal })
@@ -182,6 +192,8 @@ export const serve = Effect.gen(function* () {
           }
         }),
       ),
+    // What he asked to hear once a thread finishes leads its update, named as the desk names it.
+    finishing: Reminders.finishing({ reminders, desk: (ref) => threads.desk(Option.none(), [ref], 1), lines: persona.lines }),
   })
   const icons = yield* Icons.make({ actions: threads.actions })
   /** What he hasn't heard, as the assistant gathers it for a catch-up, once it's made. */
@@ -240,6 +252,7 @@ export const serve = Effect.gen(function* () {
     controls,
     naming,
     modes,
+    reminders,
   })
   yield* Deferred.succeed(welcome, assistant.welcome)
   missing = Effect.map(assistant.missed, ({ groups }) => groups)
@@ -260,8 +273,13 @@ export const serve = Effect.gen(function* () {
     // The work it started, whose first turn may have ended while yapd restarted, with no word of it then.
     started: (machine, since) => ledger.steps(since, { kinds: ["start"], states: ["prepared", "sent", "unknown"], machine }),
     shortest: (yield* Config.minSeconds) * 1000,
+    reminders,
+    offered: assistant.offered,
   })
   yield* Effect.forkScoped(notices.follow)
+  // What he heard none of that was handed over to be said before the restart is said again, then what he set for a time is said as it
+  // comes, one due while yapd was down at once.
+  yield* Effect.forkScoped(Effect.zipRight(notices.retell, notices.due.pipe(Effect.repeat(Schedule.spaced(reminding)))))
   // Once T3 Code has caught up, what never said what came of it before the restart is looked for, and never sent: what didn't get there is offered.
   // New work T3 Code is still getting ready is said once it's waited for, alongside, so none of the rest waits for it. Each machine's once its own
   // T3 Code has, so one that's down holds up none of the rest, and this one's takes in what went to a machine yapd no longer follows.

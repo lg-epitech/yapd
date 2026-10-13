@@ -22,6 +22,7 @@ import { Agent, key, type Payload } from "./Payload.ts"
 import { Persona } from "./Persona.ts"
 import * as Project from "./Project.ts"
 import * as Recent from "./Recent.ts"
+import type * as Reminders from "./Reminders.ts"
 import { RelayError, Relays, type Thread } from "./Relay.ts"
 import type { Handle } from "./Server.ts"
 import * as T3Code from "./T3Code.ts"
@@ -177,6 +178,12 @@ export const make = (
      * that `asks` him something, only what can't be his answer to it.
      */
     readonly command?: (heard: string, asks: boolean) => Option.Option<Effect.Effect<string>>
+    /**
+     * What he asked to be told once a thread finishes, as a turn of it is
+     * about to be said: its update is led by them, as one, and said whatever
+     * he muted or holds, an answer to what he asked. Offers are asked apart.
+     */
+    readonly finishing?: (about: Threads.Ref) => Effect.Effect<ReadonlyArray<Reminders.Leading>>
   } = {},
 ) => Effect.gen(function* () {
   const lifetime = yield* Effect.scope
@@ -294,6 +301,8 @@ export const make = (
   const audible = new WeakSet<Conversation.Update>()
   /** Updates that are the first turn of work yapd started, which answer what he asked, and which quiet alone holds, for the morning's rundown. */
   const openings = new WeakSet<Conversation.Update>()
+  /** The entries of what he asked to be told as a thread finished, which an update is led by, heard with it. */
+  const leading = new WeakMap<Conversation.Update, ReadonlyArray<number>>()
   /** Stops whose update was kept quiet, since he muted its thread, so he never heard what they told of. */
   const hushed = new WeakSet<Notices.Stop>()
   /** The Stop each hook's update is of. */
@@ -1029,11 +1038,15 @@ export const make = (
       // What it answers of what yapd sent its thread for him, if anything: the first turn of work yapd started is what he asked for.
       const answers = Option.isSome(tied) ? yield* asked(tied.value, finished) : Option.none()
       const opening = finished.opening === true || Option.contains(answers, "start")
+      // What he asked to hear once it finishes leads it, as one: then it's what he asked for, however slight, and never kept quiet or held.
+      const reminders = Option.isSome(tied) && options.finishing !== undefined ? yield* options.finishing(tied.value) : []
+      const reminded = reminders.length > 0
       // Whatever needs him is said in full, question and all, and so is everything once he asked to hear everything, when nothing is held
       // as progress. Otherwise only the headline is said, and the rest is kept for when he asks for more.
       const full = needsYou || summary.priority === "needs-you" || (yield* options.detail ?? Effect.succeed<Modes.Detail>("brief")) === "full"
       // Whoever sent it knows it needs the user, whatever the summary makes of it, and the first turn of work yapd started is never slight.
-      const priority = needsYou ? "needs-you" : (full && summary.priority === "progress") || (opening && summary.priority === "trivial") ? "done" : summary.priority
+      const priority =
+        needsYou ? "needs-you" : (full && summary.priority === "progress") || ((opening || reminded) && summary.priority === "trivial") ? "done" : summary.priority
       const more = full ? "" : (summary.more ?? "").trim()
       // What answers what yapd sent its thread for him, as a message by the shortcut or the work it started, is his own ask too, and so is
       // what answers what he said back through its hook before yapd restarted, when its prompt came before then.
@@ -1043,7 +1056,7 @@ export const make = (
         (priority !== "needs-you" && finished.unprompted === true && (yield* repliedBefore(session, arrivedAt)))
       // What needs him is said whatever he muted, and so is what answers what he asked of the thread himself. A turn that couldn't be
       // summed up may be either, as far as yapd can tell, so it's said.
-      const mutable = priority !== "needs-you" && !answering && summarized
+      const mutable = priority !== "needs-you" && !answering && summarized && !reminded
       const spoken = introduce(project, full ? [summary.spoken, summary.more ?? ""].map((part) => part.trim()).filter((part) => part !== "").join(" ") : summary.spoken)
       // All it would tell, its rest too, as what was kept of its turn is weighed against it word for word.
       const all = Missed.whole(spoken, more)
@@ -1104,22 +1117,29 @@ export const make = (
       const muted = mutable ? yield* muting(keys) : Option.none<Mutes.Mute>()
       if (Option.isSome(muted)) return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: muted.value })
       // Off, or turned off since it came, it's kept unheard, what needs him and the answer to what he asked too, for him to catch up on:
-      // nothing that came in around turning off is said late.
-      if (yield* offSince(turns)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: "off" })
+      // nothing that came in around turning off is said late. What he asked to hear of its finishing is kept so too.
+      if (yield* offSince(turns)) {
+        yield* Effect.forEach(reminders, ({ fire }) => fire(true), { discard: true })
+        return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: "off" })
+      }
       // Muted first, then kept as yapd is off, then held by the mode, then held as progress: kept the same way, by the same rule, and never rendered.
-      const held: Option.Option<Held> = yield* heldFor(priority, full, mutable, opening)
+      const held: Option.Option<Held> = reminded ? Option.none() : yield* heldFor(priority, full, mutable, opening)
       if (Option.isSome(held)) return yield* hush(finished, entry, detail, keys, { _tag: "Held", why: held.value })
 
+      // Each fired as it's about to be said, once: one said on its own meanwhile is left out.
+      const led = (yield* Effect.forEach(reminders, ({ line, fire }) => Effect.map(fire(false), Option.map((row) => ({ line, row }))))).flatMap(Option.toArray)
+      const remindRows = led.flatMap(({ row }) => Option.toArray(row))
+      const said = led.length === 0 ? spoken : [...led.map(({ line }) => line), spoken].join(" ")
       const audio = join(dir, `${crypto.randomUUID()}${extension}`)
       // Rendering takes about as long as the speaker takes to get ready.
       yield* soon
-      yield* voice.render(spoken, audio).pipe(Effect.onError(() => removeFile(audio)))
+      yield* voice.render(said, audio).pipe(Effect.onError(() => removeFile(audio)))
       const update: Conversation.Update = {
         session,
         project,
         turn,
         needsYou: priority === "needs-you",
-        spoken,
+        spoken: said,
         ...(more === "" ? {} : { more }),
         audio,
         thread,
@@ -1130,7 +1150,8 @@ export const make = (
       if (finished.hooked) hooked.add(update)
       if (finished.stop !== undefined) stopOf.set(update, finished.stop)
       if (!mutable) audible.add(update)
-      if (opening) openings.add(update)
+      if (opening && !reminded) openings.add(update)
+      if (remindRows.length > 0) leading.set(update, remindRows)
       // Said once ever: one already kept under its key was said, or held, before.
       const { fallback } = finished
       // Given way since to a Stop of its own, or its thread started again or went, it isn't said.
@@ -1160,10 +1181,12 @@ export const make = (
         yield* removeFile(audio)
         return yield* hush(finished, entry, detail, keys, { _tag: "Muted", mute: late.value }, claimed === undefined ? undefined : Option.flatten(claimed))
       }
-      // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it.
+      // Turned off meanwhile, it's held for when he catches up, whatever mode began too, which would otherwise have the digest say it, and
+      // what he asked to hear of its finishing with it.
       const off = { _tag: "Held", why: "off" } as const
       if (yield* offSince(turns)) {
         yield* removeFile(audio)
+        yield* journal.hold(remindRows, "off")
         return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       const lateHeld: Option.Option<Held> = yield* heldFor(priority, full, mutable, opening)
@@ -1175,6 +1198,7 @@ export const make = (
       if (!(yield* enqueue({ session, priority, arrivedAt, update, ...(hook === undefined ? {} : { hook }) }, turns))) {
         // Turned off just now, it's kept unheard all the same.
         yield* removeFile(audio)
+        yield* journal.hold(remindRows, "off")
         return yield* hush(finished, entry, detail, keys, off, claimed === undefined ? undefined : Option.flatten(claimed))
       }
       const row = claimed === undefined ? yield* journal.write(entry) : Option.flatten(claimed)
@@ -1883,7 +1907,7 @@ export const make = (
         if (dropped.replay !== undefined) yield* replayed(dropped.replay)
       }
       const row = rows.get(update)
-      if (row !== undefined) yield* journal.markHeard([row], yield* Clock.currentTimeMillis)
+      yield* journal.markHeard([...(row === undefined ? [] : [row]), ...(leading.get(update) ?? [])], yield* Clock.currentTimeMillis)
       // Said in its hook's place, it's the turn's, so a Stop of its own coming later isn't said either.
       const fallback = standing.get(update)
       if (fallback !== undefined) fallback.heard = true
@@ -1980,9 +2004,11 @@ export const make = (
         if (through) return Effect.void
         through = true
         const row = rows.get(update)
-        if (row === undefined) return Effect.void
+        // What he asked to hear of its finishing, which led it, is heard with it.
+        const led = leading.get(update) ?? []
+        if (row === undefined) return led.length === 0 ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (at) => journal.markHeard(led, at))
         return Effect.flatMap(Clock.currentTimeMillis, (at) =>
-          Effect.zipRight(journal.markHeard([row], at), journal.outdated(row, update.session, update.about ?? update.owner, at)),
+          Effect.zipRight(journal.markHeard([row, ...led], at), journal.outdated(row, update.session, update.about ?? update.owner, at)),
         )
       }).pipe(Effect.uninterruptible)
     const reading =
